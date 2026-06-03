@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agentlibre-agent-loop",
     "crates/agentlibre-observability",
     "crates/agentlibre-tool-protocol",
 ]
@@ -11,5 +12,8 @@ license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
 
 [workspace.dependencies]
+agentlibre-observability = { path = "crates/agentlibre-observability" }
+agentlibre-tool-protocol = { path = "crates/agentlibre-tool-protocol" }
+anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
