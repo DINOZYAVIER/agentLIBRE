@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agentlibre-observability",
+    "crates/agentlibre-tool-protocol",
 ]
 resolver = "2"
 
