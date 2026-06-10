@@ -2,6 +2,7 @@
 members = [
     "crates/agl-loop",
     "crates/agl-turn",
+    "crates/agl-config",
     "crates/agl-events",
     "crates/agl-actions",
 ]
@@ -17,6 +18,8 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
 agl-turn = { path = "crates/agl-turn" }
+agl-config = { path = "crates/agl-config" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
