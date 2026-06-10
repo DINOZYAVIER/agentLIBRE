@@ -4,7 +4,7 @@ pub struct TurnOutput {
     pub stop_reason: Option<StopReason>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
     ToolJsonUnrepairable,
     ToolLimitReached,

@@ -1,15 +1,10 @@
 [package]
-name = "agl-loop"
+name = "agl-turn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-events.workspace = true
 agl-actions.workspace = true
-agl-turn.workspace = true
-anyhow.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

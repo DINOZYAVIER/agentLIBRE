@@ -24,7 +24,16 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "agl-actions",
  "agl-events",
+ "agl-turn",
  "anyhow",
+ "serde_json",
+]
+
+[[package]]
+name = "agl-turn"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "agl-actions",
  "serde_json",
 ]
 

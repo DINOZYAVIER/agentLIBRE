@@ -1,14 +1,11 @@
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_events::{AgentEvent, ParsedActionEvent, TurnFinishStatus};
+use agl_turn::policy::{decide_tool_call, ToolCallDecision, ToolCallStop};
+use agl_turn::{ModelRequest, StopReason, TurnInput, TurnOutput, TurnState};
 use anyhow::Result;
 
 use crate::event_map::{malformed_kind, stop_reason_event};
-use crate::state::TurnState;
-use crate::tool::validate_tool_arguments;
-use crate::{
-    AgentLoopHost, MessageRole, ModelMessage, ModelRequest, StopReason, ToolDispatchRequest,
-    TurnInput, TurnOutput,
-};
+use crate::AgentLoopHost;
 
 pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<TurnOutput> {
     let mut state = TurnState::new(input);
@@ -82,72 +79,36 @@ fn handle_tool_call<H: AgentLoopHost>(
     state: &mut TurnState,
     tool_call: ToolCall,
 ) -> Result<Option<TurnOutput>> {
-    if state.tool_call_count >= state.input.max_tool_calls {
-        emit(
-            host,
-            AgentEvent::ToolLimitReached {
-                turn_id: state.input.turn_id.clone(),
-                limit: state.input.max_tool_calls,
-            },
-        )?;
-        return stop_turn(host, state, StopReason::ToolLimitReached).map(Some);
-    }
-
-    let Some(visible_tool) = state
-        .input
-        .visible_tools
-        .iter()
-        .find(|tool| tool.name == tool_call.name)
-    else {
-        emit(
-            host,
-            AgentEvent::ToolHiddenRejected {
-                turn_id: state.input.turn_id.clone(),
-                name: tool_call.name,
-            },
-        )?;
-        return stop_turn(host, state, StopReason::HiddenTool).map(Some);
+    let dispatch_request = match decide_tool_call(state, &tool_call) {
+        ToolCallDecision::Dispatch(dispatch_request) => dispatch_request,
+        ToolCallDecision::Stop(stop) => {
+            emit_tool_call_stop(host, state, &stop)?;
+            return stop_turn(host, state, stop.reason()).map(Some);
+        }
     };
-
-    if let Err(message) = validate_tool_arguments(visible_tool, &tool_call.arguments) {
-        emit(
-            host,
-            AgentEvent::ToolArgsInvalid {
-                turn_id: state.input.turn_id.clone(),
-                name: tool_call.name,
-                message,
-            },
-        )?;
-        return stop_turn(host, state, StopReason::InvalidToolArguments).map(Some);
-    }
 
     emit(
         host,
         AgentEvent::ToolArgsValidated {
             turn_id: state.input.turn_id.clone(),
-            name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
+            name: dispatch_request.name.clone(),
+            arguments: dispatch_request.arguments.clone(),
         },
     )?;
     emit(
         host,
         AgentEvent::ToolCallStarted {
             turn_id: state.input.turn_id.clone(),
-            name: tool_call.name.clone(),
-            arguments: tool_call.arguments.clone(),
+            name: dispatch_request.name.clone(),
+            arguments: dispatch_request.arguments.clone(),
         },
     )?;
-    let response = host.dispatch_tool(ToolDispatchRequest {
-        turn_id: state.input.turn_id.clone(),
-        name: tool_call.name.clone(),
-        arguments: tool_call.arguments.clone(),
-    })?;
-    state.tool_call_count += 1;
+    let response = host.dispatch_tool(dispatch_request.clone())?;
     emit(
         host,
         AgentEvent::ToolCallFinished {
             turn_id: state.input.turn_id.clone(),
-            name: tool_call.name.clone(),
+            name: dispatch_request.name.clone(),
             observation: response.observation.clone(),
         },
     )?;
@@ -155,24 +116,11 @@ fn handle_tool_call<H: AgentLoopHost>(
         host,
         AgentEvent::ObservationAppended {
             turn_id: state.input.turn_id.clone(),
-            name: tool_call.name.clone(),
+            name: dispatch_request.name.clone(),
             observation: response.observation.clone(),
         },
     )?;
-    state.messages.push(ModelMessage {
-        role: MessageRole::Assistant,
-        content: format!(
-            "<tool_call>{}</tool_call>",
-            serde_json::json!({
-                "name": tool_call.name,
-                "arguments": tool_call.arguments,
-            })
-        ),
-    });
-    state.messages.push(ModelMessage {
-        role: MessageRole::Tool,
-        content: response.observation,
-    });
+    state.append_tool_observation(tool_call, response.observation);
 
     Ok(None)
 }
@@ -315,6 +263,37 @@ fn emit_repair_attempted<H: AgentLoopHost>(
             strategy: strategy.as_str().to_string(),
         },
     )
+}
+
+fn emit_tool_call_stop<H: AgentLoopHost>(
+    host: &mut H,
+    state: &TurnState,
+    stop: &ToolCallStop,
+) -> Result<()> {
+    match stop {
+        ToolCallStop::ToolLimitReached { limit } => emit(
+            host,
+            AgentEvent::ToolLimitReached {
+                turn_id: state.input.turn_id.clone(),
+                limit: *limit,
+            },
+        ),
+        ToolCallStop::HiddenTool { name } => emit(
+            host,
+            AgentEvent::ToolHiddenRejected {
+                turn_id: state.input.turn_id.clone(),
+                name: name.clone(),
+            },
+        ),
+        ToolCallStop::InvalidArguments { name, message } => emit(
+            host,
+            AgentEvent::ToolArgsInvalid {
+                turn_id: state.input.turn_id.clone(),
+                name: name.clone(),
+                message: message.clone(),
+            },
+        ),
+    }
 }
 
 fn emit<H: AgentLoopHost>(host: &mut H, event: AgentEvent) -> Result<()> {

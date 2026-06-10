@@ -1,8 +1,6 @@
 use agl_events::AgentEvent;
+use agl_turn::{ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse};
 use anyhow::Result;
-
-use crate::model::{ModelRequest, ModelResponse};
-use crate::tool::{ToolDispatchRequest, ToolDispatchResponse};
 
 pub trait AgentLoopHost {
     fn generate(&mut self, request: ModelRequest) -> Result<ModelResponse>;

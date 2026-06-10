@@ -1,7 +1,6 @@
 use agl_actions::MalformedToolJsonKind;
 use agl_events::{StopReasonEvent, ToolJsonMalformedKind};
-
-use crate::StopReason;
+use agl_turn::StopReason;
 
 pub(crate) fn malformed_kind(kind: MalformedToolJsonKind) -> ToolJsonMalformedKind {
     match kind {
