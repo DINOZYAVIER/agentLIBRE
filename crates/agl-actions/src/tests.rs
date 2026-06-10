@@ -95,6 +95,24 @@ fn repairs_missing_tool_call_terminator_when_json_is_complete() {
 }
 
 #[test]
+fn classifies_missing_terminator_before_json_syntax() {
+    let action = parse_model_action(r#"<tool_call>{"name":,"arguments":42"#);
+
+    let ModelAction::MalformedToolCall(malformed) = action else {
+        panic!("expected malformed tool call");
+    };
+
+    assert_eq!(
+        malformed.classification,
+        MalformedToolJsonKind::MissingTerminator
+    );
+    assert!(matches!(
+        malformed.repair,
+        Some(ToolJsonRepair::Failed { .. })
+    ));
+}
+
+#[test]
 fn leaves_unrepairable_json_malformed() {
     let action = parse_model_action(r#"<tool_call>{"name":,"arguments":42</tool_call>"#);
 

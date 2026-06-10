@@ -52,65 +52,25 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
         )?;
 
         match agl_actions::parse_model_action(&response.content) {
-            ModelAction::Answer(answer) => return finish_answer(host, &state, answer),
+            ModelAction::Answer(answer) => {
+                emit(
+                    host,
+                    AgentEvent::ModelActionParsed {
+                        turn_id: state.input.turn_id.clone(),
+                        action: ParsedActionEvent::Answer,
+                    },
+                )?;
+                return finish_answer(host, &state, answer);
+            }
             ModelAction::ToolCall(tool_call) => {
+                emit_tool_call_parsed(host, &state, &tool_call)?;
                 if let Some(output) = handle_tool_call(host, &mut state, tool_call)? {
                     return Ok(output);
                 }
             }
             ModelAction::MalformedToolCall(malformed) => {
-                emit(
-                    host,
-                    AgentEvent::ToolJsonMalformed {
-                        turn_id: state.input.turn_id.clone(),
-                        classification: malformed_kind(malformed.classification.clone()),
-                        raw_json: malformed.raw_json,
-                    },
-                )?;
-
-                match malformed.repair {
-                    Some(ToolJsonRepair::Succeeded {
-                        strategy,
-                        repaired_json,
-                        tool_call,
-                    }) => {
-                        emit_repair_attempted(host, &state, strategy)?;
-                        emit(
-                            host,
-                            AgentEvent::ToolJsonRepairSucceeded {
-                                turn_id: state.input.turn_id.clone(),
-                                strategy: strategy.as_str().to_string(),
-                                repaired_json,
-                            },
-                        )?;
-                        if let Some(output) = handle_tool_call(host, &mut state, tool_call)? {
-                            return Ok(output);
-                        }
-                    }
-                    Some(ToolJsonRepair::Failed { strategy, message }) => {
-                        emit_repair_attempted(host, &state, strategy)?;
-                        emit(
-                            host,
-                            AgentEvent::ToolJsonRepairFailed {
-                                turn_id: state.input.turn_id.clone(),
-                                strategy: strategy.as_str().to_string(),
-                                message,
-                            },
-                        )?;
-                        return stop_turn(host, &state, StopReason::ToolJsonUnrepairable);
-                    }
-                    None => {
-                        emit_repair_attempted(host, &state, RepairStrategy::None)?;
-                        emit(
-                            host,
-                            AgentEvent::ToolJsonRepairFailed {
-                                turn_id: state.input.turn_id.clone(),
-                                strategy: RepairStrategy::None.as_str().to_string(),
-                                message: "no repair returned".to_string(),
-                            },
-                        )?;
-                        return stop_turn(host, &state, StopReason::ToolJsonUnrepairable);
-                    }
+                if let Some(output) = handle_malformed_tool_call(host, &mut state, malformed)? {
+                    return Ok(output);
                 }
             }
         }
@@ -122,16 +82,6 @@ fn handle_tool_call<H: AgentLoopHost>(
     state: &mut TurnState,
     tool_call: ToolCall,
 ) -> Result<Option<TurnOutput>> {
-    emit(
-        host,
-        AgentEvent::ModelActionParsed {
-            turn_id: state.input.turn_id.clone(),
-            action: ParsedActionEvent::ToolCall {
-                name: tool_call.name.clone(),
-            },
-        },
-    )?;
-
     if state.tool_call_count >= state.input.max_tool_calls {
         emit(
             host,
@@ -227,18 +177,70 @@ fn handle_tool_call<H: AgentLoopHost>(
     Ok(None)
 }
 
+fn handle_malformed_tool_call<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    malformed: agl_actions::MalformedToolCall,
+) -> Result<Option<TurnOutput>> {
+    emit(
+        host,
+        AgentEvent::ToolJsonMalformed {
+            turn_id: state.input.turn_id.clone(),
+            classification: malformed_kind(malformed.classification),
+            raw_json: malformed.raw_json,
+        },
+    )?;
+
+    match malformed.repair {
+        Some(ToolJsonRepair::Succeeded {
+            strategy,
+            repaired_json,
+            tool_call,
+        }) => {
+            emit_repair_attempted(host, state, strategy)?;
+            emit(
+                host,
+                AgentEvent::ToolJsonRepairSucceeded {
+                    turn_id: state.input.turn_id.clone(),
+                    strategy: strategy.as_str().to_string(),
+                    repaired_json,
+                },
+            )?;
+            emit_tool_call_parsed(host, state, &tool_call)?;
+            handle_tool_call(host, state, tool_call)
+        }
+        Some(ToolJsonRepair::Failed { strategy, message }) => {
+            emit_repair_attempted(host, state, strategy)?;
+            emit(
+                host,
+                AgentEvent::ToolJsonRepairFailed {
+                    turn_id: state.input.turn_id.clone(),
+                    strategy: strategy.as_str().to_string(),
+                    message,
+                },
+            )?;
+            stop_turn(host, state, StopReason::ToolJsonUnrepairable).map(Some)
+        }
+        None => {
+            emit_repair_attempted(host, state, RepairStrategy::None)?;
+            emit(
+                host,
+                AgentEvent::ToolJsonRepairFailed {
+                    turn_id: state.input.turn_id.clone(),
+                    strategy: RepairStrategy::None.as_str().to_string(),
+                    message: "no repair returned".to_string(),
+                },
+            )?;
+            stop_turn(host, state, StopReason::ToolJsonUnrepairable).map(Some)
+        }
+    }
+}
+
 fn finish_answer<H: AgentLoopHost>(
     host: &mut H,
     state: &TurnState,
     answer: String,
 ) -> Result<TurnOutput> {
-    emit(
-        host,
-        AgentEvent::ModelActionParsed {
-            turn_id: state.input.turn_id.clone(),
-            action: ParsedActionEvent::Answer,
-        },
-    )?;
     emit(
         host,
         AgentEvent::AnswerFinal {
@@ -283,6 +285,22 @@ fn stop_turn<H: AgentLoopHost>(
         answer: None,
         stop_reason: Some(reason),
     })
+}
+
+fn emit_tool_call_parsed<H: AgentLoopHost>(
+    host: &mut H,
+    state: &TurnState,
+    tool_call: &ToolCall,
+) -> Result<()> {
+    emit(
+        host,
+        AgentEvent::ModelActionParsed {
+            turn_id: state.input.turn_id.clone(),
+            action: ParsedActionEvent::ToolCall {
+                name: tool_call.name.clone(),
+            },
+        },
+    )
 }
 
 fn emit_repair_attempted<H: AgentLoopHost>(
