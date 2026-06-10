@@ -56,5 +56,10 @@ version boundary:
 git tag -a v1.0.0-alpha.1 -m "v1.0.0-alpha.1"
 ```
 
+Use `scripts/bump-workspace-version.sh --dry-run` to preview the next
+checkpoint version. Run `scripts/bump-workspace-version.sh` after an approved
+checkpoint to update the workspace version, update `Cargo.lock`, commit the
+version bump, and create the signed tag.
+
 `Signed-off-by` remains a DCO/attestation trailer for commits. Use
 `Reviewed-by` or `Approved-by` trailers to record human review when useful.
