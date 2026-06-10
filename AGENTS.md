@@ -33,3 +33,28 @@ materially shaped the patch, not when it was merely run as a routine check.
 
 A human must review, understand, and take responsibility for the final commit
 before submission.
+
+## Review checkpoints and versions
+
+Git tags are the source of truth for project checkpoint versions. Do not derive
+versions from `Signed-off-by` trailers.
+
+Use SemVer pre-release tags for accepted alpha checkpoints, starting with
+`v1.0.0-alpha.1`. Increment the alpha number for the next accepted checkpoint
+before the stable `v1.0.0` baseline.
+
+Prefer signed tags for approved checkpoints when local signing is configured:
+
+```text
+git tag -s v1.0.0-alpha.1 -m "v1.0.0-alpha.1"
+```
+
+If signing is not available, use an annotated tag and keep the tag as the
+version boundary:
+
+```text
+git tag -a v1.0.0-alpha.1 -m "v1.0.0-alpha.1"
+```
+
+`Signed-off-by` remains a DCO/attestation trailer for commits. Use
+`Reviewed-by` or `Approved-by` trailers to record human review when useful.
