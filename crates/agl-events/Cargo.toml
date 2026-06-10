@@ -1,13 +1,10 @@
 [package]
-name = "agentlibre-agent-loop"
+name = "agl-events"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agentlibre-observability.workspace = true
-agentlibre-tool-protocol.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

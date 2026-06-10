@@ -1,0 +1,110 @@
+use crate::*;
+use serde_json::json;
+
+fn example_events() -> Vec<AgentEvent> {
+    let turn_id = "turn-1".to_string();
+    vec![
+        AgentEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+            user_input: "read README".to_string(),
+        },
+        AgentEvent::PromptRendered {
+            turn_id: turn_id.clone(),
+            message_count: 1,
+        },
+        AgentEvent::ModelRequested {
+            turn_id: turn_id.clone(),
+            request_index: 0,
+        },
+        AgentEvent::ModelResponseReceived {
+            turn_id: turn_id.clone(),
+            request_index: 0,
+            content: "answer\nwith newline".to_string(),
+        },
+        AgentEvent::ModelActionParsed {
+            turn_id: turn_id.clone(),
+            action: ParsedActionEvent::Answer,
+        },
+        AgentEvent::ModelActionParsed {
+            turn_id: turn_id.clone(),
+            action: ParsedActionEvent::ToolCall {
+                name: "read_file".to_string(),
+            },
+        },
+        AgentEvent::ToolJsonMalformed {
+            turn_id: turn_id.clone(),
+            classification: ToolJsonMalformedKind::Syntax,
+            raw_json: "{bad".to_string(),
+        },
+        AgentEvent::ToolJsonRepairAttempted {
+            turn_id: turn_id.clone(),
+            strategy: "unescape_quoted_json".to_string(),
+        },
+        AgentEvent::ToolJsonRepairSucceeded {
+            turn_id: turn_id.clone(),
+            strategy: "unescape_quoted_json".to_string(),
+            repaired_json: r#"{"name":"read_file","arguments":{"path":"README.MD"}}"#.to_string(),
+        },
+        AgentEvent::ToolJsonRepairFailed {
+            turn_id: turn_id.clone(),
+            strategy: "unescape_quoted_json".to_string(),
+            message: "expected value".to_string(),
+        },
+        AgentEvent::ToolArgsValidated {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            arguments: json!({"path":"README.MD"}),
+        },
+        AgentEvent::ToolArgsInvalid {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            message: "missing required argument path".to_string(),
+        },
+        AgentEvent::ToolHiddenRejected {
+            turn_id: turn_id.clone(),
+            name: "write_file".to_string(),
+        },
+        AgentEvent::ToolLimitReached {
+            turn_id: turn_id.clone(),
+            limit: 0,
+        },
+        AgentEvent::ToolCallStarted {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            arguments: json!({"path":"README.MD"}),
+        },
+        AgentEvent::ToolCallFinished {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            observation: "README contents".to_string(),
+        },
+        AgentEvent::ObservationAppended {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            observation: "README contents".to_string(),
+        },
+        AgentEvent::AnswerFinal {
+            turn_id: turn_id.clone(),
+            answer: "done".to_string(),
+        },
+        AgentEvent::TurnStopped {
+            turn_id: turn_id.clone(),
+            reason: StopReasonEvent::ToolJsonUnrepairable,
+            visible: true,
+        },
+        AgentEvent::TurnFinished {
+            turn_id,
+            status: TurnFinishStatus::Answered,
+        },
+    ]
+}
+
+#[test]
+fn serializes_every_event_as_jsonl() {
+    for event in example_events() {
+        let line = event.to_jsonl_line().expect("event serializes");
+        assert!(!line.contains('\n'), "{line}");
+        let decoded: AgentEvent = serde_json::from_str(&line).expect("event round trips");
+        assert_eq!(decoded, event);
+    }
+}
