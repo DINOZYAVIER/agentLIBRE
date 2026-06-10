@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agl-actions"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -12,7 +12,7 @@ dependencies = [
 
 [[package]]
 name = "agl-events"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "agl-loop"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 dependencies = [
  "agl-actions",
  "agl-events",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "agl-turn"
-version = "1.0.0-alpha.1"
+version = "1.0.0-alpha.2"
 dependencies = [
  "agl-actions",
  "serde_json",
