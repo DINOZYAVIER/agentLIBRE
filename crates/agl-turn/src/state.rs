@@ -1,19 +1,18 @@
 use agl_actions::ToolCall;
 
-use crate::{MessageRole, ModelMessage, TurnInput};
+use crate::{TurnInput, TurnMessage};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnState {
     pub input: TurnInput,
-    pub messages: Vec<ModelMessage>,
+    pub messages: Vec<TurnMessage>,
     pub request_index: usize,
     pub tool_call_count: usize,
 }
 
 impl TurnState {
     pub fn new(input: TurnInput) -> Self {
-        let messages = vec![ModelMessage {
-            role: MessageRole::User,
+        let messages = vec![TurnMessage::User {
             content: input.user_input.clone(),
         }];
         Self {
@@ -26,18 +25,12 @@ impl TurnState {
 
     pub fn append_tool_observation(&mut self, tool_call: ToolCall, observation: String) {
         self.tool_call_count += 1;
-        self.messages.push(ModelMessage {
-            role: MessageRole::Assistant,
-            content: format!(
-                "<tool_call>{}</tool_call>",
-                serde_json::json!({
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
-                })
-            ),
+        self.messages.push(TurnMessage::AssistantToolCall {
+            name: tool_call.name.clone(),
+            arguments: tool_call.arguments,
         });
-        self.messages.push(ModelMessage {
-            role: MessageRole::Tool,
+        self.messages.push(TurnMessage::ToolObservation {
+            name: tool_call.name,
             content: observation,
         });
     }

@@ -111,14 +111,14 @@ fn loads_model_config_from_explicit_file() {
         "model-format",
         r#"
 dialect = "gemma4"
-tool_call_format = "gemma4"
+tool_call_format = "gemma_function_call"
 "#,
     );
 
     let config = load_model_config(&path).unwrap();
 
     assert_eq!(config.dialect, ModelDialect::Gemma4);
-    assert_eq!(config.tool_call_format, ToolCallFormat::Gemma4);
+    assert_eq!(config.tool_call_format, ToolCallFormat::GemmaFunctionCall);
 
     std::fs::remove_file(path).unwrap();
 }

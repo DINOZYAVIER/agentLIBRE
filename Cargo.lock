@@ -39,6 +39,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-model"
+version = "1.0.0-alpha.3"
+dependencies = [
+ "agl-config",
+ "agl-turn",
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-turn"
 version = "1.0.0-alpha.3"
 dependencies = [

@@ -37,6 +37,7 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
             turn_id: state.input.turn_id.clone(),
             request_index,
             messages: state.messages.clone(),
+            visible_tools: state.input.visible_tools.clone(),
         })?;
         state.request_index += 1;
         emit(

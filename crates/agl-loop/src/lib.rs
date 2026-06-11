@@ -3,8 +3,8 @@ mod host;
 mod turn;
 
 pub use agl_turn::{
-    MessageRole, ModelMessage, ModelRequest, ModelResponse, StopReason, ToolDispatchRequest,
-    ToolDispatchResponse, TurnInput, TurnOutput, VisibleTool,
+    ModelRequest, ModelResponse, StopReason, ToolDispatchRequest, ToolDispatchResponse, TurnInput,
+    TurnMessage, TurnOutput, VisibleTool,
 };
 pub use host::AgentLoopHost;
 pub use turn::run_turn;

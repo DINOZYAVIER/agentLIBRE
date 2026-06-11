@@ -23,8 +23,7 @@ fn initializes_turn_state_with_user_message() {
     assert_eq!(state.tool_call_count, 0);
     assert_eq!(
         state.messages,
-        [ModelMessage {
-            role: MessageRole::User,
+        [TurnMessage::User {
             content: "hello".to_string(),
         }]
     );
@@ -119,13 +118,17 @@ fn append_tool_observation_records_assistant_tool_pair() {
 
     assert_eq!(state.tool_call_count, 1);
     assert_eq!(state.messages.len(), 3);
-    assert_eq!(state.messages[1].role, MessageRole::Assistant);
-    assert!(state.messages[1].content.starts_with("<tool_call>"));
-    assert!(state.messages[1].content.ends_with("</tool_call>"));
+    assert_eq!(
+        state.messages[1],
+        TurnMessage::AssistantToolCall {
+            name: "read_file".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        }
+    );
     assert_eq!(
         state.messages[2],
-        ModelMessage {
-            role: MessageRole::Tool,
+        TurnMessage::ToolObservation {
+            name: "read_file".to_string(),
             content: "agentLIBRE readme".to_string(),
         }
     );

@@ -35,8 +35,8 @@ pub enum ModelDialect {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallFormat {
+    StructuredToolCalls,
     #[default]
     HermesJson,
-    XmlTag,
-    Gemma4,
+    GemmaFunctionCall,
 }
