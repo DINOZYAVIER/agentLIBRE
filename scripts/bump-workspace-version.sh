@@ -10,7 +10,7 @@ Bumps [workspace.package].version to the next vX.Y.Z-alpha.N checkpoint based
 on the latest local signed/annotated alpha tag, then:
 
   1. updates Cargo.lock with cargo generate-lockfile
-  2. commits Cargo.toml and Cargo.lock
+  2. commits Cargo.toml and Cargo.lock with Signed-off-by
   3. creates a signed tag for the new version
 
 The script does not fetch tags. Run git fetch --tags first if local tags may be
@@ -195,7 +195,7 @@ planned:
   update Cargo.toml workspace version to $next_version
   cargo generate-lockfile
   git add Cargo.toml Cargo.lock
-  git commit -m "$commit_message"
+  git commit --signoff -m "$commit_message"
   git tag -s $next_tag -m "$next_tag"
 EOF
   exit 0
@@ -219,7 +219,7 @@ if git diff --cached --quiet; then
   die "version bump produced no staged changes"
 fi
 
-git commit -m "$commit_message"
+git commit --signoff -m "$commit_message"
 create_signed_tag "$next_tag"
 
 echo "created $next_tag"
