@@ -28,6 +28,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-inference"
+version = "1.0.0-alpha.4"
+dependencies = [
+ "agl-config",
+ "agl-model",
+ "agl-observe",
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-loop"
 version = "1.0.0-alpha.4"
 dependencies = [
@@ -45,6 +57,7 @@ dependencies = [
  "agl-config",
  "agl-turn",
  "anyhow",
+ "serde",
  "serde_json",
 ]
 

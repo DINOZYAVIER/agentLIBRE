@@ -1,8 +1,9 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
 use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{bail, ensure, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedModelRequest {
     pub turn_id: String,
     pub request_index: usize,
@@ -12,7 +13,7 @@ pub struct RenderedModelRequest {
     pub tools: Vec<RenderedTool>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub role: RenderedMessageRole,
     pub content: String,
@@ -20,20 +21,21 @@ pub struct RenderedMessage {
     pub tool_calls: Vec<RenderedToolCall>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RenderedMessageRole {
     User,
     Assistant,
     Tool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedTool {
     pub name: String,
     pub required_arguments: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
