@@ -25,5 +25,4 @@ pub struct InferenceResponse {
 pub enum InferenceFinishReason {
     Stop,
     Length,
-    BackendError,
 }
