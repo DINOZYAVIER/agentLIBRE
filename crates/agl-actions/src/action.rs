@@ -42,15 +42,6 @@ pub enum ToolJsonRepair {
     },
 }
 
-impl ToolJsonRepair {
-    pub fn strategy(&self) -> RepairStrategy {
-        match self {
-            ToolJsonRepair::Succeeded { strategy, .. }
-            | ToolJsonRepair::Failed { strategy, .. } => *strategy,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepairStrategy {

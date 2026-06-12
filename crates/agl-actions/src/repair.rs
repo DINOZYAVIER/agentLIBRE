@@ -1,6 +1,9 @@
-use crate::{parse_tool_json, MalformedToolJsonKind, RepairStrategy, ToolJsonRepair};
+use crate::{parse::parse_tool_json, MalformedToolJsonKind, RepairStrategy, ToolJsonRepair};
 
-pub fn repair_tool_json(raw_json: &str, classification: MalformedToolJsonKind) -> ToolJsonRepair {
+pub(crate) fn repair_tool_json(
+    raw_json: &str,
+    classification: MalformedToolJsonKind,
+) -> ToolJsonRepair {
     if let Some(repaired_json) = unescape_quoted_json(raw_json) {
         return match parse_tool_json(&repaired_json) {
             Ok(tool_call) => ToolJsonRepair::Succeeded {

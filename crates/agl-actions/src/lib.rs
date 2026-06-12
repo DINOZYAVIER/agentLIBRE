@@ -5,8 +5,7 @@ mod repair;
 pub use action::{
     MalformedToolCall, MalformedToolJsonKind, ModelAction, RepairStrategy, ToolCall, ToolJsonRepair,
 };
-pub use parse::{parse_model_action, parse_tool_json};
-pub use repair::repair_tool_json;
+pub use parse::parse_model_action;
 
 #[cfg(test)]
 mod tests;

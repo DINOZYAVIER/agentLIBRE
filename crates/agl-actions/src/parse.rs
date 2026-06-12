@@ -1,4 +1,6 @@
-use crate::{repair_tool_json, MalformedToolCall, MalformedToolJsonKind, ModelAction, ToolCall};
+use crate::{
+    repair::repair_tool_json, MalformedToolCall, MalformedToolJsonKind, ModelAction, ToolCall,
+};
 use serde_json::Value;
 
 const TOOL_CALL_OPEN: &str = "<tool_call>";
@@ -36,7 +38,7 @@ pub fn parse_model_action(content: &str) -> ModelAction {
     )
 }
 
-pub fn parse_tool_json(raw_json: &str) -> Result<ToolCall, MalformedToolJsonKind> {
+pub(crate) fn parse_tool_json(raw_json: &str) -> Result<ToolCall, MalformedToolJsonKind> {
     let value: Value = serde_json::from_str(raw_json).map_err(|_| MalformedToolJsonKind::Syntax)?;
     tool_call_from_value(value)
 }
