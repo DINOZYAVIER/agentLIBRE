@@ -122,3 +122,172 @@ tool_call_format = "gemma_function_call"
 
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn loads_local_inference_config_from_explicit_file() {
+    let path = write_temp_config(
+        "local-inference",
+        r#"
+[backend]
+kind = "llama_cpp"
+binary = "/opt/llama.cpp/build/bin/llama-cli"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert_eq!(config.backend.kind, BackendKind::LlamaCpp);
+    assert_eq!(
+        config.backend.binary,
+        PathBuf::from("/opt/llama.cpp/build/bin/llama-cli")
+    );
+    assert_eq!(config.backend.model, PathBuf::from("/models/qwen3.6.gguf"));
+    assert_eq!(config.runtime.gpu_layers, 999);
+    assert_eq!(config.runtime.context_tokens, 32768);
+    assert_eq!(config.runtime.threads, 8);
+    assert_eq!(config.model.dialect, ModelDialect::Qwen3);
+    assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_unknown_fields() {
+    let path = write_temp_config(
+        "local-inference-unknown",
+        r#"
+[backend]
+kind = "llama_cpp"
+binary = "/bin/llama-cli"
+model = "/models/qwen.gguf"
+surprise = true
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert!(
+        err.to_string().contains("failed to parse config file"),
+        "unexpected error: {err}"
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_does_not_require_paths_to_exist() {
+    let path = write_temp_config(
+        "local-inference-paths",
+        r#"
+[backend]
+kind = "llama_cpp"
+binary = "/definitely/not/installed/llama-cli"
+model = "/definitely/not/downloaded/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert_eq!(
+        config.backend.binary,
+        PathBuf::from("/definitely/not/installed/llama-cli")
+    );
+    assert_eq!(
+        config.backend.model,
+        PathBuf::from("/definitely/not/downloaded/qwen.gguf")
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_invalid_numeric_limits() {
+    let path = write_temp_config(
+        "local-inference-limits",
+        r#"
+[backend]
+kind = "llama_cpp"
+binary = "/bin/llama-cli"
+model = "/models/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 0
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("context_tokens 0 must be between 1 and 1048576"),
+        "unexpected error: {err}"
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_empty_backend_paths() {
+    let path = write_temp_config(
+        "local-inference-empty-path",
+        r#"
+[backend]
+kind = "llama_cpp"
+binary = ""
+model = "/models/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("backend binary path cannot be empty"),
+        "unexpected error: {err}"
+    );
+
+    std::fs::remove_file(path).unwrap();
+}

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
-use crate::{ModelConfig, TurnPolicyConfig};
+use crate::{LocalInferenceConfig, ModelConfig, TurnPolicyConfig};
 
 pub fn load_turn_policy_config(path: impl AsRef<Path>) -> Result<TurnPolicyConfig> {
     let config: TurnPolicyConfig = load_toml_file(path.as_ref())?;
@@ -12,6 +12,12 @@ pub fn load_turn_policy_config(path: impl AsRef<Path>) -> Result<TurnPolicyConfi
 
 pub fn load_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
     let config: ModelConfig = load_toml_file(path.as_ref())?;
+    config.validate()?;
+    Ok(config)
+}
+
+pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<LocalInferenceConfig> {
+    let config: LocalInferenceConfig = load_toml_file(path.as_ref())?;
     config.validate()?;
     Ok(config)
 }
