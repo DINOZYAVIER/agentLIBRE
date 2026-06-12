@@ -176,6 +176,7 @@ fn llama_cpp_backend_builds_cli_arguments_from_config() {
 
     let args = backend
         .command_args("User:\nhello\n\nAssistant:\n")
+        .unwrap()
         .into_iter()
         .map(|value| value.to_string_lossy().to_string())
         .collect::<Vec<_>>();
@@ -214,6 +215,36 @@ fn llama_cpp_backend_builds_cli_arguments_from_config() {
             "--no-display-prompt",
         ]
     );
+}
+
+#[test]
+fn llama_cpp_backend_records_invalid_invocation_without_panicking() {
+    let root_path = temp_root("llama-invalid-invocation");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let request = inference_request();
+    let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
+    let mut backend = LlamaCppCliBackend::new(
+        local_config("/opt/llama.cpp/build/bin/llama-completion"),
+        artifact_root,
+    )
+    .unwrap()
+    .with_max_output_tokens(0);
+
+    let err = backend.generate(request).unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("failed to build llama.cpp CLI arguments"));
+    assert!(paths.request_json().exists());
+    assert!(!paths.response_json().exists());
+    assert!(std::fs::read_to_string(paths.stderr_log())
+        .unwrap()
+        .contains("llama.cpp max_output_tokens cannot be zero"));
+    let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
+    assert!(events.contains("\"kind\":\"inference.attempt_failed\""));
+    assert!(events.contains("\"finish_status\":\"failed\""));
+
+    std::fs::remove_dir_all(root_path).unwrap();
 }
 
 #[test]

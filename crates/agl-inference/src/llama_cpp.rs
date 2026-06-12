@@ -39,7 +39,7 @@ impl LlamaCppCliBackend {
         &self.config
     }
 
-    pub(crate) fn command_args(&self, prompt: &str) -> Vec<OsString> {
+    pub(crate) fn command_args(&self, prompt: &str) -> Result<Vec<OsString>> {
         LlamaCppCliInvocation {
             model: self.config.backend.model.clone(),
             prompt: prompt.to_string(),
@@ -68,7 +68,6 @@ impl LlamaCppCliBackend {
             display_prompt: self.config.runtime.display_prompt,
         }
         .command_args()
-        .expect("validated local inference config should build llama.cpp CLI args")
     }
 
     fn append_started(
@@ -129,8 +128,17 @@ impl InferenceBackend for LlamaCppCliBackend {
         })?;
 
         let prompt = render_llama_cli_prompt(&request.rendered)?;
+        let args = match self.command_args(&prompt) {
+            Ok(args) => args,
+            Err(err) => {
+                let message = format!("failed to build llama.cpp CLI arguments: {err}");
+                paths.write_stderr_log(format!("{message}\n"))?;
+                self.append_failure(&writer, &request, &message)?;
+                bail!("{message}");
+            }
+        };
         let output = Command::new(&self.config.backend.binary)
-            .args(self.command_args(&prompt))
+            .args(args)
             .output();
 
         let output = match output {
