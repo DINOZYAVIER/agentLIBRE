@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::process::Command;
 
-use agl_config::LocalInferenceConfig;
+use agl_config::{LocalInferenceConfig, RuntimeSwitch};
+use agl_llama_cpp::{LlamaCppCliInvocation, LlamaCppSwitch};
 use agl_model::{RenderedMessageRole, RenderedModelRequest};
 use agl_observe::{
     InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
@@ -39,20 +40,35 @@ impl LlamaCppCliBackend {
     }
 
     pub(crate) fn command_args(&self, prompt: &str) -> Vec<OsString> {
-        vec![
-            "-m".into(),
-            self.config.backend.model.as_os_str().to_owned(),
-            "-p".into(),
-            prompt.into(),
-            "-n".into(),
-            self.max_output_tokens.to_string().into(),
-            "-c".into(),
-            self.config.runtime.context_tokens.to_string().into(),
-            "-ngl".into(),
-            self.config.runtime.gpu_layers.to_string().into(),
-            "-t".into(),
-            self.config.runtime.threads.to_string().into(),
-        ]
+        LlamaCppCliInvocation {
+            model: self.config.backend.model.clone(),
+            prompt: prompt.to_string(),
+            max_output_tokens: self.max_output_tokens,
+            context_tokens: self.config.runtime.context_tokens,
+            gpu_layers: self.config.runtime.gpu_layers,
+            threads: self.config.runtime.threads,
+            device: self.config.runtime.device.clone(),
+            batch_size: self.config.runtime.batch_size,
+            ubatch_size: self.config.runtime.ubatch_size,
+            flash_attention: self.config.runtime.flash_attention.map(map_runtime_switch),
+            cache_type_k: self
+                .config
+                .runtime
+                .cache_type_k
+                .map(|cache_type| cache_type.as_llama_arg().to_string()),
+            cache_type_v: self
+                .config
+                .runtime
+                .cache_type_v
+                .map(|cache_type| cache_type.as_llama_arg().to_string()),
+            mmap: self.config.runtime.mmap,
+            jinja: self.config.runtime.jinja,
+            conversation: self.config.runtime.conversation,
+            simple_io: self.config.runtime.simple_io,
+            display_prompt: self.config.runtime.display_prompt,
+        }
+        .command_args()
+        .expect("validated local inference config should build llama.cpp CLI args")
     }
 
     fn append_started(
@@ -87,6 +103,14 @@ impl LlamaCppCliBackend {
             attempt_id: request.attempt_id.clone(),
             finish_status: InferenceFinishStatus::Failed,
         })
+    }
+}
+
+fn map_runtime_switch(value: RuntimeSwitch) -> LlamaCppSwitch {
+    match value {
+        RuntimeSwitch::On => LlamaCppSwitch::On,
+        RuntimeSwitch::Off => LlamaCppSwitch::Off,
+        RuntimeSwitch::Auto => LlamaCppSwitch::Auto,
     }
 }
 

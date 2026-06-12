@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agl-llama-cpp",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-model",
@@ -23,6 +24,7 @@ agl-actions = { path = "crates/agl-actions" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-inference = { path = "crates/agl-inference" }
+agl-llama-cpp = { path = "crates/agl-llama-cpp" }
 agl-model = { path = "crates/agl-model" }
 agl-observe = { path = "crates/agl-observe" }
 anyhow = "1.0"

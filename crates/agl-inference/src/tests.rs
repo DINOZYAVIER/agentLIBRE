@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agl_config::{
     load_local_inference_config, BackendKind, InferenceBackendConfig, InferenceRuntimeConfig,
-    LocalInferenceConfig, ModelConfig, ModelDialect, ToolCallFormat,
+    KvCacheType, LocalInferenceConfig, ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat,
 };
 use agl_model::{
     RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
@@ -61,6 +61,17 @@ fn local_config(binary: impl Into<PathBuf>) -> LocalInferenceConfig {
             gpu_layers: 999,
             context_tokens: 32768,
             threads: 8,
+            device: Some("Vulkan0".to_string()),
+            batch_size: Some(1024),
+            ubatch_size: Some(256),
+            flash_attention: Some(RuntimeSwitch::On),
+            cache_type_k: Some(KvCacheType::Q8_0),
+            cache_type_v: Some(KvCacheType::Q8_0),
+            mmap: Some(false),
+            jinja: Some(true),
+            conversation: Some(false),
+            simple_io: true,
+            display_prompt: Some(false),
         },
         model: ModelConfig {
             dialect: ModelDialect::Qwen3,
@@ -184,6 +195,23 @@ fn llama_cpp_backend_builds_cli_arguments_from_config() {
             "999",
             "-t",
             "8",
+            "--device",
+            "Vulkan0",
+            "-b",
+            "1024",
+            "-ub",
+            "256",
+            "-fa",
+            "on",
+            "-ctk",
+            "q8_0",
+            "-ctv",
+            "q8_0",
+            "--no-mmap",
+            "--jinja",
+            "-no-cnv",
+            "--simple-io",
+            "--no-display-prompt",
         ]
     );
 }
