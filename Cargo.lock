@@ -49,6 +49,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-observe"
+version = "1.0.0-alpha.4"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-turn"
 version = "1.0.0-alpha.4"
 dependencies = [

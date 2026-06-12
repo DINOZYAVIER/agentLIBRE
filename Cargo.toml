@@ -2,6 +2,7 @@
 members = [
     "crates/agl-loop",
     "crates/agl-model",
+    "crates/agl-observe",
     "crates/agl-turn",
     "crates/agl-config",
     "crates/agl-events",
@@ -21,6 +22,7 @@ agl-actions = { path = "crates/agl-actions" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-model = { path = "crates/agl-model" }
+agl-observe = { path = "crates/agl-observe" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
