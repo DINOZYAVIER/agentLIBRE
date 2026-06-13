@@ -4,14 +4,14 @@ use std::path::PathBuf;
 use anyhow::{bail, ensure, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LlamaCppSwitch {
+pub(super) enum LlamaCppSwitch {
     On,
     Off,
     Auto,
 }
 
 impl LlamaCppSwitch {
-    pub fn as_arg(self) -> &'static str {
+    fn as_arg(self) -> &'static str {
         match self {
             Self::On => "on",
             Self::Off => "off",
@@ -21,28 +21,28 @@ impl LlamaCppSwitch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LlamaCppCliInvocation {
-    pub model: PathBuf,
-    pub prompt: String,
-    pub max_output_tokens: u32,
-    pub context_tokens: u32,
-    pub gpu_layers: u32,
-    pub threads: u32,
-    pub device: Option<String>,
-    pub batch_size: Option<u32>,
-    pub ubatch_size: Option<u32>,
-    pub flash_attention: Option<LlamaCppSwitch>,
-    pub cache_type_k: Option<String>,
-    pub cache_type_v: Option<String>,
-    pub mmap: Option<bool>,
-    pub jinja: Option<bool>,
-    pub conversation: Option<bool>,
-    pub simple_io: bool,
-    pub display_prompt: Option<bool>,
+pub(super) struct LlamaCppCliInvocation {
+    pub(super) model: PathBuf,
+    pub(super) prompt: String,
+    pub(super) max_output_tokens: u32,
+    pub(super) context_tokens: u32,
+    pub(super) gpu_layers: u32,
+    pub(super) threads: u32,
+    pub(super) device: Option<String>,
+    pub(super) batch_size: Option<u32>,
+    pub(super) ubatch_size: Option<u32>,
+    pub(super) flash_attention: Option<LlamaCppSwitch>,
+    pub(super) cache_type_k: Option<String>,
+    pub(super) cache_type_v: Option<String>,
+    pub(super) mmap: Option<bool>,
+    pub(super) jinja: Option<bool>,
+    pub(super) conversation: Option<bool>,
+    pub(super) simple_io: bool,
+    pub(super) display_prompt: Option<bool>,
 }
 
 impl LlamaCppCliInvocation {
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         ensure!(
             !self.model.as_os_str().is_empty(),
             "llama.cpp model path cannot be empty"
@@ -68,7 +68,7 @@ impl LlamaCppCliInvocation {
         Ok(())
     }
 
-    pub fn command_args(&self) -> Result<Vec<OsString>> {
+    pub(super) fn command_args(&self) -> Result<Vec<OsString>> {
         self.validate()?;
 
         let mut args = vec![
