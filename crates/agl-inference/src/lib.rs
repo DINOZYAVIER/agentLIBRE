@@ -1,4 +1,5 @@
 mod backend;
+pub mod evidence;
 mod fake;
 mod llama_cpp;
 

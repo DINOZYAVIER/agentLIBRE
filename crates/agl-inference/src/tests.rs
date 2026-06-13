@@ -8,9 +8,9 @@ use agl_config::{
 use agl_model::{
     RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
 };
-use agl_observe::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use serde_json::json;
 
+use crate::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use crate::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);

@@ -4,11 +4,11 @@ use std::process::Command;
 use agl_config::{LocalInferenceConfig, RuntimeSwitch};
 use agl_llama_cpp::{LlamaCppCliInvocation, LlamaCppSwitch};
 use agl_model::{RenderedMessageRole, RenderedModelRequest};
-use agl_observe::{
-    InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
-};
 use anyhow::{bail, Context, Result};
 
+use crate::evidence::{
+    InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
+};
 use crate::{InferenceBackend, InferenceFinishReason, InferenceRequest, InferenceResponse};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;

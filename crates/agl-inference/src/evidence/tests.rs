@@ -3,13 +3,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 
-use crate::*;
+use super::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn temp_root(name: &str) -> PathBuf {
     let id = DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("agl-observe-{name}-{}-{id}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "agl-inference-evidence-{name}-{}-{id}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&path);
     path
 }
@@ -168,7 +171,7 @@ fn appends_observation_events_as_jsonl() {
 fn serializes_every_observation_event_as_single_line_json() {
     let run_id = run_id();
     let attempt_id = attempt_id();
-    let path = PathBuf::from("/tmp/agl-observe/request.json");
+    let path = PathBuf::from("/tmp/agl-inference-evidence/request.json");
     let events = [
         InferenceObservationEvent::AttemptStarted {
             run_id: run_id.clone(),
@@ -184,7 +187,7 @@ fn serializes_every_observation_event_as_single_line_json() {
         InferenceObservationEvent::ResponseRecorded {
             run_id: run_id.clone(),
             attempt_id: attempt_id.clone(),
-            path: PathBuf::from("/tmp/agl-observe/response.json"),
+            path: PathBuf::from("/tmp/agl-inference-evidence/response.json"),
         },
         InferenceObservationEvent::AttemptFinished {
             run_id: run_id.clone(),

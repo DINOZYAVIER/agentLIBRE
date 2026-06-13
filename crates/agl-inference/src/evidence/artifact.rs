@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::{InferenceAttemptId, InferenceRunId};
+use super::{InferenceAttemptId, InferenceRunId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceArtifactRoot {

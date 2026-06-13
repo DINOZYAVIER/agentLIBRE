@@ -34,7 +34,6 @@ dependencies = [
  "agl-config",
  "agl-llama-cpp",
  "agl-model",
- "agl-observe",
  "anyhow",
  "serde",
  "serde_json",
@@ -64,15 +63,6 @@ version = "1.0.0-alpha.4"
 dependencies = [
  "agl-config",
  "agl-turn",
- "anyhow",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agl-observe"
-version = "1.0.0-alpha.4"
-dependencies = [
  "anyhow",
  "serde",
  "serde_json",

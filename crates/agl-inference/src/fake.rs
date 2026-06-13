@@ -1,8 +1,8 @@
-use agl_observe::{
-    InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
-};
 use anyhow::{bail, Result};
 
+use crate::evidence::{
+    InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
+};
 use crate::{InferenceBackend, InferenceFinishReason, InferenceRequest, InferenceResponse};
 
 #[derive(Clone, Debug)]

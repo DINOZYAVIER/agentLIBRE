@@ -1,7 +1,8 @@
 use agl_model::RenderedModelRequest;
-use agl_observe::{InferenceAttemptId, InferenceRunId};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use crate::evidence::{InferenceAttemptId, InferenceRunId};
 
 pub trait InferenceBackend {
     fn generate(&mut self, request: InferenceRequest) -> Result<InferenceResponse>;
