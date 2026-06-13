@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/agl-llama-cpp",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-oven",
@@ -23,7 +22,6 @@ agl-actions = { path = "crates/agl-actions" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-inference = { path = "crates/agl-inference" }
-agl-llama-cpp = { path = "crates/agl-llama-cpp" }
 agl-oven = { path = "crates/agl-oven" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -32,18 +32,10 @@ name = "agl-inference"
 version = "1.0.0-alpha.4"
 dependencies = [
  "agl-config",
- "agl-llama-cpp",
  "agl-oven",
  "anyhow",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "agl-llama-cpp"
-version = "1.0.0-alpha.4"
-dependencies = [
- "anyhow",
 ]
 
 [[package]]
