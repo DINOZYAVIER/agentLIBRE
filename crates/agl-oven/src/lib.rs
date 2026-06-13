@@ -1,8 +1,8 @@
 mod render;
 
 pub use render::{
-    render_model_request, RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool,
-    RenderedToolCall,
+    RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
+    render_model_request,
 };
 
 #[cfg(test)]

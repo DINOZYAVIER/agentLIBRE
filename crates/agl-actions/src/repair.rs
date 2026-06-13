@@ -1,4 +1,4 @@
-use crate::{parse::parse_tool_json, MalformedToolJsonKind, RepairStrategy, ToolJsonRepair};
+use crate::{MalformedToolJsonKind, RepairStrategy, ToolJsonRepair, parse::parse_tool_json};
 
 pub(crate) fn repair_tool_json(
     raw_json: &str,

@@ -1,5 +1,5 @@
 use crate::{
-    repair::repair_tool_json, MalformedToolCall, MalformedToolJsonKind, ModelAction, ToolCall,
+    MalformedToolCall, MalformedToolJsonKind, ModelAction, ToolCall, repair::repair_tool_json,
 };
 use serde_json::Value;
 

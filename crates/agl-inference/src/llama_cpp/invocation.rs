@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LlamaCppSwitch {

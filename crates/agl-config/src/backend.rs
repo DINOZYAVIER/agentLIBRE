@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::ModelConfig;

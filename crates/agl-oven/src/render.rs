@@ -1,6 +1,6 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
 use agl_turn::{ModelRequest, TurnMessage};
-use anyhow::{bail, ensure, Result};
+use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -1,11 +1,11 @@
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_events::{AgentEvent, ParsedActionEvent, TurnFinishStatus};
-use agl_turn::policy::{decide_tool_call, ToolCallDecision, ToolCallStop};
+use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{ModelRequest, StopReason, TurnInput, TurnOutput, TurnState};
 use anyhow::Result;
 
-use crate::event_map::{malformed_kind, stop_reason_event};
 use crate::AgentLoopHost;
+use crate::event_map::{malformed_kind, stop_reason_event};
 
 pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<TurnOutput> {
     let mut state = TurnState::new(input);

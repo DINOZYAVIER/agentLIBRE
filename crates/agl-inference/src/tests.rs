@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agl_config::{
-    load_local_inference_config, BackendKind, InferenceBackendConfig, InferenceRuntimeConfig,
-    KvCacheType, LocalInferenceConfig, ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat,
+    BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
+    ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat, load_local_inference_config,
 };
 use agl_oven::{
     RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
@@ -160,14 +160,17 @@ fn llama_cpp_backend_records_invalid_invocation_without_panicking() {
 
     let err = backend.generate(request).unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("failed to build llama.cpp CLI arguments"));
+    assert!(
+        err.to_string()
+            .contains("failed to build llama.cpp CLI arguments")
+    );
     assert!(paths.request_json().exists());
     assert!(!paths.response_json().exists());
-    assert!(std::fs::read_to_string(paths.stderr_log())
-        .unwrap()
-        .contains("llama.cpp max_output_tokens cannot be zero"));
+    assert!(
+        std::fs::read_to_string(paths.stderr_log())
+            .unwrap()
+            .contains("llama.cpp max_output_tokens cannot be zero")
+    );
     let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
     assert!(events.contains("\"kind\":\"inference.attempt_failed\""));
     assert!(events.contains("\"finish_status\":\"failed\""));
@@ -191,8 +194,11 @@ fn llama_cpp_prompt_uses_rendered_request_fields() {
     let prompt = crate::llama_cpp::render_llama_cli_prompt(&rendered).unwrap();
 
     assert!(prompt.contains("User:\nuse the rendered request\n"));
-    assert!(prompt
-        .contains("Assistant:\n{\"arguments\":{\"path\":\"README.MD\"},\"name\":\"read_file\"}\n"));
+    assert!(
+        prompt.contains(
+            "Assistant:\n{\"arguments\":{\"path\":\"README.MD\"},\"name\":\"read_file\"}\n"
+        )
+    );
     assert!(prompt.contains("Available tools:\n- read_file required: path\n"));
     assert!(prompt.ends_with("Assistant:\n"));
 }
@@ -211,17 +217,22 @@ fn llama_cpp_backend_records_launch_failure_with_artifacts() {
 
     let err = backend.generate(request).unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("failed to launch llama.cpp binary"));
+    assert!(
+        err.to_string()
+            .contains("failed to launch llama.cpp binary")
+    );
     assert!(paths.request_json().exists());
     assert!(!paths.response_json().exists());
-    assert!(std::fs::read_to_string(paths.request_json())
-        .unwrap()
-        .contains("\"tool_call_format\": \"hermes_json\""));
-    assert!(std::fs::read_to_string(paths.stderr_log())
-        .unwrap()
-        .contains("failed to launch llama.cpp binary"));
+    assert!(
+        std::fs::read_to_string(paths.request_json())
+            .unwrap()
+            .contains("\"tool_call_format\": \"hermes_json\"")
+    );
+    assert!(
+        std::fs::read_to_string(paths.stderr_log())
+            .unwrap()
+            .contains("failed to launch llama.cpp binary")
+    );
     let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
     assert!(events.contains("\"backend\":\"llama_cpp_cli\""));
     assert!(events.contains("\"kind\":\"inference.request_recorded\""));

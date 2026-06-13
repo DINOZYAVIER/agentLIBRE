@@ -3,7 +3,7 @@ use agl_turn::{ModelRequest, TurnMessage, VisibleTool};
 use serde_json::json;
 
 use crate::{
-    render_model_request, RenderedMessage, RenderedMessageRole, RenderedTool, RenderedToolCall,
+    RenderedMessage, RenderedMessageRole, RenderedTool, RenderedToolCall, render_model_request,
 };
 
 fn qwen_hermes_config() -> ModelConfig {
@@ -190,7 +190,9 @@ fn rejects_gemma_function_call_nested_arguments_explicitly() {
 
     let error = render_model_request(&request, &config).unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("Gemma function calls support scalar argument values only"));
+    assert!(
+        error
+            .to_string()
+            .contains("Gemma function calls support scalar argument values only")
+    );
 }

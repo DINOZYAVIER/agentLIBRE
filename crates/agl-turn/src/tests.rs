@@ -1,7 +1,7 @@
 use agl_actions::ToolCall;
 use serde_json::json;
 
-use crate::policy::{decide_tool_call, ToolCallDecision, ToolCallStop};
+use crate::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use crate::*;
 
 fn read_file_tool() -> VisibleTool {

@@ -3,7 +3,7 @@ use std::process::Command;
 
 use agl_config::{LocalInferenceConfig, RuntimeSwitch};
 use agl_oven::{RenderedMessageRole, RenderedModelRequest};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 mod invocation;
 
