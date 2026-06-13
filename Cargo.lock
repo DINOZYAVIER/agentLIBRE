@@ -11,6 +11,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-cli"
+version = "1.0.0-alpha.4"
+dependencies = [
+ "agl-config",
+ "agl-inference",
+ "agl-oven",
+ "agl-turn",
+ "anyhow",
+]
+
+[[package]]
 name = "agl-config"
 version = "1.0.0-alpha.4"
 dependencies = [

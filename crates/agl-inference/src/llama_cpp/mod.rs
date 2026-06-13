@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use agl_config::{LocalInferenceConfig, RuntimeSwitch};
 use agl_oven::{RenderedMessageRole, RenderedModelRequest};
@@ -141,6 +141,7 @@ impl InferenceBackend for LlamaCppCliBackend {
         };
         let output = Command::new(&self.config.backend.binary)
             .args(args)
+            .stdin(Stdio::null())
             .output();
 
         let output = match output {

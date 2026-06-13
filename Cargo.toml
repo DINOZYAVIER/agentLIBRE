@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agl-cli",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-oven",

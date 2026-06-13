@@ -1,0 +1,17 @@
+[package]
+name = "agl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "agentLIBRE"
+path = "src/main.rs"
+
+[dependencies]
+agl-config.workspace = true
+agl-inference.workspace = true
+agl-oven.workspace = true
+agl-turn.workspace = true
+anyhow.workspace = true
