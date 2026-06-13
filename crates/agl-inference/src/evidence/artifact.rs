@@ -80,15 +80,6 @@ impl InferenceArtifactPaths {
         &self.stderr_log
     }
 
-    pub fn ensure_attempt_dir(&self) -> Result<()> {
-        std::fs::create_dir_all(self.attempt_dir()).with_context(|| {
-            format!(
-                "failed to create inference attempt artifact directory {}",
-                self.attempt_dir().display()
-            )
-        })
-    }
-
     pub fn write_request_json<T>(&self, request: &T) -> Result<&Path>
     where
         T: Serialize + ?Sized,

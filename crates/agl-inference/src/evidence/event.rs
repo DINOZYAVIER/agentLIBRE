@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -76,10 +76,6 @@ impl InferenceEventWriter {
         Self {
             events_jsonl: events_jsonl.into(),
         }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.events_jsonl
     }
 
     pub fn append(&self, event: &InferenceObservationEvent) -> Result<()> {
