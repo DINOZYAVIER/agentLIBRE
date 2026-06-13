@@ -115,20 +115,20 @@ impl InferenceRuntimeConfig {
         }
         validate_optional_token_limit("batch_size", self.batch_size)?;
         validate_optional_token_limit("ubatch_size", self.ubatch_size)?;
-        if let (Some(batch_size), Some(ubatch_size)) = (self.batch_size, self.ubatch_size) {
-            if ubatch_size > batch_size {
-                bail!("ubatch_size {ubatch_size} cannot exceed batch_size {batch_size}");
-            }
+        if let (Some(batch_size), Some(ubatch_size)) = (self.batch_size, self.ubatch_size)
+            && ubatch_size > batch_size
+        {
+            bail!("ubatch_size {ubatch_size} cannot exceed batch_size {batch_size}");
         }
         Ok(())
     }
 }
 
 fn validate_optional_token_limit(name: &str, value: Option<u32>) -> Result<()> {
-    if let Some(value) = value {
-        if value == 0 || value > MAX_BATCH_TOKENS {
-            bail!("{name} {value} must be between 1 and {MAX_BATCH_TOKENS}");
-        }
+    if let Some(value) = value
+        && (value == 0 || value > MAX_BATCH_TOKENS)
+    {
+        bail!("{name} {value} must be between 1 and {MAX_BATCH_TOKENS}");
     }
     Ok(())
 }

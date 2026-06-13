@@ -18,14 +18,14 @@ pub(crate) fn repair_tool_json(
         };
     }
 
-    if classification == MalformedToolJsonKind::MissingTerminator {
-        if let Ok(tool_call) = parse_tool_json(raw_json) {
-            return ToolJsonRepair::Succeeded {
-                strategy: RepairStrategy::AcceptMissingTerminator,
-                repaired_json: raw_json.to_string(),
-                tool_call,
-            };
-        }
+    if classification == MalformedToolJsonKind::MissingTerminator
+        && let Ok(tool_call) = parse_tool_json(raw_json)
+    {
+        return ToolJsonRepair::Succeeded {
+            strategy: RepairStrategy::AcceptMissingTerminator,
+            repaired_json: raw_json.to_string(),
+            tool_call,
+        };
     }
 
     if classification == MalformedToolJsonKind::InvalidShape {
