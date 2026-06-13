@@ -10,11 +10,11 @@ members = [
     "crates/agl-events",
     "crates/agl-actions",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "1.0.0-alpha.4"
-edition = "2021"
+edition = "2024"
 license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
 
