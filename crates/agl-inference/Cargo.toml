@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 agl-config.workspace = true
 agl-llama-cpp.workspace = true
-agl-model.workspace = true
+agl-oven.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -5,7 +5,7 @@ use agl_config::{
     load_local_inference_config, BackendKind, InferenceBackendConfig, InferenceRuntimeConfig,
     KvCacheType, LocalInferenceConfig, ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat,
 };
-use agl_model::{
+use agl_oven::{
     RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
 };
 use serde_json::json;

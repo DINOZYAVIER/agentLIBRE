@@ -3,7 +3,7 @@ use std::process::Command;
 
 use agl_config::{LocalInferenceConfig, RuntimeSwitch};
 use agl_llama_cpp::{LlamaCppCliInvocation, LlamaCppSwitch};
-use agl_model::{RenderedMessageRole, RenderedModelRequest};
+use agl_oven::{RenderedMessageRole, RenderedModelRequest};
 use anyhow::{bail, Context, Result};
 
 use crate::evidence::{

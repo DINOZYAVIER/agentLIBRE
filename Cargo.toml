@@ -3,7 +3,7 @@ members = [
     "crates/agl-llama-cpp",
     "crates/agl-inference",
     "crates/agl-loop",
-    "crates/agl-model",
+    "crates/agl-oven",
     "crates/agl-turn",
     "crates/agl-config",
     "crates/agl-events",
@@ -24,7 +24,7 @@ agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-inference = { path = "crates/agl-inference" }
 agl-llama-cpp = { path = "crates/agl-llama-cpp" }
-agl-model = { path = "crates/agl-model" }
+agl-oven = { path = "crates/agl-oven" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,4 +1,4 @@
-use agl_model::RenderedModelRequest;
+use agl_oven::RenderedModelRequest;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 

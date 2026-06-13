@@ -33,7 +33,7 @@ version = "1.0.0-alpha.4"
 dependencies = [
  "agl-config",
  "agl-llama-cpp",
- "agl-model",
+ "agl-oven",
  "anyhow",
  "serde",
  "serde_json",
@@ -58,7 +58,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-model"
+name = "agl-oven"
 version = "1.0.0-alpha.4"
 dependencies = [
  "agl-config",
