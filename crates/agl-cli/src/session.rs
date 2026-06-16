@@ -6,6 +6,7 @@ use agl_config::{ModelConfig, load_local_inference_config};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
+use agl_runtime::AgentLibreRuntimeConfig;
 use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{Context, Result};
 
@@ -18,18 +19,30 @@ pub(crate) struct InferenceSession {
     backend: LlamaCppBackend,
     model_config: ModelConfig,
     run_id: InferenceRunId,
+    config_path: PathBuf,
+    artifact_root: PathBuf,
 }
 
 impl InferenceSession {
-    pub(crate) fn new(options: RunOptions) -> Result<Self> {
-        let config_path = options
-            .config
-            .or_else(|| env::var_os(CONFIG_ENV).map(PathBuf::from))
-            .context("missing --config PATH or AGL_LOCAL_INFERENCE_CONFIG")?;
-        let artifact_root = options
-            .artifact_root
-            .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from))
-            .context("missing --artifact-root DIR or AGL_INFERENCE_ARTIFACT_ROOT")?;
+    pub(crate) fn new(
+        options: RunOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        artifact_root_override: Option<PathBuf>,
+    ) -> Result<Self> {
+        let config_path = Self::resolve_config_path(&options, runtime);
+        let artifact_root = artifact_root_override
+            .or(options
+                .artifact_root
+                .clone()
+                .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
+            .unwrap_or_else(|| Self::default_artifact_root(runtime));
+
+        tracing::info!(
+            target: "agentlibre::app",
+            config_path = %config_path.display(),
+            artifact_root = %artifact_root.display(),
+            "resolved inference session paths"
+        );
 
         let config = load_local_inference_config(&config_path).with_context(|| {
             format!(
@@ -38,7 +51,7 @@ impl InferenceSession {
             )
         })?;
         let model_config = config.model.clone();
-        let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(artifact_root))?
+        let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
         let run_id = InferenceRunId::new(options.run_id.unwrap_or_else(default_run_id))?;
 
@@ -46,7 +59,43 @@ impl InferenceSession {
             backend,
             model_config,
             run_id,
+            config_path,
+            artifact_root,
         })
+    }
+
+    pub(crate) fn resolve_config_path(
+        options: &RunOptions,
+        runtime: &AgentLibreRuntimeConfig,
+    ) -> PathBuf {
+        options
+            .config
+            .clone()
+            .or_else(|| env::var_os(CONFIG_ENV).map(PathBuf::from))
+            .unwrap_or_else(|| runtime.paths.default_local_inference_config())
+    }
+
+    pub(crate) fn resolve_artifact_root(options: &RunOptions) -> Option<PathBuf> {
+        options
+            .artifact_root
+            .clone()
+            .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from))
+    }
+
+    pub(crate) fn default_artifact_root(runtime: &AgentLibreRuntimeConfig) -> PathBuf {
+        runtime.paths.default_artifact_root()
+    }
+
+    pub(crate) fn run_id(&self) -> &InferenceRunId {
+        &self.run_id
+    }
+
+    pub(crate) fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
+    pub(crate) fn artifact_root(&self) -> &std::path::Path {
+        &self.artifact_root
     }
 
     pub(crate) fn generate(
@@ -84,7 +133,7 @@ fn build_inference_request(
     })
 }
 
-fn default_run_id() -> String {
+pub(crate) fn default_run_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -125,6 +174,25 @@ mod tests {
         assert_eq!(
             request.rendered.tool_call_format,
             ToolCallFormat::HermesJson
+        );
+    }
+
+    #[test]
+    fn resolves_default_paths_from_runtime_config() {
+        let runtime = AgentLibreRuntimeConfig {
+            paths: agl_runtime::AgentLibrePaths::from_agl_home("/tmp/agl-home"),
+            logging: agl_runtime::AgentLibreLoggingConfig::default(),
+            history: agl_runtime::AgentLibreHistoryConfig::default(),
+        };
+        let options = RunOptions::default();
+
+        assert_eq!(
+            InferenceSession::resolve_config_path(&options, &runtime),
+            PathBuf::from("/tmp/agl-home/config/inference/local.toml")
+        );
+        assert_eq!(
+            InferenceSession::default_artifact_root(&runtime),
+            PathBuf::from("/tmp/agl-home/data/runs")
         );
     }
 }

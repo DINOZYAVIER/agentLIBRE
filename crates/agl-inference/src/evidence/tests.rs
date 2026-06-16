@@ -62,11 +62,11 @@ fn builds_deterministic_artifact_paths_from_caller_root() {
         paths.response_json(),
         paths.attempt_dir().join("response.json")
     );
-    assert_eq!(paths.stderr_log(), paths.attempt_dir().join("stderr.log"));
+    assert_eq!(paths.runtime_log(), paths.attempt_dir().join("runtime.log"));
 }
 
 #[test]
-fn writes_request_response_and_stderr_artifacts() {
+fn writes_request_response_and_runtime_artifacts() {
     let root_path = temp_root("artifacts");
     let root = InferenceArtifactRoot::new(&root_path);
     let paths = root.paths(&run_id(), &attempt_id());
@@ -83,11 +83,11 @@ fn writes_request_response_and_stderr_artifacts() {
             "text": "world"
         }))
         .unwrap();
-    let stderr_path = paths.write_stderr_log("loaded model\n").unwrap();
+    let runtime_path = paths.write_runtime_log("loaded model\n").unwrap();
 
     assert_eq!(request_path, paths.request_json());
     assert_eq!(response_path, paths.response_json());
-    assert_eq!(stderr_path, paths.stderr_log());
+    assert_eq!(runtime_path, paths.runtime_log());
     assert_eq!(
         std::fs::read_to_string(paths.request_json()).unwrap(),
         "{\n  \"prompt\": \"hello\",\n  \"temperature\": 0\n}\n"
@@ -97,7 +97,7 @@ fn writes_request_response_and_stderr_artifacts() {
         "{\n  \"finish_reason\": \"stop\",\n  \"text\": \"world\"\n}\n"
     );
     assert_eq!(
-        std::fs::read_to_string(paths.stderr_log()).unwrap(),
+        std::fs::read_to_string(paths.runtime_log()).unwrap(),
         "loaded model\n"
     );
 

@@ -1,4 +1,6 @@
+use std::error::Error;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fmt;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
@@ -42,6 +44,30 @@ pub(super) struct LlamaCppRuntimeOutput {
     pub(super) finish_reason: InferenceFinishReason,
     pub(super) log: String,
 }
+
+#[derive(Debug)]
+pub(super) struct LlamaCppRuntimeError {
+    message: String,
+    log: String,
+}
+
+impl LlamaCppRuntimeError {
+    fn new(message: String, log: String) -> Self {
+        Self { message, log }
+    }
+
+    pub(super) fn log(&self) -> &str {
+        &self.log
+    }
+}
+
+impl fmt::Display for LlamaCppRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for LlamaCppRuntimeError {}
 
 impl LlamaCppRuntime {
     pub(super) fn new(config: LocalInferenceConfig, max_output_tokens: u32) -> Self {
@@ -116,7 +142,12 @@ impl NativeLlamaCppRuntime {
         clear_llama_logs();
 
         let mut log = runtime_log_header();
-        let model_state = self.ensure_session(&mut log)?;
+        let model_state = match self.ensure_session(&mut log) {
+            Ok(model_state) => model_state,
+            Err(err) => {
+                return Err(runtime_error(err.to_string(), log));
+            }
+        };
         log.push_str("model_state = ");
         log.push_str(model_state.as_str());
         log.push('\n');
@@ -138,7 +169,12 @@ impl NativeLlamaCppRuntime {
             }
         }
 
-        let output = session.generate(rendered, self.max_output_tokens, &mut log)?;
+        let output = match session.generate(rendered, self.max_output_tokens, &mut log) {
+            Ok(output) => output,
+            Err(err) => {
+                return Err(runtime_error(err.to_string(), log));
+            }
+        };
         let native_logs = take_llama_logs();
         if model_state == LlamaCppModelState::Loaded {
             session.set_load_native_log(native_logs.clone());
@@ -163,6 +199,10 @@ impl NativeLlamaCppRuntime {
         self.session = Some(LlamaCppSession::load(&self.config, log)?);
         Ok(LlamaCppModelState::Loaded)
     }
+}
+
+fn runtime_error(message: String, log: String) -> anyhow::Error {
+    LlamaCppRuntimeError::new(message, finish_runtime_log(log, take_llama_logs())).into()
 }
 
 #[cfg(test)]

@@ -119,7 +119,7 @@ fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
     assert!(paths.request_json().exists());
     assert!(!paths.response_json().exists());
     assert!(
-        std::fs::read_to_string(paths.stderr_log())
+        std::fs::read_to_string(paths.runtime_log())
             .unwrap()
             .contains("llama.cpp max_output_tokens cannot be zero")
     );
@@ -189,23 +189,23 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     let second_paths = artifact_root.paths(&run_id, &second_attempt);
     assert!(first_paths.request_json().exists());
     assert!(first_paths.response_json().exists());
-    assert!(first_paths.stderr_log().exists());
+    assert!(first_paths.runtime_log().exists());
     assert!(second_paths.request_json().exists());
     assert!(second_paths.response_json().exists());
-    assert!(second_paths.stderr_log().exists());
+    assert!(second_paths.runtime_log().exists());
     assert!(second_paths.events_jsonl().exists());
 
-    let first_stderr = std::fs::read_to_string(first_paths.stderr_log()).unwrap();
-    let second_stderr = std::fs::read_to_string(second_paths.stderr_log()).unwrap();
-    assert!(first_stderr.contains("model_state = loaded"));
-    assert!(first_stderr.contains("thinking_prefill = disabled"));
-    assert!(first_stderr.contains("llama_cpp_prompt_append:\nUser: first\n"));
-    assert!(second_stderr.contains("model_state = reused"));
-    assert!(second_stderr.contains("llama_cpp_session_load_log:"));
-    assert!(second_stderr.contains("load_tensors: offloaded 66/66 layers to GPU"));
-    assert!(second_stderr.contains("rendered_message_history_len = 2"));
-    assert!(second_stderr.contains("llama_cpp_prompt_append:\nUser: second\n"));
-    assert!(!second_stderr.contains("User: first\n"));
+    let first_runtime_log = std::fs::read_to_string(first_paths.runtime_log()).unwrap();
+    let second_runtime_log = std::fs::read_to_string(second_paths.runtime_log()).unwrap();
+    assert!(first_runtime_log.contains("model_state = loaded"));
+    assert!(first_runtime_log.contains("thinking_prefill = disabled"));
+    assert!(first_runtime_log.contains("llama_cpp_prompt_append:\nUser: first\n"));
+    assert!(second_runtime_log.contains("model_state = reused"));
+    assert!(second_runtime_log.contains("llama_cpp_session_load_log:"));
+    assert!(second_runtime_log.contains("load_tensors: offloaded 66/66 layers to GPU"));
+    assert!(second_runtime_log.contains("rendered_message_history_len = 2"));
+    assert!(second_runtime_log.contains("llama_cpp_prompt_append:\nUser: second\n"));
+    assert!(!second_runtime_log.contains("User: first\n"));
 
     let events = std::fs::read_to_string(second_paths.events_jsonl()).unwrap();
     assert!(events.contains("\"backend\":\"llama_cpp\""));

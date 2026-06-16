@@ -5,10 +5,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 config="${AGL_SMOKE_CONFIG:-}"
-artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-015-llama-cpp-smoke}"
+artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-016-llama-cpp-smoke}"
 agentlibre_bin="${AGL_SMOKE_AGENTLIBRE_BIN:-$repo_root/target/debug/agentLIBRE}"
 device="${AGL_SMOKE_DEVICE:-Vulkan0}"
-run_suffix="agl-015-$$"
+run_suffix="agl-016-$(date +%s)-$$"
+export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}"
 
 fail() {
   echo "smoke failed: $*" >&2
@@ -87,26 +88,29 @@ linked_libraries="$(readelf -d "$agentlibre_bin" | grep -E 'NEEDED.*(libllama|li
 
 infer_run_id="$run_suffix-infer"
 chat_run_id="$run_suffix-chat"
-infer_root="$artifact_root/infer-$run_suffix"
-chat_root="$artifact_root/chat-$run_suffix"
-mkdir -p "$infer_root" "$chat_root"
+chat_session_id="$run_suffix-session"
+infer_root="$AGL_HOME/data/runs"
+chat_root="$AGL_HOME/data/sessions/$chat_session_id/runs/$chat_run_id"
+app_log="$AGL_HOME/state/logs/agentLIBRE.log"
+inference_log="$AGL_HOME/state/logs/inference.log"
+session_transcript="$AGL_HOME/data/sessions/$chat_session_id/transcript.jsonl"
+mkdir -p "$artifact_root"
 
 "$agentlibre_bin" infer \
   --config "$config" \
-  --artifact-root "$infer_root" \
   --run-id "$infer_run_id" \
   --max-output-tokens 32 \
   --prompt "Answer with exactly: agentLIBRE ok" \
-  >"$infer_root/stdout.txt"
+  >"$artifact_root/infer-stdout.txt"
 
 infer_response="$(attempt_file "$infer_root" "$infer_run_id" 1 response.json)"
-infer_stderr="$(attempt_file "$infer_root" "$infer_run_id" 1 stderr.log)"
+infer_runtime_log="$(attempt_file "$infer_root" "$infer_run_id" 1 runtime.log)"
 infer_events="$(events_file "$infer_root" "$infer_run_id")"
 infer_content="$(json_content "$infer_response")"
 [[ "$infer_content" == "agentLIBRE ok" ]] || fail "infer returned: $infer_content"
 require_contains "$infer_events" '"backend":"llama_cpp"'
-require_contains "$infer_stderr" "selected_device = $device"
-require_contains "$infer_stderr" "load_tensors: offloaded"
+require_contains "$infer_runtime_log" "selected_device = $device"
+require_contains "$infer_runtime_log" "load_tensors: offloaded"
 
 printf '%s\n%s\n%s\n' \
   "Reply with one short sentence." \
@@ -114,32 +118,44 @@ printf '%s\n%s\n%s\n' \
   "/exit" \
   | "$agentlibre_bin" chat \
       --config "$config" \
-      --artifact-root "$chat_root" \
       --run-id "$chat_run_id" \
+      --session-id "$chat_session_id" \
       --max-output-tokens 48 \
-      >"$chat_root/stdout.txt"
+      >"$artifact_root/chat-stdout.txt"
 
 chat_response_1="$(attempt_file "$chat_root" "$chat_run_id" 1 response.json)"
 chat_response_2="$(attempt_file "$chat_root" "$chat_run_id" 2 response.json)"
-chat_stderr_1="$(attempt_file "$chat_root" "$chat_run_id" 1 stderr.log)"
-chat_stderr_2="$(attempt_file "$chat_root" "$chat_run_id" 2 stderr.log)"
+chat_runtime_log_1="$(attempt_file "$chat_root" "$chat_run_id" 1 runtime.log)"
+chat_runtime_log_2="$(attempt_file "$chat_root" "$chat_run_id" 2 runtime.log)"
 chat_events="$(events_file "$chat_root" "$chat_run_id")"
 
 reject_generated_continuation "$chat_response_1"
 reject_generated_continuation "$chat_response_2"
 require_contains "$chat_events" '"backend":"llama_cpp"'
-require_contains "$chat_stderr_1" "model_state = loaded"
-require_contains "$chat_stderr_1" "selected_device = $device"
-require_contains "$chat_stderr_1" "load_tensors: offloaded"
-require_contains "$chat_stderr_2" "model_state = reused"
-require_contains "$chat_stderr_2" "selected_device = $device"
-require_contains "$chat_stderr_2" "load_tensors: offloaded"
+require_contains "$chat_runtime_log_1" "model_state = loaded"
+require_contains "$chat_runtime_log_1" "selected_device = $device"
+require_contains "$chat_runtime_log_1" "load_tensors: offloaded"
+require_contains "$chat_runtime_log_2" "model_state = reused"
+require_contains "$chat_runtime_log_2" "selected_device = $device"
+require_contains "$chat_runtime_log_2" "load_tensors: offloaded"
+require_contains "$session_transcript" '"kind":"user_message"'
+require_contains "$session_transcript" '"kind":"assistant_message"'
+require_contains "$app_log" "chat session started"
+require_contains "$inference_log" "llama.cpp inference attempt succeeded"
 
+echo "AGL_HOME: $AGL_HOME"
+echo "config path: $config"
 echo "infer artifact root: $infer_root"
 echo "chat artifact root: $chat_root"
+echo "session transcript: $session_transcript"
+echo "app log: $app_log"
+echo "inference log: $inference_log"
+echo "infer runtime log: $infer_runtime_log"
+echo "chat attempt 1 runtime log: $chat_runtime_log_1"
+echo "chat attempt 2 runtime log: $chat_runtime_log_2"
 echo "linked llama.cpp libraries:"
 echo "$linked_libraries"
 echo "selected device: $device"
-echo "chat attempt 1 model state: $(model_state "$chat_stderr_1")"
-echo "chat attempt 2 model state: $(model_state "$chat_stderr_2")"
-echo "AGL-015 llama.cpp smoke passed"
+echo "chat attempt 1 model state: $(model_state "$chat_runtime_log_1")"
+echo "chat attempt 2 model state: $(model_state "$chat_runtime_log_2")"
+echo "AGL-016 llama.cpp smoke passed"

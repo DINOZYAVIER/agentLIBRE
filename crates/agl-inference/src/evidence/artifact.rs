@@ -17,7 +17,7 @@ pub struct InferenceArtifactPaths {
     attempt_dir: PathBuf,
     request_json: PathBuf,
     response_json: PathBuf,
-    stderr_log: PathBuf,
+    runtime_log: PathBuf,
 }
 
 impl InferenceArtifactRoot {
@@ -49,7 +49,7 @@ impl InferenceArtifactRoot {
             run_dir,
             request_json: attempt_dir.join("request.json"),
             response_json: attempt_dir.join("response.json"),
-            stderr_log: attempt_dir.join("stderr.log"),
+            runtime_log: attempt_dir.join("runtime.log"),
             attempt_dir,
         }
     }
@@ -76,8 +76,8 @@ impl InferenceArtifactPaths {
         &self.response_json
     }
 
-    pub fn stderr_log(&self) -> &Path {
-        &self.stderr_log
+    pub fn runtime_log(&self) -> &Path {
+        &self.runtime_log
     }
 
     pub fn write_request_json<T>(&self, request: &T) -> Result<&Path>
@@ -96,9 +96,9 @@ impl InferenceArtifactPaths {
         Ok(self.response_json())
     }
 
-    pub fn write_stderr_log(&self, content: impl AsRef<[u8]>) -> Result<&Path> {
-        write_bytes_artifact(self.stderr_log(), content.as_ref())?;
-        Ok(self.stderr_log())
+    pub fn write_runtime_log(&self, content: impl AsRef<[u8]>) -> Result<&Path> {
+        write_bytes_artifact(self.runtime_log(), content.as_ref())?;
+        Ok(self.runtime_log())
     }
 }
 

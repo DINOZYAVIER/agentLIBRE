@@ -9,7 +9,7 @@ use crate::evidence::{
     InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
 };
 use crate::{InferenceBackend, InferenceRequest, InferenceResponse};
-use runtime::LlamaCppRuntime;
+use runtime::{LlamaCppRuntime, LlamaCppRuntimeError};
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 
@@ -88,13 +88,32 @@ impl InferenceBackend for LlamaCppBackend {
         let output = match self.runtime.generate(&request.rendered) {
             Ok(output) => output,
             Err(err) => {
-                let message = format!("llama.cpp runtime failed: {err}");
-                paths.write_stderr_log(format!("{message}\n"))?;
+                let err_text = err.to_string();
+                let message = format!("llama.cpp runtime failed: {err_text}");
+                let mut runtime_log = err
+                    .downcast_ref::<LlamaCppRuntimeError>()
+                    .map(|err| err.log().to_string())
+                    .unwrap_or_default();
+                if !runtime_log.is_empty() && !runtime_log.ends_with('\n') {
+                    runtime_log.push('\n');
+                }
+                runtime_log.push_str("error = ");
+                runtime_log.push_str(&err_text);
+                runtime_log.push('\n');
+                paths.write_runtime_log(runtime_log)?;
                 self.append_failure(&writer, &request, &message)?;
+                tracing::error!(
+                    target: "agentlibre::inference",
+                    run_id = %request.run_id,
+                    attempt_id = %request.attempt_id,
+                    backend = "llama_cpp",
+                    error = %err_text,
+                    "llama.cpp inference attempt failed"
+                );
                 bail!("{message}");
             }
         };
-        paths.write_stderr_log(output.log)?;
+        paths.write_runtime_log(output.log)?;
 
         let response = InferenceResponse {
             content: output.content,
@@ -111,6 +130,15 @@ impl InferenceBackend for LlamaCppBackend {
             attempt_id: request.attempt_id.clone(),
             finish_status: InferenceFinishStatus::Succeeded,
         })?;
+        tracing::info!(
+            target: "agentlibre::inference",
+            run_id = %request.run_id,
+            attempt_id = %request.attempt_id,
+            backend = "llama_cpp",
+            finish_reason = ?response.finish_reason,
+            content_bytes = response.content.len(),
+            "llama.cpp inference attempt succeeded"
+        );
         Ok(response)
     }
 }

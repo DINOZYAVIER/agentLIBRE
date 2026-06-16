@@ -16,6 +16,9 @@ pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) run_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) no_history: bool,
+    pub(crate) new_session: bool,
     pub(crate) max_output_tokens: u32,
     pub(crate) prompt: Option<String>,
 }
@@ -26,6 +29,9 @@ impl Default for RunOptions {
             config: None,
             artifact_root: None,
             run_id: None,
+            session_id: None,
+            no_history: false,
+            new_session: false,
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             prompt: None,
         }
@@ -62,6 +68,9 @@ fn parse_run_options(
                     Some(PathBuf::from(next_value(&mut args, "--artifact-root")?));
             }
             "--run-id" => options.run_id = Some(next_value(&mut args, "--run-id")?),
+            "--session-id" => options.session_id = Some(next_value(&mut args, "--session-id")?),
+            "--new-session" => options.new_session = true,
+            "--no-history" => options.no_history = true,
             "--max-output-tokens" => {
                 let value = next_value(&mut args, "--max-output-tokens")?;
                 options.max_output_tokens = value
@@ -77,6 +86,13 @@ fn parse_run_options(
         }
     }
 
+    if options.new_session && options.session_id.is_some() {
+        bail!("--new-session cannot be used with --session-id");
+    }
+    if allow_prompt && (options.session_id.is_some() || options.no_history || options.new_session) {
+        bail!("infer does not accept chat session options");
+    }
+
     Ok(options)
 }
 
@@ -88,12 +104,13 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 pub(crate) fn print_usage() {
     println!(
         "Usage:
-  agentLIBRE infer --config PATH --artifact-root DIR --prompt TEXT [--run-id ID] [--max-output-tokens N]
-  agentLIBRE chat --config PATH --artifact-root DIR [--run-id ID] [--max-output-tokens N]
+  agentLIBRE infer [--config PATH] [--artifact-root DIR] --prompt TEXT [--run-id ID] [--max-output-tokens N]
+  agentLIBRE chat [--config PATH] [--artifact-root DIR] [--run-id ID] [--session-id ID] [--no-history] [--max-output-tokens N]
 
 Environment defaults:
   AGL_LOCAL_INFERENCE_CONFIG
   AGL_INFERENCE_ARTIFACT_ROOT
+  AGL_HOME
 
 Chat commands:
   /exit
@@ -129,8 +146,32 @@ mod tests {
                 config: Some(PathBuf::from("local.toml")),
                 artifact_root: Some(PathBuf::from("artifacts")),
                 run_id: Some("manual-test".to_string()),
+                session_id: None,
+                no_history: false,
+                new_session: false,
                 max_output_tokens: 32,
                 prompt: Some("hello".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_chat_session_options() {
+        let command = parse_cli([
+            "agentLIBRE".to_string(),
+            "chat".to_string(),
+            "--session-id".to_string(),
+            "session-001".to_string(),
+            "--no-history".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Chat(RunOptions {
+                session_id: Some("session-001".to_string()),
+                no_history: true,
+                ..RunOptions::default()
             })
         );
     }
