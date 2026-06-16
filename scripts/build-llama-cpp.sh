@@ -73,7 +73,7 @@ cmake_args=(
   -DGGML_VULKAN=ON \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
-  -DLLAMA_BUILD_TOOLS=ON \
+  -DLLAMA_BUILD_TOOLS=OFF \
   -DLLAMA_BUILD_SERVER=OFF \
   -DLLAMA_BUILD_APP=OFF
 )
@@ -96,6 +96,6 @@ fi
 
 cmake "${cmake_args[@]}"
 
-cmake --build "$build_dir" --target llama-completion --parallel "$jobs"
+cmake --build "$build_dir" --target llama --parallel "$jobs"
 
-printf '%s\n' "$build_dir/bin/llama-completion"
+printf '%s\n' "$build_dir/bin"

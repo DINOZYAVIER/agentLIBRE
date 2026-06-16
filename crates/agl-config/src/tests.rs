@@ -40,7 +40,6 @@ fn loads_local_inference_config_from_explicit_file() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/opt/llama.cpp/build/bin/llama-cli"
 model = "/models/qwen3.6.gguf"
 
 [runtime]
@@ -54,10 +53,6 @@ flash_attention = "on"
 cache_type_k = "q8_0"
 cache_type_v = "q8_0"
 mmap = false
-jinja = true
-conversation = false
-simple_io = true
-display_prompt = false
 
 [model]
 dialect = "qwen3"
@@ -68,10 +63,6 @@ tool_call_format = "hermes_json"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.backend.kind, BackendKind::LlamaCpp);
-    assert_eq!(
-        config.backend.binary,
-        PathBuf::from("/opt/llama.cpp/build/bin/llama-cli")
-    );
     assert_eq!(config.backend.model, PathBuf::from("/models/qwen3.6.gguf"));
     assert_eq!(config.runtime.gpu_layers, 999);
     assert_eq!(config.runtime.context_tokens, 32768);
@@ -83,10 +74,6 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.cache_type_k, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.cache_type_v, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.mmap, Some(false));
-    assert_eq!(config.runtime.jinja, Some(true));
-    assert_eq!(config.runtime.conversation, Some(false));
-    assert!(config.runtime.simple_io);
-    assert_eq!(config.runtime.display_prompt, Some(false));
     assert_eq!(config.model.dialect, ModelDialect::Qwen3);
     assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
 
@@ -100,7 +87,6 @@ fn local_inference_config_accepts_legacy_minimal_runtime_fields() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/opt/llama.cpp/build/bin/llama-completion"
 model = "/models/qwen3.6.gguf"
 
 [runtime]
@@ -121,7 +107,6 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.ubatch_size, None);
     assert_eq!(config.runtime.flash_attention, None);
     assert_eq!(config.runtime.cache_type_k, None);
-    assert!(!config.runtime.simple_io);
 
     std::fs::remove_file(path).unwrap();
 }
@@ -133,7 +118,6 @@ fn local_inference_config_rejects_unknown_fields() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/bin/llama-cli"
 model = "/models/qwen.gguf"
 surprise = true
 
@@ -165,7 +149,6 @@ fn local_inference_config_does_not_require_paths_to_exist() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/definitely/not/installed/llama-cli"
 model = "/definitely/not/downloaded/qwen.gguf"
 
 [runtime]
@@ -182,10 +165,6 @@ tool_call_format = "hermes_json"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(
-        config.backend.binary,
-        PathBuf::from("/definitely/not/installed/llama-cli")
-    );
-    assert_eq!(
         config.backend.model,
         PathBuf::from("/definitely/not/downloaded/qwen.gguf")
     );
@@ -200,7 +179,6 @@ fn local_inference_config_rejects_invalid_numeric_limits() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/bin/llama-cli"
 model = "/models/qwen.gguf"
 
 [runtime]
@@ -232,7 +210,6 @@ fn local_inference_config_rejects_invalid_batch_limits() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = "/bin/llama-cli"
 model = "/models/qwen.gguf"
 
 [runtime]
@@ -266,8 +243,7 @@ fn local_inference_config_rejects_empty_backend_paths() {
         r#"
 [backend]
 kind = "llama_cpp"
-binary = ""
-model = "/models/qwen.gguf"
+model = ""
 
 [runtime]
 gpu_layers = 999
@@ -284,7 +260,7 @@ tool_call_format = "hermes_json"
 
     assert!(
         err.to_string()
-            .contains("backend binary path cannot be empty"),
+            .contains("backend model path cannot be empty"),
         "unexpected error: {err}"
     );
 

@@ -5,10 +5,7 @@ use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
     ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat, load_local_inference_config,
 };
-use agl_oven::{
-    RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool, RenderedToolCall,
-};
-use serde_json::json;
+use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
 
 use crate::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use crate::*;
@@ -50,11 +47,10 @@ fn inference_request() -> InferenceRequest {
     }
 }
 
-fn local_config(binary: impl Into<PathBuf>) -> LocalInferenceConfig {
+fn local_config() -> LocalInferenceConfig {
     LocalInferenceConfig {
         backend: InferenceBackendConfig {
             kind: BackendKind::LlamaCpp,
-            binary: binary.into(),
             model: PathBuf::from("/models/qwen3.6.gguf"),
         },
         runtime: InferenceRuntimeConfig {
@@ -68,10 +64,6 @@ fn local_config(binary: impl Into<PathBuf>) -> LocalInferenceConfig {
             cache_type_k: Some(KvCacheType::Q8_0),
             cache_type_v: Some(KvCacheType::Q8_0),
             mmap: Some(false),
-            jinja: Some(true),
-            conversation: Some(false),
-            simple_io: true,
-            display_prompt: Some(false),
         },
         model: ModelConfig {
             dialect: ModelDialect::Qwen3,
@@ -93,77 +85,18 @@ fn rendered_model_request_round_trips_for_artifacts() {
 }
 
 #[test]
-fn llama_cpp_backend_builds_cli_arguments_from_config() {
-    let root_path = temp_root("args");
-    let backend = LlamaCppCliBackend::new(
-        local_config("/opt/llama.cpp/build/bin/llama-cli"),
-        InferenceArtifactRoot::new(&root_path),
-    )
-    .unwrap()
-    .with_max_output_tokens(64);
-
-    let args = backend
-        .command_args("User:\nhello\n\nAssistant:\n")
-        .unwrap()
-        .into_iter()
-        .map(|value| value.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        args,
-        [
-            "-m",
-            "/models/qwen3.6.gguf",
-            "-p",
-            "User:\nhello\n\nAssistant:\n",
-            "-n",
-            "64",
-            "-c",
-            "32768",
-            "-ngl",
-            "999",
-            "-t",
-            "8",
-            "--device",
-            "Vulkan0",
-            "-b",
-            "1024",
-            "-ub",
-            "256",
-            "-fa",
-            "on",
-            "-ctk",
-            "q8_0",
-            "-ctv",
-            "q8_0",
-            "--no-mmap",
-            "--jinja",
-            "-no-cnv",
-            "--simple-io",
-            "--no-display-prompt",
-        ]
-    );
-}
-
-#[test]
-fn llama_cpp_backend_records_invalid_invocation_without_panicking() {
+fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
     let root_path = temp_root("llama-invalid-invocation");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
     let request = inference_request();
     let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
-    let mut backend = LlamaCppCliBackend::new(
-        local_config("/opt/llama.cpp/build/bin/llama-completion"),
-        artifact_root,
-    )
-    .unwrap()
-    .with_max_output_tokens(0);
+    let mut backend = LlamaCppBackend::new(local_config(), artifact_root)
+        .unwrap()
+        .with_max_output_tokens(0);
 
     let err = backend.generate(request).unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("failed to build llama.cpp CLI arguments")
-    );
+    assert!(err.to_string().contains("llama.cpp runtime failed"));
     assert!(paths.request_json().exists());
     assert!(!paths.response_json().exists());
     assert!(
@@ -172,70 +105,6 @@ fn llama_cpp_backend_records_invalid_invocation_without_panicking() {
             .contains("llama.cpp max_output_tokens cannot be zero")
     );
     let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
-    assert!(events.contains("\"kind\":\"inference.attempt_failed\""));
-    assert!(events.contains("\"finish_status\":\"failed\""));
-
-    std::fs::remove_dir_all(root_path).unwrap();
-}
-
-#[test]
-fn llama_cpp_prompt_uses_rendered_request_fields() {
-    let mut rendered = rendered_request();
-    rendered.messages.push(RenderedMessage {
-        role: RenderedMessageRole::Assistant,
-        content: String::new(),
-        name: None,
-        tool_calls: vec![RenderedToolCall {
-            name: "read_file".to_string(),
-            arguments: json!({"path": "README.MD"}),
-        }],
-    });
-
-    let prompt = crate::llama_cpp::render_llama_cli_prompt(&rendered).unwrap();
-
-    assert!(prompt.contains("User:\nuse the rendered request\n"));
-    assert!(
-        prompt.contains(
-            "Assistant:\n{\"arguments\":{\"path\":\"README.MD\"},\"name\":\"read_file\"}\n"
-        )
-    );
-    assert!(prompt.contains("Available tools:\n- read_file required: path\n"));
-    assert!(prompt.ends_with("Assistant:\n"));
-}
-
-#[test]
-fn llama_cpp_backend_records_launch_failure_with_artifacts() {
-    let root_path = temp_root("llama-failure");
-    let artifact_root = InferenceArtifactRoot::new(&root_path);
-    let request = inference_request();
-    let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
-    let mut backend = LlamaCppCliBackend::new(
-        local_config("/definitely/not/installed/llama-cli"),
-        artifact_root,
-    )
-    .unwrap();
-
-    let err = backend.generate(request).unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("failed to launch llama.cpp binary")
-    );
-    assert!(paths.request_json().exists());
-    assert!(!paths.response_json().exists());
-    assert!(
-        std::fs::read_to_string(paths.request_json())
-            .unwrap()
-            .contains("\"tool_call_format\": \"hermes_json\"")
-    );
-    assert!(
-        std::fs::read_to_string(paths.stderr_log())
-            .unwrap()
-            .contains("failed to launch llama.cpp binary")
-    );
-    let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
-    assert!(events.contains("\"backend\":\"llama_cpp_cli\""));
-    assert!(events.contains("\"kind\":\"inference.request_recorded\""));
     assert!(events.contains("\"kind\":\"inference.attempt_failed\""));
     assert!(events.contains("\"finish_status\":\"failed\""));
 
@@ -268,7 +137,7 @@ fn manual_llama_cpp_smoke_from_env() {
 
     let config = load_local_inference_config(config_path).unwrap();
     let mut backend =
-        LlamaCppCliBackend::new(config, InferenceArtifactRoot::new(artifact_root)).unwrap();
+        LlamaCppBackend::new(config, InferenceArtifactRoot::new(artifact_root)).unwrap();
     let response = backend.generate(request).unwrap();
 
     assert!(!response.content.trim().is_empty());

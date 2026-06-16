@@ -30,16 +30,11 @@ impl LocalInferenceConfig {
 #[serde(deny_unknown_fields)]
 pub struct InferenceBackendConfig {
     pub kind: BackendKind,
-    pub binary: PathBuf,
     pub model: PathBuf,
 }
 
 impl InferenceBackendConfig {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.binary.as_os_str().is_empty(),
-            "backend binary path cannot be empty"
-        );
         ensure!(
             !self.model.as_os_str().is_empty(),
             "backend model path cannot be empty"
@@ -74,14 +69,6 @@ pub struct InferenceRuntimeConfig {
     pub cache_type_v: Option<KvCacheType>,
     #[serde(default)]
     pub mmap: Option<bool>,
-    #[serde(default)]
-    pub jinja: Option<bool>,
-    #[serde(default)]
-    pub conversation: Option<bool>,
-    #[serde(default)]
-    pub simple_io: bool,
-    #[serde(default)]
-    pub display_prompt: Option<bool>,
 }
 
 impl InferenceRuntimeConfig {

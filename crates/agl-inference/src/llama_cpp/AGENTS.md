@@ -1,4 +1,4 @@
 # AGENTS.md
 
-This component owns llama.cpp CLI backend execution and argument construction.
-Keep argument names aligned with the pinned llama.cpp CLI and preserve evidence writes for every attempted inference path.
+This component owns the in-process llama.cpp runtime.
+Keep FFI bindings aligned with the pinned vendored llama.cpp C API and preserve evidence writes for every attempted inference path.

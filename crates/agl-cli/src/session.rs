@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_config::{ModelConfig, load_local_inference_config};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
-use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppCliBackend};
+use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
 use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 
 pub(crate) struct InferenceSession {
-    backend: LlamaCppCliBackend,
+    backend: LlamaCppBackend,
     model_config: ModelConfig,
     run_id: InferenceRunId,
 }
@@ -38,7 +38,7 @@ impl InferenceSession {
             )
         })?;
         let model_config = config.model.clone();
-        let backend = LlamaCppCliBackend::new(config, InferenceArtifactRoot::new(artifact_root))?
+        let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
         let run_id = InferenceRunId::new(options.run_id.unwrap_or_else(default_run_id))?;
 
