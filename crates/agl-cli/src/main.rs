@@ -3,22 +3,36 @@ use std::io::{self, Write};
 use std::process;
 
 use agl_runtime::{
-    AgentLibreMessageId, AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent,
-    ChatSessionReplay, ChatSessionStore, init_tracing, logged_message_fields,
+    AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibreMessageId, AgentLibrePaths,
+    AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
+    ChatSessionStore, init_tracing, logged_message_fields,
 };
 use agl_turn::TurnMessage;
 use anyhow::{Context, Result};
 
 mod args;
+mod config;
 mod session;
 mod terminal;
 
 use args::{CliCommand, RunOptions, parse_cli, print_usage};
+use config::run_config;
 use session::{InferenceSession, default_run_id};
 use terminal::assistant_text_for_terminal;
 
 fn main() {
-    let runtime = match AgentLibreRuntimeConfig::from_env() {
+    let command = match parse_cli(env::args()) {
+        Ok(CliCommand::Help) => {
+            print_usage();
+            return;
+        }
+        Ok(command) => command,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            process::exit(1);
+        }
+    };
+    let runtime = match runtime_for_command(&command) {
         Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("error: failed to resolve agentLIBRE runtime: {err:#}");
@@ -42,19 +56,40 @@ fn main() {
         "agentLIBRE runtime paths resolved"
     );
 
-    if let Err(err) = run(env::args(), &runtime) {
+    if let Err(err) = run(command, &runtime) {
         tracing::error!(target: "agentlibre::app", error = %err, "agentLIBRE command failed");
         eprintln!("error: {err:#}");
         process::exit(1);
     }
 }
 
-fn run(args: impl IntoIterator<Item = String>, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    match parse_cli(args)? {
+fn runtime_for_command(command: &CliCommand) -> Result<AgentLibreRuntimeConfig> {
+    let paths = AgentLibrePaths::from_env()?;
+    runtime_for_command_paths(command, paths)
+}
+
+fn runtime_for_command_paths(
+    command: &CliCommand,
+    paths: AgentLibrePaths,
+) -> Result<AgentLibreRuntimeConfig> {
+    if matches!(command, CliCommand::Config(_)) {
+        return Ok(AgentLibreRuntimeConfig {
+            paths,
+            logging: AgentLibreLoggingConfig::from_env(),
+            history: AgentLibreHistoryConfig::default(),
+        });
+    }
+
+    AgentLibreRuntimeConfig::from_paths(paths)
+}
+
+fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    match command {
         CliCommand::Help => {
             print_usage();
             Ok(())
         }
+        CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
     }
@@ -259,6 +294,8 @@ fn log_message_metadata(
 mod tests {
     use agl_runtime::{AgentLibreMessageId, AgentLibreSessionId};
 
+    use crate::args::ConfigCommand;
+
     use super::*;
 
     #[test]
@@ -306,5 +343,27 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn config_command_runtime_does_not_parse_existing_config() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-invalid-runtime-config-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = AgentLibrePaths::from_agl_home(&root);
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.runtime_config_path(), "not toml").unwrap();
+
+        let runtime = runtime_for_command_paths(
+            &CliCommand::Config(ConfigCommand::Init { force: true }),
+            paths,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.logging, AgentLibreLoggingConfig::from_env());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

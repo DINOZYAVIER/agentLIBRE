@@ -1,9 +1,56 @@
+use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::AgentLibrePaths;
+
+pub const DEFAULT_RUNTIME_CONFIG_TOML: &str = r#"[logging]
+level = "info"
+format = "compact"
+file = true
+stderr = "auto"
+include_message_text = false
+
+[history]
+enabled = true
+"#;
+
+pub fn write_default_runtime_config(path: impl AsRef<Path>, force: bool) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create runtime config directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    if force {
+        std::fs::write(path, DEFAULT_RUNTIME_CONFIG_TOML)
+            .with_context(|| format!("failed to write runtime config {}", path.display()))?;
+        return Ok(());
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("runtime config already exists: {}", path.display())
+        }
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to write runtime config {}", path.display()));
+        }
+    };
+    file.write_all(DEFAULT_RUNTIME_CONFIG_TOML.as_bytes())
+        .with_context(|| format!("failed to write runtime config {}", path.display()))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentLibreRuntimeConfig {
@@ -212,5 +259,56 @@ enabled = false
         assert!(!config.include_message_text);
         assert_eq!(config.level, "info");
         assert_eq!(config.format, AgentLibreLogFormat::Compact);
+    }
+
+    #[test]
+    fn writes_default_runtime_config_file() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-config-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("config").join("agentlibre.toml");
+
+        write_default_runtime_config(&path, false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            DEFAULT_RUNTIME_CONFIG_TOML
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_runtime_config_refuses_overwrite() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-config-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("config").join("agentlibre.toml");
+        write_default_runtime_config(&path, false).unwrap();
+
+        let err = write_default_runtime_config(&path, false).unwrap_err();
+
+        assert!(err.to_string().contains("runtime config already exists"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_runtime_config_force_overwrites() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-config-force-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("config").join("agentlibre.toml");
+        write_default_runtime_config(&path, false).unwrap();
+        std::fs::write(&path, "old").unwrap();
+
+        write_default_runtime_config(&path, true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            DEFAULT_RUNTIME_CONFIG_TOML
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

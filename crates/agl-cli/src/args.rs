@@ -7,8 +7,15 @@ pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
     Help,
+    Config(ConfigCommand),
     Infer(RunOptions),
     Chat(RunOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigCommand {
+    Paths,
+    Init { force: bool },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,9 +54,36 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliCom
 
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(CliCommand::Help),
+        "config" => parse_config_command(args).map(CliCommand::Config),
         "infer" => parse_run_options(args, true).map(CliCommand::Infer),
         "chat" => parse_run_options(args, false).map(CliCommand::Chat),
         other => bail!("unknown command {other:?}"),
+    }
+}
+
+fn parse_config_command(mut args: impl Iterator<Item = String>) -> Result<ConfigCommand> {
+    let Some(command) = args.next() else {
+        bail!("config requires a subcommand");
+    };
+
+    match command.as_str() {
+        "paths" => {
+            if let Some(arg) = args.next() {
+                bail!("config paths does not accept {arg:?}");
+            }
+            Ok(ConfigCommand::Paths)
+        }
+        "init" => {
+            let mut force = false;
+            for arg in args {
+                match arg.as_str() {
+                    "--force" => force = true,
+                    other => bail!("config init does not accept {other:?}"),
+                }
+            }
+            Ok(ConfigCommand::Init { force })
+        }
+        other => bail!("unknown config subcommand {other:?}"),
     }
 }
 
@@ -104,6 +138,8 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 pub(crate) fn print_usage() {
     println!(
         "Usage:
+  agentLIBRE config paths
+  agentLIBRE config init [--force]
   agentLIBRE infer [--config PATH] [--artifact-root DIR] --prompt TEXT [--run-id ID] [--max-output-tokens N]
   agentLIBRE chat [--config PATH] [--artifact-root DIR] [--run-id ID] [--session-id ID] [--no-history] [--max-output-tokens N]
 
@@ -187,5 +223,61 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("chat does not accept --prompt"));
+    }
+
+    #[test]
+    fn parse_config_paths_command() {
+        let command = parse_cli([
+            "agentLIBRE".to_string(),
+            "config".to_string(),
+            "paths".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(command, CliCommand::Config(ConfigCommand::Paths));
+    }
+
+    #[test]
+    fn parse_config_init_command() {
+        let command = parse_cli([
+            "agentLIBRE".to_string(),
+            "config".to_string(),
+            "init".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Config(ConfigCommand::Init { force: false })
+        );
+    }
+
+    #[test]
+    fn parse_config_init_force_command() {
+        let command = parse_cli([
+            "agentLIBRE".to_string(),
+            "config".to_string(),
+            "init".to_string(),
+            "--force".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            command,
+            CliCommand::Config(ConfigCommand::Init { force: true })
+        );
+    }
+
+    #[test]
+    fn parse_config_paths_rejects_force() {
+        let error = parse_cli([
+            "agentLIBRE".to_string(),
+            "config".to_string(),
+            "paths".to_string(),
+            "--force".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("config paths does not accept"));
     }
 }

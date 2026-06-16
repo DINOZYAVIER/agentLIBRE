@@ -5,7 +5,7 @@ mod tracing_setup;
 
 pub use config::{
     AgentLibreHistoryConfig, AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibreRuntimeConfig,
-    AgentLibreStderrLogMode,
+    AgentLibreStderrLogMode, DEFAULT_RUNTIME_CONFIG_TOML, write_default_runtime_config,
 };
 pub use paths::AgentLibrePaths;
 pub use session::{
