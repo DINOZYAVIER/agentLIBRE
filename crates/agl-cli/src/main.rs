@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::process;
 
 use agl_runtime::{
-    AgentLibreMessageId, AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionStore,
-    init_tracing, logged_message_fields,
+    AgentLibreMessageId, AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent,
+    ChatSessionReplay, ChatSessionStore, init_tracing, logged_message_fields,
 };
 use agl_turn::TurnMessage;
 use anyhow::{Context, Result};
@@ -85,6 +85,10 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     } else {
         AgentLibreSessionId::generate()
     };
+    let resumed_session = history_enabled
+        && !options.new_session
+        && options.session_id.is_some()
+        && ChatSessionStore::exists(runtime.paths.sessions_root(), &session_id);
     let explicit_artifact_root = InferenceSession::resolve_artifact_root(&options);
     let artifact_root_override = if history_enabled {
         explicit_artifact_root.or_else(|| {
@@ -98,21 +102,43 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         None
     };
     let mut session = InferenceSession::new(options, runtime, artifact_root_override)?;
-    let chat_history = if history_enabled {
-        Some(ChatSessionStore::start(
-            runtime.paths.sessions_root(),
-            session_id.clone(),
-            session.run_id().as_str().to_string(),
-            session.config_path().to_path_buf(),
-            "llama_cpp",
-        )?)
+    let (chat_history, replay) = if history_enabled {
+        if resumed_session {
+            let history = ChatSessionStore::open(
+                runtime.paths.sessions_root(),
+                session_id.clone(),
+                session.run_id().as_str().to_string(),
+            )?;
+            let replay = history.read_replay()?;
+            (Some(history), Some(replay))
+        } else {
+            (
+                Some(ChatSessionStore::start(
+                    runtime.paths.sessions_root(),
+                    session_id.clone(),
+                    session.run_id().as_str().to_string(),
+                    session.config_path().to_path_buf(),
+                    "llama_cpp",
+                )?),
+                None,
+            )
+        }
     } else {
-        None
+        (None, None)
     };
-    let mut messages = Vec::new();
+    let mut messages = replay
+        .as_ref()
+        .map(replay_turn_messages)
+        .unwrap_or_default();
     let stdin = io::stdin();
-    let mut request_index = 1;
-    let mut message_index = 1;
+    let mut request_index = replay
+        .as_ref()
+        .map(|replay| replay.next_attempt_index)
+        .unwrap_or(1);
+    let mut message_index = replay
+        .as_ref()
+        .map(|replay| replay.next_message_index)
+        .unwrap_or(1);
 
     tracing::info!(
         target: "agentlibre::app",
@@ -120,6 +146,8 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         run_id = %session.run_id(),
         artifact_root = %session.artifact_root().display(),
         history_enabled,
+        resumed = resumed_session,
+        replayed_messages = messages.len(),
         "chat session started"
     );
 
@@ -186,6 +214,28 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     Ok(())
 }
 
+fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
+    replay
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ChatSessionEvent::UserMessage { content, .. } => Some(TurnMessage::User {
+                content: content.clone(),
+            }),
+            ChatSessionEvent::AssistantMessage { content, .. } => Some(TurnMessage::Assistant {
+                content: content.clone(),
+            }),
+            ChatSessionEvent::ToolMessage { name, content, .. } => {
+                Some(TurnMessage::ToolObservation {
+                    name: name.clone(),
+                    content: content.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn log_message_metadata(
     role: &str,
     session_id: &AgentLibreSessionId,
@@ -203,4 +253,58 @@ fn log_message_metadata(
         content = ?fields.content,
         "chat message recorded"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use agl_runtime::{AgentLibreMessageId, AgentLibreSessionId};
+
+    use super::*;
+
+    #[test]
+    fn replay_turn_messages_keeps_transcript_order() {
+        let session_id = AgentLibreSessionId::new("session-001").unwrap();
+        let replay = ChatSessionReplay {
+            events: vec![
+                ChatSessionEvent::SessionStarted {
+                    session_id: session_id.clone(),
+                    run_id: "run-001".to_string(),
+                },
+                ChatSessionEvent::UserMessage {
+                    session_id: session_id.clone(),
+                    message_id: AgentLibreMessageId::indexed(1),
+                    content: "hello".to_string(),
+                },
+                ChatSessionEvent::AssistantMessage {
+                    session_id: session_id.clone(),
+                    message_id: AgentLibreMessageId::indexed(2),
+                    content: "hi".to_string(),
+                },
+                ChatSessionEvent::ToolMessage {
+                    session_id,
+                    message_id: AgentLibreMessageId::indexed(3),
+                    name: "read_file".to_string(),
+                    content: "content".to_string(),
+                },
+            ],
+            next_message_index: 4,
+            next_attempt_index: 1,
+        };
+
+        assert_eq!(
+            replay_turn_messages(&replay),
+            vec![
+                TurnMessage::User {
+                    content: "hello".to_string()
+                },
+                TurnMessage::Assistant {
+                    content: "hi".to_string()
+                },
+                TurnMessage::ToolObservation {
+                    name: "read_file".to_string(),
+                    content: "content".to_string()
+                }
+            ]
+        );
+    }
 }

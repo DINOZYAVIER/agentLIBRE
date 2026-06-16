@@ -9,6 +9,7 @@ pub use config::{
 };
 pub use paths::AgentLibrePaths;
 pub use session::{
-    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionStore, SessionMetadata,
+    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
+    ChatSessionStore, SessionMetadata,
 };
 pub use tracing_setup::{TracingGuards, init_tracing, logged_message_fields};
