@@ -47,6 +47,25 @@ fn inference_request() -> InferenceRequest {
     }
 }
 
+fn inference_request_with_messages(
+    attempt_id: &str,
+    request_index: usize,
+    messages: Vec<RenderedMessage>,
+) -> InferenceRequest {
+    InferenceRequest {
+        run_id: InferenceRunId::new("run-001").unwrap(),
+        attempt_id: InferenceAttemptId::new(attempt_id).unwrap(),
+        rendered: RenderedModelRequest {
+            turn_id: "turn-1".to_string(),
+            request_index,
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+            messages,
+            tools: Vec::new(),
+        },
+    }
+}
+
 fn local_config() -> LocalInferenceConfig {
     LocalInferenceConfig {
         backend: InferenceBackendConfig {
@@ -109,6 +128,108 @@ fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
     assert!(events.contains("\"finish_status\":\"failed\""));
 
     std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
+    let root_path = temp_root("llama-session-reuse");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let run_id = InferenceRunId::new("run-001").unwrap();
+    let first_attempt = InferenceAttemptId::new("attempt-0001").unwrap();
+    let second_attempt = InferenceAttemptId::new("attempt-0002").unwrap();
+    let mut backend = LlamaCppBackend::new_with_test_runtime(
+        local_config(),
+        artifact_root.clone(),
+        vec!["first answer", "second answer\n\nUser:\ncontinuation"],
+    )
+    .unwrap();
+
+    let first = inference_request_with_messages(
+        first_attempt.as_str(),
+        1,
+        vec![RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "first".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        }],
+    );
+    let second = inference_request_with_messages(
+        second_attempt.as_str(),
+        2,
+        vec![
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "first".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Assistant,
+                content: "first answer".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "second".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+        ],
+    );
+
+    let first_response = backend.generate(first).unwrap();
+    let second_response = backend.generate(second).unwrap();
+
+    assert_eq!(first_response.content, "first answer");
+    assert_eq!(second_response.content, "second answer\n");
+
+    let first_paths = artifact_root.paths(&run_id, &first_attempt);
+    let second_paths = artifact_root.paths(&run_id, &second_attempt);
+    assert!(first_paths.request_json().exists());
+    assert!(first_paths.response_json().exists());
+    assert!(first_paths.stderr_log().exists());
+    assert!(second_paths.request_json().exists());
+    assert!(second_paths.response_json().exists());
+    assert!(second_paths.stderr_log().exists());
+    assert!(second_paths.events_jsonl().exists());
+
+    let first_stderr = std::fs::read_to_string(first_paths.stderr_log()).unwrap();
+    let second_stderr = std::fs::read_to_string(second_paths.stderr_log()).unwrap();
+    assert!(first_stderr.contains("model_state = loaded"));
+    assert!(first_stderr.contains("thinking_prefill = disabled"));
+    assert!(first_stderr.contains("llama_cpp_prompt_append:\nUser: first\n"));
+    assert!(second_stderr.contains("model_state = reused"));
+    assert!(second_stderr.contains("llama_cpp_session_load_log:"));
+    assert!(second_stderr.contains("load_tensors: offloaded 66/66 layers to GPU"));
+    assert!(second_stderr.contains("rendered_message_history_len = 2"));
+    assert!(second_stderr.contains("llama_cpp_prompt_append:\nUser: second\n"));
+    assert!(!second_stderr.contains("User: first\n"));
+
+    let events = std::fs::read_to_string(second_paths.events_jsonl()).unwrap();
+    assert!(events.contains("\"backend\":\"llama_cpp\""));
+    assert!(events.contains("\"kind\":\"inference.response_recorded\""));
+
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn llama_cpp_invocation_module_does_not_return() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("llama_cpp")
+        .join("invocation.rs");
+
+    assert!(!path.exists(), "{} must stay removed", path.display());
+}
+
+#[test]
+fn local_llama_cpp_config_has_no_executable_path() {
+    let config = serde_json::to_string(&local_config()).unwrap();
+
+    assert!(!config.contains("binary"));
+    assert!(!config.contains("llama-completion"));
 }
 
 #[test]

@@ -25,6 +25,13 @@ mod tests {
     }
 
     #[test]
+    fn terminal_text_cuts_generated_tool_continuation() {
+        let content = "agentLIBRE ok\nTool:\nobservation";
+
+        assert_eq!(assistant_text_for_terminal(content), "agentLIBRE ok");
+    }
+
+    #[test]
     fn terminal_text_strips_leading_assistant_label() {
         assert_eq!(
             assistant_text_for_terminal("Assistant:\nhello\n"),

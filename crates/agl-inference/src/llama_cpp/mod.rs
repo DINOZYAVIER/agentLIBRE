@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 
 mod ffi;
 mod runtime;
+mod session;
 
 use crate::evidence::{
     InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
@@ -12,30 +13,27 @@ use runtime::LlamaCppRuntime;
 
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 
-#[derive(Clone, Debug)]
 pub struct LlamaCppBackend {
-    config: LocalInferenceConfig,
     artifact_root: InferenceArtifactRoot,
-    max_output_tokens: u32,
+    runtime: LlamaCppRuntime,
 }
 
 impl LlamaCppBackend {
     pub fn new(config: LocalInferenceConfig, artifact_root: InferenceArtifactRoot) -> Result<Self> {
         config.validate()?;
         Ok(Self {
-            config,
             artifact_root,
-            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            runtime: LlamaCppRuntime::new(config, DEFAULT_MAX_OUTPUT_TOKENS),
         })
     }
 
     pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
-        self.max_output_tokens = max_output_tokens;
+        self.runtime.set_max_output_tokens(max_output_tokens);
         self
     }
 
     pub fn config(&self) -> &LocalInferenceConfig {
-        &self.config
+        self.runtime.config()
     }
 
     fn append_started(
@@ -87,8 +85,7 @@ impl InferenceBackend for LlamaCppBackend {
             path: paths.request_json().to_path_buf(),
         })?;
 
-        let mut runtime = LlamaCppRuntime::new(self.config.clone(), self.max_output_tokens);
-        let output = match runtime.generate(&request.rendered) {
+        let output = match self.runtime.generate(&request.rendered) {
             Ok(output) => output,
             Err(err) => {
                 let message = format!("llama.cpp runtime failed: {err}");
@@ -115,5 +112,20 @@ impl InferenceBackend for LlamaCppBackend {
             finish_status: InferenceFinishStatus::Succeeded,
         })?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+impl LlamaCppBackend {
+    pub(crate) fn new_with_test_runtime(
+        config: LocalInferenceConfig,
+        artifact_root: InferenceArtifactRoot,
+        responses: Vec<&str>,
+    ) -> Result<Self> {
+        config.validate()?;
+        Ok(Self {
+            artifact_root,
+            runtime: LlamaCppRuntime::new_test(config, DEFAULT_MAX_OUTPUT_TOKENS, responses),
+        })
     }
 }

@@ -143,6 +143,37 @@ tool_call_format = "hermes_json"
 }
 
 #[test]
+fn local_inference_config_rejects_backend_binary() {
+    let path = write_temp_config(
+        "local-inference-backend-binary",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen.gguf"
+binary = "/usr/bin/llama-completion"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert!(
+        err.to_string().contains("failed to parse config file"),
+        "unexpected error: {err}"
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn local_inference_config_does_not_require_paths_to_exist() {
     let path = write_temp_config(
         "local-inference-paths",
