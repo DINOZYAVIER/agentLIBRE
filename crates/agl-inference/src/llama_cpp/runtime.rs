@@ -42,6 +42,8 @@ struct NativeLlamaCppRuntime {
 pub(super) struct LlamaCppRuntimeOutput {
     pub(super) content: String,
     pub(super) finish_reason: InferenceFinishReason,
+    pub(super) model_state: String,
+    pub(super) selected_device: Option<String>,
     pub(super) log: String,
 }
 
@@ -183,6 +185,8 @@ impl NativeLlamaCppRuntime {
         Ok(LlamaCppRuntimeOutput {
             content: output.content,
             finish_reason: output.finish_reason,
+            model_state: model_state.as_str().to_string(),
+            selected_device: self.config.runtime.device.clone(),
             log: finish_runtime_log(log, native_logs),
         })
     }
@@ -256,6 +260,8 @@ impl TestLlamaCppRuntime {
         Ok(LlamaCppRuntimeOutput {
             content,
             finish_reason: InferenceFinishReason::Stop,
+            model_state: model_state.as_str().to_string(),
+            selected_device: self.config.runtime.device.clone(),
             log,
         })
     }

@@ -4,8 +4,8 @@ use std::process;
 
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibreMessageId, AgentLibrePaths,
-    AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
-    ChatSessionStore, init_tracing, logged_message_fields,
+    AgentLibreProcessMode, AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent,
+    ChatSessionReplay, ChatSessionStore, init_tracing, logged_message_fields,
 };
 use agl_turn::TurnMessage;
 use anyhow::{Context, Result};
@@ -39,7 +39,11 @@ fn main() {
             process::exit(1);
         }
     };
-    let _tracing_guards = match init_tracing(&runtime.paths, &runtime.logging) {
+    let _tracing_guards = match init_tracing(
+        &runtime.paths,
+        &runtime.logging,
+        process_mode_for_command(&command),
+    ) {
         Ok(guards) => Some(guards),
         Err(err) => {
             eprintln!("warning: failed to initialize logging: {err:#}");
@@ -81,6 +85,13 @@ fn runtime_for_command_paths(
     }
 
     AgentLibreRuntimeConfig::from_paths(paths)
+}
+
+fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
+    match command {
+        CliCommand::Infer(_) | CliCommand::Chat(_) => AgentLibreProcessMode::Interactive,
+        CliCommand::Help | CliCommand::Config(_) => AgentLibreProcessMode::Batch,
+    }
 }
 
 fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {

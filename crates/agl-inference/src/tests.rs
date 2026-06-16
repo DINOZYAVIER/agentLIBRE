@@ -183,7 +183,24 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     let second_response = backend.generate(second).unwrap();
 
     assert_eq!(first_response.content, "first answer");
+    assert_eq!(
+        first_response.metadata.model_state.as_deref(),
+        Some("loaded")
+    );
+    assert_eq!(
+        first_response.metadata.selected_device.as_deref(),
+        Some("Vulkan0")
+    );
     assert_eq!(second_response.content, "second answer\n");
+    assert_eq!(
+        second_response.metadata.model_state.as_deref(),
+        Some("reused")
+    );
+    assert_eq!(
+        second_response.metadata.selected_device.as_deref(),
+        Some("Vulkan0")
+    );
+    assert!(second_response.metadata.duration_ms < 60_000);
 
     let first_paths = artifact_root.paths(&run_id, &first_attempt);
     let second_paths = artifact_root.paths(&run_id, &second_attempt);

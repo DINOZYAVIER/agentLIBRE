@@ -19,6 +19,14 @@ pub struct InferenceRequest {
 pub struct InferenceResponse {
     pub content: String,
     pub finish_reason: InferenceFinishReason,
+    pub metadata: InferenceResponseMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceResponseMetadata {
+    pub model_state: Option<String>,
+    pub selected_device: Option<String>,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

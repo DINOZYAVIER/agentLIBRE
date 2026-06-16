@@ -12,4 +12,6 @@ pub use session::{
     AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
     ChatSessionStore, SessionMetadata,
 };
-pub use tracing_setup::{TracingGuards, init_tracing, logged_message_fields};
+pub use tracing_setup::{
+    AgentLibreProcessMode, TracingGuards, init_tracing, logged_message_fields,
+};

@@ -10,6 +10,12 @@ use crate::{
     AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreStderrLogMode,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentLibreProcessMode {
+    Interactive,
+    Batch,
+}
+
 pub struct TracingGuards {
     _guards: Vec<WorkerGuard>,
 }
@@ -36,6 +42,7 @@ pub fn logged_message_fields(
 pub fn init_tracing(
     paths: &AgentLibrePaths,
     config: &AgentLibreLoggingConfig,
+    process_mode: AgentLibreProcessMode,
 ) -> Result<TracingGuards> {
     let log_dir = paths.state_dir.join("logs");
     std::fs::create_dir_all(&log_dir)
@@ -61,7 +68,7 @@ pub fn init_tracing(
         );
     }
 
-    if config.stderr == AgentLibreStderrLogMode::Always {
+    if stderr_logs_enabled(config.stderr, process_mode) {
         layers.push(
             format_layer(config.format, std::io::stderr).with_filter_boxed(log_filter(config)),
         );
@@ -73,6 +80,14 @@ pub fn init_tracing(
         .context("failed to initialize tracing subscriber")?;
 
     Ok(TracingGuards { _guards: guards })
+}
+
+fn stderr_logs_enabled(mode: AgentLibreStderrLogMode, process_mode: AgentLibreProcessMode) -> bool {
+    match mode {
+        AgentLibreStderrLogMode::Auto => process_mode == AgentLibreProcessMode::Interactive,
+        AgentLibreStderrLogMode::Always => true,
+        AgentLibreStderrLogMode::Never => false,
+    }
 }
 
 trait BoxLayerExt {
@@ -135,5 +150,29 @@ mod tests {
         let fields = logged_message_fields("assistant", "hello", true);
 
         assert_eq!(fields.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn auto_stderr_mode_follows_process_mode() {
+        assert!(stderr_logs_enabled(
+            AgentLibreStderrLogMode::Auto,
+            AgentLibreProcessMode::Interactive
+        ));
+        assert!(!stderr_logs_enabled(
+            AgentLibreStderrLogMode::Auto,
+            AgentLibreProcessMode::Batch
+        ));
+    }
+
+    #[test]
+    fn explicit_stderr_modes_override_process_mode() {
+        assert!(!stderr_logs_enabled(
+            AgentLibreStderrLogMode::Never,
+            AgentLibreProcessMode::Interactive
+        ));
+        assert!(stderr_logs_enabled(
+            AgentLibreStderrLogMode::Always,
+            AgentLibreProcessMode::Batch
+        ));
     }
 }
