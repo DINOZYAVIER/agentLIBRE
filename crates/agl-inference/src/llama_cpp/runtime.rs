@@ -122,6 +122,19 @@ impl LlamaCppRuntime {
         }
     }
 
+    pub(super) fn clear_context(&mut self) {
+        match &mut self.inner {
+            LlamaCppRuntimeInner::Native(runtime) => {
+                runtime.session = None;
+            }
+            #[cfg(test)]
+            LlamaCppRuntimeInner::Test(runtime) => {
+                runtime.loaded = false;
+                runtime.rendered_message_history_len = 0;
+            }
+        }
+    }
+
     pub(super) fn generate(
         &mut self,
         rendered: &RenderedModelRequest,

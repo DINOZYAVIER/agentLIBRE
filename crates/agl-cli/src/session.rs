@@ -111,6 +111,10 @@ impl InferenceSession {
         )?;
         self.backend.generate(request)
     }
+
+    pub(crate) fn clear_context(&mut self) {
+        self.backend.clear_context();
+    }
 }
 
 fn build_inference_request(

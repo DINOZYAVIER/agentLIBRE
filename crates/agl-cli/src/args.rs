@@ -149,6 +149,9 @@ Environment defaults:
   AGL_HOME
 
 Chat commands:
+  /help
+  /session
+  /clear
   /exit
   /quit"
     );

@@ -100,6 +100,9 @@ pub enum ChatSessionEvent {
         run_id: String,
         attempt_id: String,
     },
+    ContextCleared {
+        session_id: AgentLibreSessionId,
+    },
     SessionFinished {
         session_id: AgentLibreSessionId,
     },
@@ -272,6 +275,12 @@ impl ChatSessionStore {
         })
     }
 
+    pub fn append_context_cleared(&self) -> Result<()> {
+        self.append(&ChatSessionEvent::ContextCleared {
+            session_id: self.session_id.clone(),
+        })
+    }
+
     pub fn finish(&self) -> Result<()> {
         self.append(&ChatSessionEvent::SessionFinished {
             session_id: self.session_id.clone(),
@@ -385,6 +394,7 @@ mod tests {
             .append_assistant_message(AgentLibreMessageId::indexed(2), "hi".to_string())
             .unwrap();
         store.link_attempt("attempt-0001").unwrap();
+        store.append_context_cleared().unwrap();
         store.finish().unwrap();
 
         assert!(store.session_dir().join("session.json").exists());
@@ -393,6 +403,7 @@ mod tests {
         assert!(transcript.contains("\"kind\":\"user_message\""));
         assert!(transcript.contains("\"kind\":\"assistant_message\""));
         assert!(transcript.contains("\"kind\":\"model_attempt_linked\""));
+        assert!(transcript.contains("\"kind\":\"context_cleared\""));
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -11,11 +11,15 @@ use agl_turn::TurnMessage;
 use anyhow::{Context, Result};
 
 mod args;
+mod chat;
 mod config;
 mod session;
 mod terminal;
 
 use args::{CliCommand, RunOptions, parse_cli, print_usage};
+use chat::{
+    CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, clear_chat_context, parse_chat_input,
+};
 use config::run_config;
 use session::{InferenceSession, default_run_id};
 use terminal::assistant_text_for_terminal;
@@ -196,6 +200,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         replayed_messages = messages.len(),
         "chat session started"
     );
+    println!("session_id={session_id}");
 
     loop {
         print!("agentLIBRE> ");
@@ -209,13 +214,39 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             break;
         }
 
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
-        if matches!(input, "/exit" | "/quit") {
-            break;
-        }
+        let input = match parse_chat_input(&input) {
+            ParsedChatInput::Empty => continue,
+            ParsedChatInput::Message(input) => input,
+            ParsedChatInput::UnknownCommand(command) => {
+                println!("unknown_command={command}");
+                continue;
+            }
+            ParsedChatInput::Command(ChatCommand::Help) => {
+                print!("{CHAT_COMMANDS_HELP}");
+                continue;
+            }
+            ParsedChatInput::Command(ChatCommand::Session) => {
+                print_chat_session_summary(&session_id, &session);
+                continue;
+            }
+            ParsedChatInput::Command(ChatCommand::Clear) => {
+                let cleared_messages = clear_chat_context(&mut messages);
+                session.clear_context();
+                if let Some(history) = &chat_history {
+                    history.append_context_cleared()?;
+                }
+                tracing::info!(
+                    target: "agentlibre::app",
+                    session_id = %session_id,
+                    run_id = %session.run_id(),
+                    cleared_messages,
+                    "chat context cleared"
+                );
+                println!("context_cleared=true cleared_messages={cleared_messages}");
+                continue;
+            }
+            ParsedChatInput::Command(ChatCommand::Exit) => break,
+        };
 
         let user_message_id = AgentLibreMessageId::indexed(message_index);
         message_index += 1;
@@ -260,26 +291,35 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     Ok(())
 }
 
+fn print_chat_session_summary(session_id: &AgentLibreSessionId, session: &InferenceSession) {
+    println!("session_id={session_id}");
+    println!("run_id={}", session.run_id());
+    println!("artifact_root={}", session.artifact_root().display());
+}
+
 fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
-    replay
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            ChatSessionEvent::UserMessage { content, .. } => Some(TurnMessage::User {
+    let mut messages = Vec::new();
+    for event in &replay.events {
+        match event {
+            ChatSessionEvent::UserMessage { content, .. } => messages.push(TurnMessage::User {
                 content: content.clone(),
             }),
-            ChatSessionEvent::AssistantMessage { content, .. } => Some(TurnMessage::Assistant {
-                content: content.clone(),
-            }),
+            ChatSessionEvent::AssistantMessage { content, .. } => {
+                messages.push(TurnMessage::Assistant {
+                    content: content.clone(),
+                });
+            }
             ChatSessionEvent::ToolMessage { name, content, .. } => {
-                Some(TurnMessage::ToolObservation {
+                messages.push(TurnMessage::ToolObservation {
                     name: name.clone(),
                     content: content.clone(),
-                })
+                });
             }
-            _ => None,
-        })
-        .collect()
+            ChatSessionEvent::ContextCleared { .. } => messages.clear(),
+            _ => {}
+        }
+    }
+    messages
 }
 
 fn log_message_metadata(
@@ -353,6 +393,37 @@ mod tests {
                     content: "content".to_string()
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn replay_turn_messages_honors_context_clear() {
+        let session_id = AgentLibreSessionId::new("session-001").unwrap();
+        let replay = ChatSessionReplay {
+            events: vec![
+                ChatSessionEvent::UserMessage {
+                    session_id: session_id.clone(),
+                    message_id: AgentLibreMessageId::indexed(1),
+                    content: "old".to_string(),
+                },
+                ChatSessionEvent::ContextCleared {
+                    session_id: session_id.clone(),
+                },
+                ChatSessionEvent::UserMessage {
+                    session_id,
+                    message_id: AgentLibreMessageId::indexed(2),
+                    content: "new".to_string(),
+                },
+            ],
+            next_message_index: 3,
+            next_attempt_index: 1,
+        };
+
+        assert_eq!(
+            replay_turn_messages(&replay),
+            vec![TurnMessage::User {
+                content: "new".to_string()
+            }]
         );
     }
 

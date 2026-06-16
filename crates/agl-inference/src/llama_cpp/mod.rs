@@ -37,6 +37,10 @@ impl LlamaCppBackend {
         self.runtime.config()
     }
 
+    pub fn clear_context(&mut self) {
+        self.runtime.clear_context();
+    }
+
     fn append_started(
         &self,
         writer: &InferenceEventWriter,
