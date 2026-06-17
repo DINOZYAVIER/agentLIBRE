@@ -287,21 +287,20 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
 
         let user_message_id = AgentLibreMessageId::indexed(message_index);
         message_index += 1;
-        if let Some(history) = &chat_history {
-            history.append_user_message(user_message_id.clone(), input.to_string())?;
-        }
         log_message_metadata("user", &session_id, &user_message_id, input, runtime);
         messages.push(TurnMessage::User {
             content: input.to_string(),
         });
-        if let Some(history) = &chat_history {
-            history.link_attempt(format!("attempt-{request_index:04}"))?;
-        }
+        let attempt_id = format!("attempt-{request_index:04}");
         let response = session.generate(&messages, request_index)?;
         let content = assistant_text_for_terminal(&response.content);
         println!("assistant> {content}");
         let assistant_message_id = AgentLibreMessageId::indexed(message_index);
         message_index += 1;
+        if let Some(history) = &chat_history {
+            history.append_user_message(user_message_id.clone(), input.to_string())?;
+            history.link_attempt(attempt_id)?;
+        }
         if let Some(history) = &chat_history {
             history.append_assistant_message(assistant_message_id.clone(), content.clone())?;
         }
