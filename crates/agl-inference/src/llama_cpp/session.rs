@@ -29,9 +29,9 @@ impl LlamaCppModelState {
 
 pub(super) struct LlamaCppSession {
     key: LlamaCppSessionKey,
-    model: Model,
-    context: ContextHandle,
     sampler: Sampler,
+    context: ContextHandle,
+    model: Model,
     vocab: *const c_void,
     rendered_message_history_len: usize,
     formatted_prompt_prefix_len: usize,
@@ -114,9 +114,9 @@ impl LlamaCppSession {
                 model: config.backend.model.clone(),
                 runtime: config.runtime.clone(),
             },
-            model,
-            context,
             sampler,
+            context,
+            model,
             vocab,
             rendered_message_history_len: 0,
             formatted_prompt_prefix_len: 0,
