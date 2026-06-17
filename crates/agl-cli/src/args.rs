@@ -1,12 +1,23 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CliInvocation {
+    pub(crate) command: CliCommand,
+    pub(crate) home: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
     Help,
+    HelpPrinted,
+    Completion { shell: Shell },
     Config(ConfigCommand),
     Infer(RunOptions),
     Chat(RunOptions),
@@ -45,139 +56,280 @@ impl Default for RunOptions {
     }
 }
 
-pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliCommand> {
-    let mut args = args.into_iter();
-    let _program = args.next();
-    let Some(command) = args.next() else {
-        return Ok(CliCommand::Help);
-    };
+#[derive(Debug, Parser)]
+#[command(
+    name = "agl",
+    bin_name = "agl",
+    version,
+    about = "agentLIBRE CLI - local-first agentic inference"
+)]
+struct Cli {
+    /// Override AGL_HOME for this invocation.
+    #[arg(long, global = true, value_name = "DIR")]
+    home: Option<PathBuf>,
 
-    match command.as_str() {
-        "-h" | "--help" | "help" => Ok(CliCommand::Help),
-        "config" => parse_config_command(args).map(CliCommand::Config),
-        "infer" => parse_run_options(args, true).map(CliCommand::Infer),
-        "chat" => parse_run_options(args, false).map(CliCommand::Chat),
-        other => bail!("unknown command {other:?}"),
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Prompt text for a one-shot run.
+    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Write shell completion scripts to stdout.
+    Completion {
+        /// Shell to generate completions for.
+        #[arg(value_enum, default_value_t = Shell::Bash)]
+        shell: Shell,
+    },
+    /// Runtime configuration commands.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+    /// Retired internal command name.
+    #[command(hide = true, disable_help_flag = true)]
+    Infer(ReservedCommandArgs),
+    /// Run one prompt and print the final answer.
+    Run(RunArgs),
+    /// Alias for `run`.
+    Generate(RunArgs),
+    /// Start an interactive chat session.
+    Chat(ChatArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Print resolved config, data, state, cache, log, and session paths.
+    Paths,
+    /// Write a default runtime config.
+    Init {
+        /// Overwrite an existing runtime config.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+struct CommonRunArgs {
+    /// Local inference config TOML path.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Inference artifact root directory.
+    #[arg(long, value_name = "DIR")]
+    artifact_root: Option<PathBuf>,
+
+    /// Stable run id for artifacts.
+    #[arg(long, value_name = "ID")]
+    run_id: Option<String>,
+
+    /// Maximum response tokens.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
+    max_output_tokens: u32,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    common: CommonRunArgs,
+
+    /// Prompt text.
+    #[arg(long = "prompt", value_name = "TEXT", conflicts_with = "prompt")]
+    prompt_option: Option<String>,
+
+    /// Prompt text.
+    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ChatArgs {
+    #[command(flatten)]
+    common: CommonRunArgs,
+
+    /// Resume or write a specific chat session id.
+    #[arg(long, value_name = "ID")]
+    session_id: Option<String>,
+
+    /// Start a new chat session even when a session id is configured.
+    #[arg(long)]
+    new_session: bool,
+
+    /// Disable persisted chat history for this process.
+    #[arg(long)]
+    no_history: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReservedCommandArgs {
+    #[arg(value_name = "ARGS", num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInvocation> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let display_name = cli_display_name(args.first().map(String::as_str));
+    let command = Cli::command().name(display_name).bin_name(display_name);
+
+    match command.try_get_matches_from(args) {
+        Ok(matches) => Cli::from_arg_matches(&matches)
+            .map_err(anyhow::Error::from)
+            .and_then(Cli::into_invocation),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            err.print().context("failed to print CLI help")?;
+            Ok(CliInvocation {
+                command: CliCommand::HelpPrinted,
+                home: None,
+            })
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
-fn parse_config_command(mut args: impl Iterator<Item = String>) -> Result<ConfigCommand> {
-    let Some(command) = args.next() else {
-        bail!("config requires a subcommand");
-    };
+impl Cli {
+    fn into_invocation(self) -> Result<CliInvocation> {
+        let command = match self.command {
+            Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
+            Some(Commands::Config { command }) => CliCommand::Config(match command {
+                ConfigCommands::Paths => ConfigCommand::Paths,
+                ConfigCommands::Init { force } => ConfigCommand::Init { force },
+            }),
+            Some(Commands::Infer(args)) => retired_infer_command(args.args)?,
+            Some(Commands::Run(args) | Commands::Generate(args)) => {
+                CliCommand::Infer(run_options_from_args(args)?)
+            }
+            Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
+            None if self.prompt.is_empty() => CliCommand::Help,
+            None => CliCommand::Infer(RunOptions {
+                prompt: Some(join_prompt(self.prompt)),
+                ..RunOptions::default()
+            }),
+        };
 
-    match command.as_str() {
-        "paths" => {
-            if let Some(arg) = args.next() {
-                bail!("config paths does not accept {arg:?}");
-            }
-            Ok(ConfigCommand::Paths)
-        }
-        "init" => {
-            let mut force = false;
-            for arg in args {
-                match arg.as_str() {
-                    "--force" => force = true,
-                    other => bail!("config init does not accept {other:?}"),
-                }
-            }
-            Ok(ConfigCommand::Init { force })
-        }
-        other => bail!("unknown config subcommand {other:?}"),
+        Ok(CliInvocation {
+            command,
+            home: self.home,
+        })
     }
 }
 
-fn parse_run_options(
-    mut args: impl Iterator<Item = String>,
-    allow_prompt: bool,
-) -> Result<RunOptions> {
-    let mut options = RunOptions::default();
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => bail!("command help is available with agentLIBRE --help"),
-            "--config" => options.config = Some(PathBuf::from(next_value(&mut args, "--config")?)),
-            "--artifact-root" => {
-                options.artifact_root =
-                    Some(PathBuf::from(next_value(&mut args, "--artifact-root")?));
-            }
-            "--run-id" => options.run_id = Some(next_value(&mut args, "--run-id")?),
-            "--session-id" => options.session_id = Some(next_value(&mut args, "--session-id")?),
-            "--new-session" => options.new_session = true,
-            "--no-history" => options.no_history = true,
-            "--max-output-tokens" => {
-                let value = next_value(&mut args, "--max-output-tokens")?;
-                options.max_output_tokens = value
-                    .parse()
-                    .with_context(|| format!("invalid --max-output-tokens value {value:?}"))?;
-                if options.max_output_tokens == 0 {
-                    bail!("--max-output-tokens must be greater than zero");
-                }
-            }
-            "--prompt" if allow_prompt => options.prompt = Some(next_value(&mut args, "--prompt")?),
-            "--prompt" => bail!("chat does not accept --prompt"),
-            other => bail!("unknown option {other:?}"),
+fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
+    let prompt = args.prompt_option.or_else(|| {
+        if args.prompt.is_empty() {
+            None
+        } else {
+            Some(join_prompt(args.prompt))
         }
+    });
+    if prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.trim().is_empty())
+    {
+        bail!("prompt cannot be empty");
     }
 
-    if options.new_session && options.session_id.is_some() {
-        bail!("--new-session cannot be used with --session-id");
-    }
-    if allow_prompt && (options.session_id.is_some() || options.no_history || options.new_session) {
-        bail!("infer does not accept chat session options");
-    }
-
+    let options = RunOptions {
+        config: args.common.config,
+        artifact_root: args.common.artifact_root,
+        run_id: args.common.run_id,
+        session_id: None,
+        no_history: false,
+        new_session: false,
+        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        prompt,
+    };
     Ok(options)
 }
 
-fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String> {
-    args.next()
-        .with_context(|| format!("{name} requires a value"))
+fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
+    if args.new_session && args.session_id.is_some() {
+        bail!("--new-session cannot be used with --session-id");
+    }
+
+    Ok(RunOptions {
+        config: args.common.config,
+        artifact_root: args.common.artifact_root,
+        run_id: args.common.run_id,
+        session_id: args.session_id,
+        no_history: args.no_history,
+        new_session: args.new_session,
+        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        prompt: None,
+    })
+}
+
+fn validate_max_output_tokens(value: u32) -> Result<u32> {
+    if value == 0 {
+        bail!("--max-output-tokens must be greater than zero");
+    }
+    Ok(value)
+}
+
+fn retired_infer_command(args: Vec<String>) -> Result<CliCommand> {
+    let attempted = if args.is_empty() {
+        "infer".to_string()
+    } else {
+        format!("infer {}", args.join(" "))
+    };
+    bail!(
+        "agl {attempted} is not part of the public CLI in this alpha. Use `agl run --config PATH PROMPT` instead."
+    );
+}
+
+fn join_prompt(parts: Vec<String>) -> String {
+    parts.join(" ")
 }
 
 pub(crate) fn print_usage() {
-    println!(
-        "Usage:
-  agentLIBRE config paths
-  agentLIBRE config init [--force]
-  agentLIBRE infer [--config PATH] [--artifact-root DIR] --prompt TEXT [--run-id ID] [--max-output-tokens N]
-  agentLIBRE chat [--config PATH] [--artifact-root DIR] [--run-id ID] [--session-id ID] [--no-history] [--max-output-tokens N]
+    let mut command = Cli::command().name("agl").bin_name("agl");
+    command.print_help().expect("CLI help should print");
+    println!();
+}
 
-Environment defaults:
-  AGL_LOCAL_INFERENCE_CONFIG
-  AGL_INFERENCE_ARTIFACT_ROOT
-  AGL_HOME
+pub(crate) fn print_completion(shell: Shell) {
+    let mut command = Cli::command().name("agl").bin_name("agl");
+    generate(shell, &mut command, "agl", &mut std::io::stdout());
+}
 
-Chat commands:
-  /help
-  /session
-  /clear
-  /exit
-  /quit"
-    );
+fn cli_display_name(program: Option<&str>) -> &'static str {
+    let _ = program;
+    "agl"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
+        parse_cli(args.into_iter().map(str::to_string))
+            .unwrap()
+            .command
+    }
+
     #[test]
-    fn parse_infer_command() {
-        let command = parse_cli([
-            "agentLIBRE".to_string(),
-            "infer".to_string(),
-            "--config".to_string(),
-            "local.toml".to_string(),
-            "--artifact-root".to_string(),
-            "artifacts".to_string(),
-            "--prompt".to_string(),
-            "hello".to_string(),
-            "--run-id".to_string(),
-            "manual-test".to_string(),
-            "--max-output-tokens".to_string(),
-            "32".to_string(),
-        ])
-        .unwrap();
+    fn parse_run_command_with_options() {
+        let command = parse_command([
+            "agl",
+            "run",
+            "--config",
+            "local.toml",
+            "--artifact-root",
+            "artifacts",
+            "--prompt",
+            "hello",
+            "--run-id",
+            "manual-test",
+            "--max-output-tokens",
+            "32",
+        ]);
 
         assert_eq!(
             command,
@@ -195,15 +347,79 @@ mod tests {
     }
 
     #[test]
-    fn parse_chat_session_options() {
-        let command = parse_cli([
-            "agentLIBRE".to_string(),
-            "chat".to_string(),
-            "--session-id".to_string(),
-            "session-001".to_string(),
-            "--no-history".to_string(),
+    fn parse_retired_infer_command_rejects_with_run_guidance() {
+        let error = parse_cli([
+            "agl".to_string(),
+            "infer".to_string(),
+            "--config".to_string(),
+            "local.toml".to_string(),
+            "--prompt".to_string(),
+            "hello".to_string(),
+        ])
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("agl infer"));
+        assert!(message.contains("Use `agl run --config PATH PROMPT`"));
+    }
+
+    #[test]
+    fn parse_run_prompt_argument() {
+        let command = parse_command(["agl", "run", "hello", "world"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Infer(RunOptions {
+                prompt: Some("hello world".to_string()),
+                ..RunOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_generate_alias() {
+        let command = parse_command(["agl", "generate", "--prompt", "hello"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Infer(RunOptions {
+                prompt: Some("hello".to_string()),
+                ..RunOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_bare_prompt_as_run() {
+        let command = parse_command(["agl", "hello"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Infer(RunOptions {
+                prompt: Some("hello".to_string()),
+                ..RunOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_home_override() {
+        let invocation = parse_cli([
+            "agl".to_string(),
+            "--home".to_string(),
+            "/tmp/agl-home".to_string(),
+            "config".to_string(),
+            "paths".to_string(),
         ])
         .unwrap();
+
+        assert_eq!(invocation.home, Some(PathBuf::from("/tmp/agl-home")));
+        assert_eq!(invocation.command, CliCommand::Config(ConfigCommand::Paths));
+    }
+
+    #[test]
+    fn parse_chat_session_options() {
+        let command = parse_command(["agl", "chat", "--session-id", "session-001", "--no-history"]);
 
         assert_eq!(
             command,
@@ -218,36 +434,26 @@ mod tests {
     #[test]
     fn parse_chat_rejects_prompt() {
         let error = parse_cli([
-            "agentLIBRE".to_string(),
+            "agl".to_string(),
             "chat".to_string(),
             "--prompt".to_string(),
             "hello".to_string(),
         ])
         .unwrap_err();
 
-        assert!(error.to_string().contains("chat does not accept --prompt"));
+        assert!(error.to_string().contains("unexpected argument"));
     }
 
     #[test]
     fn parse_config_paths_command() {
-        let command = parse_cli([
-            "agentLIBRE".to_string(),
-            "config".to_string(),
-            "paths".to_string(),
-        ])
-        .unwrap();
+        let command = parse_command(["agl", "config", "paths"]);
 
         assert_eq!(command, CliCommand::Config(ConfigCommand::Paths));
     }
 
     #[test]
     fn parse_config_init_command() {
-        let command = parse_cli([
-            "agentLIBRE".to_string(),
-            "config".to_string(),
-            "init".to_string(),
-        ])
-        .unwrap();
+        let command = parse_command(["agl", "config", "init"]);
 
         assert_eq!(
             command,
@@ -257,13 +463,7 @@ mod tests {
 
     #[test]
     fn parse_config_init_force_command() {
-        let command = parse_cli([
-            "agentLIBRE".to_string(),
-            "config".to_string(),
-            "init".to_string(),
-            "--force".to_string(),
-        ])
-        .unwrap();
+        let command = parse_command(["agl", "config", "init", "--force"]);
 
         assert_eq!(
             command,
@@ -274,13 +474,29 @@ mod tests {
     #[test]
     fn parse_config_paths_rejects_force() {
         let error = parse_cli([
-            "agentLIBRE".to_string(),
+            "agl".to_string(),
             "config".to_string(),
             "paths".to_string(),
             "--force".to_string(),
         ])
         .unwrap_err();
 
-        assert!(error.to_string().contains("config paths does not accept"));
+        assert!(error.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn parse_completion_command() {
+        let command = parse_command(["agl", "completion", "bash"]);
+
+        assert_eq!(command, CliCommand::Completion { shell: Shell::Bash });
+    }
+
+    #[test]
+    fn display_name_prefers_agl_alias() {
+        assert_eq!(cli_display_name(Some("agl")), "agl");
+        assert_eq!(cli_display_name(Some("/usr/local/bin/agl")), "agl");
+        assert_eq!(cli_display_name(Some("agentLIBRE")), "agl");
+        assert_eq!(cli_display_name(Some("/usr/local/bin/agentLIBRE")), "agl");
+        assert_eq!(cli_display_name(None), "agl");
     }
 }

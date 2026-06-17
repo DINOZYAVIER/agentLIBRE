@@ -6,7 +6,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 config="${AGL_SMOKE_CONFIG:-}"
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-016-llama-cpp-smoke}"
-agentlibre_bin="${AGL_SMOKE_AGENTLIBRE_BIN:-$repo_root/target/debug/agentLIBRE}"
+agl_bin="${AGL_SMOKE_AGL_BIN:-$repo_root/target/debug/agl}"
 device="${AGL_SMOKE_DEVICE:-Vulkan0}"
 run_suffix="agl-016-$(date +%s)-$$"
 export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}"
@@ -82,9 +82,9 @@ need_tool readelf
 cd "$repo_root"
 cargo build -p agl-cli
 
-linked_libraries="$(readelf -d "$agentlibre_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
-[[ "$linked_libraries" == *"libllama"* ]] || fail "$agentlibre_bin is not linked to libllama"
-[[ "$linked_libraries" == *"libggml"* ]] || fail "$agentlibre_bin is not linked to libggml"
+linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
+[[ "$linked_libraries" == *"libllama"* ]] || fail "$agl_bin is not linked to libllama"
+[[ "$linked_libraries" == *"libggml"* ]] || fail "$agl_bin is not linked to libggml"
 
 infer_run_id="$run_suffix-infer"
 chat_run_id="$run_suffix-chat"
@@ -96,7 +96,7 @@ inference_log="$AGL_HOME/state/logs/inference.log"
 session_transcript="$AGL_HOME/data/sessions/$chat_session_id/transcript.jsonl"
 mkdir -p "$artifact_root"
 
-"$agentlibre_bin" infer \
+"$agl_bin" run \
   --config "$config" \
   --run-id "$infer_run_id" \
   --max-output-tokens 32 \
@@ -116,7 +116,7 @@ printf '%s\n%s\n%s\n' \
   "Reply with one short sentence." \
   "Reply with another short sentence." \
   "/exit" \
-  | "$agentlibre_bin" chat \
+  | "$agl_bin" chat \
       --config "$config" \
       --run-id "$chat_run_id" \
       --session-id "$chat_session_id" \

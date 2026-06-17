@@ -14,7 +14,7 @@ fn main() {
         repo_root.join("vendor/llama.cpp").display()
     );
     println!(
-        "cargo:rustc-link-arg-bin=agentLIBRE=-Wl,-rpath,{}",
+        "cargo:rustc-link-arg-bin=agl=-Wl,-rpath,{}",
         lib_dir.display()
     );
 }

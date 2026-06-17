@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 build = "build.rs"
+autobins = false
 
 [[bin]]
-name = "agentLIBRE"
+name = "agl"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,4 +18,6 @@ agl-oven.workspace = true
 agl-runtime.workspace = true
 agl-turn.workspace = true
 anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
 tracing.workspace = true
