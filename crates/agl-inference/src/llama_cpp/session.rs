@@ -146,6 +146,7 @@ impl LlamaCppSession {
         let PreparedPrompt {
             text: prompt,
             assistant_context_prefix,
+            messages: prompt_messages,
         } = self.prepare_prompt_append(rendered, log)?;
 
         let add_special = is_context_empty(self.context.as_ptr());
@@ -154,9 +155,11 @@ impl LlamaCppSession {
             !prompt_tokens.is_empty(),
             "llama.cpp prompt produced no tokens"
         );
+        let prompt_token_count = i32::try_from(prompt_tokens.len())
+            .context("llama.cpp prompt token count exceeds i32")?;
         ensure!(
-            prompt_tokens.len() < unsafe { ffi::llama_n_ctx(self.context.as_ptr()) } as usize,
-            "llama.cpp prompt exceeds context size"
+            has_context_space(self.context.as_ptr(), prompt_token_count),
+            "llama.cpp prompt exceeds remaining context"
         );
         decode_tokens(self.context.as_ptr(), &mut prompt_tokens)
             .context("failed to decode prompt")?;
@@ -164,6 +167,10 @@ impl LlamaCppSession {
         let mut content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         for _ in 0..max_output_tokens {
+            if !has_context_space(self.context.as_ptr(), 1) {
+                finish_reason = InferenceFinishReason::Length;
+                break;
+            }
             let token = unsafe {
                 ffi::llama_sampler_sample(self.sampler.as_ptr(), self.context.as_ptr(), -1)
             };
@@ -172,22 +179,23 @@ impl LlamaCppSession {
                 break;
             }
 
-            content.push_str(&token_to_piece(self.vocab, token)?);
+            let piece = token_to_piece(self.vocab, token)?;
+            let mut next_token = [token];
+            decode_tokens(self.context.as_ptr(), &mut next_token)
+                .context("failed to decode generated token")?;
+            content.push_str(&piece);
             if trim_generated_continuation(&mut content) {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
             }
-
-            if !has_context_space(self.context.as_ptr(), 1) {
-                finish_reason = InferenceFinishReason::Length;
-                break;
-            }
-            let mut next_token = [token];
-            decode_tokens(self.context.as_ptr(), &mut next_token)
-                .context("failed to decode generated token")?;
         }
 
-        self.record_generated_assistant(rendered, assistant_context_prefix, &content)?;
+        self.record_generated_assistant(
+            rendered,
+            prompt_messages,
+            assistant_context_prefix,
+            &content,
+        )?;
 
         Ok(LlamaCppSessionOutput {
             content,
@@ -208,14 +216,15 @@ impl LlamaCppSession {
             );
         }
 
-        self.messages.extend(
+        let mut messages = self.messages.clone();
+        messages.extend(
             rendered.messages[self.rendered_message_history_len..]
                 .iter()
                 .cloned(),
         );
 
         let mut formatted =
-            apply_chat_template_messages(self.model.as_ptr().cast_const(), &self.messages, true)
+            apply_chat_template_messages(self.model.as_ptr().cast_const(), &messages, true)
                 .context("failed to render llama.cpp chat template")?;
         let assistant_context_prefix = disable_qwen_thinking(&mut formatted)
             .map(str::to_string)
@@ -245,21 +254,24 @@ impl LlamaCppSession {
         Ok(PreparedPrompt {
             text: prompt,
             assistant_context_prefix,
+            messages,
         })
     }
 
     fn record_generated_assistant(
         &mut self,
         rendered: &RenderedModelRequest,
+        mut messages: Vec<RenderedMessage>,
         assistant_context_prefix: String,
         content: &str,
     ) -> Result<()> {
-        self.messages.push(RenderedMessage {
+        messages.push(RenderedMessage {
             role: RenderedMessageRole::Assistant,
             content: format!("{assistant_context_prefix}{content}"),
             name: None,
             tool_calls: Vec::new(),
         });
+        self.messages = messages;
         self.rendered_message_history_len = rendered.messages.len() + 1;
         self.formatted_prompt_prefix_len =
             apply_chat_template_messages(self.model.as_ptr().cast_const(), &self.messages, false)
@@ -272,6 +284,7 @@ impl LlamaCppSession {
 struct PreparedPrompt {
     text: String,
     assistant_context_prefix: String,
+    messages: Vec<RenderedMessage>,
 }
 
 struct SelectedDevices {

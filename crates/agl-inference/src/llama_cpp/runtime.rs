@@ -160,7 +160,7 @@ impl NativeLlamaCppRuntime {
         let model_state = match self.ensure_session(&mut log) {
             Ok(model_state) => model_state,
             Err(err) => {
-                return Err(runtime_error(err.to_string(), log));
+                return Err(runtime_error(format!("{err:#}"), log));
             }
         };
         log.push_str("model_state = ");
@@ -172,29 +172,35 @@ impl NativeLlamaCppRuntime {
             log.push('\n');
         }
 
-        let Some(session) = self.session.as_mut() else {
-            return Err(runtime_error(
-                "llama.cpp session was not initialized".to_string(),
-                log,
-            ));
-        };
-        if model_state == LlamaCppModelState::Reused && !session.load_native_log().is_empty() {
-            log.push_str("llama_cpp_session_load_log:\n");
-            log.push_str(session.load_native_log());
-            if !session.load_native_log().ends_with('\n') {
-                log.push('\n');
+        let output = {
+            let Some(session) = self.session.as_mut() else {
+                return Err(runtime_error(
+                    "llama.cpp session was not initialized".to_string(),
+                    log,
+                ));
+            };
+            if model_state == LlamaCppModelState::Reused && !session.load_native_log().is_empty() {
+                log.push_str("llama_cpp_session_load_log:\n");
+                log.push_str(session.load_native_log());
+                if !session.load_native_log().ends_with('\n') {
+                    log.push('\n');
+                }
             }
-        }
 
-        let output = match session.generate(rendered, self.max_output_tokens, &mut log) {
+            session.generate(rendered, self.max_output_tokens, &mut log)
+        };
+        let output = match output {
             Ok(output) => output,
             Err(err) => {
-                return Err(runtime_error(err.to_string(), log));
+                self.session = None;
+                return Err(runtime_error(format!("{err:#}"), log));
             }
         };
         let native_logs = take_llama_logs();
         if model_state == LlamaCppModelState::Loaded {
-            session.set_load_native_log(native_logs.clone());
+            if let Some(session) = self.session.as_mut() {
+                session.set_load_native_log(native_logs.clone());
+            }
         }
 
         Ok(LlamaCppRuntimeOutput {
