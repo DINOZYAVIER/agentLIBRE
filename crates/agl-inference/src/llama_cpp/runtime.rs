@@ -172,10 +172,12 @@ impl NativeLlamaCppRuntime {
             log.push('\n');
         }
 
-        let session = self
-            .session
-            .as_mut()
-            .expect("llama.cpp session must exist after ensure_session");
+        let Some(session) = self.session.as_mut() else {
+            return Err(runtime_error(
+                "llama.cpp session was not initialized".to_string(),
+                log,
+            ));
+        };
         if model_state == LlamaCppModelState::Reused && !session.load_native_log().is_empty() {
             log.push_str("llama_cpp_session_load_log:\n");
             log.push_str(session.load_native_log());

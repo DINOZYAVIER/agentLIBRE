@@ -10,7 +10,7 @@ pub const DEFAULT_RUNTIME_CONFIG_TOML: &str = r#"[logging]
 level = "info"
 format = "compact"
 file = true
-stderr = "auto"
+stderr = "never"
 include_message_text = false
 
 [history]
@@ -162,7 +162,7 @@ impl Default for AgentLibreLoggingConfig {
             level: "info".to_string(),
             format: AgentLibreLogFormat::Compact,
             file: true,
-            stderr: AgentLibreStderrLogMode::Auto,
+            stderr: AgentLibreStderrLogMode::Never,
             include_message_text: false,
         }
     }
@@ -259,6 +259,7 @@ enabled = false
         assert!(!config.include_message_text);
         assert_eq!(config.level, "info");
         assert_eq!(config.format, AgentLibreLogFormat::Compact);
+        assert_eq!(config.stderr, AgentLibreStderrLogMode::Never);
     }
 
     #[test]
