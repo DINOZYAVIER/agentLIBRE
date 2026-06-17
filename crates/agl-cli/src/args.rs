@@ -98,6 +98,15 @@ enum Commands {
     Generate(RunArgs),
     /// Start an interactive chat session.
     Chat(ChatArgs),
+    /// Planned public setup command.
+    #[command(hide = true)]
+    Setup(ReservedCommandArgs),
+    /// Planned public diagnostics command.
+    #[command(hide = true)]
+    Doctor(ReservedCommandArgs),
+    /// Planned public model lifecycle commands.
+    #[command(hide = true)]
+    Model(ReservedCommandArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +216,9 @@ impl Cli {
                 CliCommand::Infer(run_options_from_args(args)?)
             }
             Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
+            Some(Commands::Setup(args)) => unavailable_command("setup", args.args)?,
+            Some(Commands::Doctor(args)) => unavailable_command("doctor", args.args)?,
+            Some(Commands::Model(args)) => unavailable_command("model", args.args)?,
             None if self.prompt.is_empty() => CliCommand::Help,
             None => CliCommand::Infer(RunOptions {
                 prompt: Some(join_prompt(self.prompt)),
@@ -281,6 +293,17 @@ fn retired_infer_command(args: Vec<String>) -> Result<CliCommand> {
     };
     bail!(
         "agl {attempted} is not part of the public CLI in this alpha. Use `agl run --config PATH PROMPT` instead."
+    );
+}
+
+fn unavailable_command(name: &str, args: Vec<String>) -> Result<CliCommand> {
+    let attempted = if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {}", args.join(" "))
+    };
+    bail!(
+        "agl {attempted} is planned but not implemented in this alpha. Use `agl config paths` and `agl run --config PATH PROMPT` with a local GGUF config for now."
     );
 }
 
@@ -489,6 +512,35 @@ mod tests {
         let command = parse_command(["agl", "completion", "bash"]);
 
         assert_eq!(command, CliCommand::Completion { shell: Shell::Bash });
+    }
+
+    #[test]
+    fn parse_reserved_setup_rejects_before_bare_prompt() {
+        let error = parse_cli(["agl".to_string(), "setup".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("planned but not implemented"));
+    }
+
+    #[test]
+    fn parse_reserved_doctor_rejects_before_bare_prompt() {
+        let error = parse_cli(["agl".to_string(), "doctor".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("planned but not implemented"));
+    }
+
+    #[test]
+    fn parse_reserved_model_rejects_subcommand_before_bare_prompt() {
+        let error = parse_cli([
+            "agl".to_string(),
+            "model".to_string(),
+            "pull".to_string(),
+            "owner/repo/model.gguf".to_string(),
+            "--set-default".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("agl model pull"));
+        assert!(error.to_string().contains("planned but not implemented"));
     }
 
     #[test]

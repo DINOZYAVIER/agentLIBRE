@@ -117,6 +117,44 @@ fn chat_rejects_prompt_option_with_clap_error() {
     assert_contains(&stderr(&output), "unexpected argument '--prompt'");
 }
 
+#[test]
+fn reserved_future_commands_fail_before_bare_prompt_execution() {
+    for args in [
+        &["setup"][..],
+        &["doctor"][..],
+        &["model", "pull", "owner/repo/model.gguf", "--set-default"][..],
+    ] {
+        let output = run_agl(args);
+
+        assert_failure(&output);
+        assert!(stdout(&output).is_empty(), "stdout should be empty");
+        let stderr = stderr(&output);
+        assert_contains(&stderr, "planned but not implemented");
+        assert!(
+            !stderr.contains("local inference config"),
+            "reserved command should not run inference path:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn missing_default_inference_config_points_to_next_steps() {
+    let home = TempHome::new("missing-config");
+    let home_arg = home.path_string();
+    let output = run_agl(&["--home", &home_arg, "run", "hello"]);
+
+    assert_failure(&output);
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "local inference config not found");
+    assert_contains(&stderr, "Create this file or pass --config PATH");
+    assert_contains(&stderr, "agl config paths");
+    assert_contains(&stderr, "existing local GGUF file");
+    assert!(
+        !stderr.contains("No such file or directory"),
+        "missing config should not expose raw IO as the primary error:\n{stderr}"
+    );
+}
+
 fn run_agl(args: &[&str]) -> Output {
     Command::new(AGL_BIN)
         .args(args)

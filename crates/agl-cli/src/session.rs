@@ -8,7 +8,7 @@ use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, Llama
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_turn::{ModelRequest, TurnMessage};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::args::RunOptions;
 
@@ -43,6 +43,13 @@ impl InferenceSession {
             artifact_root = %artifact_root.display(),
             "resolved inference session paths"
         );
+
+        if !config_path.is_file() {
+            bail!(
+                "local inference config not found: {}\nCreate this file or pass --config PATH.\nRun `agl config paths` to see default locations.\nModel setup/download commands are planned but not implemented in this alpha; point [backend].model at an existing local GGUF file.",
+                config_path.display()
+            );
+        }
 
         let config = load_local_inference_config(&config_path).with_context(|| {
             format!(
