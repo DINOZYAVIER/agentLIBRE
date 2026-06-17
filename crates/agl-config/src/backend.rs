@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,7 @@ impl InferenceRuntimeConfig {
     }
 }
 
-fn path_is_blank(path: &PathBuf) -> bool {
+fn path_is_blank(path: &Path) -> bool {
     path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty()
 }
 

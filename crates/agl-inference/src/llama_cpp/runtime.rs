@@ -197,10 +197,10 @@ impl NativeLlamaCppRuntime {
             }
         };
         let native_logs = take_llama_logs();
-        if model_state == LlamaCppModelState::Loaded {
-            if let Some(session) = self.session.as_mut() {
-                session.set_load_native_log(native_logs.clone());
-            }
+        if model_state == LlamaCppModelState::Loaded
+            && let Some(session) = self.session.as_mut()
+        {
+            session.set_load_native_log(native_logs.clone());
         }
 
         Ok(LlamaCppRuntimeOutput {
