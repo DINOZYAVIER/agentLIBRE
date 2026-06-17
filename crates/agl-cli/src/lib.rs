@@ -28,14 +28,17 @@ pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
         Ok(invocation) => invocation,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            print_cli_error(&err);
             process::exit(1);
         }
     };
     let command = invocation.command;
     match &command {
-        CliCommand::Help => {
-            print_usage();
+        CliCommand::Help { bin_name } => {
+            if let Err(err) = print_usage(bin_name) {
+                eprintln!("error: {err:#}");
+                process::exit(1);
+            }
             return;
         }
         CliCommand::HelpPrinted => return,
@@ -111,7 +114,7 @@ fn runtime_for_command_paths(
 fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
     match command {
         CliCommand::Infer(_) | CliCommand::Chat(_) => AgentLibreProcessMode::Interactive,
-        CliCommand::Help
+        CliCommand::Help { .. }
         | CliCommand::HelpPrinted
         | CliCommand::Completion { .. }
         | CliCommand::Config(_) => AgentLibreProcessMode::Batch,
@@ -120,10 +123,7 @@ fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
 
 fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
-        CliCommand::Help => {
-            print_usage();
-            Ok(())
-        }
+        CliCommand::Help { bin_name } => print_usage(bin_name),
         CliCommand::HelpPrinted => Ok(()),
         CliCommand::Completion { shell } => {
             print_completion(shell);
@@ -132,6 +132,18 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
+    }
+}
+
+fn print_cli_error(err: &anyhow::Error) {
+    let message = format!("{err:#}");
+    if message.starts_with("error: ") {
+        eprint!("{message}");
+        if !message.ends_with('\n') {
+            eprintln!();
+        }
+    } else {
+        eprintln!("error: {message}");
     }
 }
 

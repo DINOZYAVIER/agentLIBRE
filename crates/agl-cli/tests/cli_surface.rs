@@ -84,6 +84,12 @@ fn completion_bash_emits_agl_completion_function() {
     let stdout = stdout(&output);
     assert_contains(&stdout, "_agl()");
     assert_contains(&stdout, "complete -F _agl");
+    for hidden_command in ["infer", "setup", "doctor", "model"] {
+        assert!(
+            !stdout.contains(hidden_command),
+            "completion should not expose hidden command {hidden_command:?}:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -114,7 +120,12 @@ fn chat_rejects_prompt_option_with_clap_error() {
         stdout(&output).is_empty(),
         "stdout should be empty on parse error"
     );
-    assert_contains(&stderr(&output), "unexpected argument '--prompt'");
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "unexpected argument '--prompt'");
+    assert!(
+        !stderr.starts_with("error: error:"),
+        "clap errors should not be double-prefixed:\n{stderr}"
+    );
 }
 
 #[test]
@@ -135,6 +146,20 @@ fn reserved_future_commands_fail_before_bare_prompt_execution() {
             "reserved command should not run inference path:\n{stderr}"
         );
     }
+}
+
+#[test]
+fn blank_bare_prompt_fails_before_inference_path() {
+    let output = run_agl(&["   "]);
+
+    assert_failure(&output);
+    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "prompt cannot be empty");
+    assert!(
+        !stderr.contains("local inference config"),
+        "blank prompt should not run inference path:\n{stderr}"
+    );
 }
 
 #[test]

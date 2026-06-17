@@ -15,7 +15,7 @@ pub(crate) struct CliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
-    Help,
+    Help { bin_name: &'static str },
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
@@ -186,7 +186,7 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInv
     match command.try_get_matches_from(args) {
         Ok(matches) => Cli::from_arg_matches(&matches)
             .map_err(anyhow::Error::from)
-            .and_then(Cli::into_invocation),
+            .and_then(|cli| cli.into_invocation(display_name)),
         Err(err)
             if matches!(
                 err.kind(),
@@ -204,7 +204,7 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInv
 }
 
 impl Cli {
-    fn into_invocation(self) -> Result<CliInvocation> {
+    fn into_invocation(self, display_name: &'static str) -> Result<CliInvocation> {
         let command = match self.command {
             Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
             Some(Commands::Config { command }) => CliCommand::Config(match command {
@@ -219,11 +219,10 @@ impl Cli {
             Some(Commands::Setup(args)) => unavailable_command("setup", args.args)?,
             Some(Commands::Doctor(args)) => unavailable_command("doctor", args.args)?,
             Some(Commands::Model(args)) => unavailable_command("model", args.args)?,
-            None if self.prompt.is_empty() => CliCommand::Help,
-            None => CliCommand::Infer(RunOptions {
-                prompt: Some(join_prompt(self.prompt)),
-                ..RunOptions::default()
-            }),
+            None if self.prompt.is_empty() => CliCommand::Help {
+                bin_name: display_name,
+            },
+            None => CliCommand::Infer(run_options_from_prompt(join_prompt(self.prompt))?),
         };
 
         Ok(CliInvocation {
@@ -241,11 +240,8 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
             Some(join_prompt(args.prompt))
         }
     });
-    if prompt
-        .as_ref()
-        .is_some_and(|prompt| prompt.trim().is_empty())
-    {
-        bail!("prompt cannot be empty");
+    if let Some(prompt) = &prompt {
+        validate_prompt(prompt)?;
     }
 
     let options = RunOptions {
@@ -259,6 +255,14 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         prompt,
     };
     Ok(options)
+}
+
+fn run_options_from_prompt(prompt: String) -> Result<RunOptions> {
+    validate_prompt(&prompt)?;
+    Ok(RunOptions {
+        prompt: Some(prompt),
+        ..RunOptions::default()
+    })
 }
 
 fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
@@ -276,6 +280,13 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
         prompt: None,
     })
+}
+
+fn validate_prompt(prompt: &str) -> Result<()> {
+    if prompt.trim().is_empty() {
+        bail!("prompt cannot be empty");
+    }
+    Ok(())
 }
 
 fn validate_max_output_tokens(value: u32) -> Result<u32> {
@@ -311,20 +322,62 @@ fn join_prompt(parts: Vec<String>) -> String {
     parts.join(" ")
 }
 
-pub(crate) fn print_usage() {
-    let mut command = Cli::command().name("agl").bin_name("agl");
-    command.print_help().expect("CLI help should print");
+pub(crate) fn print_usage(bin_name: &'static str) -> Result<()> {
+    let mut command = Cli::command().name(bin_name).bin_name(bin_name);
+    command.print_help().context("failed to print CLI help")?;
     println!();
+    Ok(())
 }
 
 pub(crate) fn print_completion(shell: Shell) {
-    let mut command = Cli::command().name("agl").bin_name("agl");
+    let mut command = PublicCompletionCli::command().name("agl").bin_name("agl");
     generate(shell, &mut command, "agl", &mut std::io::stdout());
 }
 
 fn cli_display_name(program: Option<&str>) -> &'static str {
     let _ = program;
     "agl"
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "agl",
+    bin_name = "agl",
+    version,
+    about = "agentLIBRE CLI - local-first agentic inference"
+)]
+struct PublicCompletionCli {
+    /// Override AGL_HOME for this invocation.
+    #[arg(long, global = true, value_name = "DIR")]
+    home: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<PublicCompletionCommands>,
+
+    /// Prompt text for a one-shot run.
+    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
+    prompt: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum PublicCompletionCommands {
+    /// Write shell completion scripts to stdout.
+    Completion {
+        /// Shell to generate completions for.
+        #[arg(value_enum, default_value_t = Shell::Bash)]
+        shell: Shell,
+    },
+    /// Runtime configuration commands.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+    /// Run one prompt and print the final answer.
+    Run(RunArgs),
+    /// Alias for `run`.
+    Generate(RunArgs),
+    /// Start an interactive chat session.
+    Chat(ChatArgs),
 }
 
 #[cfg(test)]
@@ -423,6 +476,13 @@ mod tests {
                 ..RunOptions::default()
             })
         );
+    }
+
+    #[test]
+    fn parse_rejects_blank_bare_prompt() {
+        let error = parse_cli(["agl".to_string(), "   ".to_string()]).unwrap_err();
+
+        assert!(error.to_string().contains("prompt cannot be empty"));
     }
 
     #[test]
