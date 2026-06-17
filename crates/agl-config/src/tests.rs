@@ -15,6 +15,14 @@ fn write_temp_config(name: &str, content: &str) -> PathBuf {
     path
 }
 
+fn assert_error_contains(error: &anyhow::Error, needle: &str) {
+    let formatted = format!("{error:#}");
+    assert!(
+        formatted.contains(needle),
+        "expected error to contain {needle:?}, got:\n{formatted}"
+    );
+}
+
 #[test]
 fn loads_model_config_from_explicit_file() {
     let path = write_temp_config(
@@ -225,11 +233,7 @@ tool_call_format = "hermes_json"
 
     let err = load_local_inference_config(&path).unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("context_tokens 0 must be between 1 and 1048576"),
-        "unexpected error: {err}"
-    );
+    assert_error_contains(&err, "context_tokens 0 must be between 1 and 1048576");
 
     std::fs::remove_file(path).unwrap();
 }
@@ -258,11 +262,35 @@ tool_call_format = "hermes_json"
 
     let err = load_local_inference_config(&path).unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("ubatch_size 512 cannot exceed batch_size 256"),
-        "unexpected error: {err}"
+    assert_error_contains(&err, "ubatch_size 512 cannot exceed batch_size 256");
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_ubatch_above_default_batch() {
+    let path = write_temp_config(
+        "local-inference-ubatch-default-batch",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 256
+threads = 8
+ubatch_size = 512
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
     );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "ubatch_size 512 cannot exceed context_tokens 256");
 
     std::fs::remove_file(path).unwrap();
 }
@@ -289,10 +317,94 @@ tool_call_format = "hermes_json"
 
     let err = load_local_inference_config(&path).unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("backend model path cannot be empty"),
-        "unexpected error: {err}"
+    assert_error_contains(&err, "backend model path cannot be empty");
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_whitespace_backend_paths() {
+    let path = write_temp_config(
+        "local-inference-whitespace-path",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "   "
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "backend model path cannot be empty");
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_device_whitespace() {
+    let path = write_temp_config(
+        "local-inference-device-whitespace",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+device = " Vulkan0 "
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(
+        &err,
+        "runtime device cannot contain leading or trailing whitespace",
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_unsupported_dialect_format_pair() {
+    let path = write_temp_config(
+        "local-inference-dialect-format",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "gemma4"
+tool_call_format = "hermes_json"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(
+        &err,
+        "tool_call_format HermesJson is not supported for dialect Gemma4",
     );
 
     std::fs::remove_file(path).unwrap();

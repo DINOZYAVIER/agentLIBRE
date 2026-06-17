@@ -115,8 +115,8 @@ fn render_assistant_tool_call(
     arguments: &serde_json::Value,
     tool_call_format: ToolCallFormat,
 ) -> Result<RenderedMessage> {
-    if tool_call_format == ToolCallFormat::StructuredToolCalls {
-        return Ok(RenderedMessage {
+    match tool_call_format {
+        ToolCallFormat::StructuredToolCalls => Ok(RenderedMessage {
             role: RenderedMessageRole::Assistant,
             content: String::new(),
             name: None,
@@ -124,21 +124,18 @@ fn render_assistant_tool_call(
                 name: name.to_string(),
                 arguments: arguments.clone(),
             }],
-        });
+        }),
+        ToolCallFormat::HermesJson => Ok(rendered_text_message(
+            RenderedMessageRole::Assistant,
+            render_hermes_tool_call(name, arguments)?,
+            Some(name.to_string()),
+        )),
+        ToolCallFormat::GemmaFunctionCall => Ok(rendered_text_message(
+            RenderedMessageRole::Assistant,
+            render_gemma_function_call(name, arguments)?,
+            Some(name.to_string()),
+        )),
     }
-
-    let content = match tool_call_format {
-        ToolCallFormat::StructuredToolCalls => {
-            unreachable!("structured tool calls return before text rendering")
-        }
-        ToolCallFormat::HermesJson => render_hermes_tool_call(name, arguments)?,
-        ToolCallFormat::GemmaFunctionCall => render_gemma_function_call(name, arguments)?,
-    };
-    Ok(rendered_text_message(
-        RenderedMessageRole::Assistant,
-        content,
-        Some(name.to_string()),
-    ))
 }
 
 fn render_hermes_tool_call(name: &str, arguments: &serde_json::Value) -> Result<String> {

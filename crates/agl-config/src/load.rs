@@ -5,14 +5,20 @@ use std::path::Path;
 use crate::{LocalInferenceConfig, ModelConfig};
 
 pub fn load_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
-    let config: ModelConfig = load_toml_file(path.as_ref())?;
-    config.validate()?;
+    let path = path.as_ref();
+    let config: ModelConfig = load_toml_file(path)?;
+    config
+        .validate()
+        .with_context(|| format!("invalid config file {}", path.display()))?;
     Ok(config)
 }
 
 pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<LocalInferenceConfig> {
-    let config: LocalInferenceConfig = load_toml_file(path.as_ref())?;
-    config.validate()?;
+    let path = path.as_ref();
+    let config: LocalInferenceConfig = load_toml_file(path)?;
+    config
+        .validate()
+        .with_context(|| format!("invalid config file {}", path.display()))?;
     Ok(config)
 }
 

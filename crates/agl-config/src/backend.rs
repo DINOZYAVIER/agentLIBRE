@@ -36,7 +36,7 @@ pub struct InferenceBackendConfig {
 impl InferenceBackendConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            !self.model.as_os_str().is_empty(),
+            !path_is_blank(&self.model),
             "backend model path cannot be empty"
         );
         Ok(())
@@ -99,16 +99,31 @@ impl InferenceRuntimeConfig {
                 !device.trim().is_empty(),
                 "runtime device cannot be empty when configured"
             );
+            ensure!(
+                device.trim() == device,
+                "runtime device cannot contain leading or trailing whitespace"
+            );
         }
         validate_optional_token_limit("batch_size", self.batch_size)?;
         validate_optional_token_limit("ubatch_size", self.ubatch_size)?;
-        if let (Some(batch_size), Some(ubatch_size)) = (self.batch_size, self.ubatch_size)
-            && ubatch_size > batch_size
-        {
-            bail!("ubatch_size {ubatch_size} cannot exceed batch_size {batch_size}");
+        if let Some(ubatch_size) = self.ubatch_size {
+            if let Some(batch_size) = self.batch_size {
+                if ubatch_size > batch_size {
+                    bail!("ubatch_size {ubatch_size} cannot exceed batch_size {batch_size}");
+                }
+            } else if ubatch_size > self.context_tokens {
+                bail!(
+                    "ubatch_size {ubatch_size} cannot exceed context_tokens {} when batch_size is not configured",
+                    self.context_tokens
+                );
+            }
         }
         Ok(())
     }
+}
+
+fn path_is_blank(path: &PathBuf) -> bool {
+    path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty()
 }
 
 fn validate_optional_token_limit(name: &str, value: Option<u32>) -> Result<()> {

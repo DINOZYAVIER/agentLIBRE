@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,7 +19,16 @@ impl Default for ModelConfig {
 
 impl ModelConfig {
     pub fn validate(&self) -> Result<()> {
-        Ok(())
+        match (self.dialect, self.tool_call_format) {
+            (ModelDialect::Generic, ToolCallFormat::HermesJson)
+            | (ModelDialect::Generic, ToolCallFormat::StructuredToolCalls)
+            | (ModelDialect::Qwen3, ToolCallFormat::HermesJson)
+            | (ModelDialect::Qwen3, ToolCallFormat::StructuredToolCalls)
+            | (ModelDialect::Gemma4, ToolCallFormat::GemmaFunctionCall) => Ok(()),
+            (dialect, tool_call_format) => bail!(
+                "tool_call_format {tool_call_format:?} is not supported for dialect {dialect:?}"
+            ),
+        }
     }
 }
 
