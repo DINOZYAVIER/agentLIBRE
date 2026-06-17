@@ -1,10 +1,13 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct AgentLibreSessionId(String);
@@ -17,7 +20,12 @@ impl AgentLibreSessionId {
     }
 
     pub fn generate() -> Self {
-        Self(format!("session-{}", unix_millis()))
+        let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self(format!(
+            "session-{}-{}-{counter}",
+            unix_millis(),
+            std::process::id()
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -134,14 +142,16 @@ impl ChatSessionStore {
     ) -> Result<Self> {
         let run_id = run_id.into();
         ensure_path_segment(&run_id, "run_id")?;
-        let session_dir = sessions_root.as_ref().join(session_id.as_str());
-        let transcript_jsonl = session_dir.join("transcript.jsonl");
-        std::fs::create_dir_all(&session_dir).with_context(|| {
+        let sessions_root = sessions_root.as_ref();
+        std::fs::create_dir_all(sessions_root).with_context(|| {
             format!(
-                "failed to create chat session directory {}",
-                session_dir.display()
+                "failed to create chat sessions root {}",
+                sessions_root.display()
             )
         })?;
+        let session_dir = sessions_root.join(session_id.as_str());
+        let transcript_jsonl = session_dir.join("transcript.jsonl");
+        create_new_session_dir(&session_dir)?;
 
         let metadata = SessionMetadata {
             session_id: session_id.clone(),
@@ -150,7 +160,7 @@ impl ChatSessionStore {
             model_config_path: model_config_path.into(),
             backend: backend.into(),
         };
-        write_json(&session_dir.join("session.json"), &metadata)?;
+        write_new_json(&session_dir.join("session.json"), &metadata)?;
 
         let store = Self {
             session_id,
@@ -327,13 +337,30 @@ impl ChatSessionEvent {
     }
 }
 
-fn write_json<T>(path: &Path, value: &T) -> Result<()>
+fn create_new_session_dir(path: &Path) -> Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            bail!("chat session already exists: {}", path.display())
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("failed to create chat session directory {}", path.display())),
+    }
+}
+
+fn write_new_json<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize + ?Sized,
 {
     let bytes = serde_json::to_vec_pretty(value)
         .with_context(|| format!("failed to serialize JSON {}", path.display()))?;
-    std::fs::write(path, bytes).with_context(|| format!("failed to write {}", path.display()))
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn ensure_path_segment(value: &str, name: &str) -> Result<()> {
@@ -376,6 +403,16 @@ mod tests {
     }
 
     #[test]
+    fn generated_session_ids_are_unique_path_segments() {
+        let first = AgentLibreSessionId::generate();
+        let second = AgentLibreSessionId::generate();
+
+        assert_ne!(first, second);
+        AgentLibreSessionId::new(first.as_str()).unwrap();
+        AgentLibreSessionId::new(second.as_str()).unwrap();
+    }
+
+    #[test]
     fn writes_chat_session_metadata_and_transcript() {
         let root = temp_root("session");
         let store = ChatSessionStore::start(
@@ -404,6 +441,28 @@ mod tests {
         assert!(transcript.contains("\"kind\":\"assistant_message\""));
         assert!(transcript.contains("\"kind\":\"model_attempt_linked\""));
         assert!(transcript.contains("\"kind\":\"context_cleared\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn start_refuses_existing_chat_session() {
+        let root = temp_root("session-collision");
+        let session_id = AgentLibreSessionId::new("session-001").unwrap();
+        let _store = ChatSessionStore::start(
+            &root,
+            session_id.clone(),
+            "run-001",
+            "/tmp/local.toml",
+            "llama_cpp",
+        )
+        .unwrap();
+
+        let err =
+            ChatSessionStore::start(&root, session_id, "run-002", "/tmp/local.toml", "llama_cpp")
+                .unwrap_err();
+
+        assert!(format!("{err:#}").contains("chat session already exists"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

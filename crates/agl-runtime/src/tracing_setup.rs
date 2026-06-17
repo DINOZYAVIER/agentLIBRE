@@ -44,14 +44,13 @@ pub fn init_tracing(
     config: &AgentLibreLoggingConfig,
     process_mode: AgentLibreProcessMode,
 ) -> Result<TracingGuards> {
-    let log_dir = paths.state_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)
-        .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
-
     let mut guards = Vec::new();
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
 
     if config.file {
+        let log_dir = paths.state_dir.join("logs");
+        std::fs::create_dir_all(&log_dir)
+            .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
         let app_appender = tracing_appender::rolling::never(&log_dir, "agentLIBRE.log");
         let (app_writer, app_guard) = tracing_appender::non_blocking(app_appender);
         guards.push(app_guard);
@@ -174,5 +173,23 @@ mod tests {
             AgentLibreStderrLogMode::Always,
             AgentLibreProcessMode::Batch
         ));
+    }
+
+    #[test]
+    fn file_disabled_does_not_require_log_directory() {
+        let paths = AgentLibrePaths::from_agl_home(
+            std::env::temp_dir().join(format!("agl-runtime-no-file-logs-{}", std::process::id())),
+        );
+        let _ = std::fs::remove_dir_all(&paths.state_dir);
+        let config = AgentLibreLoggingConfig {
+            file: false,
+            stderr: AgentLibreStderrLogMode::Never,
+            ..AgentLibreLoggingConfig::default()
+        };
+
+        init_tracing(&paths, &config, AgentLibreProcessMode::Batch).unwrap();
+
+        assert!(!paths.state_dir.join("logs").exists());
+        let _ = std::fs::remove_dir_all(&paths.state_dir);
     }
 }
