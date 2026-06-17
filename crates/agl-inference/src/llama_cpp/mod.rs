@@ -94,7 +94,7 @@ impl InferenceBackend for LlamaCppBackend {
         let output = match self.runtime.generate(&request.rendered) {
             Ok(output) => output,
             Err(err) => {
-                let duration_ms = elapsed_millis(runtime_started);
+                let duration_ms = elapsed_ms(runtime_started);
                 let err_text = err.to_string();
                 let message = format!("llama.cpp runtime failed: {err_text}");
                 let mut runtime_log = err
@@ -129,7 +129,7 @@ impl InferenceBackend for LlamaCppBackend {
             metadata: InferenceResponseMetadata {
                 model_state: Some(output.model_state),
                 selected_device: output.selected_device,
-                duration_ms: elapsed_millis(runtime_started),
+                duration_ms: elapsed_ms(runtime_started),
             },
         };
         paths.write_response_json(&response)?;
@@ -159,7 +159,7 @@ impl InferenceBackend for LlamaCppBackend {
     }
 }
 
-fn elapsed_millis(started: Instant) -> u64 {
+fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
