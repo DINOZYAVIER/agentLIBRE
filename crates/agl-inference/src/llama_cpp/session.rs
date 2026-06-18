@@ -37,6 +37,7 @@ pub(super) struct LlamaCppSession {
     formatted_prompt_prefix_len: usize,
     messages: Vec<RenderedMessage>,
     load_native_log: String,
+    prefill_batch_size: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,10 +82,11 @@ impl LlamaCppSession {
 
         let mut context_params = unsafe { ffi::llama_context_default_params() };
         context_params.n_ctx = config.runtime.context_tokens;
-        context_params.n_batch = config
+        let prefill_batch_size = config
             .runtime
             .batch_size
             .unwrap_or(config.runtime.context_tokens);
+        context_params.n_batch = prefill_batch_size;
         if let Some(ubatch_size) = config.runtime.ubatch_size {
             context_params.n_ubatch = ubatch_size;
         }
@@ -108,6 +110,12 @@ impl LlamaCppSession {
         let sampler = Sampler::greedy().context("failed to create llama.cpp sampler")?;
         let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr().cast_const()) };
         ensure!(!vocab.is_null(), "llama.cpp model has no vocab");
+        let prefill_batch_size =
+            usize::try_from(prefill_batch_size).context("llama.cpp n_batch exceeds usize")?;
+        ensure!(
+            prefill_batch_size > 0,
+            "llama.cpp n_batch must be greater than zero"
+        );
 
         Ok(Self {
             key: LlamaCppSessionKey {
@@ -122,6 +130,7 @@ impl LlamaCppSession {
             formatted_prompt_prefix_len: 0,
             messages: Vec::new(),
             load_native_log: String::new(),
+            prefill_batch_size,
         })
     }
 
@@ -161,8 +170,13 @@ impl LlamaCppSession {
             has_context_space(self.context.as_ptr(), prompt_token_count),
             "llama.cpp prompt exceeds remaining context"
         );
-        decode_tokens(self.context.as_ptr(), &mut prompt_tokens)
-            .context("failed to decode prompt")?;
+        decode_prompt_tokens(
+            self.context.as_ptr(),
+            &mut prompt_tokens,
+            self.prefill_batch_size,
+            log,
+        )
+        .context("failed to decode prompt")?;
 
         let mut content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
@@ -561,6 +575,47 @@ fn decode_tokens(ctx: *mut c_void, tokens: &mut [ffi::llama_token]) -> Result<()
     Ok(())
 }
 
+fn decode_prompt_tokens(
+    ctx: *mut c_void,
+    tokens: &mut [ffi::llama_token],
+    batch_size: usize,
+    log: &mut String,
+) -> Result<()> {
+    let chunk_count = prefill_chunk_count(tokens.len(), batch_size)?;
+    log.push_str("prompt_tokens = ");
+    log.push_str(&tokens.len().to_string());
+    log.push('\n');
+    log.push_str("prefill_batch_size = ");
+    log.push_str(&batch_size.to_string());
+    log.push('\n');
+    log.push_str("prefill_chunks = ");
+    log.push_str(&chunk_count.to_string());
+    log.push('\n');
+
+    for (chunk_index, chunk) in tokens.chunks_mut(batch_size).enumerate() {
+        decode_tokens(ctx, chunk).with_context(|| {
+            format!(
+                "failed to decode prompt chunk {}/{}",
+                chunk_index + 1,
+                chunk_count
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn prefill_chunk_count(token_count: usize, batch_size: usize) -> Result<usize> {
+    ensure!(
+        batch_size > 0,
+        "llama.cpp prefill batch size cannot be zero"
+    );
+    Ok(if token_count == 0 {
+        0
+    } else {
+        ((token_count - 1) / batch_size) + 1
+    })
+}
+
 fn token_to_piece(vocab: *const c_void, token: ffi::llama_token) -> Result<String> {
     let mut buf = vec![0_i8; 256];
     let len = unsafe {
@@ -783,6 +838,25 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "hello"
+        );
+    }
+
+    #[test]
+    fn prefill_chunk_count_splits_prompt_by_batch_size() {
+        assert_eq!(prefill_chunk_count(0, 1024).unwrap(), 0);
+        assert_eq!(prefill_chunk_count(1, 1024).unwrap(), 1);
+        assert_eq!(prefill_chunk_count(1024, 1024).unwrap(), 1);
+        assert_eq!(prefill_chunk_count(1025, 1024).unwrap(), 2);
+        assert_eq!(prefill_chunk_count(4096, 1024).unwrap(), 4);
+    }
+
+    #[test]
+    fn prefill_chunk_count_rejects_zero_batch_size() {
+        let err = prefill_chunk_count(1, 0).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("llama.cpp prefill batch size cannot be zero"),
+            "unexpected error: {err:#}"
         );
     }
 }
