@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ModelConfig;
+use crate::{ModelConfig, PromptConfig};
 
 pub const MAX_GPU_LAYERS: u32 = 4096;
 pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
@@ -16,13 +16,16 @@ pub struct LocalInferenceConfig {
     pub backend: InferenceBackendConfig,
     pub runtime: InferenceRuntimeConfig,
     pub model: ModelConfig,
+    #[serde(default)]
+    pub prompt: PromptConfig,
 }
 
 impl LocalInferenceConfig {
     pub fn validate(&self) -> Result<()> {
         self.backend.validate()?;
         self.runtime.validate()?;
-        self.model.validate()
+        self.model.validate()?;
+        self.prompt.validate()
     }
 }
 

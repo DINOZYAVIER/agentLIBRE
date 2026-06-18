@@ -4,6 +4,7 @@ use crate::VisibleTool;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnMessage {
+    System { content: String },
     User { content: String },
     Assistant { content: String },
     AssistantToolCall { name: String, arguments: Value },

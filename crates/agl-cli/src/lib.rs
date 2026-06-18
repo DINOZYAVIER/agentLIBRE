@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 mod args;
 mod chat;
 mod config;
+mod prompt;
 mod session;
 mod terminal;
 

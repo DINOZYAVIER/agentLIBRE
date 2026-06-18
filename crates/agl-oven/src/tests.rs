@@ -49,6 +49,26 @@ fn renders_user_messages_and_visible_tools() {
 }
 
 #[test]
+fn renders_system_message() {
+    let request = ModelRequest {
+        turn_id: "turn-1".to_string(),
+        request_index: 0,
+        messages: vec![TurnMessage::System {
+            content: "demo system".to_string(),
+        }],
+        visible_tools: Vec::new(),
+    };
+
+    let rendered = render_model_request(&request, &qwen_hermes_config()).unwrap();
+
+    assert_eq!(rendered.messages.len(), 1);
+    assert_eq!(rendered.messages[0].role, RenderedMessageRole::System);
+    assert_eq!(rendered.messages[0].content, "demo system");
+    assert_eq!(rendered.messages[0].name, None);
+    assert!(rendered.messages[0].tool_calls.is_empty());
+}
+
+#[test]
 fn renders_hermes_assistant_tool_call_transcript() {
     let request = ModelRequest {
         turn_id: "turn-1".to_string(),

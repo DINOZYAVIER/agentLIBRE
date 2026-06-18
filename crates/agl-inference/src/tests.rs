@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
-    ModelConfig, ModelDialect, RuntimeSwitch, ToolCallFormat, load_local_inference_config,
+    ModelConfig, ModelDialect, PromptConfig, RuntimeSwitch, ToolCallFormat,
+    load_local_inference_config,
 };
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
 
@@ -88,6 +89,7 @@ fn local_config() -> LocalInferenceConfig {
             dialect: ModelDialect::Qwen3,
             tool_call_format: ToolCallFormat::HermesJson,
         },
+        prompt: PromptConfig::default(),
     }
 }
 

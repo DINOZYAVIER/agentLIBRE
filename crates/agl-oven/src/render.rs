@@ -24,6 +24,7 @@ pub struct RenderedMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderedMessageRole {
+    System,
     User,
     Assistant,
     Tool,
@@ -76,6 +77,11 @@ fn render_message(
     tool_call_format: ToolCallFormat,
 ) -> Result<RenderedMessage> {
     match message {
+        TurnMessage::System { content } => Ok(rendered_text_message(
+            RenderedMessageRole::System,
+            content.clone(),
+            None,
+        )),
         TurnMessage::User { content } => Ok(rendered_text_message(
             RenderedMessageRole::User,
             content.clone(),

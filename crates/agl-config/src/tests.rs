@@ -84,6 +84,7 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.mmap, Some(false));
     assert_eq!(config.model.dialect, ModelDialect::Qwen3);
     assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
+    assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
 
     std::fs::remove_file(path).unwrap();
 }
@@ -115,6 +116,97 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.ubatch_size, None);
     assert_eq!(config.runtime.flash_attention, None);
     assert_eq!(config.runtime.cache_type_k, None);
+    assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_accepts_disabled_system_prompt() {
+    let path = write_temp_config(
+        "local-inference-system-prompt-none",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+
+[prompt]
+system = "none"
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert_eq!(config.prompt.system, SystemPrompt::None);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_accepts_builtin_system_prompt() {
+    let path = write_temp_config(
+        "local-inference-system-prompt-builtin",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+
+[prompt]
+system = "builtin:default"
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_unknown_system_prompt() {
+    let path = write_temp_config(
+        "local-inference-system-prompt-unknown",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+
+[prompt]
+system = "builtin:future"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "failed to parse config file");
 
     std::fs::remove_file(path).unwrap();
 }
