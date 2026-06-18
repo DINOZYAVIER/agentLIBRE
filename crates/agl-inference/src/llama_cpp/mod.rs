@@ -170,10 +170,24 @@ impl LlamaCppBackend {
         artifact_root: InferenceArtifactRoot,
         responses: Vec<&str>,
     ) -> Result<Self> {
+        Self::new_with_test_runtime_and_auto_device(config, artifact_root, responses, None)
+    }
+
+    pub(crate) fn new_with_test_runtime_and_auto_device(
+        config: LocalInferenceConfig,
+        artifact_root: InferenceArtifactRoot,
+        responses: Vec<&str>,
+        auto_selected_device: Option<&str>,
+    ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             artifact_root,
-            runtime: LlamaCppRuntime::new_test(config, DEFAULT_MAX_OUTPUT_TOKENS, responses),
+            runtime: LlamaCppRuntime::new_test(
+                config,
+                DEFAULT_MAX_OUTPUT_TOKENS,
+                responses,
+                auto_selected_device,
+            ),
         })
     }
 }

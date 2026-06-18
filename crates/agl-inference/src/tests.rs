@@ -91,6 +91,12 @@ fn local_config() -> LocalInferenceConfig {
     }
 }
 
+fn local_config_without_device() -> LocalInferenceConfig {
+    let mut config = local_config();
+    config.runtime.device = None;
+    config
+}
+
 #[test]
 fn rendered_model_request_round_trips_for_artifacts() {
     let rendered = rendered_request();
@@ -227,6 +233,82 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     let events = std::fs::read_to_string(second_paths.events_jsonl()).unwrap();
     assert!(events.contains("\"backend\":\"llama_cpp\""));
     assert!(events.contains("\"kind\":\"inference.response_recorded\""));
+
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn llama_cpp_backend_records_auto_selected_device_metadata() {
+    let root_path = temp_root("llama-auto-selected-device");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let request = inference_request_with_messages(
+        "attempt-0001",
+        1,
+        vec![RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "first".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        }],
+    );
+    let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
+    let mut backend = LlamaCppBackend::new_with_test_runtime_and_auto_device(
+        local_config_without_device(),
+        artifact_root,
+        vec!["answer"],
+        Some("Vulkan0"),
+    )
+    .unwrap();
+
+    let response = backend.generate(request).unwrap();
+
+    assert_eq!(
+        response.metadata.selected_device.as_deref(),
+        Some("Vulkan0")
+    );
+    let response_json: InferenceResponse =
+        serde_json::from_str(&std::fs::read_to_string(paths.response_json()).unwrap()).unwrap();
+    assert_eq!(
+        response_json.metadata.selected_device.as_deref(),
+        Some("Vulkan0")
+    );
+    assert!(
+        std::fs::read_to_string(paths.runtime_log())
+            .unwrap()
+            .contains("llama_prepare_model_devices: using device Vulkan0")
+    );
+
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
+fn llama_cpp_backend_leaves_device_metadata_empty_when_unknown() {
+    let root_path = temp_root("llama-no-selected-device");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let request = inference_request_with_messages(
+        "attempt-0001",
+        1,
+        vec![RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "first".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        }],
+    );
+    let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
+    let mut backend = LlamaCppBackend::new_with_test_runtime(
+        local_config_without_device(),
+        artifact_root,
+        vec!["answer"],
+    )
+    .unwrap();
+
+    let response = backend.generate(request).unwrap();
+
+    assert_eq!(response.metadata.selected_device, None);
+    let response_json: InferenceResponse =
+        serde_json::from_str(&std::fs::read_to_string(paths.response_json()).unwrap()).unwrap();
+    assert_eq!(response_json.metadata.selected_device, None);
 
     std::fs::remove_dir_all(root_path).unwrap();
 }
