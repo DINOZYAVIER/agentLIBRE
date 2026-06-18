@@ -87,6 +87,7 @@ impl LlamaCppRuntime {
         config: LocalInferenceConfig,
         max_output_tokens: u32,
         responses: Vec<&str>,
+        auto_selected_device: Option<&str>,
     ) -> Self {
         Self {
             inner: LlamaCppRuntimeInner::Test(TestLlamaCppRuntime {
@@ -96,6 +97,7 @@ impl LlamaCppRuntime {
                     .into_iter()
                     .map(str::to_string)
                     .collect::<VecDeque<_>>(),
+                auto_selected_device: auto_selected_device.map(str::to_string),
                 loaded: false,
                 rendered_message_history_len: 0,
             }),
@@ -197,6 +199,18 @@ impl NativeLlamaCppRuntime {
             }
         };
         let native_logs = take_llama_logs();
+        let selected_device = resolve_selected_device(
+            self.config.runtime.device.as_deref(),
+            &native_logs,
+            self.session.as_ref().map(LlamaCppSession::load_native_log),
+        );
+        if self.config.runtime.device.is_none()
+            && let Some(device) = &selected_device
+        {
+            log.push_str("selected_device = ");
+            log.push_str(device);
+            log.push('\n');
+        }
         if model_state == LlamaCppModelState::Loaded
             && let Some(session) = self.session.as_mut()
         {
@@ -207,7 +221,7 @@ impl NativeLlamaCppRuntime {
             content: output.content,
             finish_reason: output.finish_reason,
             model_state: model_state.as_str().to_string(),
-            selected_device: self.config.runtime.device.clone(),
+            selected_device,
             log: finish_runtime_log(log, native_logs),
         })
     }
@@ -235,6 +249,7 @@ struct TestLlamaCppRuntime {
     config: LocalInferenceConfig,
     max_output_tokens: u32,
     responses: VecDeque<String>,
+    auto_selected_device: Option<String>,
     loaded: bool,
     rendered_message_history_len: usize,
 }
@@ -271,6 +286,7 @@ impl TestLlamaCppRuntime {
             model_state,
             self.rendered_message_history_len,
             appended_messages,
+            self.auto_selected_device.as_deref(),
         );
         self.rendered_message_history_len = rendered.messages.len() + 1;
         if model_state == LlamaCppModelState::Reused {
@@ -282,7 +298,12 @@ impl TestLlamaCppRuntime {
             content,
             finish_reason: InferenceFinishReason::Stop,
             model_state: model_state.as_str().to_string(),
-            selected_device: self.config.runtime.device.clone(),
+            selected_device: self
+                .config
+                .runtime
+                .device
+                .clone()
+                .or_else(|| self.auto_selected_device.clone()),
             log,
         })
     }
@@ -294,6 +315,7 @@ fn test_runtime_log(
     model_state: LlamaCppModelState,
     rendered_message_history_len: usize,
     appended_messages: &[RenderedMessage],
+    auto_selected_device: Option<&str>,
 ) -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
@@ -304,6 +326,10 @@ fn test_runtime_log(
         log.push_str("selected_device = ");
         log.push_str(device);
         log.push('\n');
+    } else if let Some(device) = auto_selected_device {
+        log.push_str("llama_prepare_model_devices: using device ");
+        log.push_str(device);
+        log.push_str(" (test device)\n");
     }
     log.push_str("load_tensors: offloaded 66/66 layers to GPU\n");
     log.push_str("rendered_message_history_len = ");
@@ -381,6 +407,35 @@ fn finish_runtime_log(mut log: String, native_logs: String) -> String {
     log
 }
 
+fn resolve_selected_device(
+    configured_device: Option<&str>,
+    current_native_logs: &str,
+    load_native_log: Option<&str>,
+) -> Option<String> {
+    configured_device
+        .map(str::to_string)
+        .or_else(|| selected_device_from_llama_logs(current_native_logs))
+        .or_else(|| load_native_log.and_then(selected_device_from_llama_logs))
+}
+
+fn selected_device_from_llama_logs(log: &str) -> Option<String> {
+    const PREFIX: &str = "llama_prepare_model_devices: using device ";
+    for line in log.lines() {
+        let Some(rest) = line.strip_prefix(PREFIX) else {
+            continue;
+        };
+        let device = rest
+            .split_once(" (")
+            .map(|(name, _)| name)
+            .unwrap_or(rest)
+            .trim();
+        if !device.is_empty() {
+            return Some(device.to_string());
+        }
+    }
+    None
+}
+
 fn runtime_log_header() -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
@@ -441,4 +496,51 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_auto_selected_llama_device() {
+        let log = "\
+llama_model_loader: metadata
+llama_prepare_model_devices: using device Vulkan0 (AMD Radeon RX 7900 XTX) - 22938 MiB free
+load_tensors: offloaded 34/34 layers to GPU
+";
+
+        assert_eq!(
+            selected_device_from_llama_logs(log).as_deref(),
+            Some("Vulkan0")
+        );
+    }
+
+    #[test]
+    fn selected_device_prefers_configured_value() {
+        let log = "llama_prepare_model_devices: using device Vulkan0 (auto)\n";
+
+        assert_eq!(
+            resolve_selected_device(Some("Vulkan1"), log, None).as_deref(),
+            Some("Vulkan1")
+        );
+    }
+
+    #[test]
+    fn selected_device_can_use_prior_load_log() {
+        let load_log = "llama_prepare_model_devices: using device Vulkan0 (auto)\n";
+
+        assert_eq!(
+            resolve_selected_device(None, "", Some(load_log)).as_deref(),
+            Some("Vulkan0")
+        );
+    }
+
+    #[test]
+    fn selected_device_is_none_when_unavailable() {
+        assert_eq!(
+            resolve_selected_device(None, "no selected device", None),
+            None
+        );
+    }
 }
