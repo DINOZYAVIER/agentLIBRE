@@ -18,6 +18,7 @@ const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 pub(crate) struct InferenceSession {
     backend: LlamaCppBackend,
     model_config: ModelConfig,
+    system_prompt: Option<String>,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -58,6 +59,7 @@ impl InferenceSession {
             )
         })?;
         let model_config = config.model.clone();
+        let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
         let run_id = InferenceRunId::new(options.run_id.unwrap_or_else(default_run_id))?;
@@ -65,6 +67,7 @@ impl InferenceSession {
         Ok(Self {
             backend,
             model_config,
+            system_prompt,
             run_id,
             config_path,
             artifact_root,
@@ -115,6 +118,7 @@ impl InferenceSession {
             request_index,
             messages.to_vec(),
             &self.model_config,
+            self.system_prompt.as_deref(),
         )?;
         self.backend.generate(request)
     }
@@ -129,11 +133,27 @@ fn build_inference_request(
     request_index: usize,
     messages: Vec<TurnMessage>,
     model_config: &ModelConfig,
+    system_prompt: Option<&str>,
 ) -> Result<InferenceRequest> {
+    let mut request_messages = Vec::with_capacity(
+        messages.len()
+            + usize::from(
+                system_prompt
+                    .map(|prompt| !prompt.trim().is_empty())
+                    .unwrap_or(false),
+            ),
+    );
+    if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+        request_messages.push(TurnMessage::System {
+            content: system_prompt.to_string(),
+        });
+    }
+    request_messages.extend(messages);
+
     let model_request = ModelRequest {
         turn_id: run_id.to_string(),
         request_index,
-        messages,
+        messages: request_messages,
         visible_tools: Vec::new(),
     };
     let rendered = render_model_request(&model_request, model_config)?;
@@ -173,6 +193,7 @@ mod tests {
                 content: "hello".to_string(),
             }],
             &config,
+            None,
         )
         .unwrap();
 
@@ -186,6 +207,38 @@ mod tests {
             request.rendered.tool_call_format,
             ToolCallFormat::HermesJson
         );
+    }
+
+    #[test]
+    fn build_request_prepends_configured_system_prompt() {
+        let run_id = InferenceRunId::new("manual-test").unwrap();
+        let config = ModelConfig {
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+        };
+
+        let request = build_inference_request(
+            run_id,
+            0,
+            vec![TurnMessage::User {
+                content: "hello".to_string(),
+            }],
+            &config,
+            Some("demo system"),
+        )
+        .unwrap();
+
+        assert_eq!(request.rendered.messages.len(), 2);
+        assert_eq!(
+            request.rendered.messages[0].role,
+            agl_oven::RenderedMessageRole::System
+        );
+        assert_eq!(request.rendered.messages[0].content, "demo system");
+        assert_eq!(
+            request.rendered.messages[1].role,
+            agl_oven::RenderedMessageRole::User
+        );
+        assert_eq!(request.rendered.messages[1].content, "hello");
     }
 
     #[test]

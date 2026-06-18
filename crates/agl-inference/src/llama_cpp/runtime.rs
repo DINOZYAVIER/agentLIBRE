@@ -351,6 +351,7 @@ fn test_runtime_log(
 #[cfg(test)]
 fn write_test_message(log: &mut String, message: &RenderedMessage) {
     match message.role {
+        RenderedMessageRole::System => log.push_str("System: "),
         RenderedMessageRole::User => log.push_str("User: "),
         RenderedMessageRole::Assistant => log.push_str("Assistant: "),
         RenderedMessageRole::Tool => log.push_str("Tool: "),

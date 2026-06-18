@@ -477,6 +477,7 @@ impl PreparedChatMessages {
 
         for message in messages {
             let role = CString::new(match message.role {
+                RenderedMessageRole::System => "system",
                 RenderedMessageRole::User => "user",
                 RenderedMessageRole::Assistant => "assistant",
                 RenderedMessageRole::Tool => "tool",
@@ -736,12 +737,20 @@ mod tests {
             request_index: 0,
             dialect: ModelDialect::Qwen3,
             tool_call_format: ToolCallFormat::HermesJson,
-            messages: vec![RenderedMessage {
-                role: RenderedMessageRole::User,
-                content: "hello".to_string(),
-                name: None,
-                tool_calls: Vec::new(),
-            }],
+            messages: vec![
+                RenderedMessage {
+                    role: RenderedMessageRole::System,
+                    content: "demo system".to_string(),
+                    name: None,
+                    tool_calls: Vec::new(),
+                },
+                RenderedMessage {
+                    role: RenderedMessageRole::User,
+                    content: "hello".to_string(),
+                    name: None,
+                    tool_calls: Vec::new(),
+                },
+            ],
             tools: vec![RenderedTool {
                 name: "unused".to_string(),
                 required_arguments: Vec::new(),
@@ -750,15 +759,27 @@ mod tests {
 
         let prepared = PreparedChatMessages::new(&rendered.messages).unwrap();
 
-        assert_eq!(prepared.messages.len(), 1);
+        assert_eq!(prepared.messages.len(), 2);
         assert_eq!(
             unsafe { CStr::from_ptr(prepared.messages[0].role) }
+                .to_str()
+                .unwrap(),
+            "system"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared.messages[0].content) }
+                .to_str()
+                .unwrap(),
+            "demo system"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared.messages[1].role) }
                 .to_str()
                 .unwrap(),
             "user"
         );
         assert_eq!(
-            unsafe { CStr::from_ptr(prepared.messages[0].content) }
+            unsafe { CStr::from_ptr(prepared.messages[1].content) }
                 .to_str()
                 .unwrap(),
             "hello"
