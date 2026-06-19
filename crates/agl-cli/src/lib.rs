@@ -347,6 +347,21 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 stop_reason: Some(reason),
             } => {
                 println!("stopped=true reason={}", stop_reason_name(reason));
+                let content = stopped_turn_context_message(reason).to_string();
+                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
+                message_index += 1;
+                if let Some(history) = &chat_history {
+                    history
+                        .append_assistant_message(assistant_message_id.clone(), content.clone())?;
+                }
+                log_message_metadata(
+                    "assistant",
+                    &session_id,
+                    &assistant_message_id,
+                    &content,
+                    runtime,
+                );
+                messages.push(TurnMessage::Assistant { content });
             }
             TurnOutput {
                 answer: Some(answer),
@@ -359,6 +374,19 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 );
                 let content = assistant_text_for_terminal(&answer);
                 println!("assistant> {content}");
+                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
+                message_index += 1;
+                if let Some(history) = &chat_history {
+                    history
+                        .append_assistant_message(assistant_message_id.clone(), content.clone())?;
+                }
+                log_message_metadata(
+                    "assistant",
+                    &session_id,
+                    &assistant_message_id,
+                    &content,
+                    runtime,
+                );
                 messages.push(TurnMessage::Assistant { content });
             }
             TurnOutput {
@@ -411,6 +439,23 @@ fn stop_reason_name(reason: StopReason) -> &'static str {
         StopReason::ToolLimitReached => "tool_limit_reached",
         StopReason::HiddenTool => "hidden_tool",
         StopReason::InvalidToolArguments => "invalid_tool_arguments",
+    }
+}
+
+fn stopped_turn_context_message(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::ToolJsonUnrepairable => {
+            "The previous turn stopped because the model produced malformed tool JSON. No tool was executed."
+        }
+        StopReason::ToolLimitReached => {
+            "The previous turn stopped because tool use is not available in this CLI session. No tool was executed."
+        }
+        StopReason::HiddenTool => {
+            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed."
+        }
+        StopReason::InvalidToolArguments => {
+            "The previous turn stopped because the requested tool arguments were invalid. No tool was executed."
+        }
     }
 }
 
@@ -586,6 +631,21 @@ mod tests {
             stop_reason_name(StopReason::InvalidToolArguments),
             "invalid_tool_arguments"
         );
+    }
+
+    #[test]
+    fn stopped_turn_context_message_explains_no_tool_execution() {
+        for reason in [
+            StopReason::ToolJsonUnrepairable,
+            StopReason::ToolLimitReached,
+            StopReason::HiddenTool,
+            StopReason::InvalidToolArguments,
+        ] {
+            let message = stopped_turn_context_message(reason);
+
+            assert!(message.contains("previous turn stopped"));
+            assert!(message.contains("No tool was executed."));
+        }
     }
 
     #[test]
