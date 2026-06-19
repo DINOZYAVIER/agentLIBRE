@@ -156,9 +156,16 @@ impl NativeLlamaCppRuntime {
             "llama.cpp max_output_tokens cannot be zero"
         );
         init_llama_backend();
-        clear_llama_logs();
+        let backend_init_logs = take_llama_logs();
 
-        let mut log = runtime_log_header();
+        let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
+        let mut log = runtime_log_header(&self.config, supports_gpu_offload);
+        append_backend_init_logs(&mut log, &backend_init_logs);
+        if let Some(message) =
+            gpu_offload_unavailable_message(self.config.runtime.gpu_layers, supports_gpu_offload)
+        {
+            return Err(runtime_error(message, log));
+        }
         let model_state = match self.ensure_session(&mut log) {
             Ok(model_state) => model_state,
             Err(err) => {
@@ -384,12 +391,6 @@ unsafe extern "C" fn llama_log_callback(
     }
 }
 
-fn clear_llama_logs() {
-    if let Ok(mut logs) = LLAMA_LOGS.lock() {
-        logs.clear();
-    }
-}
-
 fn take_llama_logs() -> String {
     LLAMA_LOGS
         .lock()
@@ -406,6 +407,28 @@ fn finish_runtime_log(mut log: String, native_logs: String) -> String {
         }
     }
     log
+}
+
+fn append_backend_init_logs(log: &mut String, backend_init_logs: &str) {
+    if backend_init_logs.is_empty() {
+        return;
+    }
+
+    log.push_str("llama_cpp_backend_init_log:\n");
+    log.push_str(backend_init_logs);
+    if !backend_init_logs.ends_with('\n') {
+        log.push('\n');
+    }
+}
+
+fn gpu_offload_unavailable_message(gpu_layers: u32, supports_gpu_offload: bool) -> Option<String> {
+    if gpu_layers == 0 || supports_gpu_offload {
+        return None;
+    }
+
+    Some(format!(
+        "llama.cpp GPU offload requested with gpu_layers={gpu_layers}, but no GPU backend is available. Set [runtime].gpu_layers = 0 for CPU-only runs or make a llama.cpp GPU backend available to this process."
+    ))
 }
 
 fn resolve_selected_device(
@@ -437,14 +460,17 @@ fn selected_device_from_llama_logs(log: &str) -> Option<String> {
     None
 }
 
-fn runtime_log_header() -> String {
+fn runtime_log_header(config: &LocalInferenceConfig, supports_gpu_offload: bool) -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
     log.push_str("library_dir = ");
     log.push_str(env!("AGL_LLAMA_CPP_LIBRARY_DIR"));
     log.push('\n');
+    log.push_str("gpu_layers_requested = ");
+    log.push_str(&config.runtime.gpu_layers.to_string());
+    log.push('\n');
     log.push_str("supports_gpu_offload = ");
-    log.push_str(if unsafe { ffi::llama_supports_gpu_offload() } {
+    log.push_str(if supports_gpu_offload {
         "true"
     } else {
         "false"
@@ -543,5 +569,25 @@ load_tensors: offloaded 34/34 layers to GPU
             resolve_selected_device(None, "no selected device", None),
             None
         );
+    }
+
+    #[test]
+    fn gpu_offload_unavailable_only_when_requested_and_unsupported() {
+        assert!(gpu_offload_unavailable_message(0, false).is_none());
+        assert!(gpu_offload_unavailable_message(99, true).is_none());
+
+        let message = gpu_offload_unavailable_message(99, false).unwrap();
+
+        assert!(message.contains("gpu_layers=99"));
+        assert!(message.contains("gpu_layers = 0"));
+    }
+
+    #[test]
+    fn backend_init_logs_are_labeled() {
+        let mut log = String::new();
+
+        append_backend_init_logs(&mut log, "backend loaded");
+
+        assert_eq!(log, "llama_cpp_backend_init_log:\nbackend loaded\n");
     }
 }
