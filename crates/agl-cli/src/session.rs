@@ -108,15 +108,14 @@ impl InferenceSession {
         &self.artifact_root
     }
 
-    pub(crate) fn generate(
-        &mut self,
-        messages: &[TurnMessage],
-        request_index: usize,
-    ) -> Result<InferenceResponse> {
+    pub(crate) fn event_stream_path(&self) -> PathBuf {
+        InferenceArtifactRoot::new(self.artifact_root.clone()).events_jsonl(&self.run_id)
+    }
+
+    pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
         let request = build_inference_request(
             self.run_id.clone(),
-            request_index,
-            messages.to_vec(),
+            request,
             &self.model_config,
             self.system_prompt.as_deref(),
         )?;
@@ -130,13 +129,13 @@ impl InferenceSession {
 
 fn build_inference_request(
     run_id: InferenceRunId,
-    request_index: usize,
-    messages: Vec<TurnMessage>,
+    request: ModelRequest,
     model_config: &ModelConfig,
     system_prompt: Option<&str>,
 ) -> Result<InferenceRequest> {
+    let request_index = request.request_index;
     let mut request_messages = Vec::with_capacity(
-        messages.len()
+        request.messages.len()
             + usize::from(
                 system_prompt
                     .map(|prompt| !prompt.trim().is_empty())
@@ -148,13 +147,13 @@ fn build_inference_request(
             content: system_prompt.to_string(),
         });
     }
-    request_messages.extend(messages);
+    request_messages.extend(request.messages);
 
     let model_request = ModelRequest {
-        turn_id: run_id.to_string(),
+        turn_id: request.turn_id,
         request_index,
         messages: request_messages,
-        visible_tools: Vec::new(),
+        visible_tools: request.visible_tools,
     };
     let rendered = render_model_request(&model_request, model_config)?;
     Ok(InferenceRequest {
@@ -188,10 +187,14 @@ mod tests {
 
         let request = build_inference_request(
             run_id.clone(),
-            7,
-            vec![TurnMessage::User {
-                content: "hello".to_string(),
-            }],
+            ModelRequest {
+                turn_id: "manual-test".to_string(),
+                request_index: 7,
+                messages: vec![TurnMessage::User {
+                    content: "hello".to_string(),
+                }],
+                visible_tools: Vec::new(),
+            },
             &config,
             None,
         )
@@ -219,10 +222,14 @@ mod tests {
 
         let request = build_inference_request(
             run_id,
-            0,
-            vec![TurnMessage::User {
-                content: "hello".to_string(),
-            }],
+            ModelRequest {
+                turn_id: "manual-test".to_string(),
+                request_index: 0,
+                messages: vec![TurnMessage::User {
+                    content: "hello".to_string(),
+                }],
+                visible_tools: Vec::new(),
+            },
             &config,
             Some("demo system"),
         )

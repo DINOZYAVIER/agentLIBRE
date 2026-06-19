@@ -12,13 +12,15 @@ pub struct TurnState {
 
 impl TurnState {
     pub fn new(input: TurnInput) -> Self {
-        let messages = vec![TurnMessage::User {
+        let mut messages = input.context_messages.clone();
+        messages.push(TurnMessage::User {
             content: input.user_input.clone(),
-        }];
+        });
+        let request_index = input.request_index_start;
         Self {
             input,
             messages,
-            request_index: 0,
+            request_index,
             tool_call_count: 0,
         }
     }
