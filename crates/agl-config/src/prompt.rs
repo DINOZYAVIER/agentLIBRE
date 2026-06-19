@@ -1,19 +1,11 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptConfig {
     #[serde(default)]
     pub system: SystemPrompt,
-}
-
-impl Default for PromptConfig {
-    fn default() -> Self {
-        Self {
-            system: SystemPrompt::default(),
-        }
-    }
 }
 
 impl PromptConfig {
