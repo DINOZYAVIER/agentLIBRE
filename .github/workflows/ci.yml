@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "develop"]
+  pull_request:
+    branches: ["master", "develop"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AGL_LLAMA_CPP_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install native dependencies
+        run: scripts/ci/install-native-ubuntu.sh
+
+      - name: Install Rust
+        run: scripts/ci/install-rustup.sh
+
+      - name: Prepare native libraries
+        run: scripts/ci/prepare.sh
+
+      - name: Tool versions
+        run: scripts/ci/tool-versions.sh
+
+      - name: Cargo metadata
+        run: scripts/ci/metadata.sh
+
+      - name: Rust format
+        run: scripts/ci/fmt.sh
+
+      - name: Clippy
+        run: scripts/ci/clippy.sh
+
+      - name: Workspace tests
+        run: scripts/ci/test.sh
+
+      - name: Diff whitespace check
+        run: scripts/ci/diff-check.sh
+
+      - name: Release CLI smoke
+        run: AGL_CI_SKIP_PREPARE=1 scripts/ci/release-smoke.sh
