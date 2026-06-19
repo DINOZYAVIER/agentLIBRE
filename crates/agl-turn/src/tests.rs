@@ -30,6 +30,40 @@ fn initializes_turn_state_with_user_message() {
 }
 
 #[test]
+fn initializes_turn_state_with_context_and_request_index() {
+    let state = TurnState::new(
+        TurnInput::user("new")
+            .with_turn_id("turn-chat")
+            .with_context_messages(vec![
+                TurnMessage::User {
+                    content: "old".to_string(),
+                },
+                TurnMessage::Assistant {
+                    content: "previous".to_string(),
+                },
+            ])
+            .with_request_index_start(7),
+    );
+
+    assert_eq!(state.input.turn_id, "turn-chat");
+    assert_eq!(state.request_index, 7);
+    assert_eq!(
+        state.messages,
+        [
+            TurnMessage::User {
+                content: "old".to_string(),
+            },
+            TurnMessage::Assistant {
+                content: "previous".to_string(),
+            },
+            TurnMessage::User {
+                content: "new".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn policy_dispatches_visible_tool_with_required_arguments() {
     let state = TurnState::new(
         TurnInput::user("read README")
