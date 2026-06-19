@@ -1,8 +1,12 @@
+use crate::transcript::TurnMessage;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnInput {
     pub turn_id: String,
     pub user_input: String,
+    pub context_messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,
+    pub request_index_start: usize,
     pub max_tool_calls: usize,
 }
 
@@ -11,9 +15,26 @@ impl TurnInput {
         Self {
             turn_id: "turn-1".to_string(),
             user_input: user_input.into(),
+            context_messages: Vec::new(),
             visible_tools: Vec::new(),
+            request_index_start: 0,
             max_tool_calls: 0,
         }
+    }
+
+    pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.turn_id = turn_id.into();
+        self
+    }
+
+    pub fn with_context_messages(mut self, messages: Vec<TurnMessage>) -> Self {
+        self.context_messages = messages;
+        self
+    }
+
+    pub fn with_request_index_start(mut self, request_index_start: usize) -> Self {
+        self.request_index_start = request_index_start;
+        self
     }
 
     pub fn with_visible_tool(mut self, tool: VisibleTool) -> Self {

@@ -20,6 +20,8 @@ Working now:
 - `agl` is the public CLI binary.
 - `agl run` and `agl chat` can run a local GGUF model through the in-process
   llama.cpp backend.
+- `agl run` and `agl chat` execute turns through `agl-loop` and write
+  metadata-only `agl-events` records beside inference artifacts.
 - `agl config paths` prints the runtime/config/data/log locations.
 - `agl config init` writes the runtime config.
 - Planned commands such as `agl model pull`, `agl setup`, and `agl doctor`
@@ -33,10 +35,9 @@ Not ready yet:
 - Tool-use demos should not be promised yet. Visible tools are not rendered into
   the native prompt, the action parser is Hermes-only, and Gemma/structured tool
   paths are not end-to-end.
-- `agl-loop` and `agl-events` are mostly library/test surfaces and are not wired
-  into the CLI demo path.
-- Event schema and privacy behavior need another pass before observability is
-  treated as stable.
+- Hooks, skills, and repair loops are not wired to the runtime event stream yet.
+- Event schema and privacy behavior have safe defaults, but need a separate
+  review before observability is treated as stable.
 
 ## Dev Demo Quickstart
 

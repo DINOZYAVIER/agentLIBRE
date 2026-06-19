@@ -108,3 +108,46 @@ fn serializes_every_event_as_jsonl() {
         assert_eq!(decoded, event);
     }
 }
+
+#[test]
+fn safe_jsonl_omits_content_bearing_fields() {
+    let forbidden = [
+        "read README",
+        "answer\nwith newline",
+        "{bad",
+        r#"{"name":"read_file","arguments":{"path":"README.MD"}}"#,
+        "README contents",
+        "done",
+    ];
+
+    for event in example_events() {
+        let line = event.to_safe_jsonl_line().expect("event serializes");
+        assert!(!line.contains('\n'), "{line}");
+        for value in forbidden {
+            assert!(
+                !line.contains(value),
+                "safe event leaked content `{value}` in {line}"
+            );
+        }
+        let decoded: SafeAgentEvent = serde_json::from_str(&line).expect("safe event round trips");
+        assert_eq!(decoded.kind(), event.kind());
+    }
+}
+
+#[test]
+fn safe_jsonl_keeps_argument_shape_without_values() {
+    let event = AgentEvent::ToolCallStarted {
+        turn_id: "turn-1".to_string(),
+        name: "read_file".to_string(),
+        arguments: json!({
+            "path": "SECRET.md",
+            "line": 42
+        }),
+    };
+
+    let line = event.to_safe_jsonl_line().expect("event serializes");
+
+    assert!(line.contains(r#""keys":["line","path"]"#), "{line}");
+    assert!(!line.contains("SECRET.md"), "{line}");
+    assert!(!line.contains("42"), "{line}");
+}

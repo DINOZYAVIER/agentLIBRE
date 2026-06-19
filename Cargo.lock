@@ -15,7 +15,9 @@ name = "agl-cli"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-config",
+ "agl-events",
  "agl-inference",
+ "agl-loop",
  "agl-oven",
  "agl-runtime",
  "agl-turn",

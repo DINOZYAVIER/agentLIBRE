@@ -24,6 +24,7 @@ agl-actions = { path = "crates/agl-actions" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-inference = { path = "crates/agl-inference" }
+agl-loop = { path = "crates/agl-loop" }
 agl-oven = { path = "crates/agl-oven" }
 agl-runtime = { path = "crates/agl-runtime" }
 anyhow = "1.0"
