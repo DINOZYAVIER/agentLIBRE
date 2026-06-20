@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{ChatSessionMachine, ChatSessionTransition, ChatSessionTransitionRecord};
+use crate::fsm::{ChatSessionMachine, ChatSessionTransition, ChatSessionTransitionRecord};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -128,6 +128,10 @@ pub enum ChatSessionEvent {
         #[serde(default)]
         reason: AgentLibreSessionFinishReason,
     },
+    SessionFailed {
+        session_id: AgentLibreSessionId,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -231,7 +235,8 @@ impl ChatSessionStore {
         &self.transcript_jsonl
     }
 
-    pub fn machine(&self) -> &ChatSessionMachine {
+    #[cfg(test)]
+    pub(crate) fn machine(&self) -> &ChatSessionMachine {
         &self.machine
     }
 
@@ -292,31 +297,6 @@ impl ChatSessionStore {
         self.append_record_event(&record)
     }
 
-    pub fn note_empty_input(&mut self) -> Result<()> {
-        self.apply(ChatSessionTransition::ReadEmptyInput)?;
-        Ok(())
-    }
-
-    pub fn note_help_command(&mut self) -> Result<()> {
-        self.apply(ChatSessionTransition::ReadCommandHelp)?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
-    }
-
-    pub fn note_session_command(&mut self) -> Result<()> {
-        self.apply(ChatSessionTransition::ReadCommandSession)?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
-    }
-
-    pub fn note_unknown_command(&mut self, command: impl Into<String>) -> Result<()> {
-        self.apply(ChatSessionTransition::ReadUnknownCommand {
-            command: command.into(),
-        })?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
-    }
-
     pub fn append_assistant_message(
         &mut self,
         message_id: AgentLibreMessageId,
@@ -328,11 +308,6 @@ impl ChatSessionStore {
         })?;
         self.append_record_event(&record)?;
         self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
-    }
-
-    pub fn note_turn_started(&mut self) -> Result<()> {
-        self.apply(ChatSessionTransition::RunTurn)?;
         Ok(())
     }
 
@@ -348,6 +323,20 @@ impl ChatSessionStore {
         self.append_record_event(&record)?;
         self.apply(ChatSessionTransition::PromptForInput)?;
         Ok(())
+    }
+
+    pub fn append_tool_message(
+        &mut self,
+        message_id: AgentLibreMessageId,
+        name: String,
+        content: String,
+    ) -> Result<()> {
+        let record = self.apply(ChatSessionTransition::RecordToolMessage {
+            message_id,
+            name,
+            content,
+        })?;
+        self.append_record_event(&record)
     }
 
     pub fn link_attempt(&mut self, attempt_id: impl Into<String>) -> Result<()> {
@@ -376,6 +365,13 @@ impl ChatSessionStore {
 
     pub fn request_exit(&mut self) -> Result<()> {
         let record = self.apply(ChatSessionTransition::ReadCommandExit)?;
+        self.append_record_event(&record)
+    }
+
+    pub fn fail(&mut self, message: impl Into<String>) -> Result<()> {
+        let record = self.apply(ChatSessionTransition::FailSession {
+            message: message.into(),
+        })?;
         self.append_record_event(&record)
     }
 
@@ -442,6 +438,16 @@ impl ChatSessionEvent {
                 message_id: message_id.clone(),
                 content: content.clone(),
             }),
+            ChatSessionTransition::RecordToolMessage {
+                message_id,
+                name,
+                content,
+            } => Some(Self::ToolMessage {
+                session_id: record.session_id.clone(),
+                message_id: message_id.clone(),
+                name: name.clone(),
+                content: content.clone(),
+            }),
             ChatSessionTransition::LinkModelAttempt { run_id, attempt_id } => {
                 Some(Self::ModelAttemptLinked {
                     session_id: record.session_id.clone(),
@@ -459,6 +465,10 @@ impl ChatSessionEvent {
             ChatSessionTransition::FinishSession { reason } => Some(Self::SessionFinished {
                 session_id: record.session_id.clone(),
                 reason: *reason,
+            }),
+            ChatSessionTransition::FailSession { message } => Some(Self::SessionFailed {
+                session_id: record.session_id.clone(),
+                message: message.clone(),
             }),
             _ => None,
         }
