@@ -4,6 +4,7 @@ members = [
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-oven",
+    "crates/agl-session",
     "crates/agl-turn",
     "crates/agl-config",
     "crates/agl-events",
@@ -27,6 +28,7 @@ agl-inference = { path = "crates/agl-inference" }
 agl-loop = { path = "crates/agl-loop" }
 agl-oven = { path = "crates/agl-oven" }
 agl-runtime = { path = "crates/agl-runtime" }
+agl-session = { path = "crates/agl-session" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"

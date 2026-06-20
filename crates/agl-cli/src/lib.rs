@@ -202,7 +202,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         None
     };
     let session = InferenceSession::new(options, runtime, artifact_root_override)?;
-    let (chat_history, replay) = if history_enabled {
+    let (mut chat_history, replay) = if history_enabled {
         if resumed_session {
             let history = ChatSessionStore::open(
                 runtime.paths.sessions_root(),
@@ -267,24 +267,38 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         }
 
         let input = match parse_chat_input(&input) {
-            ParsedChatInput::Empty => continue,
+            ParsedChatInput::Empty => {
+                if let Some(history) = &mut chat_history {
+                    history.note_empty_input()?;
+                }
+                continue;
+            }
             ParsedChatInput::Message(input) => input,
             ParsedChatInput::UnknownCommand(command) => {
+                if let Some(history) = &mut chat_history {
+                    history.note_unknown_command(command)?;
+                }
                 println!("unknown_command={command}");
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Help) => {
+                if let Some(history) = &mut chat_history {
+                    history.note_help_command()?;
+                }
                 print!("{CHAT_COMMANDS_HELP}");
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
+                if let Some(history) = &mut chat_history {
+                    history.note_session_command()?;
+                }
                 print_chat_session_summary(&session_id, loop_host.session());
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Clear) => {
                 let cleared_messages = clear_chat_context(&mut messages);
                 loop_host.session_mut().clear_context();
-                if let Some(history) = &chat_history {
+                if let Some(history) = &mut chat_history {
                     history.append_context_cleared()?;
                 }
                 tracing::info!(
@@ -304,6 +318,10 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         message_index += 1;
         log_message_metadata("user", &session_id, &user_message_id, input, runtime);
         let attempt_id = format!("attempt-{request_index:04}");
+        if let Some(history) = &mut chat_history {
+            history.append_user_message(user_message_id.clone(), input.to_string())?;
+            history.link_attempt(attempt_id.clone())?;
+        }
         let turn_input = build_turn_input(
             loop_host.session().run_id().as_str(),
             request_index,
@@ -313,10 +331,6 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         loop_host.reset_turn_counters();
         let output = run_turn(&mut loop_host, turn_input)?;
         let generated_requests = loop_host.generated_requests();
-        if let Some(history) = &chat_history {
-            history.append_user_message(user_message_id.clone(), input.to_string())?;
-            history.link_attempt(attempt_id)?;
-        }
         messages.push(TurnMessage::User {
             content: input.to_string(),
         });
@@ -329,7 +343,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 println!("assistant> {content}");
                 let assistant_message_id = AgentLibreMessageId::indexed(message_index);
                 message_index += 1;
-                if let Some(history) = &chat_history {
+                if let Some(history) = &mut chat_history {
                     history
                         .append_assistant_message(assistant_message_id.clone(), content.clone())?;
                 }
@@ -350,9 +364,11 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 let content = stopped_turn_context_message(reason).to_string();
                 let assistant_message_id = AgentLibreMessageId::indexed(message_index);
                 message_index += 1;
-                if let Some(history) = &chat_history {
-                    history
-                        .append_assistant_message(assistant_message_id.clone(), content.clone())?;
+                if let Some(history) = &mut chat_history {
+                    history.append_assistant_stop_marker(
+                        assistant_message_id.clone(),
+                        content.clone(),
+                    )?;
                 }
                 log_message_metadata(
                     "assistant",
@@ -376,7 +392,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 println!("assistant> {content}");
                 let assistant_message_id = AgentLibreMessageId::indexed(message_index);
                 message_index += 1;
-                if let Some(history) = &chat_history {
+                if let Some(history) = &mut chat_history {
                     history
                         .append_assistant_message(assistant_message_id.clone(), content.clone())?;
                 }
@@ -394,12 +410,31 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 stop_reason: None,
             } => {
                 println!("stopped=true reason=unknown");
+                let content =
+                    "The previous turn stopped for an unknown reason. No tool was executed."
+                        .to_string();
+                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
+                message_index += 1;
+                if let Some(history) = &mut chat_history {
+                    history.append_assistant_stop_marker(
+                        assistant_message_id.clone(),
+                        content.clone(),
+                    )?;
+                }
+                log_message_metadata(
+                    "assistant",
+                    &session_id,
+                    &assistant_message_id,
+                    &content,
+                    runtime,
+                );
+                messages.push(TurnMessage::Assistant { content });
             }
         }
         request_index += generated_requests;
     }
 
-    if let Some(history) = &chat_history {
+    if let Some(history) = &mut chat_history {
         history.finish()?;
     }
     tracing::info!(

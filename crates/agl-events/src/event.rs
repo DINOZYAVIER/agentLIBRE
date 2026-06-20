@@ -23,6 +23,12 @@ pub enum AgentEvent {
         request_index: usize,
         content: String,
     },
+    #[serde(rename = "model.request_failed")]
+    ModelRequestFailed {
+        turn_id: String,
+        request_index: usize,
+        message: String,
+    },
     #[serde(rename = "model.action_parsed")]
     ModelActionParsed {
         turn_id: String,
@@ -76,6 +82,12 @@ pub enum AgentEvent {
         name: String,
         observation: String,
     },
+    #[serde(rename = "tool.call_failed")]
+    ToolCallFailed {
+        turn_id: String,
+        name: String,
+        message: String,
+    },
     #[serde(rename = "observation.appended")]
     ObservationAppended {
         turn_id: String,
@@ -104,6 +116,7 @@ impl AgentEvent {
             AgentEvent::PromptRendered { .. } => "prompt.rendered",
             AgentEvent::ModelRequested { .. } => "model.requested",
             AgentEvent::ModelResponseReceived { .. } => "model.response_received",
+            AgentEvent::ModelRequestFailed { .. } => "model.request_failed",
             AgentEvent::ModelActionParsed { .. } => "model.action_parsed",
             AgentEvent::ToolJsonMalformed { .. } => "tool.json_malformed",
             AgentEvent::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
@@ -115,6 +128,7 @@ impl AgentEvent {
             AgentEvent::ToolLimitReached { .. } => "tool.limit_reached",
             AgentEvent::ToolCallStarted { .. } => "tool.call_started",
             AgentEvent::ToolCallFinished { .. } => "tool.call_finished",
+            AgentEvent::ToolCallFailed { .. } => "tool.call_failed",
             AgentEvent::ObservationAppended { .. } => "observation.appended",
             AgentEvent::AnswerFinal { .. } => "answer.final",
             AgentEvent::TurnStopped { .. } => "turn.stopped",
@@ -128,6 +142,20 @@ impl AgentEvent {
 
     pub fn to_safe_jsonl_line(&self) -> serde_json::Result<String> {
         serde_json::to_string(&SafeAgentEvent::from(self))
+    }
+
+    pub fn to_safe_runtime_jsonl_line(
+        &self,
+        sequence: usize,
+        from_phase: impl Into<String>,
+        to_phase: impl Into<String>,
+    ) -> serde_json::Result<String> {
+        serde_json::to_string(&SafeRuntimeEvent {
+            sequence,
+            from_phase: from_phase.into(),
+            to_phase: to_phase.into(),
+            event: SafeAgentEvent::from(self),
+        })
     }
 }
 
@@ -154,6 +182,12 @@ pub enum SafeAgentEvent {
         turn_id: String,
         request_index: usize,
         content_bytes: usize,
+    },
+    #[serde(rename = "model.request_failed")]
+    ModelRequestFailed {
+        turn_id: String,
+        request_index: usize,
+        message_bytes: usize,
     },
     #[serde(rename = "model.action_parsed")]
     ModelActionParsed {
@@ -208,6 +242,12 @@ pub enum SafeAgentEvent {
         name: String,
         observation_bytes: usize,
     },
+    #[serde(rename = "tool.call_failed")]
+    ToolCallFailed {
+        turn_id: String,
+        name: String,
+        message_bytes: usize,
+    },
     #[serde(rename = "observation.appended")]
     ObservationAppended {
         turn_id: String,
@@ -232,6 +272,15 @@ pub enum SafeAgentEvent {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SafeRuntimeEvent {
+    pub sequence: usize,
+    pub from_phase: String,
+    pub to_phase: String,
+    #[serde(flatten)]
+    pub event: SafeAgentEvent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "json_kind", rename_all = "snake_case")]
 pub enum JsonMetadata {
@@ -250,6 +299,7 @@ impl SafeAgentEvent {
             SafeAgentEvent::PromptRendered { .. } => "prompt.rendered",
             SafeAgentEvent::ModelRequested { .. } => "model.requested",
             SafeAgentEvent::ModelResponseReceived { .. } => "model.response_received",
+            SafeAgentEvent::ModelRequestFailed { .. } => "model.request_failed",
             SafeAgentEvent::ModelActionParsed { .. } => "model.action_parsed",
             SafeAgentEvent::ToolJsonMalformed { .. } => "tool.json_malformed",
             SafeAgentEvent::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
@@ -261,6 +311,7 @@ impl SafeAgentEvent {
             SafeAgentEvent::ToolLimitReached { .. } => "tool.limit_reached",
             SafeAgentEvent::ToolCallStarted { .. } => "tool.call_started",
             SafeAgentEvent::ToolCallFinished { .. } => "tool.call_finished",
+            SafeAgentEvent::ToolCallFailed { .. } => "tool.call_failed",
             SafeAgentEvent::ObservationAppended { .. } => "observation.appended",
             SafeAgentEvent::AnswerFinal { .. } => "answer.final",
             SafeAgentEvent::TurnStopped { .. } => "turn.stopped",
@@ -301,6 +352,15 @@ impl From<&AgentEvent> for SafeAgentEvent {
                 turn_id: turn_id.clone(),
                 request_index: *request_index,
                 content_bytes: content.len(),
+            },
+            AgentEvent::ModelRequestFailed {
+                turn_id,
+                request_index,
+                message,
+            } => SafeAgentEvent::ModelRequestFailed {
+                turn_id: turn_id.clone(),
+                request_index: *request_index,
+                message_bytes: message.len(),
             },
             AgentEvent::ModelActionParsed { turn_id, action } => {
                 SafeAgentEvent::ModelActionParsed {
@@ -386,6 +446,15 @@ impl From<&AgentEvent> for SafeAgentEvent {
                 turn_id: turn_id.clone(),
                 name: name.clone(),
                 observation_bytes: observation.len(),
+            },
+            AgentEvent::ToolCallFailed {
+                turn_id,
+                name,
+                message,
+            } => SafeAgentEvent::ToolCallFailed {
+                turn_id: turn_id.clone(),
+                name: name.clone(),
+                message_bytes: message.len(),
             },
             AgentEvent::ObservationAppended {
                 turn_id,

@@ -4,7 +4,7 @@ mod runner;
 
 pub use agl_turn::{
     ModelRequest, ModelResponse, StopReason, ToolDispatchRequest, ToolDispatchResponse, TurnInput,
-    TurnMessage, TurnOutput, VisibleTool,
+    TurnMessage, TurnOutput, TurnPhase, TurnTransition, TurnTransitionRecord, VisibleTool,
 };
 pub use host::AgentLoopHost;
 pub use runner::run_turn;

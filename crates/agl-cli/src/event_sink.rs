@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use agl_events::AgentEvent;
+use agl_turn::TurnTransitionRecord;
 use anyhow::{Context, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +23,30 @@ impl RuntimeEventSink {
     }
 
     pub(crate) fn emit(&self, event: &AgentEvent) -> Result<()> {
+        self.write_line(
+            event
+                .to_safe_jsonl_line()
+                .context("failed to serialize safe runtime event")?,
+        )
+    }
+
+    pub(crate) fn emit_transition(
+        &self,
+        record: &TurnTransitionRecord,
+        event: &AgentEvent,
+    ) -> Result<()> {
+        self.write_line(
+            event
+                .to_safe_runtime_jsonl_line(
+                    record.sequence,
+                    record.from.as_str(),
+                    record.to.as_str(),
+                )
+                .context("failed to serialize safe runtime event")?,
+        )
+    }
+
+    fn write_line(&self, line: String) -> Result<()> {
         if let Some(parent) = self.events_jsonl.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -41,9 +66,6 @@ impl RuntimeEventSink {
                     self.events_jsonl.display()
                 )
             })?;
-        let line = event
-            .to_safe_jsonl_line()
-            .context("failed to serialize safe runtime event")?;
         file.write_all(line.as_bytes()).with_context(|| {
             format!(
                 "failed to write runtime event {}",
@@ -102,6 +124,40 @@ mod tests {
         assert!(content.contains(r#""answer_bytes":13"#), "{content}");
         assert!(!content.contains("secret prompt"), "{content}");
         assert!(!content.contains("secret answer"), "{content}");
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn writes_safe_runtime_events_with_fsm_metadata() {
+        let path = temp_event_path("safe-runtime-jsonl");
+        let sink = RuntimeEventSink::new(&path);
+        let mut machine = agl_turn::TurnMachine::new("turn-1");
+        let record = machine
+            .apply(agl_turn::TurnTransition::Start {
+                user_input: "secret prompt".to_string(),
+            })
+            .unwrap();
+
+        sink.emit_transition(
+            &record,
+            &AgentEvent::TurnStarted {
+                turn_id: "turn-1".to_string(),
+                user_input: "secret prompt".to_string(),
+            },
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(content.contains(r#""sequence":1"#), "{content}");
+        assert!(
+            content.contains(r#""from_phase":"initialized""#),
+            "{content}"
+        );
+        assert!(content.contains(r#""to_phase":"started""#), "{content}");
+        assert!(content.contains(r#""kind":"turn.started""#), "{content}");
+        assert!(!content.contains("secret prompt"), "{content}");
 
         std::fs::remove_file(path).unwrap();
     }

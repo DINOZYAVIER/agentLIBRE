@@ -1,0 +1,296 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::*;
+
+static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn temp_root(name: &str) -> PathBuf {
+    let id = DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("agl-session-{name}-{}-{id}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    path
+}
+
+#[test]
+fn generated_session_ids_are_unique_path_segments() {
+    let first = AgentLibreSessionId::generate();
+    let second = AgentLibreSessionId::generate();
+
+    assert_ne!(first, second);
+    AgentLibreSessionId::new(first.as_str()).unwrap();
+    AgentLibreSessionId::new(second.as_str()).unwrap();
+}
+
+#[test]
+fn chat_session_machine_accepts_answer_turn_path() {
+    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let mut machine = ChatSessionMachine::new(session_id);
+
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::StartNewSession {
+                run_id: "run-001".to_string(),
+            })
+            .unwrap()
+            .to,
+        ChatSessionPhase::Started
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::PromptForInput)
+            .unwrap()
+            .to,
+        ChatSessionPhase::AwaitingInput
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::ReadUserMessage {
+                content: "hello".to_string(),
+            })
+            .unwrap()
+            .to,
+        ChatSessionPhase::RecordingUserMessage
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::RecordUserMessage {
+                message_id: AgentLibreMessageId::indexed(1),
+                content: "hello".to_string(),
+            })
+            .unwrap()
+            .to,
+        ChatSessionPhase::RunningTurn
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::LinkModelAttempt {
+                run_id: "run-001".to_string(),
+                attempt_id: "attempt-0001".to_string(),
+            })
+            .unwrap()
+            .to,
+        ChatSessionPhase::RunningTurn
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::RecordAssistantAnswer {
+                message_id: AgentLibreMessageId::indexed(2),
+                content: "hi".to_string(),
+            })
+            .unwrap()
+            .to,
+        ChatSessionPhase::RecordingAssistantMessage
+    );
+    assert_eq!(
+        machine
+            .apply(ChatSessionTransition::PromptForInput)
+            .unwrap()
+            .to,
+        ChatSessionPhase::AwaitingInput
+    );
+}
+
+#[test]
+fn chat_session_machine_rejects_illegal_transition_and_finished_is_terminal() {
+    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let mut machine = ChatSessionMachine::new(session_id);
+
+    let err = machine
+        .apply(ChatSessionTransition::RecordAssistantAnswer {
+            message_id: AgentLibreMessageId::indexed(1),
+            content: "hi".to_string(),
+        })
+        .unwrap_err();
+    assert_eq!(err.phase, ChatSessionPhase::Uninitialized);
+    assert_eq!(err.transition, "record_assistant_answer");
+
+    machine
+        .apply(ChatSessionTransition::StartNewSession {
+            run_id: "run-001".to_string(),
+        })
+        .unwrap();
+    machine
+        .apply(ChatSessionTransition::PromptForInput)
+        .unwrap();
+    machine.apply(ChatSessionTransition::FinishSession).unwrap();
+    let err = machine
+        .apply(ChatSessionTransition::PromptForInput)
+        .unwrap_err();
+    assert_eq!(err.phase, ChatSessionPhase::Finished);
+}
+
+#[test]
+fn writes_chat_session_metadata_and_transcript_from_transitions() {
+    let root = temp_root("session");
+    let mut store = ChatSessionStore::start(
+        &root,
+        AgentLibreSessionId::new("session-001").unwrap(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+
+    store
+        .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
+        .unwrap();
+    store.link_attempt("attempt-0001").unwrap();
+    store
+        .append_assistant_message(AgentLibreMessageId::indexed(2), "hi".to_string())
+        .unwrap();
+    store.append_context_cleared().unwrap();
+    store.finish().unwrap();
+
+    assert!(store.session_dir().join("session.json").exists());
+    let transcript = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+    assert!(transcript.contains("\"kind\":\"session_started\""));
+    assert!(transcript.contains("\"kind\":\"user_message\""));
+    assert!(transcript.contains("\"kind\":\"assistant_message\""));
+    assert!(transcript.contains("\"kind\":\"model_attempt_linked\""));
+    assert!(transcript.contains("\"kind\":\"context_cleared\""));
+    assert!(transcript.contains("\"kind\":\"session_finished\""));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stopped_turn_marker_is_recorded_as_assistant_message() {
+    let root = temp_root("stopped-marker");
+    let mut store = ChatSessionStore::start(
+        &root,
+        AgentLibreSessionId::new("session-001").unwrap(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+
+    store
+        .append_user_message(AgentLibreMessageId::indexed(1), "tool bait".to_string())
+        .unwrap();
+    store.link_attempt("attempt-0001").unwrap();
+    store
+        .append_assistant_stop_marker(
+            AgentLibreMessageId::indexed(2),
+            "The previous turn stopped.".to_string(),
+        )
+        .unwrap();
+
+    let replay = store.read_replay().unwrap();
+
+    assert!(matches!(
+        replay.events[2],
+        ChatSessionEvent::ModelAttemptLinked { .. }
+    ));
+    assert!(matches!(
+        replay.events[3],
+        ChatSessionEvent::AssistantMessage { .. }
+    ));
+    assert_eq!(replay.next_message_index, 3);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn non_mutating_commands_advance_fsm_without_transcript_events() {
+    let root = temp_root("non-mutating-commands");
+    let mut store = ChatSessionStore::start(
+        &root,
+        AgentLibreSessionId::new("session-001").unwrap(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+
+    store.note_empty_input().unwrap();
+    store.note_help_command().unwrap();
+    store.note_session_command().unwrap();
+    store.note_unknown_command("/wat").unwrap();
+
+    let after = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+    assert_eq!(after, before);
+    assert_eq!(store.machine().phase(), ChatSessionPhase::AwaitingInput);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn start_refuses_existing_chat_session() {
+    let root = temp_root("session-collision");
+    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let _store = ChatSessionStore::start(
+        &root,
+        session_id.clone(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+
+    let err = ChatSessionStore::start(&root, session_id, "run-002", "/tmp/local.toml", "llama_cpp")
+        .unwrap_err();
+
+    assert!(format!("{err:#}").contains("chat session already exists"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn opens_existing_session_and_reads_replay_without_appending_start() {
+    let root = temp_root("session-replay");
+    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let mut store = ChatSessionStore::start(
+        &root,
+        session_id.clone(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+    store
+        .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
+        .unwrap();
+    store.link_attempt("attempt-0001").unwrap();
+    store
+        .append_assistant_message(AgentLibreMessageId::indexed(2), "hi".to_string())
+        .unwrap();
+    let before = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+
+    let opened = ChatSessionStore::open(&root, session_id, "run-002").unwrap();
+    let replay = opened.read_replay().unwrap();
+    let after = std::fs::read_to_string(opened.transcript_jsonl()).unwrap();
+
+    assert_eq!(after, before);
+    assert_eq!(replay.events.len(), 4);
+    assert_eq!(replay.next_message_index, 3);
+    assert_eq!(replay.next_attempt_index, 2);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_transcript_reports_line_number() {
+    let root = temp_root("session-malformed");
+    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let store = ChatSessionStore::start(
+        &root,
+        session_id.clone(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+    let mut transcript = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+    transcript.push_str("not-json\n");
+    std::fs::write(store.transcript_jsonl(), transcript).unwrap();
+    let opened = ChatSessionStore::open(&root, session_id, "run-002").unwrap();
+
+    let err = opened.read_replay().unwrap_err();
+
+    assert!(format!("{err:#}").contains("line 2"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
