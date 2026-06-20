@@ -89,16 +89,12 @@ impl AgentLoopHost for FakeHost {
         }
     }
 
-    fn emit_event(&mut self, event: AgentEvent) -> Result<()> {
-        self.events.push(event);
-        Ok(())
-    }
-
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
         self.operations
             .push(format!("transition:{}", record.transition.as_str()));
         self.transitions.push(record.clone());
-        self.emit_event(event.clone())
+        self.events.push(event.clone());
+        Ok(())
     }
 }
 

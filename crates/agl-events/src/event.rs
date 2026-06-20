@@ -146,11 +146,15 @@ impl AgentEvent {
 
     pub fn to_safe_runtime_jsonl_line(
         &self,
+        fsm: impl Into<String>,
+        transition: impl Into<String>,
         sequence: usize,
         from_phase: impl Into<String>,
         to_phase: impl Into<String>,
     ) -> serde_json::Result<String> {
         serde_json::to_string(&SafeRuntimeEvent {
+            fsm: fsm.into(),
+            transition: transition.into(),
             sequence,
             from_phase: from_phase.into(),
             to_phase: to_phase.into(),
@@ -274,6 +278,8 @@ pub enum SafeAgentEvent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SafeRuntimeEvent {
+    pub fsm: String,
+    pub transition: String,
     pub sequence: usize,
     pub from_phase: String,
     pub to_phase: String,
