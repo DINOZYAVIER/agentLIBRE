@@ -41,6 +41,7 @@ dependencies = [
 name = "agl-events"
 version = "1.0.0-alpha.6"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
 ]

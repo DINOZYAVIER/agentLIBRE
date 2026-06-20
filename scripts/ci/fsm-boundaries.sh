@@ -40,8 +40,7 @@ check_absent \
   ':(exclude)crates/agl-loop/src/event_map.rs' \
   ':(exclude)crates/agl-loop/src/tests.rs' \
   ':(exclude)crates/agl-events/src/event.rs' \
-  ':(exclude)crates/agl-events/src/tests.rs' \
-  ':(exclude)crates/agl-cli/src/event_sink.rs'
+  ':(exclude)crates/agl-events/src/tests.rs'
 
 check_absent \
   "inference observation events must be emitted from transition records" \

@@ -1,22 +1,21 @@
-use agl_events::AgentEvent;
+use agl_events::{AgentEvent, RuntimeEventWriter};
 use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
     TurnTransitionRecord,
 };
 use anyhow::{Result, bail};
 
-use crate::event_sink::RuntimeEventSink;
 use crate::session::InferenceSession;
 
 pub(crate) struct CliLoopHost {
     session: InferenceSession,
-    event_sink: RuntimeEventSink,
+    event_sink: RuntimeEventWriter,
     generated_requests: usize,
 }
 
 impl CliLoopHost {
     pub(crate) fn new(session: InferenceSession) -> Self {
-        let event_sink = RuntimeEventSink::new(session.event_stream_path());
+        let event_sink = RuntimeEventWriter::new(session.event_stream_path());
         Self {
             session,
             event_sink,
@@ -62,6 +61,13 @@ impl AgentLoopHost for CliLoopHost {
     }
 
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
-        self.event_sink.emit_transition(record, event)
+        self.event_sink.append_safe_runtime_event(
+            event,
+            "turn",
+            record.transition.as_str(),
+            record.sequence,
+            record.from.as_str(),
+            record.to.as_str(),
+        )
     }
 }
