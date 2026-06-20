@@ -18,7 +18,7 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
     apply_emit(
         host,
         &mut state,
-        TurnTransition::RenderPrompt { message_count },
+        TurnTransition::PrepareModelRequest { message_count },
     )?;
 
     loop {

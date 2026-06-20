@@ -122,7 +122,7 @@ fn answers_without_tools_when_model_returns_plain_text() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -134,7 +134,7 @@ fn answers_without_tools_when_model_returns_plain_text() {
         host.transition_kinds(),
         [
             "start",
-            "render_prompt",
+            "prepare_model_request",
             "request_model",
             "receive_model_response",
             "parse_answer",
@@ -146,7 +146,7 @@ fn answers_without_tools_when_model_returns_plain_text() {
         host.operation_kinds(),
         [
             "transition:start",
-            "transition:render_prompt",
+            "transition:prepare_model_request",
             "transition:request_model",
             "generate",
             "transition:receive_model_response",
@@ -183,7 +183,7 @@ fn runs_one_tool_then_answers_with_observation() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -204,7 +204,7 @@ fn runs_one_tool_then_answers_with_observation() {
         host.operation_kinds(),
         [
             "transition:start",
-            "transition:render_prompt",
+            "transition:prepare_model_request",
             "transition:request_model",
             "generate",
             "transition:receive_model_response",
@@ -252,7 +252,7 @@ fn repairs_malformed_tool_json_before_dispatch() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "tool.json_malformed",
@@ -294,7 +294,7 @@ fn stops_visibly_when_tool_json_cannot_be_repaired() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "tool.json_malformed",
@@ -327,7 +327,7 @@ fn stops_before_dispatch_when_tool_limit_is_reached() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -361,7 +361,7 @@ fn rejects_hidden_tool_before_dispatch() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -395,7 +395,7 @@ fn validates_tool_args_before_dispatch() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -418,7 +418,7 @@ fn model_request_failure_finishes_failed_turn() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.request_failed",
             "turn.finished",
@@ -426,7 +426,13 @@ fn model_request_failure_finishes_failed_turn() {
     );
     assert_eq!(
         host.transition_kinds(),
-        ["start", "render_prompt", "request_model", "fail", "finish",]
+        [
+            "start",
+            "prepare_model_request",
+            "request_model",
+            "fail",
+            "finish",
+        ]
     );
     assert!(matches!(
         host.events.last(),
@@ -454,7 +460,7 @@ fn tool_dispatch_failure_finishes_failed_turn() {
         host.event_kinds(),
         [
             "turn.started",
-            "prompt.rendered",
+            "model.request_prepared",
             "model.requested",
             "model.response_received",
             "model.action_parsed",
@@ -468,7 +474,7 @@ fn tool_dispatch_failure_finishes_failed_turn() {
         host.transition_kinds(),
         [
             "start",
-            "render_prompt",
+            "prepare_model_request",
             "request_model",
             "receive_model_response",
             "parse_tool_call",

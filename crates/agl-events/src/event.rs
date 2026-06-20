@@ -12,8 +12,8 @@ use serde_json::Value;
 pub enum AgentEvent {
     #[serde(rename = "turn.started")]
     TurnStarted { turn_id: String, user_input: String },
-    #[serde(rename = "prompt.rendered")]
-    PromptRendered {
+    #[serde(rename = "model.request_prepared")]
+    ModelRequestPrepared {
         turn_id: String,
         message_count: usize,
     },
@@ -118,7 +118,7 @@ impl AgentEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             AgentEvent::TurnStarted { .. } => "turn.started",
-            AgentEvent::PromptRendered { .. } => "prompt.rendered",
+            AgentEvent::ModelRequestPrepared { .. } => "model.request_prepared",
             AgentEvent::ModelRequested { .. } => "model.requested",
             AgentEvent::ModelResponseReceived { .. } => "model.response_received",
             AgentEvent::ModelRequestFailed { .. } => "model.request_failed",
@@ -176,8 +176,8 @@ pub enum SafeAgentEvent {
         turn_id: String,
         user_input_bytes: usize,
     },
-    #[serde(rename = "prompt.rendered")]
-    PromptRendered {
+    #[serde(rename = "model.request_prepared")]
+    ModelRequestPrepared {
         turn_id: String,
         message_count: usize,
     },
@@ -380,7 +380,7 @@ impl SafeAgentEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             SafeAgentEvent::TurnStarted { .. } => "turn.started",
-            SafeAgentEvent::PromptRendered { .. } => "prompt.rendered",
+            SafeAgentEvent::ModelRequestPrepared { .. } => "model.request_prepared",
             SafeAgentEvent::ModelRequested { .. } => "model.requested",
             SafeAgentEvent::ModelResponseReceived { .. } => "model.response_received",
             SafeAgentEvent::ModelRequestFailed { .. } => "model.request_failed",
@@ -414,10 +414,10 @@ impl From<&AgentEvent> for SafeAgentEvent {
                 turn_id: turn_id.clone(),
                 user_input_bytes: user_input.len(),
             },
-            AgentEvent::PromptRendered {
+            AgentEvent::ModelRequestPrepared {
                 turn_id,
                 message_count,
-            } => SafeAgentEvent::PromptRendered {
+            } => SafeAgentEvent::ModelRequestPrepared {
                 turn_id: turn_id.clone(),
                 message_count: *message_count,
             },

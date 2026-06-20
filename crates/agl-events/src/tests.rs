@@ -8,7 +8,7 @@ fn example_events() -> Vec<AgentEvent> {
             turn_id: turn_id.clone(),
             user_input: "read README".to_string(),
         },
-        AgentEvent::PromptRendered {
+        AgentEvent::ModelRequestPrepared {
             turn_id: turn_id.clone(),
             message_count: 1,
         },
