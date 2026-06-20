@@ -177,6 +177,47 @@ fn safe_runtime_jsonl_wraps_events_with_fsm_metadata() {
     assert_eq!(decoded.event.kind(), "model.request_failed");
 }
 
+fn temp_event_path(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("agl-events-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+#[test]
+fn runtime_event_writer_writes_safe_events_with_fsm_metadata() {
+    let path = temp_event_path("safe-runtime-jsonl");
+    let writer = RuntimeEventWriter::new(&path);
+
+    writer
+        .append_safe_runtime_event(
+            &AgentEvent::TurnStarted {
+                turn_id: "turn-1".to_string(),
+                user_input: "secret prompt".to_string(),
+            },
+            "turn",
+            "start",
+            1,
+            "initialized",
+            "started",
+        )
+        .unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+
+    assert!(content.contains(r#""fsm":"turn""#), "{content}");
+    assert!(content.contains(r#""transition":"start""#), "{content}");
+    assert!(content.contains(r#""sequence":1"#), "{content}");
+    assert!(
+        content.contains(r#""from_phase":"initialized""#),
+        "{content}"
+    );
+    assert!(content.contains(r#""to_phase":"started""#), "{content}");
+    assert!(content.contains(r#""kind":"turn.started""#), "{content}");
+    assert!(!content.contains("secret prompt"), "{content}");
+
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn safe_jsonl_keeps_argument_shape_without_values() {
     let event = AgentEvent::ToolCallStarted {

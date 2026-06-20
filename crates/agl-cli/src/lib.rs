@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 mod args;
 mod chat;
 mod config;
-mod event_sink;
 mod loop_host;
 mod prompt;
 mod session;
