@@ -5,8 +5,6 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::AgentLibreSessionId;
-
 const APP_DIR: &str = "agentLIBRE";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -68,15 +66,11 @@ impl AgentLibrePaths {
         self.data_dir.join("sessions")
     }
 
-    pub fn session_dir(&self, session_id: &AgentLibreSessionId) -> PathBuf {
-        self.sessions_root().join(session_id.as_str())
+    pub fn session_dir(&self, session_id: impl AsRef<str>) -> PathBuf {
+        self.sessions_root().join(session_id.as_ref())
     }
 
-    pub fn session_run_artifact_root(
-        &self,
-        session_id: &AgentLibreSessionId,
-        run_id: &str,
-    ) -> PathBuf {
+    pub fn session_run_artifact_root(&self, session_id: impl AsRef<str>, run_id: &str) -> PathBuf {
         self.session_dir(session_id).join("runs").join(run_id)
     }
 
@@ -122,7 +116,7 @@ mod tests {
     #[test]
     fn derived_paths_match_layout() {
         let paths = AgentLibrePaths::from_agl_home("/tmp/agl-home");
-        let session_id = AgentLibreSessionId::new("session-001").unwrap();
+        let session_id = "session-001";
 
         assert_eq!(
             paths.default_local_inference_config(),
@@ -137,7 +131,7 @@ mod tests {
             PathBuf::from("/tmp/agl-home/data/runs")
         );
         assert_eq!(
-            paths.session_run_artifact_root(&session_id, "run-001"),
+            paths.session_run_artifact_root(session_id, "run-001"),
             PathBuf::from("/tmp/agl-home/data/sessions/session-001/runs/run-001")
         );
         assert_eq!(
