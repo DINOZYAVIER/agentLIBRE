@@ -18,6 +18,7 @@ agl-inference.workspace = true
 agl-loop.workspace = true
 agl-oven.workspace = true
 agl-runtime.workspace = true
+agl-session.workspace = true
 agl-turn.workspace = true
 anyhow.workspace = true
 clap.workspace = true
