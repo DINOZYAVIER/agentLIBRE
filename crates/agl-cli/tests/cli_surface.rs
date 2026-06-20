@@ -129,6 +129,30 @@ fn chat_rejects_prompt_option_with_clap_error() {
 }
 
 #[test]
+fn chat_new_session_conflict_fails_before_inference_path() {
+    let output = run_agl(&[
+        "chat",
+        "--new-session",
+        "--session-id",
+        "session-001",
+        "--run-id",
+        "run-001",
+    ]);
+
+    assert_failure(&output);
+    assert!(
+        stdout(&output).is_empty(),
+        "stdout should be empty on parse validation error"
+    );
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "--new-session cannot be used with --session-id");
+    assert!(
+        !stderr.contains("local inference config"),
+        "session flag conflict should not run inference path:\n{stderr}"
+    );
+}
+
+#[test]
 fn reserved_future_commands_fail_before_bare_prompt_execution() {
     for args in [
         &["setup"][..],

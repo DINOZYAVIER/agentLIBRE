@@ -515,6 +515,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_chat_rejects_new_session_with_session_id() {
+        let error = parse_cli([
+            "agl".to_string(),
+            "chat".to_string(),
+            "--new-session".to_string(),
+            "--session-id".to_string(),
+            "session-001".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--new-session cannot be used with --session-id")
+        );
+    }
+
+    #[test]
     fn parse_chat_rejects_prompt() {
         let error = parse_cli([
             "agl".to_string(),
