@@ -29,4 +29,5 @@ pub enum StopReasonEvent {
 pub enum TurnFinishStatus {
     Answered,
     Stopped,
+    Failed,
 }

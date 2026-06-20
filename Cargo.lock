@@ -82,6 +82,7 @@ dependencies = [
 name = "agl-runtime"
 version = "1.0.0-alpha.6"
 dependencies = [
+ "agl-session",
  "anyhow",
  "directories",
  "serde",
@@ -90,6 +91,15 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agl-session"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
