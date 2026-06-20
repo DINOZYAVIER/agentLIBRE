@@ -271,30 +271,18 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
 
         let input = match parse_chat_input(&input) {
             ParsedChatInput::Empty => {
-                if let Some(history) = &mut chat_history {
-                    history.note_empty_input()?;
-                }
                 continue;
             }
             ParsedChatInput::Message(input) => input,
             ParsedChatInput::UnknownCommand(command) => {
-                if let Some(history) = &mut chat_history {
-                    history.note_unknown_command(command)?;
-                }
                 println!("unknown_command={command}");
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Help) => {
-                if let Some(history) = &mut chat_history {
-                    history.note_help_command()?;
-                }
                 print!("{CHAT_COMMANDS_HELP}");
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
-                if let Some(history) = &mut chat_history {
-                    history.note_session_command()?;
-                }
                 print_chat_session_summary(&session_id, loop_host.session());
                 continue;
             }
@@ -330,7 +318,6 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         if let Some(history) = &mut chat_history {
             history.append_user_message(user_message_id.clone(), input.to_string())?;
             history.link_attempt(attempt_id.clone())?;
-            history.note_turn_started()?;
         }
         let turn_input = build_turn_input(
             loop_host.session().run_id().as_str(),
@@ -339,7 +326,15 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             input,
         );
         loop_host.reset_turn_counters();
-        let output = run_turn(&mut loop_host, turn_input)?;
+        let output = match run_turn(&mut loop_host, turn_input) {
+            Ok(output) => output,
+            Err(err) => {
+                if let Some(history) = &mut chat_history {
+                    history.fail(format!("{err:#}"))?;
+                }
+                return Err(err);
+            }
+        };
         let generated_requests = loop_host.generated_requests();
         messages.push(TurnMessage::User {
             content: input.to_string(),

@@ -43,17 +43,11 @@ pub enum ChatSessionTransition {
         run_id: String,
     },
     PromptForInput,
-    ReadEmptyInput,
     ReadUserMessage {
         content: String,
     },
-    ReadCommandHelp,
-    ReadCommandSession,
     ReadCommandClear,
     ReadCommandExit,
-    ReadUnknownCommand {
-        command: String,
-    },
     RecordUserMessage {
         message_id: AgentLibreMessageId,
         content: String,
@@ -62,13 +56,17 @@ pub enum ChatSessionTransition {
         run_id: String,
         attempt_id: String,
     },
-    RunTurn,
     RecordAssistantAnswer {
         message_id: AgentLibreMessageId,
         content: String,
     },
     RecordAssistantStopMarker {
         message_id: AgentLibreMessageId,
+        content: String,
+    },
+    RecordToolMessage {
+        message_id: AgentLibreMessageId,
+        name: String,
         content: String,
     },
     ClearContext,
@@ -86,20 +84,16 @@ impl ChatSessionTransition {
             ChatSessionTransition::StartNewSession { .. } => "start_new_session",
             ChatSessionTransition::ResumeSession { .. } => "resume_session",
             ChatSessionTransition::PromptForInput => "prompt_for_input",
-            ChatSessionTransition::ReadEmptyInput => "read_empty_input",
             ChatSessionTransition::ReadUserMessage { .. } => "read_user_message",
-            ChatSessionTransition::ReadCommandHelp => "read_command_help",
-            ChatSessionTransition::ReadCommandSession => "read_command_session",
             ChatSessionTransition::ReadCommandClear => "read_command_clear",
             ChatSessionTransition::ReadCommandExit => "read_command_exit",
-            ChatSessionTransition::ReadUnknownCommand { .. } => "read_unknown_command",
             ChatSessionTransition::RecordUserMessage { .. } => "record_user_message",
             ChatSessionTransition::LinkModelAttempt { .. } => "link_model_attempt",
-            ChatSessionTransition::RunTurn => "run_turn",
             ChatSessionTransition::RecordAssistantAnswer { .. } => "record_assistant_answer",
             ChatSessionTransition::RecordAssistantStopMarker { .. } => {
                 "record_assistant_stop_marker"
             }
+            ChatSessionTransition::RecordToolMessage { .. } => "record_tool_message",
             ChatSessionTransition::ClearContext => "clear_context",
             ChatSessionTransition::FinishSession { .. } => "finish_session",
             ChatSessionTransition::FailSession { .. } => "fail_session",
@@ -136,12 +130,9 @@ impl ChatSessionMachine {
         &self.session_id
     }
 
-    pub fn phase(&self) -> ChatSessionPhase {
+    #[cfg(test)]
+    pub(crate) fn phase(&self) -> ChatSessionPhase {
         self.phase
-    }
-
-    pub fn sequence(&self) -> usize {
-        self.sequence
     }
 
     pub fn apply(
@@ -198,17 +189,12 @@ fn next_phase(
         (Uninitialized, StartNewSession { .. }) => Some(Started),
         (Uninitialized, ResumeSession { .. }) => Some(Started),
         (Started | ContextCleared, PromptForInput) => Some(AwaitingInput),
-        (AwaitingInput, ReadEmptyInput) => Some(AwaitingInput),
         (AwaitingInput, ReadUserMessage { .. }) => Some(RecordingUserMessage),
-        (AwaitingInput, ReadCommandHelp) => Some(HandlingCommand),
-        (AwaitingInput, ReadCommandSession) => Some(HandlingCommand),
         (AwaitingInput, ReadCommandClear) => Some(HandlingCommand),
-        (AwaitingInput, ReadUnknownCommand { .. }) => Some(HandlingCommand),
         (HandlingCommand, ClearContext) => Some(ContextCleared),
-        (HandlingCommand, PromptForInput) => Some(AwaitingInput),
         (RecordingUserMessage, RecordUserMessage { .. }) => Some(RunningTurn),
         (RunningTurn, LinkModelAttempt { .. }) => Some(RunningTurn),
-        (RunningTurn, RunTurn) => Some(RunningTurn),
+        (RunningTurn, RecordToolMessage { .. }) => Some(RunningTurn),
         (RunningTurn, RecordAssistantAnswer { .. }) => Some(RecordingAssistantMessage),
         (RunningTurn, RecordAssistantStopMarker { .. }) => Some(RecordingAssistantMessage),
         (RecordingAssistantMessage, PromptForInput) => Some(AwaitingInput),
