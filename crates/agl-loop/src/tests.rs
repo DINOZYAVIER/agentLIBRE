@@ -111,8 +111,12 @@ fn answers_without_tools_when_model_returns_plain_text() {
     let mut host = FakeHost::default().with_model_response("done");
     let output = run_turn(&mut host, TurnInput::user("answer")).unwrap();
 
-    assert_eq!(output.answer, Some("done".to_string()));
-    assert_eq!(output.stop_reason, None);
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "done".to_string()
+        }
+    );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert_eq!(
         host.event_kinds(),
@@ -165,7 +169,12 @@ fn runs_one_tool_then_answers_with_observation() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.answer, Some("README says agentLIBRE.".to_string()));
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "README says agentLIBRE.".to_string()
+        }
+    );
     assert_eq!(
         host.request_kinds(),
         ["generate", "dispatch_tool", "generate"]
@@ -229,7 +238,12 @@ fn repairs_malformed_tool_json_before_dispatch() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.answer, Some("repaired and done".to_string()));
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "repaired and done".to_string()
+        }
+    );
     assert_eq!(
         host.request_kinds(),
         ["generate", "dispatch_tool", "generate"]
@@ -269,8 +283,12 @@ fn stops_visibly_when_tool_json_cannot_be_repaired() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.answer, None);
-    assert_eq!(output.stop_reason, Some(StopReason::ToolJsonUnrepairable));
+    assert_eq!(
+        output,
+        TurnOutput::Stopped {
+            reason: StopReason::ToolJsonUnrepairable
+        }
+    );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert_eq!(
         host.event_kinds(),
@@ -297,7 +315,12 @@ fn stops_before_dispatch_when_tool_limit_is_reached() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.stop_reason, Some(StopReason::ToolLimitReached));
+    assert_eq!(
+        output,
+        TurnOutput::Stopped {
+            reason: StopReason::ToolLimitReached
+        }
+    );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
     assert_eq!(
@@ -326,7 +349,12 @@ fn rejects_hidden_tool_before_dispatch() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.stop_reason, Some(StopReason::HiddenTool));
+    assert_eq!(
+        output,
+        TurnOutput::Stopped {
+            reason: StopReason::HiddenTool
+        }
+    );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
     assert_eq!(
@@ -355,7 +383,12 @@ fn validates_tool_args_before_dispatch() {
 
     let output = run_turn(&mut host, input).unwrap();
 
-    assert_eq!(output.stop_reason, Some(StopReason::InvalidToolArguments));
+    assert_eq!(
+        output,
+        TurnOutput::Stopped {
+            reason: StopReason::InvalidToolArguments
+        }
+    );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
     assert_eq!(
