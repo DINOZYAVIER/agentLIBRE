@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::{AgentLibreMessageId, AgentLibreSessionId};
+use crate::{AgentLibreMessageId, AgentLibreSessionFinishReason, AgentLibreSessionId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatSessionPhase {
@@ -72,7 +72,9 @@ pub enum ChatSessionTransition {
         content: String,
     },
     ClearContext,
-    FinishSession,
+    FinishSession {
+        reason: AgentLibreSessionFinishReason,
+    },
     FailSession {
         message: String,
     },
@@ -99,7 +101,7 @@ impl ChatSessionTransition {
                 "record_assistant_stop_marker"
             }
             ChatSessionTransition::ClearContext => "clear_context",
-            ChatSessionTransition::FinishSession => "finish_session",
+            ChatSessionTransition::FinishSession { .. } => "finish_session",
             ChatSessionTransition::FailSession { .. } => "fail_session",
         }
     }
@@ -211,8 +213,8 @@ fn next_phase(
         (RunningTurn, RecordAssistantStopMarker { .. }) => Some(RecordingAssistantMessage),
         (RecordingAssistantMessage, PromptForInput) => Some(AwaitingInput),
         (AwaitingInput, ReadCommandExit) => Some(Finished),
-        (AwaitingInput, FinishSession) => Some(Finished),
-        (Started, FinishSession) => Some(Finished),
+        (AwaitingInput, FinishSession { .. }) => Some(Finished),
+        (Started, FinishSession { .. }) => Some(Finished),
         (_, FailSession { .. }) if !matches!(from, Finished | Failed) => Some(Failed),
         _ => None,
     }

@@ -22,14 +22,6 @@ impl RuntimeEventSink {
         &self.events_jsonl
     }
 
-    pub(crate) fn emit(&self, event: &AgentEvent) -> Result<()> {
-        self.write_line(
-            event
-                .to_safe_jsonl_line()
-                .context("failed to serialize safe runtime event")?,
-        )
-    }
-
     pub(crate) fn emit_transition(
         &self,
         record: &TurnTransitionRecord,
@@ -38,6 +30,8 @@ impl RuntimeEventSink {
         self.write_line(
             event
                 .to_safe_runtime_jsonl_line(
+                    "turn",
+                    record.transition.as_str(),
                     record.sequence,
                     record.from.as_str(),
                     record.to.as_str(),
@@ -101,34 +95,6 @@ mod tests {
     }
 
     #[test]
-    fn writes_safe_runtime_events_as_jsonl() {
-        let path = temp_event_path("safe-jsonl");
-        let sink = RuntimeEventSink::new(&path);
-
-        sink.emit(&AgentEvent::TurnStarted {
-            turn_id: "turn-1".to_string(),
-            user_input: "secret prompt".to_string(),
-        })
-        .unwrap();
-        sink.emit(&AgentEvent::AnswerFinal {
-            turn_id: "turn-1".to_string(),
-            answer: "secret answer".to_string(),
-        })
-        .unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-
-        assert!(content.contains(r#""kind":"turn.started""#), "{content}");
-        assert!(content.contains(r#""user_input_bytes":13"#), "{content}");
-        assert!(content.contains(r#""kind":"answer.final""#), "{content}");
-        assert!(content.contains(r#""answer_bytes":13"#), "{content}");
-        assert!(!content.contains("secret prompt"), "{content}");
-        assert!(!content.contains("secret answer"), "{content}");
-
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
     fn writes_safe_runtime_events_with_fsm_metadata() {
         let path = temp_event_path("safe-runtime-jsonl");
         let sink = RuntimeEventSink::new(&path);
@@ -150,6 +116,8 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
 
+        assert!(content.contains(r#""fsm":"turn""#), "{content}");
+        assert!(content.contains(r#""transition":"start""#), "{content}");
         assert!(content.contains(r#""sequence":1"#), "{content}");
         assert!(
             content.contains(r#""from_phase":"initialized""#),

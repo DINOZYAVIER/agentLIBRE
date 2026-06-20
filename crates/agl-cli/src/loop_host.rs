@@ -61,10 +61,6 @@ impl AgentLoopHost for CliLoopHost {
         )
     }
 
-    fn emit_event(&mut self, event: AgentEvent) -> Result<()> {
-        self.event_sink.emit(&event)
-    }
-
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
         self.event_sink.emit_transition(record, event)
     }

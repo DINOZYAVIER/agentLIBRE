@@ -3,8 +3,8 @@ mod paths;
 mod tracing_setup;
 
 pub use agl_session::{
-    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
-    ChatSessionStore, SessionMetadata,
+    AgentLibreMessageId, AgentLibreSessionFinishReason, AgentLibreSessionId, ChatSessionEvent,
+    ChatSessionReplay, ChatSessionStore, SessionMetadata,
 };
 pub use config::{
     AgentLibreHistoryConfig, AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibreRuntimeConfig,

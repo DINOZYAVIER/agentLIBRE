@@ -155,9 +155,11 @@ fn safe_runtime_jsonl_wraps_events_with_fsm_metadata() {
     };
 
     let line = event
-        .to_safe_runtime_jsonl_line(7, "awaiting_model", "failed")
+        .to_safe_runtime_jsonl_line("turn", "fail", 7, "awaiting_model", "failed")
         .expect("event serializes");
 
+    assert!(line.contains(r#""fsm":"turn""#), "{line}");
+    assert!(line.contains(r#""transition":"fail""#), "{line}");
     assert!(line.contains(r#""sequence":7"#), "{line}");
     assert!(line.contains(r#""from_phase":"awaiting_model""#), "{line}");
     assert!(line.contains(r#""to_phase":"failed""#), "{line}");
@@ -167,6 +169,8 @@ fn safe_runtime_jsonl_wraps_events_with_fsm_metadata() {
 
     let decoded: SafeRuntimeEvent =
         serde_json::from_str(&line).expect("safe runtime event round trips");
+    assert_eq!(decoded.fsm, "turn");
+    assert_eq!(decoded.transition, "fail");
     assert_eq!(decoded.sequence, 7);
     assert_eq!(decoded.from_phase, "awaiting_model");
     assert_eq!(decoded.to_phase, "failed");

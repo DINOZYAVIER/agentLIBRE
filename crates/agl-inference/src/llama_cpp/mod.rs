@@ -6,8 +6,9 @@ mod ffi;
 mod runtime;
 mod session;
 
-use crate::evidence::{
-    InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent,
+use crate::evidence::{InferenceArtifactRoot, InferenceEventWriter, InferenceFinishStatus};
+use crate::{
+    InferenceAttemptMachine, InferenceAttemptTransition, InferenceAttemptTransitionRecord,
 };
 use crate::{InferenceBackend, InferenceRequest, InferenceResponse, InferenceResponseMetadata};
 use runtime::{LlamaCppRuntime, LlamaCppRuntimeError};
@@ -40,40 +41,6 @@ impl LlamaCppBackend {
     pub fn clear_context(&mut self) {
         self.runtime.clear_context();
     }
-
-    fn append_started(
-        &self,
-        writer: &InferenceEventWriter,
-        request: &InferenceRequest,
-    ) -> Result<()> {
-        let paths = self
-            .artifact_root
-            .paths(&request.run_id, &request.attempt_id);
-        writer.append(&InferenceObservationEvent::AttemptStarted {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            backend: "llama_cpp".to_string(),
-            request_path: paths.request_json().to_path_buf(),
-        })
-    }
-
-    fn append_failure(
-        &self,
-        writer: &InferenceEventWriter,
-        request: &InferenceRequest,
-        message: &str,
-    ) -> Result<()> {
-        writer.append(&InferenceObservationEvent::AttemptFailed {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            message: message.to_string(),
-        })?;
-        writer.append(&InferenceObservationEvent::AttemptFinished {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            finish_status: InferenceFinishStatus::Failed,
-        })
-    }
 }
 
 impl InferenceBackend for LlamaCppBackend {
@@ -82,15 +49,31 @@ impl InferenceBackend for LlamaCppBackend {
             .artifact_root
             .paths(&request.run_id, &request.attempt_id);
         let writer = InferenceEventWriter::new(paths.events_jsonl());
-        self.append_started(&writer, &request)?;
+        let mut machine =
+            InferenceAttemptMachine::new(request.run_id.clone(), request.attempt_id.clone());
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::StartAttempt {
+                backend: "llama_cpp".to_string(),
+                request_path: paths.request_json().to_path_buf(),
+            },
+        )?;
         paths.write_request_json(&request)?;
-        writer.append(&InferenceObservationEvent::RequestRecorded {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            path: paths.request_json().to_path_buf(),
-        })?;
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordRequest {
+                path: paths.request_json().to_path_buf(),
+            },
+        )?;
 
         let runtime_started = Instant::now();
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::StartRuntime,
+        )?;
         let output = match self.runtime.generate(&request.rendered) {
             Ok(output) => output,
             Err(err) => {
@@ -108,7 +91,27 @@ impl InferenceBackend for LlamaCppBackend {
                 runtime_log.push_str(&err_text);
                 runtime_log.push('\n');
                 paths.write_runtime_log(runtime_log)?;
-                self.append_failure(&writer, &request, &message)?;
+                apply_inference_transition(
+                    &writer,
+                    &mut machine,
+                    InferenceAttemptTransition::RecordRuntimeLog {
+                        path: paths.runtime_log().to_path_buf(),
+                    },
+                )?;
+                apply_inference_transition(
+                    &writer,
+                    &mut machine,
+                    InferenceAttemptTransition::FailAttempt {
+                        message: message.clone(),
+                    },
+                )?;
+                apply_inference_transition(
+                    &writer,
+                    &mut machine,
+                    InferenceAttemptTransition::FinishAttempt {
+                        status: InferenceFinishStatus::Failed,
+                    },
+                )?;
                 tracing::error!(
                     target: "agentlibre::inference",
                     run_id = %request.run_id,
@@ -122,6 +125,13 @@ impl InferenceBackend for LlamaCppBackend {
             }
         };
         paths.write_runtime_log(output.log)?;
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordRuntimeLog {
+                path: paths.runtime_log().to_path_buf(),
+            },
+        )?;
 
         let response = InferenceResponse {
             content: output.content,
@@ -133,16 +143,20 @@ impl InferenceBackend for LlamaCppBackend {
             },
         };
         paths.write_response_json(&response)?;
-        writer.append(&InferenceObservationEvent::ResponseRecorded {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            path: paths.response_json().to_path_buf(),
-        })?;
-        writer.append(&InferenceObservationEvent::AttemptFinished {
-            run_id: request.run_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            finish_status: InferenceFinishStatus::Succeeded,
-        })?;
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::RecordResponse {
+                path: paths.response_json().to_path_buf(),
+            },
+        )?;
+        apply_inference_transition(
+            &writer,
+            &mut machine,
+            InferenceAttemptTransition::FinishAttempt {
+                status: InferenceFinishStatus::Succeeded,
+            },
+        )?;
         tracing::info!(
             target: "agentlibre::inference",
             run_id = %request.run_id,
@@ -157,6 +171,16 @@ impl InferenceBackend for LlamaCppBackend {
         );
         Ok(response)
     }
+}
+
+fn apply_inference_transition(
+    writer: &InferenceEventWriter,
+    machine: &mut InferenceAttemptMachine,
+    transition: InferenceAttemptTransition,
+) -> Result<InferenceAttemptTransitionRecord> {
+    let record = machine.apply(transition)?;
+    writer.append_transition(&record)?;
+    Ok(record)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
