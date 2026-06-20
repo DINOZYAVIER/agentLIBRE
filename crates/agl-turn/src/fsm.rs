@@ -9,7 +9,7 @@ use crate::StopReason;
 pub enum TurnPhase {
     Initialized,
     Started,
-    PromptRendered,
+    ModelRequestPrepared,
     AwaitingModel,
     ModelResponded,
     ActionParsed,
@@ -28,7 +28,7 @@ impl TurnPhase {
         match self {
             TurnPhase::Initialized => "initialized",
             TurnPhase::Started => "started",
-            TurnPhase::PromptRendered => "prompt_rendered",
+            TurnPhase::ModelRequestPrepared => "model_request_prepared",
             TurnPhase::AwaitingModel => "awaiting_model",
             TurnPhase::ModelResponded => "model_responded",
             TurnPhase::ActionParsed => "action_parsed",
@@ -49,7 +49,7 @@ pub enum TurnTransition {
     Start {
         user_input: String,
     },
-    RenderPrompt {
+    PrepareModelRequest {
         message_count: usize,
     },
     RequestModel {
@@ -124,7 +124,7 @@ impl TurnTransition {
     pub fn as_str(&self) -> &'static str {
         match self {
             TurnTransition::Start { .. } => "start",
-            TurnTransition::RenderPrompt { .. } => "render_prompt",
+            TurnTransition::PrepareModelRequest { .. } => "prepare_model_request",
             TurnTransition::RequestModel { .. } => "request_model",
             TurnTransition::ReceiveModelResponse { .. } => "receive_model_response",
             TurnTransition::ParseAnswer => "parse_answer",
@@ -283,8 +283,8 @@ fn next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnPhase>
 
     match (from, transition) {
         (Initialized, Start { .. }) => Some(Started),
-        (Started, RenderPrompt { .. }) => Some(PromptRendered),
-        (PromptRendered | ObservationAppended, RequestModel { .. }) => Some(AwaitingModel),
+        (Started, PrepareModelRequest { .. }) => Some(ModelRequestPrepared),
+        (ModelRequestPrepared | ObservationAppended, RequestModel { .. }) => Some(AwaitingModel),
         (AwaitingModel, ReceiveModelResponse { .. }) => Some(ModelResponded),
         (
             AwaitingModel,
