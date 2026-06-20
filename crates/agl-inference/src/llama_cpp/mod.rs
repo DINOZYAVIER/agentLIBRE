@@ -51,11 +51,12 @@ impl InferenceBackend for LlamaCppBackend {
         let writer = InferenceEventWriter::new(paths.events_jsonl());
         let mut machine =
             InferenceAttemptMachine::new(request.run_id.clone(), request.attempt_id.clone());
+        let backend = self.runtime.config().backend.kind.as_str();
         apply_inference_transition(
             &writer,
             &mut machine,
             InferenceAttemptTransition::StartAttempt {
-                backend: "llama_cpp".to_string(),
+                backend: backend.to_string(),
                 request_path: paths.request_json().to_path_buf(),
             },
         )?;
@@ -116,7 +117,7 @@ impl InferenceBackend for LlamaCppBackend {
                     target: "agentlibre::inference",
                     run_id = %request.run_id,
                     attempt_id = %request.attempt_id,
-                    backend = "llama_cpp",
+                    backend,
                     duration_ms,
                     error = %err_text,
                     "llama.cpp inference attempt failed"
@@ -161,7 +162,7 @@ impl InferenceBackend for LlamaCppBackend {
             target: "agentlibre::inference",
             run_id = %request.run_id,
             attempt_id = %request.attempt_id,
-            backend = "llama_cpp",
+            backend,
             finish_reason = ?response.finish_reason,
             model_state = %response.metadata.model_state.as_deref().unwrap_or("unknown"),
             selected_device = %response.metadata.selected_device.as_deref().unwrap_or(""),

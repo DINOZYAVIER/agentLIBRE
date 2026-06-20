@@ -71,7 +71,8 @@ pub struct SessionMetadata {
     pub session_id: AgentLibreSessionId,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
-    pub model_config_path: PathBuf,
+    #[serde(alias = "model_config_path")]
+    pub local_inference_config_path: PathBuf,
     pub backend: String,
 }
 
@@ -155,7 +156,7 @@ impl ChatSessionStore {
         sessions_root: impl AsRef<Path>,
         session_id: AgentLibreSessionId,
         run_id: impl Into<String>,
-        model_config_path: impl Into<PathBuf>,
+        local_inference_config_path: impl Into<PathBuf>,
         backend: impl Into<String>,
     ) -> Result<Self> {
         let run_id = run_id.into();
@@ -175,7 +176,7 @@ impl ChatSessionStore {
             session_id: session_id.clone(),
             created_at_unix_ms: unix_millis(),
             updated_at_unix_ms: unix_millis(),
-            model_config_path: model_config_path.into(),
+            local_inference_config_path: local_inference_config_path.into(),
             backend: backend.into(),
         };
         write_new_json(&session_dir.join("session.json"), &metadata)?;
