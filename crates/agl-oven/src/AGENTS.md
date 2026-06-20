@@ -1,4 +1,7 @@
 # AGENTS.md
 
-This component owns prompt baking and dialect-specific rendered model request structures.
-When adding a dialect, tool-call format, or prepared artifact, add round-trip or golden-style tests for the exact output.
+This component owns backend-neutral rendered model request structures and
+dialect-specific tool-call transcript formatting.
+When adding a dialect, tool-call format, or rendered artifact, add round-trip or
+golden-style tests for the exact output. Final backend chat-template application
+belongs in `agl-inference`.

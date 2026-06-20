@@ -13,7 +13,7 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> AgentEvent {
             turn_id: record.turn_id.clone(),
             user_input: user_input.clone(),
         },
-        TurnTransition::RenderPrompt { message_count } => AgentEvent::PromptRendered {
+        TurnTransition::PrepareModelRequest { message_count } => AgentEvent::ModelRequestPrepared {
             turn_id: record.turn_id.clone(),
             message_count: *message_count,
         },

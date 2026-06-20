@@ -202,9 +202,9 @@ fn turn_machine_accepts_answer_path() {
     assert_eq!(
         apply(
             &mut machine,
-            TurnTransition::RenderPrompt { message_count: 1 },
+            TurnTransition::PrepareModelRequest { message_count: 1 },
         ),
-        TurnPhase::PromptRendered
+        TurnPhase::ModelRequestPrepared
     );
     assert_eq!(
         apply(
@@ -260,7 +260,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
     );
     apply(
         &mut machine,
-        TurnTransition::RenderPrompt { message_count: 1 },
+        TurnTransition::PrepareModelRequest { message_count: 1 },
     );
     apply(
         &mut machine,
@@ -332,7 +332,7 @@ fn turn_machine_accepts_repaired_malformed_tool_json() {
     );
     apply(
         &mut machine,
-        TurnTransition::RenderPrompt { message_count: 1 },
+        TurnTransition::PrepareModelRequest { message_count: 1 },
     );
     apply(
         &mut machine,
@@ -389,7 +389,7 @@ fn turn_machine_accepts_stopped_tool_path() {
     );
     apply(
         &mut machine,
-        TurnTransition::RenderPrompt { message_count: 1 },
+        TurnTransition::PrepareModelRequest { message_count: 1 },
     );
     apply(
         &mut machine,
@@ -442,7 +442,7 @@ fn turn_machine_accepts_model_failure_path() {
     );
     apply(
         &mut machine,
-        TurnTransition::RenderPrompt { message_count: 1 },
+        TurnTransition::PrepareModelRequest { message_count: 1 },
     );
     apply(
         &mut machine,
@@ -487,7 +487,7 @@ fn turn_machine_rejects_illegal_transition_and_finished_is_terminal() {
     );
     apply(
         &mut machine,
-        TurnTransition::RenderPrompt { message_count: 1 },
+        TurnTransition::PrepareModelRequest { message_count: 1 },
     );
     apply(
         &mut machine,
