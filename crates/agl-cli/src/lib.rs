@@ -4,9 +4,11 @@ use std::process;
 
 use agl_loop::{TurnInput, TurnOutput, run_turn};
 use agl_runtime::{
-    AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibreMessageId, AgentLibrePaths,
-    AgentLibreProcessMode, AgentLibreRuntimeConfig, AgentLibreSessionId, ChatSessionEvent,
-    ChatSessionReplay, ChatSessionStore, init_tracing, logged_message_fields,
+    AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
+    AgentLibreRuntimeConfig, init_tracing, logged_message_fields,
+};
+use agl_session::{
+    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
 };
 use agl_turn::{StopReason, TurnMessage};
 use anyhow::{Context, Result};
@@ -195,7 +197,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             Some(
                 runtime
                     .paths
-                    .session_run_artifact_root(&session_id, &run_id),
+                    .session_run_artifact_root(session_id.as_str(), &run_id),
             )
         })
     } else {
@@ -554,7 +556,7 @@ fn log_message_metadata(
 
 #[cfg(test)]
 mod tests {
-    use agl_runtime::{AgentLibreMessageId, AgentLibreSessionId};
+    use agl_session::{AgentLibreMessageId, AgentLibreSessionId};
 
     use crate::args::ConfigCommand;
 
