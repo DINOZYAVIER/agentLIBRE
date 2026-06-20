@@ -1,4 +1,9 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use crate::{ParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -285,6 +290,79 @@ pub struct SafeRuntimeEvent {
     pub to_phase: String,
     #[serde(flatten)]
     pub event: SafeAgentEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeEventWriter {
+    events_jsonl: PathBuf,
+}
+
+impl RuntimeEventWriter {
+    pub fn new(events_jsonl: impl Into<PathBuf>) -> Self {
+        Self {
+            events_jsonl: events_jsonl.into(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.events_jsonl
+    }
+
+    pub fn append_safe_runtime_event(
+        &self,
+        event: &AgentEvent,
+        fsm: impl Into<String>,
+        transition: impl Into<String>,
+        sequence: usize,
+        from_phase: impl Into<String>,
+        to_phase: impl Into<String>,
+    ) -> Result<()> {
+        self.write_line(
+            event
+                .to_safe_runtime_jsonl_line(fsm, transition, sequence, from_phase, to_phase)
+                .context("failed to serialize safe runtime event")?,
+        )
+    }
+
+    fn write_line(&self, line: String) -> Result<()> {
+        if let Some(parent) = self.events_jsonl.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create runtime event directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.events_jsonl)
+            .with_context(|| {
+                format!(
+                    "failed to open runtime event stream {}",
+                    self.events_jsonl.display()
+                )
+            })?;
+        file.write_all(line.as_bytes()).with_context(|| {
+            format!(
+                "failed to write runtime event {}",
+                self.events_jsonl.display()
+            )
+        })?;
+        file.write_all(b"\n").with_context(|| {
+            format!(
+                "failed to write runtime event {}",
+                self.events_jsonl.display()
+            )
+        })?;
+        file.flush().with_context(|| {
+            format!(
+                "failed to flush runtime event {}",
+                self.events_jsonl.display()
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
