@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const AGL_BIN: &str = env!("CARGO_BIN_EXE_agl");
@@ -204,11 +205,71 @@ fn missing_default_inference_config_points_to_next_steps() {
     );
 }
 
+#[test]
+fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
+    let home = TempHome::new("chat-model-failure");
+    let config_path = home.write_local_inference_config(
+        "missing-model.toml",
+        "/tmp/agl-cli-surface-missing-model.gguf",
+    );
+    let home_arg = home.path_string();
+    let config_arg = config_path.display().to_string();
+    let output = run_agl_with_stdin(
+        &[
+            "--home",
+            &home_arg,
+            "chat",
+            "--config",
+            &config_arg,
+            "--run-id",
+            "failed-chat-run",
+            "--session-id",
+            "failed-chat-session",
+            "--max-output-tokens",
+            "1",
+        ],
+        "hello\n",
+    );
+
+    assert_failure(&output);
+    assert_contains(&stdout(&output), "session_id=failed-chat-session");
+    assert_contains(&stderr(&output), "model request failed");
+
+    let transcript = fs::read_to_string(
+        home.path()
+            .join("data")
+            .join("sessions")
+            .join("failed-chat-session")
+            .join("transcript.jsonl"),
+    )
+    .expect("chat failure should write transcript");
+    assert_contains(&transcript, "\"kind\":\"session_failed\"");
+}
+
 fn run_agl(args: &[&str]) -> Output {
     Command::new(AGL_BIN)
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
+}
+
+fn run_agl_with_stdin(args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(AGL_BIN)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("failed to spawn agl binary at {AGL_BIN}: {err}"));
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(input.as_bytes())
+        .expect("failed to write agl stdin");
+    child
+        .wait_with_output()
+        .expect("failed to wait for agl process")
 }
 
 fn stdout(output: &Output) -> String {
@@ -284,6 +345,41 @@ impl TempHome {
 
     fn path_string(&self) -> String {
         self.path.display().to_string()
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn write_local_inference_config(&self, name: &str, model_path: &str) -> PathBuf {
+        let path = self.path.join(name);
+        fs::write(
+            &path,
+            format!(
+                r#"[backend]
+kind = "llama_cpp"
+model = "{model_path}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#
+            ),
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to write local inference config {}: {err}",
+                path.display()
+            )
+        });
+        path
     }
 }
 
