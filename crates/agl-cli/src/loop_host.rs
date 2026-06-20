@@ -1,6 +1,7 @@
 use agl_events::AgentEvent;
 use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
+    TurnTransitionRecord,
 };
 use anyhow::{Result, bail};
 
@@ -62,5 +63,9 @@ impl AgentLoopHost for CliLoopHost {
 
     fn emit_event(&mut self, event: AgentEvent) -> Result<()> {
         self.event_sink.emit(&event)
+    }
+
+    fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
+        self.event_sink.emit_transition(record, event)
     }
 }

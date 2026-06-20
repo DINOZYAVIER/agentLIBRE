@@ -1,6 +1,8 @@
 use agl_actions::ToolCall;
 
-use crate::{TurnInput, TurnMessage};
+use crate::{
+    TurnInput, TurnMachine, TurnMessage, TurnTransition, TurnTransitionError, TurnTransitionRecord,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnState {
@@ -8,6 +10,7 @@ pub struct TurnState {
     pub messages: Vec<TurnMessage>,
     pub request_index: usize,
     pub tool_call_count: usize,
+    pub machine: TurnMachine,
 }
 
 impl TurnState {
@@ -18,11 +21,19 @@ impl TurnState {
         });
         let request_index = input.request_index_start;
         Self {
+            machine: TurnMachine::new(input.turn_id.clone()),
             input,
             messages,
             request_index,
             tool_call_count: 0,
         }
+    }
+
+    pub fn apply_transition(
+        &mut self,
+        transition: TurnTransition,
+    ) -> Result<TurnTransitionRecord, TurnTransitionError> {
+        self.machine.apply(transition)
     }
 
     pub fn append_tool_observation(&mut self, tool_call: ToolCall, observation: String) {

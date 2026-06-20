@@ -21,6 +21,11 @@ fn example_events() -> Vec<AgentEvent> {
             request_index: 0,
             content: "answer\nwith newline".to_string(),
         },
+        AgentEvent::ModelRequestFailed {
+            turn_id: turn_id.clone(),
+            request_index: 0,
+            message: "backend stderr secret".to_string(),
+        },
         AgentEvent::ModelActionParsed {
             turn_id: turn_id.clone(),
             action: ParsedActionEvent::Answer,
@@ -78,6 +83,11 @@ fn example_events() -> Vec<AgentEvent> {
             name: "read_file".to_string(),
             observation: "README contents".to_string(),
         },
+        AgentEvent::ToolCallFailed {
+            turn_id: turn_id.clone(),
+            name: "read_file".to_string(),
+            message: "tool failed with secret path".to_string(),
+        },
         AgentEvent::ObservationAppended {
             turn_id: turn_id.clone(),
             name: "read_file".to_string(),
@@ -114,9 +124,11 @@ fn safe_jsonl_omits_content_bearing_fields() {
     let forbidden = [
         "read README",
         "answer\nwith newline",
+        "backend stderr secret",
         "{bad",
         r#"{"name":"read_file","arguments":{"path":"README.MD"}}"#,
         "README contents",
+        "tool failed with secret path",
         "done",
     ];
 
@@ -132,6 +144,33 @@ fn safe_jsonl_omits_content_bearing_fields() {
         let decoded: SafeAgentEvent = serde_json::from_str(&line).expect("safe event round trips");
         assert_eq!(decoded.kind(), event.kind());
     }
+}
+
+#[test]
+fn safe_runtime_jsonl_wraps_events_with_fsm_metadata() {
+    let event = AgentEvent::ModelRequestFailed {
+        turn_id: "turn-1".to_string(),
+        request_index: 2,
+        message: "backend stderr secret".to_string(),
+    };
+
+    let line = event
+        .to_safe_runtime_jsonl_line(7, "awaiting_model", "failed")
+        .expect("event serializes");
+
+    assert!(line.contains(r#""sequence":7"#), "{line}");
+    assert!(line.contains(r#""from_phase":"awaiting_model""#), "{line}");
+    assert!(line.contains(r#""to_phase":"failed""#), "{line}");
+    assert!(line.contains(r#""kind":"model.request_failed""#), "{line}");
+    assert!(line.contains(r#""message_bytes":21"#), "{line}");
+    assert!(!line.contains("backend stderr secret"), "{line}");
+
+    let decoded: SafeRuntimeEvent =
+        serde_json::from_str(&line).expect("safe runtime event round trips");
+    assert_eq!(decoded.sequence, 7);
+    assert_eq!(decoded.from_phase, "awaiting_model");
+    assert_eq!(decoded.to_phase, "failed");
+    assert_eq!(decoded.event.kind(), "model.request_failed");
 }
 
 #[test]

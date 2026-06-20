@@ -109,7 +109,7 @@ impl InferenceSession {
     }
 
     pub(crate) fn event_stream_path(&self) -> PathBuf {
-        InferenceArtifactRoot::new(self.artifact_root.clone()).events_jsonl(&self.run_id)
+        agent_event_stream_path(&self.artifact_root, &self.run_id)
     }
 
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
@@ -125,6 +125,12 @@ impl InferenceSession {
     pub(crate) fn clear_context(&mut self) {
         self.backend.clear_context();
     }
+}
+
+fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &InferenceRunId) -> PathBuf {
+    InferenceArtifactRoot::new(artifact_root.to_path_buf())
+        .run_dir(run_id)
+        .join("agent-events.jsonl")
 }
 
 fn build_inference_request(
@@ -264,6 +270,16 @@ mod tests {
         assert_eq!(
             InferenceSession::default_artifact_root(&runtime),
             PathBuf::from("/tmp/agl-home/data/runs")
+        );
+    }
+
+    #[test]
+    fn agent_event_stream_is_separate_from_inference_evidence_events() {
+        let run_id = InferenceRunId::new("run-001").unwrap();
+
+        assert_eq!(
+            agent_event_stream_path(std::path::Path::new("/tmp/artifacts"), &run_id),
+            PathBuf::from("/tmp/artifacts/inference-runs/run-001/agent-events.jsonl")
         );
     }
 }

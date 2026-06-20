@@ -167,3 +167,335 @@ fn append_tool_observation_records_assistant_tool_pair() {
         }
     );
 }
+
+fn apply(machine: &mut TurnMachine, transition: TurnTransition) -> TurnPhase {
+    machine.apply(transition).unwrap().to
+}
+
+#[test]
+fn turn_machine_accepts_answer_path() {
+    let mut machine = TurnMachine::new("turn-answer");
+
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Start {
+                user_input: "hello".to_string(),
+            },
+        ),
+        TurnPhase::Started
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RenderPrompt { message_count: 1 },
+        ),
+        TurnPhase::PromptRendered
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RequestModel { request_index: 1 },
+        ),
+        TurnPhase::AwaitingModel
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::ReceiveModelResponse {
+                request_index: 1,
+                content: "done".to_string(),
+            },
+        ),
+        TurnPhase::ModelResponded
+    );
+    assert_eq!(
+        apply(&mut machine, TurnTransition::ParseAnswer),
+        TurnPhase::ActionParsed
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::FinalAnswer {
+                answer: "done".to_string(),
+            },
+        ),
+        TurnPhase::AnswerReady
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Finish {
+                status: TurnTerminalStatus::Answered,
+            },
+        ),
+        TurnPhase::Finished
+    );
+    assert_eq!(machine.sequence(), 7);
+}
+
+#[test]
+fn turn_machine_accepts_tool_loop_back_to_model() {
+    let mut machine = TurnMachine::new("turn-tool");
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "read".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RenderPrompt { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 1,
+            content: tool_call("read_file", json!({"path": "README.MD"})).name,
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ParseToolCall {
+            name: "read_file".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ValidateToolArgs {
+            name: "read_file".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::StartToolCall {
+            name: "read_file".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::FinishToolCall {
+            name: "read_file".to_string(),
+            observation: "readme".to_string(),
+        },
+    );
+
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::AppendObservation {
+                name: "read_file".to_string(),
+                observation: "readme".to_string(),
+            },
+        ),
+        TurnPhase::ObservationAppended
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RequestModel { request_index: 2 },
+        ),
+        TurnPhase::AwaitingModel
+    );
+}
+
+#[test]
+fn turn_machine_accepts_repaired_malformed_tool_json() {
+    let mut machine = TurnMachine::new("turn-repair");
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "read".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RenderPrompt { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 1,
+            content: "<tool_call>".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::DetectMalformedToolJson {
+            classification: ToolJsonMalformedClassification::Syntax,
+            raw_json: "{bad".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::AttemptToolJsonRepair {
+            strategy: "quoted_json_string".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::SucceedToolJsonRepair {
+            strategy: "quoted_json_string".to_string(),
+            repaired_json: "{}".to_string(),
+        },
+    );
+
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::ParseToolCall {
+                name: "read_file".to_string(),
+            },
+        ),
+        TurnPhase::ActionParsed
+    );
+}
+
+#[test]
+fn turn_machine_accepts_stopped_tool_path() {
+    let mut machine = TurnMachine::new("turn-stopped");
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "read".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RenderPrompt { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 1,
+            content: "tool".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ParseToolCall {
+            name: "read_file".to_string(),
+        },
+    );
+    apply(&mut machine, TurnTransition::RejectToolLimit { limit: 0 });
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Stop {
+                reason: StopReason::ToolLimitReached,
+                visible: true,
+            },
+        ),
+        TurnPhase::Stopped
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Finish {
+                status: TurnTerminalStatus::Stopped,
+            },
+        ),
+        TurnPhase::Finished
+    );
+}
+
+#[test]
+fn turn_machine_accepts_model_failure_path() {
+    let mut machine = TurnMachine::new("turn-model-failed");
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "hello".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RenderPrompt { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Fail {
+                operation: TurnFailureOperation::ModelRequest { request_index: 1 },
+                message: "backend failed".to_string(),
+            },
+        ),
+        TurnPhase::Failed
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Finish {
+                status: TurnTerminalStatus::Failed,
+            },
+        ),
+        TurnPhase::Finished
+    );
+}
+
+#[test]
+fn turn_machine_rejects_illegal_transition_and_finished_is_terminal() {
+    let mut machine = TurnMachine::new("turn-illegal");
+
+    let err = machine
+        .apply(TurnTransition::RequestModel { request_index: 1 })
+        .unwrap_err();
+    assert_eq!(err.phase, TurnPhase::Initialized);
+    assert_eq!(err.transition, "request_model");
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "hello".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RenderPrompt { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::Fail {
+            operation: TurnFailureOperation::ModelRequest { request_index: 1 },
+            message: "backend failed".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::Finish {
+            status: TurnTerminalStatus::Failed,
+        },
+    );
+
+    let err = machine
+        .apply(TurnTransition::RequestModel { request_index: 2 })
+        .unwrap_err();
+    assert_eq!(err.phase, TurnPhase::Finished);
+    assert_eq!(err.transition, "request_model");
+}
