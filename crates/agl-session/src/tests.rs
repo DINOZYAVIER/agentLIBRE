@@ -148,6 +148,9 @@ fn writes_chat_session_metadata_and_transcript_from_transitions() {
     store.finish_eof().unwrap();
 
     assert!(store.session_dir().join("session.json").exists());
+    let metadata = std::fs::read_to_string(store.session_dir().join("session.json")).unwrap();
+    assert!(metadata.contains("\"local_inference_config_path\""));
+    assert!(!metadata.contains("\"model_config_path\""));
     let transcript = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
     assert!(transcript.contains("\"kind\":\"session_started\""));
     assert!(transcript.contains("\"kind\":\"user_message\""));
@@ -301,6 +304,23 @@ fn legacy_session_finished_without_reason_still_replays() {
             ..
         }
     ));
+}
+
+#[test]
+fn legacy_session_metadata_model_config_path_still_deserializes() {
+    let metadata: SessionMetadata = serde_json::from_value(serde_json::json!({
+        "session_id": "session-001",
+        "created_at_unix_ms": 1,
+        "updated_at_unix_ms": 2,
+        "model_config_path": "/tmp/local.toml",
+        "backend": "llama_cpp"
+    }))
+    .unwrap();
+
+    assert_eq!(
+        metadata.local_inference_config_path,
+        PathBuf::from("/tmp/local.toml")
+    );
 }
 
 #[test]

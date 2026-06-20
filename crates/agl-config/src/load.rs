@@ -2,16 +2,7 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
-use crate::{LocalInferenceConfig, ModelConfig};
-
-pub fn load_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
-    let path = path.as_ref();
-    let config: ModelConfig = load_toml_file(path)?;
-    config
-        .validate()
-        .with_context(|| format!("invalid config file {}", path.display()))?;
-    Ok(config)
-}
+use crate::LocalInferenceConfig;
 
 pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<LocalInferenceConfig> {
     let path = path.as_ref();

@@ -219,7 +219,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                     session_id.clone(),
                     session.run_id().as_str().to_string(),
                     session.config_path().to_path_buf(),
-                    "llama_cpp",
+                    session.backend_name(),
                 )?),
                 None,
             )

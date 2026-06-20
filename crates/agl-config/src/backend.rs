@@ -52,6 +52,14 @@ pub enum BackendKind {
     LlamaCpp,
 }
 
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LlamaCpp => "llama_cpp",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InferenceRuntimeConfig {
@@ -158,20 +166,4 @@ pub enum KvCacheType {
     Iq4Nl,
     Q5_0,
     Q5_1,
-}
-
-impl KvCacheType {
-    pub fn as_llama_arg(self) -> &'static str {
-        match self {
-            Self::F32 => "f32",
-            Self::F16 => "f16",
-            Self::Bf16 => "bf16",
-            Self::Q8_0 => "q8_0",
-            Self::Q4_0 => "q4_0",
-            Self::Q4_1 => "q4_1",
-            Self::Iq4Nl => "iq4_nl",
-            Self::Q5_0 => "q5_0",
-            Self::Q5_1 => "q5_1",
-        }
-    }
 }
