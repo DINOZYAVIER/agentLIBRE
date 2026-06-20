@@ -345,10 +345,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             content: input.to_string(),
         });
         match output {
-            TurnOutput {
-                answer: Some(answer),
-                stop_reason: None,
-            } => {
+            TurnOutput::Answered { answer } => {
                 let content = assistant_text_for_terminal(&answer);
                 println!("assistant> {content}");
                 let assistant_message_id = AgentLibreMessageId::indexed(message_index);
@@ -366,63 +363,9 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 );
                 messages.push(TurnMessage::Assistant { content });
             }
-            TurnOutput {
-                answer: None,
-                stop_reason: Some(reason),
-            } => {
-                println!("stopped=true reason={}", stop_reason_name(reason));
+            TurnOutput::Stopped { reason } => {
+                println!("stopped=true reason={}", reason.as_str());
                 let content = stopped_turn_context_message(reason).to_string();
-                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
-                message_index += 1;
-                if let Some(history) = &mut chat_history {
-                    history.append_assistant_stop_marker(
-                        assistant_message_id.clone(),
-                        content.clone(),
-                    )?;
-                }
-                log_message_metadata(
-                    "assistant",
-                    &session_id,
-                    &assistant_message_id,
-                    &content,
-                    runtime,
-                );
-                messages.push(TurnMessage::Assistant { content });
-            }
-            TurnOutput {
-                answer: Some(answer),
-                stop_reason: Some(reason),
-            } => {
-                tracing::warn!(
-                    target: "agentlibre::app",
-                    reason = stop_reason_name(reason),
-                    "turn returned both answer and stop reason; printing answer"
-                );
-                let content = assistant_text_for_terminal(&answer);
-                println!("assistant> {content}");
-                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
-                message_index += 1;
-                if let Some(history) = &mut chat_history {
-                    history
-                        .append_assistant_message(assistant_message_id.clone(), content.clone())?;
-                }
-                log_message_metadata(
-                    "assistant",
-                    &session_id,
-                    &assistant_message_id,
-                    &content,
-                    runtime,
-                );
-                messages.push(TurnMessage::Assistant { content });
-            }
-            TurnOutput {
-                answer: None,
-                stop_reason: None,
-            } => {
-                println!("stopped=true reason=unknown");
-                let content =
-                    "The previous turn stopped for an unknown reason. No tool was executed."
-                        .to_string();
                 let assistant_message_id = AgentLibreMessageId::indexed(message_index);
                 message_index += 1;
                 if let Some(history) = &mut chat_history {
@@ -469,21 +412,9 @@ fn build_turn_input(
 }
 
 fn print_turn_output(output: &TurnOutput) {
-    if let Some(answer) = &output.answer {
-        println!("{}", assistant_text_for_terminal(answer));
-    } else if let Some(reason) = output.stop_reason {
-        println!("stopped=true reason={}", stop_reason_name(reason));
-    } else {
-        println!("stopped=true reason=unknown");
-    }
-}
-
-fn stop_reason_name(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::ToolJsonUnrepairable => "tool_json_unrepairable",
-        StopReason::ToolLimitReached => "tool_limit_reached",
-        StopReason::HiddenTool => "hidden_tool",
-        StopReason::InvalidToolArguments => "invalid_tool_arguments",
+    match output {
+        TurnOutput::Answered { answer } => println!("{}", assistant_text_for_terminal(answer)),
+        TurnOutput::Stopped { reason } => println!("stopped=true reason={}", reason.as_str()),
     }
 }
 
@@ -664,16 +595,13 @@ mod tests {
     #[test]
     fn stop_reason_names_are_cli_stable() {
         assert_eq!(
-            stop_reason_name(StopReason::ToolJsonUnrepairable),
+            StopReason::ToolJsonUnrepairable.as_str(),
             "tool_json_unrepairable"
         );
+        assert_eq!(StopReason::ToolLimitReached.as_str(), "tool_limit_reached");
+        assert_eq!(StopReason::HiddenTool.as_str(), "hidden_tool");
         assert_eq!(
-            stop_reason_name(StopReason::ToolLimitReached),
-            "tool_limit_reached"
-        );
-        assert_eq!(stop_reason_name(StopReason::HiddenTool), "hidden_tool");
-        assert_eq!(
-            stop_reason_name(StopReason::InvalidToolArguments),
+            StopReason::InvalidToolArguments.as_str(),
             "invalid_tool_arguments"
         );
     }
