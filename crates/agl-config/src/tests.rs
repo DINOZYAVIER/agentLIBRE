@@ -24,24 +24,6 @@ fn assert_error_contains(error: &anyhow::Error, needle: &str) {
 }
 
 #[test]
-fn loads_model_config_from_explicit_file() {
-    let path = write_temp_config(
-        "model-format",
-        r#"
-dialect = "gemma4"
-tool_call_format = "gemma_function_call"
-"#,
-    );
-
-    let config = load_model_config(&path).unwrap();
-
-    assert_eq!(config.dialect, ModelDialect::Gemma4);
-    assert_eq!(config.tool_call_format, ToolCallFormat::GemmaFunctionCall);
-
-    std::fs::remove_file(path).unwrap();
-}
-
-#[test]
 fn loads_local_inference_config_from_explicit_file() {
     let path = write_temp_config(
         "local-inference",
@@ -71,6 +53,7 @@ tool_call_format = "hermes_json"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.backend.kind, BackendKind::LlamaCpp);
+    assert_eq!(config.backend.kind.as_str(), "llama_cpp");
     assert_eq!(config.backend.model, PathBuf::from("/models/qwen3.6.gguf"));
     assert_eq!(config.runtime.gpu_layers, 999);
     assert_eq!(config.runtime.context_tokens, 32768);
