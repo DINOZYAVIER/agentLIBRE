@@ -16,6 +16,20 @@ fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
 }
 
 #[test]
+fn stop_reason_names_are_stable() {
+    assert_eq!(
+        StopReason::ToolJsonUnrepairable.as_str(),
+        "tool_json_unrepairable"
+    );
+    assert_eq!(StopReason::ToolLimitReached.as_str(), "tool_limit_reached");
+    assert_eq!(StopReason::HiddenTool.as_str(), "hidden_tool");
+    assert_eq!(
+        StopReason::InvalidToolArguments.as_str(),
+        "invalid_tool_arguments"
+    );
+}
+
+#[test]
 fn initializes_turn_state_with_user_message() {
     let state = TurnState::new(TurnInput::user("hello"));
 

@@ -220,10 +220,7 @@ fn finish_answer<H: AgentLoopHost>(
             status: TurnTerminalStatus::Answered,
         },
     )?;
-    Ok(TurnOutput {
-        answer: Some(answer),
-        stop_reason: None,
-    })
+    Ok(TurnOutput::Answered { answer })
 }
 
 fn stop_turn<H: AgentLoopHost>(
@@ -246,10 +243,7 @@ fn stop_turn<H: AgentLoopHost>(
             status: TurnTerminalStatus::Stopped,
         },
     )?;
-    Ok(TurnOutput {
-        answer: None,
-        stop_reason: Some(reason),
-    })
+    Ok(TurnOutput::Stopped { reason })
 }
 
 fn fail_turn<H: AgentLoopHost>(
