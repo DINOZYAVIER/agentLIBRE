@@ -75,6 +75,16 @@ pub struct SessionMetadata {
     pub backend: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLibreSessionFinishReason {
+    Eof,
+    ExitCommand,
+    HostShutdown,
+    #[default]
+    Legacy,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionReplay {
     pub events: Vec<ChatSessionEvent>,
@@ -115,6 +125,8 @@ pub enum ChatSessionEvent {
     },
     SessionFinished {
         session_id: AgentLibreSessionId,
+        #[serde(default)]
+        reason: AgentLibreSessionFinishReason,
     },
 }
 
@@ -319,6 +331,11 @@ impl ChatSessionStore {
         Ok(())
     }
 
+    pub fn note_turn_started(&mut self) -> Result<()> {
+        self.apply(ChatSessionTransition::RunTurn)?;
+        Ok(())
+    }
+
     pub fn append_assistant_stop_marker(
         &mut self,
         message_id: AgentLibreMessageId,
@@ -350,7 +367,20 @@ impl ChatSessionStore {
     }
 
     pub fn finish(&mut self) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::FinishSession)?;
+        self.finish_with_reason(AgentLibreSessionFinishReason::HostShutdown)
+    }
+
+    pub fn finish_eof(&mut self) -> Result<()> {
+        self.finish_with_reason(AgentLibreSessionFinishReason::Eof)
+    }
+
+    pub fn request_exit(&mut self) -> Result<()> {
+        let record = self.apply(ChatSessionTransition::ReadCommandExit)?;
+        self.append_record_event(&record)
+    }
+
+    fn finish_with_reason(&mut self, reason: AgentLibreSessionFinishReason) -> Result<()> {
+        let record = self.apply(ChatSessionTransition::FinishSession { reason })?;
         self.append_record_event(&record)
     }
 
@@ -422,8 +452,13 @@ impl ChatSessionEvent {
             ChatSessionTransition::ClearContext => Some(Self::ContextCleared {
                 session_id: record.session_id.clone(),
             }),
-            ChatSessionTransition::FinishSession => Some(Self::SessionFinished {
+            ChatSessionTransition::ReadCommandExit => Some(Self::SessionFinished {
                 session_id: record.session_id.clone(),
+                reason: AgentLibreSessionFinishReason::ExitCommand,
+            }),
+            ChatSessionTransition::FinishSession { reason } => Some(Self::SessionFinished {
+                session_id: record.session_id.clone(),
+                reason: *reason,
             }),
             _ => None,
         }

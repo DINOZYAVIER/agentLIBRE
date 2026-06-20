@@ -6,8 +6,8 @@ pub use fsm::{
     ChatSessionTransitionRecord,
 };
 pub use store::{
-    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay,
-    ChatSessionStore, SessionMetadata,
+    AgentLibreMessageId, AgentLibreSessionFinishReason, AgentLibreSessionId, ChatSessionEvent,
+    ChatSessionReplay, ChatSessionStore, SessionMetadata,
 };
 
 #[cfg(test)]

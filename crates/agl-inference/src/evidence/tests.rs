@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 
+use crate::{InferenceAttemptMachine, InferenceAttemptTransition};
+
 use super::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -23,6 +25,15 @@ fn run_id() -> InferenceRunId {
 
 fn attempt_id() -> InferenceAttemptId {
     InferenceAttemptId::new("attempt-001").unwrap()
+}
+
+fn append_transition(
+    writer: &InferenceEventWriter,
+    machine: &mut InferenceAttemptMachine,
+    transition: InferenceAttemptTransition,
+) {
+    let record = machine.apply(transition).unwrap();
+    writer.append_transition(&record).unwrap();
 }
 
 #[test]
@@ -112,34 +123,49 @@ fn appends_observation_events_as_jsonl() {
     let attempt_id = attempt_id();
     let paths = root.paths(&run_id, &attempt_id);
     let writer = InferenceEventWriter::new(paths.events_jsonl());
+    let mut machine = InferenceAttemptMachine::new(run_id, attempt_id);
 
-    let events = [
-        InferenceObservationEvent::AttemptStarted {
-            run_id: run_id.clone(),
-            attempt_id: attempt_id.clone(),
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::StartAttempt {
             backend: "fake-backend".to_string(),
             request_path: paths.request_json().to_path_buf(),
         },
-        InferenceObservationEvent::RequestRecorded {
-            run_id: run_id.clone(),
-            attempt_id: attempt_id.clone(),
+    );
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::RecordRequest {
             path: paths.request_json().to_path_buf(),
         },
-        InferenceObservationEvent::ResponseRecorded {
-            run_id: run_id.clone(),
-            attempt_id: attempt_id.clone(),
+    );
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::StartRuntime,
+    );
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::RecordRuntimeLog {
+            path: paths.runtime_log().to_path_buf(),
+        },
+    );
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::RecordResponse {
             path: paths.response_json().to_path_buf(),
         },
-        InferenceObservationEvent::AttemptFinished {
-            run_id,
-            attempt_id,
-            finish_status: InferenceFinishStatus::Succeeded,
+    );
+    append_transition(
+        &writer,
+        &mut machine,
+        InferenceAttemptTransition::FinishAttempt {
+            status: InferenceFinishStatus::Succeeded,
         },
-    ];
-
-    for event in &events {
-        writer.append(event).unwrap();
-    }
+    );
 
     let request_path_json = serde_json::to_string(paths.request_json()).unwrap();
     let response_path_json = serde_json::to_string(paths.response_json()).unwrap();

@@ -254,6 +254,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     );
     println!("session_id={session_id}");
 
+    let mut session_finished = false;
     loop {
         print!("agl> ");
         io::stdout().flush().context("failed to flush prompt")?;
@@ -311,7 +312,13 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 println!("context_cleared=true cleared_messages={cleared_messages}");
                 continue;
             }
-            ParsedChatInput::Command(ChatCommand::Exit) => break,
+            ParsedChatInput::Command(ChatCommand::Exit) => {
+                if let Some(history) = &mut chat_history {
+                    history.request_exit()?;
+                    session_finished = true;
+                }
+                break;
+            }
         };
 
         let user_message_id = AgentLibreMessageId::indexed(message_index);
@@ -321,6 +328,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         if let Some(history) = &mut chat_history {
             history.append_user_message(user_message_id.clone(), input.to_string())?;
             history.link_attempt(attempt_id.clone())?;
+            history.note_turn_started()?;
         }
         let turn_input = build_turn_input(
             loop_host.session().run_id().as_str(),
@@ -434,8 +442,8 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         request_index += generated_requests;
     }
 
-    if let Some(history) = &mut chat_history {
-        history.finish()?;
+    if !session_finished && let Some(history) = &mut chat_history {
+        history.finish_eof()?;
     }
     tracing::info!(
         target: "agentlibre::app",

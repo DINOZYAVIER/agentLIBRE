@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::{InferenceAttemptTransition, InferenceAttemptTransitionRecord};
+
 use super::{InferenceAttemptId, InferenceRunId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,7 +80,14 @@ impl InferenceEventWriter {
         }
     }
 
-    pub fn append(&self, event: &InferenceObservationEvent) -> Result<()> {
+    pub fn append_transition(&self, record: &InferenceAttemptTransitionRecord) -> Result<()> {
+        let Some(event) = event_for_record(record) else {
+            return Ok(());
+        };
+        self.append_event(&event)
+    }
+
+    fn append_event(&self, event: &InferenceObservationEvent) -> Result<()> {
         if let Some(parent) = self.events_jsonl.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
@@ -119,5 +128,51 @@ impl InferenceEventWriter {
                 self.events_jsonl.display()
             )
         })
+    }
+}
+
+fn event_for_record(
+    record: &InferenceAttemptTransitionRecord,
+) -> Option<InferenceObservationEvent> {
+    match &record.transition {
+        InferenceAttemptTransition::StartAttempt {
+            backend,
+            request_path,
+        } => Some(InferenceObservationEvent::AttemptStarted {
+            run_id: record.run_id.clone(),
+            attempt_id: record.attempt_id.clone(),
+            backend: backend.clone(),
+            request_path: request_path.clone(),
+        }),
+        InferenceAttemptTransition::RecordRequest { path } => {
+            Some(InferenceObservationEvent::RequestRecorded {
+                run_id: record.run_id.clone(),
+                attempt_id: record.attempt_id.clone(),
+                path: path.clone(),
+            })
+        }
+        InferenceAttemptTransition::RecordResponse { path } => {
+            Some(InferenceObservationEvent::ResponseRecorded {
+                run_id: record.run_id.clone(),
+                attempt_id: record.attempt_id.clone(),
+                path: path.clone(),
+            })
+        }
+        InferenceAttemptTransition::FailAttempt { message } => {
+            Some(InferenceObservationEvent::AttemptFailed {
+                run_id: record.run_id.clone(),
+                attempt_id: record.attempt_id.clone(),
+                message: message.clone(),
+            })
+        }
+        InferenceAttemptTransition::FinishAttempt { status } => {
+            Some(InferenceObservationEvent::AttemptFinished {
+                run_id: record.run_id.clone(),
+                attempt_id: record.attempt_id.clone(),
+                finish_status: *status,
+            })
+        }
+        InferenceAttemptTransition::StartRuntime
+        | InferenceAttemptTransition::RecordRuntimeLog { .. } => None,
     }
 }
