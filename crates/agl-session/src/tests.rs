@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::fsm::{ChatSessionMachine, ChatSessionPhase, ChatSessionTransition};
 use crate::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -73,10 +74,6 @@ fn chat_session_machine_accepts_answer_turn_path() {
         ChatSessionPhase::RunningTurn
     );
     assert_eq!(
-        machine.apply(ChatSessionTransition::RunTurn).unwrap().to,
-        ChatSessionPhase::RunningTurn
-    );
-    assert_eq!(
         machine
             .apply(ChatSessionTransition::RecordAssistantAnswer {
                 message_id: AgentLibreMessageId::indexed(2),
@@ -144,7 +141,6 @@ fn writes_chat_session_metadata_and_transcript_from_transitions() {
         .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
         .unwrap();
     store.link_attempt("attempt-0001").unwrap();
-    store.note_turn_started().unwrap();
     store
         .append_assistant_message(AgentLibreMessageId::indexed(2), "hi".to_string())
         .unwrap();
@@ -180,7 +176,6 @@ fn stopped_turn_marker_is_recorded_as_assistant_message() {
         .append_user_message(AgentLibreMessageId::indexed(1), "tool bait".to_string())
         .unwrap();
     store.link_attempt("attempt-0001").unwrap();
-    store.note_turn_started().unwrap();
     store
         .append_assistant_stop_marker(
             AgentLibreMessageId::indexed(2),
@@ -204,8 +199,8 @@ fn stopped_turn_marker_is_recorded_as_assistant_message() {
 }
 
 #[test]
-fn non_mutating_commands_advance_fsm_without_transcript_events() {
-    let root = temp_root("non-mutating-commands");
+fn tool_messages_are_recorded_and_replayed() {
+    let root = temp_root("tool-message");
     let mut store = ChatSessionStore::start(
         &root,
         AgentLibreSessionId::new("session-001").unwrap(),
@@ -214,16 +209,54 @@ fn non_mutating_commands_advance_fsm_without_transcript_events() {
         "llama_cpp",
     )
     .unwrap();
-    let before = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
 
-    store.note_empty_input().unwrap();
-    store.note_help_command().unwrap();
-    store.note_session_command().unwrap();
-    store.note_unknown_command("/wat").unwrap();
+    store
+        .append_user_message(AgentLibreMessageId::indexed(1), "read".to_string())
+        .unwrap();
+    store.link_attempt("attempt-0001").unwrap();
+    store
+        .append_tool_message(
+            AgentLibreMessageId::indexed(2),
+            "read_file".to_string(),
+            "file content".to_string(),
+        )
+        .unwrap();
+    store
+        .append_assistant_message(AgentLibreMessageId::indexed(3), "done".to_string())
+        .unwrap();
 
-    let after = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
-    assert_eq!(after, before);
-    assert_eq!(store.machine().phase(), ChatSessionPhase::AwaitingInput);
+    let replay = store.read_replay().unwrap();
+
+    assert!(matches!(
+        replay.events[3],
+        ChatSessionEvent::ToolMessage { .. }
+    ));
+    assert_eq!(replay.next_message_index, 4);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn session_failures_are_recorded() {
+    let root = temp_root("session-failure");
+    let mut store = ChatSessionStore::start(
+        &root,
+        AgentLibreSessionId::new("session-001").unwrap(),
+        "run-001",
+        "/tmp/local.toml",
+        "llama_cpp",
+    )
+    .unwrap();
+
+    store
+        .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
+        .unwrap();
+    store.fail("model request failed").unwrap();
+
+    assert_eq!(store.machine().phase(), ChatSessionPhase::Failed);
+    let transcript = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
+    assert!(transcript.contains("\"kind\":\"session_failed\""));
+    assert!(transcript.contains("model request failed"));
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -307,7 +340,6 @@ fn opens_existing_session_and_reads_replay_without_appending_start() {
         .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
         .unwrap();
     store.link_attempt("attempt-0001").unwrap();
-    store.note_turn_started().unwrap();
     store
         .append_assistant_message(AgentLibreMessageId::indexed(2), "hi".to_string())
         .unwrap();
