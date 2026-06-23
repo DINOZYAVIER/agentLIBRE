@@ -1,0 +1,22 @@
+[package]
+name = "agl-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-assets.workspace = true
+agl-config.workspace = true
+agl-events.workspace = true
+agl-inference.workspace = true
+agl-loop.workspace = true
+agl-oven.workspace = true
+agl-runtime.workspace = true
+agl-session.workspace = true
+agl-skills.workspace = true
+agl-tools.workspace = true
+agl-turn.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

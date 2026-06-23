@@ -1,37 +1,26 @@
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::process;
 
-use agl_loop::{TurnInput, TurnOutput, run_turn};
+use agl_chat::{
+    ChatLoopHost, ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, InferenceSession,
+    ToolAccessMode as ChatToolAccessMode, assistant_text_for_terminal, build_turn_input,
+    chat_workspace_root, default_run_id,
+};
+use agl_loop::{TurnOutput, run_turn};
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
-    AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing, logged_message_fields,
+    AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
-use agl_session::{
-    AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
-};
-use agl_turn::{StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result};
 
 mod args;
 mod chat;
 mod config;
-mod loop_host;
-mod prompt;
-mod session;
-mod terminal;
 
 use args::{CliCommand, RunOptions, parse_cli, print_completion, print_usage};
-use chat::{
-    CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, clear_chat_context, parse_chat_input,
-};
+use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
-use loop_host::CliLoopHost;
-use session::{InferenceSession, default_run_id};
-use terminal::assistant_text_for_terminal;
-
-const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
 pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
@@ -157,6 +146,34 @@ fn print_cli_error(err: &anyhow::Error) {
     }
 }
 
+fn inference_options_from_run_options(options: &RunOptions) -> InferenceOptions {
+    InferenceOptions {
+        config: options.config.clone(),
+        artifact_root: options.artifact_root.clone(),
+        run_id: options.run_id.clone(),
+        max_output_tokens: options.max_output_tokens,
+        tool_mode: chat_tool_mode(options.tool_mode),
+        skills: options.skills.clone(),
+    }
+}
+
+fn chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
+    ChatOptions {
+        inference: inference_options_from_run_options(options),
+        workspace_root: options.workspace_root.clone(),
+        session_id: options.session_id.clone(),
+        no_history: options.no_history,
+        new_session: options.new_session,
+    }
+}
+
+fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
+    match mode {
+        args::ToolAccessMode::ReadOnly => ChatToolAccessMode::ReadOnly,
+        args::ToolAccessMode::Write => ChatToolAccessMode::Write,
+    }
+}
+
 fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "run", "starting command");
     let prompt = options
@@ -165,8 +182,9 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .context("run requires PROMPT or --prompt TEXT")?;
     let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
     let tool_mode = options.tool_mode;
-    let session = InferenceSession::new(options, runtime, None)?;
-    let mut loop_host = CliLoopHost::new(session, &workspace_root)?;
+    let inference_options = inference_options_from_run_options(&options);
+    let session = InferenceSession::new(inference_options, runtime, None)?;
+    let mut loop_host = ChatLoopHost::new(session, &workspace_root)?;
     tracing::info!(
         target: "agentlibre::app",
         run_id = %loop_host.session().run_id(),
@@ -193,90 +211,27 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
 
 fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
-    let history_enabled = runtime.history.enabled && !options.no_history;
     let run_id = options.run_id.clone().unwrap_or_else(default_run_id);
     options.run_id = Some(run_id.clone());
-    let session_id = if options.new_session {
-        AgentLibreSessionId::generate()
-    } else if let Some(session_id) = &options.session_id {
-        AgentLibreSessionId::new(session_id.clone())?
-    } else {
-        AgentLibreSessionId::generate()
-    };
-    let resumed_session = history_enabled
-        && !options.new_session
-        && options.session_id.is_some()
-        && ChatSessionStore::exists(runtime.paths.sessions_root(), &session_id);
-    let explicit_artifact_root = InferenceSession::resolve_artifact_root(&options);
-    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
-    let tool_mode = options.tool_mode;
-    let artifact_root_override = if history_enabled {
-        explicit_artifact_root.or_else(|| {
-            Some(
-                runtime
-                    .paths
-                    .session_run_artifact_root(session_id.as_str(), &run_id),
-            )
-        })
-    } else {
-        None
-    };
-    let session = InferenceSession::new(options, runtime, artifact_root_override)?;
-    let (mut chat_history, replay) = if history_enabled {
-        if resumed_session {
-            let history = ChatSessionStore::open(
-                runtime.paths.sessions_root(),
-                session_id.clone(),
-                session.run_id().as_str().to_string(),
-            )?;
-            let replay = history.read_replay()?;
-            (Some(history), Some(replay))
-        } else {
-            (
-                Some(ChatSessionStore::start(
-                    runtime.paths.sessions_root(),
-                    session_id.clone(),
-                    session.run_id().as_str().to_string(),
-                    session.config_path().to_path_buf(),
-                    session.backend_name(),
-                )?),
-                None,
-            )
-        }
-    } else {
-        (None, None)
-    };
-    let mut loop_host = CliLoopHost::new(session, &workspace_root)?;
-    let mut messages = replay
-        .as_ref()
-        .map(replay_turn_messages)
-        .unwrap_or_default();
+    let mut chat_service = ChatService::open(chat_options_from_run_options(&options), runtime)?;
+    let summary = chat_service.summary();
     let stdin = io::stdin();
-    let mut request_index = replay
-        .as_ref()
-        .map(|replay| replay.next_attempt_index)
-        .unwrap_or(1);
-    let mut message_index = replay
-        .as_ref()
-        .map(|replay| replay.next_message_index)
-        .unwrap_or(1);
 
     tracing::info!(
         target: "agentlibre::app",
-        session_id = %session_id,
-        run_id = %loop_host.session().run_id(),
-        artifact_root = %loop_host.session().artifact_root().display(),
-        event_stream = %loop_host.event_sink_path().display(),
-        workspace_root = %loop_host.workspace_root().display(),
-        tool_mode = tool_mode.as_str(),
-        history_enabled,
-        resumed = resumed_session,
-        replayed_messages = messages.len(),
+        session_id = %summary.session_id,
+        run_id = %summary.run_id,
+        artifact_root = %summary.artifact_root.display(),
+        event_stream = %summary.event_stream.display(),
+        workspace_root = %summary.workspace_root.display(),
+        tool_mode = summary.tool_mode,
+        history_enabled = summary.history_enabled,
+        resumed = summary.resumed,
+        replayed_messages = summary.replayed_messages,
         "chat session started"
     );
-    println!("session_id={session_id}");
+    println!("session_id={}", chat_service.session_id());
 
-    let mut session_finished = false;
     loop {
         print!("agl> ");
         io::stdout().flush().context("failed to flush prompt")?;
@@ -303,21 +258,17 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
-                print_chat_session_summary(
-                    &session_id,
-                    loop_host.session(),
-                    loop_host.workspace_root(),
-                );
+                print_chat_session_summary(&chat_service);
                 continue;
             }
             ParsedChatInput::Workspace(path) => {
                 if let Some(path) = path {
-                    let root = chat_workspace_root(path, loop_host.workspace_root());
-                    if let Err(err) = loop_host.set_workspace_root(&root) {
+                    let root = chat_workspace_root(path, chat_service.workspace_root());
+                    if let Err(err) = chat_service.set_workspace_root(&root) {
                         tracing::warn!(
                             target: "agentlibre::app",
-                            session_id = %session_id,
-                            run_id = %loop_host.session().run_id(),
+                            session_id = %chat_service.session_id(),
+                            run_id = %chat_service.run_id(),
                             requested_workspace_root = %root.display(),
                             error = %err,
                             "chat workspace root change failed"
@@ -326,26 +277,22 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                     } else {
                         tracing::info!(
                             target: "agentlibre::app",
-                            session_id = %session_id,
-                            run_id = %loop_host.session().run_id(),
-                            workspace_root = %loop_host.workspace_root().display(),
+                            session_id = %chat_service.session_id(),
+                            run_id = %chat_service.run_id(),
+                            workspace_root = %chat_service.workspace_root().display(),
                             "chat workspace root changed"
                         );
                     }
                 }
-                println!("workspace_root={}", loop_host.workspace_root().display());
+                println!("workspace_root={}", chat_service.workspace_root().display());
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Clear) => {
-                let cleared_messages = clear_chat_context(&mut messages);
-                loop_host.session_mut().clear_context();
-                if let Some(history) = &mut chat_history {
-                    history.append_context_cleared()?;
-                }
+                let cleared_messages = chat_service.clear_context()?;
                 tracing::info!(
                     target: "agentlibre::app",
-                    session_id = %session_id,
-                    run_id = %loop_host.session().run_id(),
+                    session_id = %chat_service.session_id(),
+                    run_id = %chat_service.run_id(),
                     cleared_messages,
                     "chat context cleared"
                 );
@@ -353,124 +300,29 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Exit) => {
-                if let Some(history) = &mut chat_history {
-                    history.request_exit()?;
-                    session_finished = true;
-                }
+                chat_service.request_exit()?;
                 break;
             }
         };
 
-        let user_message_id = AgentLibreMessageId::indexed(message_index);
-        message_index += 1;
-        log_message_metadata("user", &session_id, &user_message_id, input, runtime);
-        let attempt_id = format!("attempt-{request_index:04}");
-        if let Some(history) = &mut chat_history {
-            history.append_user_message(user_message_id.clone(), input.to_string())?;
-            history.link_attempt(attempt_id.clone())?;
-        }
-        let turn_input = build_turn_input(
-            loop_host.session().run_id().as_str(),
-            request_index,
-            &messages,
-            loop_host.session().turn_hook_batches(),
-            loop_host.session().turn_visible_tools(),
-            input,
-        );
-        loop_host.reset_turn_counters();
-        let output = match run_turn(&mut loop_host, turn_input) {
-            Ok(output) => output,
-            Err(err) => {
-                if let Some(history) = &mut chat_history {
-                    history.fail(format!("{err:#}"))?;
-                }
-                return Err(err);
+        match chat_service.run_user_turn(input)?.status {
+            ChatTurnStatus::Answered { answer } => {
+                println!("assistant> {answer}");
             }
-        };
-        let generated_requests = loop_host.generated_requests();
-        let mut next_attempt_to_link = request_index + 1;
-        let linked_attempt_end = request_index + generated_requests;
-        let mut turn_recording = CompletedTurnRecording {
-            session_id: &session_id,
-            message_index: &mut message_index,
-            next_attempt_to_link: &mut next_attempt_to_link,
-            linked_attempt_end,
-            runtime,
-        };
-        let previous_message_count = messages.len();
-        let mut turn_messages = loop_host.take_turn_messages();
-        if turn_messages.is_empty() {
-            turn_messages = messages.clone();
-            turn_messages.push(TurnMessage::User {
-                content: input.to_string(),
-            });
-        }
-        match output {
-            TurnOutput::Answered { answer } => {
-                let content = assistant_text_for_terminal(&answer);
-                println!("assistant> {content}");
-                ensure_final_assistant_message(&mut turn_messages, content);
-                record_completed_turn_messages(
-                    &mut chat_history,
-                    &mut turn_recording,
-                    turn_messages
-                        .get(previous_message_count..)
-                        .context("turn transcript is shorter than prior chat context")?,
-                    None,
-                )?;
-            }
-            TurnOutput::Stopped { reason } => {
+            ChatTurnStatus::Stopped { reason } => {
                 println!("stopped=true reason={}", reason.as_str());
-                let content = stopped_turn_context_message(reason).to_string();
-                turn_messages.push(TurnMessage::Assistant { content });
-                record_completed_turn_messages(
-                    &mut chat_history,
-                    &mut turn_recording,
-                    turn_messages
-                        .get(previous_message_count..)
-                        .context("turn transcript is shorter than prior chat context")?,
-                    Some(reason),
-                )?;
             }
         }
-        messages = turn_messages;
-        request_index += generated_requests;
     }
 
-    if !session_finished && let Some(history) = &mut chat_history {
-        history.finish_eof()?;
-    }
+    chat_service.finish_eof_if_needed()?;
     tracing::info!(
         target: "agentlibre::app",
-        session_id = %session_id,
-        run_id = %loop_host.session().run_id(),
+        session_id = %chat_service.session_id(),
+        run_id = %chat_service.run_id(),
         "chat session finished"
     );
     Ok(())
-}
-
-fn build_turn_input(
-    run_id: &str,
-    request_index: usize,
-    context_messages: &[TurnMessage],
-    hook_batches: &[TurnHookBatch],
-    visible_tools: &[VisibleTool],
-    user_input: &str,
-) -> TurnInput {
-    let mut input = TurnInput::user(user_input.to_string())
-        .with_turn_id(run_id.to_string())
-        .with_context_messages(context_messages.to_vec())
-        .with_request_index_start(request_index);
-    for hook_batch in hook_batches {
-        input = input.with_hook_batch(hook_batch.clone());
-    }
-    for tool in visible_tools {
-        input = input.with_visible_tool(tool.clone());
-    }
-    if !visible_tools.is_empty() {
-        input = input.with_max_tool_calls(MAX_TOOL_CALLS_PER_TURN);
-    }
-    input
 }
 
 fn print_turn_output(output: &TurnOutput) {
@@ -480,364 +332,18 @@ fn print_turn_output(output: &TurnOutput) {
     }
 }
 
-fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: String) {
-    match messages.last_mut() {
-        Some(TurnMessage::Assistant { content: existing }) => *existing = content,
-        _ => messages.push(TurnMessage::Assistant { content }),
-    }
-}
-
-struct CompletedTurnRecording<'a> {
-    session_id: &'a AgentLibreSessionId,
-    message_index: &'a mut usize,
-    next_attempt_to_link: &'a mut usize,
-    linked_attempt_end: usize,
-    runtime: &'a AgentLibreRuntimeConfig,
-}
-
-fn record_completed_turn_messages(
-    chat_history: &mut Option<ChatSessionStore>,
-    recording: &mut CompletedTurnRecording<'_>,
-    messages: &[TurnMessage],
-    stop_reason: Option<StopReason>,
-) -> Result<()> {
-    let mut pending_stop_reason = stop_reason;
-    for message in messages {
-        match message {
-            TurnMessage::System { .. } | TurnMessage::User { .. } => {}
-            TurnMessage::Assistant { content } => {
-                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
-                *recording.message_index += 1;
-                if let Some(history) = chat_history.as_mut() {
-                    if pending_stop_reason.take().is_some() {
-                        history
-                            .append_assistant_stop_marker(message_id.clone(), content.clone())?;
-                    } else {
-                        history.append_assistant_message(message_id.clone(), content.clone())?;
-                    }
-                }
-                log_message_metadata(
-                    "assistant",
-                    recording.session_id,
-                    &message_id,
-                    content,
-                    recording.runtime,
-                );
-            }
-            TurnMessage::AssistantToolCall { name, arguments } => {
-                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
-                *recording.message_index += 1;
-                if let Some(history) = chat_history.as_mut() {
-                    history.append_assistant_tool_call(
-                        message_id.clone(),
-                        name.clone(),
-                        arguments.clone(),
-                    )?;
-                }
-                log_message_metadata(
-                    "assistant_tool_call",
-                    recording.session_id,
-                    &message_id,
-                    &arguments.to_string(),
-                    recording.runtime,
-                );
-            }
-            TurnMessage::ToolObservation { name, content } => {
-                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
-                *recording.message_index += 1;
-                if let Some(history) = chat_history.as_mut() {
-                    history.append_tool_message(
-                        message_id.clone(),
-                        name.clone(),
-                        content.clone(),
-                    )?;
-                }
-                log_message_metadata(
-                    "tool",
-                    recording.session_id,
-                    &message_id,
-                    content,
-                    recording.runtime,
-                );
-                if let Some(history) = chat_history.as_mut()
-                    && *recording.next_attempt_to_link < recording.linked_attempt_end
-                {
-                    history
-                        .link_attempt(format!("attempt-{:04}", *recording.next_attempt_to_link))?;
-                    *recording.next_attempt_to_link += 1;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn stopped_turn_context_message(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::ToolJsonUnrepairable => {
-            "The previous turn stopped because the model produced malformed tool JSON. No tool was executed."
-        }
-        StopReason::ToolLimitReached => {
-            "The previous turn stopped because tool use is not available in this CLI session. No tool was executed."
-        }
-        StopReason::HiddenTool => {
-            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed."
-        }
-        StopReason::InvalidToolArguments => {
-            "The previous turn stopped because the requested tool arguments were invalid. No tool was executed."
-        }
-    }
-}
-
-fn print_chat_session_summary(
-    session_id: &AgentLibreSessionId,
-    session: &InferenceSession,
-    workspace_root: &Path,
-) {
-    println!("session_id={session_id}");
-    println!("run_id={}", session.run_id());
-    println!("artifact_root={}", session.artifact_root().display());
-    println!("workspace_root={}", workspace_root.display());
-}
-
-fn chat_workspace_root(input: &str, current_root: &Path) -> PathBuf {
-    let path = PathBuf::from(input);
-    if path.is_absolute() {
-        path
-    } else {
-        current_root.join(path)
-    }
-}
-
-fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
-    let mut messages = Vec::new();
-    for event in &replay.events {
-        match event {
-            ChatSessionEvent::UserMessage { content, .. } => messages.push(TurnMessage::User {
-                content: content.clone(),
-            }),
-            ChatSessionEvent::AssistantMessage { content, .. } => {
-                messages.push(TurnMessage::Assistant {
-                    content: content.clone(),
-                });
-            }
-            ChatSessionEvent::AssistantToolCall {
-                name, arguments, ..
-            } => {
-                messages.push(TurnMessage::AssistantToolCall {
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                });
-            }
-            ChatSessionEvent::ToolMessage { name, content, .. } => {
-                messages.push(TurnMessage::ToolObservation {
-                    name: name.clone(),
-                    content: content.clone(),
-                });
-            }
-            ChatSessionEvent::ContextCleared { .. } => messages.clear(),
-            _ => {}
-        }
-    }
-    messages
-}
-
-fn log_message_metadata(
-    role: &str,
-    session_id: &AgentLibreSessionId,
-    message_id: &AgentLibreMessageId,
-    content: &str,
-    runtime: &AgentLibreRuntimeConfig,
-) {
-    let fields = logged_message_fields(role, content, runtime.logging.include_message_text);
-    tracing::info!(
-        target: "agentlibre::app",
-        session_id = %session_id,
-        message_id = %message_id,
-        role = %fields.role,
-        content_bytes = fields.content_bytes,
-        content = ?fields.content,
-        "chat message recorded"
-    );
+fn print_chat_session_summary(chat_service: &ChatService) {
+    println!("session_id={}", chat_service.session_id());
+    println!("run_id={}", chat_service.run_id());
+    println!("artifact_root={}", chat_service.artifact_root().display());
+    println!("workspace_root={}", chat_service.workspace_root().display());
 }
 
 #[cfg(test)]
 mod tests {
-    use agl_session::{AgentLibreMessageId, AgentLibreSessionId};
-
     use crate::args::ConfigCommand;
 
     use super::*;
-
-    #[test]
-    fn replay_turn_messages_keeps_transcript_order() {
-        let session_id = AgentLibreSessionId::new("session-001").unwrap();
-        let replay = ChatSessionReplay {
-            events: vec![
-                ChatSessionEvent::SessionStarted {
-                    session_id: session_id.clone(),
-                    run_id: "run-001".to_string(),
-                },
-                ChatSessionEvent::UserMessage {
-                    session_id: session_id.clone(),
-                    message_id: AgentLibreMessageId::indexed(1),
-                    content: "hello".to_string(),
-                },
-                ChatSessionEvent::AssistantMessage {
-                    session_id: session_id.clone(),
-                    message_id: AgentLibreMessageId::indexed(2),
-                    content: "hi".to_string(),
-                },
-                ChatSessionEvent::AssistantToolCall {
-                    session_id: session_id.clone(),
-                    message_id: AgentLibreMessageId::indexed(3),
-                    name: "read_file".to_string(),
-                    arguments: serde_json::json!({"path": "README.MD"}),
-                },
-                ChatSessionEvent::ToolMessage {
-                    session_id,
-                    message_id: AgentLibreMessageId::indexed(4),
-                    name: "read_file".to_string(),
-                    content: "content".to_string(),
-                },
-            ],
-            next_message_index: 5,
-            next_attempt_index: 1,
-        };
-
-        assert_eq!(
-            replay_turn_messages(&replay),
-            vec![
-                TurnMessage::User {
-                    content: "hello".to_string()
-                },
-                TurnMessage::Assistant {
-                    content: "hi".to_string()
-                },
-                TurnMessage::AssistantToolCall {
-                    name: "read_file".to_string(),
-                    arguments: serde_json::json!({"path": "README.MD"})
-                },
-                TurnMessage::ToolObservation {
-                    name: "read_file".to_string(),
-                    content: "content".to_string()
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn replay_turn_messages_honors_context_clear() {
-        let session_id = AgentLibreSessionId::new("session-001").unwrap();
-        let replay = ChatSessionReplay {
-            events: vec![
-                ChatSessionEvent::UserMessage {
-                    session_id: session_id.clone(),
-                    message_id: AgentLibreMessageId::indexed(1),
-                    content: "old".to_string(),
-                },
-                ChatSessionEvent::ContextCleared {
-                    session_id: session_id.clone(),
-                },
-                ChatSessionEvent::UserMessage {
-                    session_id,
-                    message_id: AgentLibreMessageId::indexed(2),
-                    content: "new".to_string(),
-                },
-            ],
-            next_message_index: 3,
-            next_attempt_index: 1,
-        };
-
-        assert_eq!(
-            replay_turn_messages(&replay),
-            vec![TurnMessage::User {
-                content: "new".to_string()
-            }]
-        );
-    }
-
-    #[test]
-    fn build_turn_input_preserves_context_and_request_index() {
-        let context = vec![
-            TurnMessage::User {
-                content: "old".to_string(),
-            },
-            TurnMessage::Assistant {
-                content: "previous".to_string(),
-            },
-        ];
-
-        let hook_batches = vec![
-            TurnHookBatch::new(agl_loop::HookEvent::ArtifactWrite)
-                .with_required_hook(agl_loop::HookId::new("task_spec.validate").unwrap()),
-        ];
-
-        let visible_tools = vec![
-            VisibleTool::new("fs.read")
-                .describe("Read a repository file")
-                .require_argument("path"),
-        ];
-
-        let input = build_turn_input("run-001", 7, &context, &hook_batches, &visible_tools, "new");
-
-        assert_eq!(input.turn_id, "run-001");
-        assert_eq!(input.user_input, "new");
-        assert_eq!(input.context_messages, context);
-        assert_eq!(input.hook_batches, hook_batches);
-        assert_eq!(input.request_index_start, 7);
-        assert_eq!(input.visible_tools, visible_tools);
-        assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
-    }
-
-    #[test]
-    fn build_turn_input_keeps_tools_disabled_without_visible_tools() {
-        let input = build_turn_input("run-001", 1, &[], &[], &[], "new");
-
-        assert!(input.visible_tools.is_empty());
-        assert_eq!(input.max_tool_calls, 0);
-    }
-
-    #[test]
-    fn chat_workspace_root_resolves_relative_to_current_root() {
-        assert_eq!(
-            chat_workspace_root("../next", std::path::Path::new("/tmp/root/current")),
-            PathBuf::from("/tmp/root/current/../next")
-        );
-        assert_eq!(
-            chat_workspace_root("/tmp/absolute", std::path::Path::new("/tmp/root")),
-            PathBuf::from("/tmp/absolute")
-        );
-    }
-
-    #[test]
-    fn stop_reason_names_are_cli_stable() {
-        assert_eq!(
-            StopReason::ToolJsonUnrepairable.as_str(),
-            "tool_json_unrepairable"
-        );
-        assert_eq!(StopReason::ToolLimitReached.as_str(), "tool_limit_reached");
-        assert_eq!(StopReason::HiddenTool.as_str(), "hidden_tool");
-        assert_eq!(
-            StopReason::InvalidToolArguments.as_str(),
-            "invalid_tool_arguments"
-        );
-    }
-
-    #[test]
-    fn stopped_turn_context_message_explains_no_tool_execution() {
-        for reason in [
-            StopReason::ToolJsonUnrepairable,
-            StopReason::ToolLimitReached,
-            StopReason::HiddenTool,
-            StopReason::InvalidToolArguments,
-        ] {
-            let message = stopped_turn_context_message(reason);
-
-            assert!(message.contains("previous turn stopped"));
-            assert!(message.contains("No tool was executed."));
-        }
-    }
 
     #[test]
     fn config_command_runtime_does_not_parse_existing_config() {
