@@ -6,8 +6,8 @@ use agl_tools::{HookBatchRequest, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,
-    TurnHookBatch, TurnInput, TurnOutput, TurnState, TurnTerminalStatus, TurnTransition,
-    TurnTransitionRecord,
+    TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnState, TurnTerminalStatus,
+    TurnTransition, TurnTransitionRecord,
 };
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
@@ -235,6 +235,11 @@ fn finish_answer<H: AgentLoopHost>(
             status: TurnTerminalStatus::Answered,
         },
     )?;
+    let mut messages = state.messages.clone();
+    messages.push(TurnMessage::Assistant {
+        content: answer.clone(),
+    });
+    host.record_turn_messages(&messages)?;
     Ok(TurnOutput::Answered { answer })
 }
 
@@ -488,6 +493,7 @@ fn stop_turn<H: AgentLoopHost>(
             status: TurnTerminalStatus::Stopped,
         },
     )?;
+    host.record_turn_messages(&state.messages)?;
     Ok(TurnOutput::Stopped { reason })
 }
 

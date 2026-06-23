@@ -218,23 +218,34 @@ fn tool_messages_are_recorded_and_replayed() {
         .unwrap();
     store.link_attempt("attempt-0001").unwrap();
     store
-        .append_tool_message(
+        .append_assistant_tool_call(
             AgentLibreMessageId::indexed(2),
+            "read_file".to_string(),
+            serde_json::json!({"path": "README.MD"}),
+        )
+        .unwrap();
+    store
+        .append_tool_message(
+            AgentLibreMessageId::indexed(3),
             "read_file".to_string(),
             "file content".to_string(),
         )
         .unwrap();
     store
-        .append_assistant_message(AgentLibreMessageId::indexed(3), "done".to_string())
+        .append_assistant_message(AgentLibreMessageId::indexed(4), "done".to_string())
         .unwrap();
 
     let replay = store.read_replay().unwrap();
 
     assert!(matches!(
         replay.events[3],
+        ChatSessionEvent::AssistantToolCall { .. }
+    ));
+    assert!(matches!(
+        replay.events[4],
         ChatSessionEvent::ToolMessage { .. }
     ));
-    assert_eq!(replay.next_message_index, 4);
+    assert_eq!(replay.next_message_index, 5);
 
     std::fs::remove_dir_all(root).unwrap();
 }

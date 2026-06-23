@@ -163,7 +163,11 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     let mut backend = LlamaCppBackend::new_with_test_runtime(
         local_config(),
         artifact_root.clone(),
-        vec!["first answer", "second answer\n\nUser:\ncontinuation"],
+        vec![
+            "first answer",
+            "second answer\n\nUser:\ncontinuation",
+            "third answer",
+        ],
     )
     .unwrap();
 
@@ -201,9 +205,35 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
             },
         ],
     );
+    let third_attempt = InferenceAttemptId::new("attempt-0003").unwrap();
+    let third = inference_request_with_messages(
+        third_attempt.as_str(),
+        3,
+        vec![
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "first".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Assistant,
+                content: "first answer".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "third".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+        ],
+    );
 
     let first_response = backend.generate(first).unwrap();
     let second_response = backend.generate(second).unwrap();
+    let third_response = backend.generate(third).unwrap();
 
     assert_eq!(first_response.content, "first answer");
     assert_eq!(
@@ -224,9 +254,15 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
         Some("Vulkan0")
     );
     assert!(second_response.metadata.duration_ms < 60_000);
+    assert_eq!(third_response.content, "third answer");
+    assert_eq!(
+        third_response.metadata.model_state.as_deref(),
+        Some("loaded")
+    );
 
     let first_paths = artifact_root.paths(&run_id, &first_attempt);
     let second_paths = artifact_root.paths(&run_id, &second_attempt);
+    let third_paths = artifact_root.paths(&run_id, &third_attempt);
     assert!(first_paths.request_json().exists());
     assert!(first_paths.response_json().exists());
     assert!(first_paths.runtime_log().exists());
@@ -234,9 +270,11 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     assert!(second_paths.response_json().exists());
     assert!(second_paths.runtime_log().exists());
     assert!(second_paths.events_jsonl().exists());
+    assert!(third_paths.response_json().exists());
 
     let first_runtime_log = std::fs::read_to_string(first_paths.runtime_log()).unwrap();
     let second_runtime_log = std::fs::read_to_string(second_paths.runtime_log()).unwrap();
+    let third_runtime_log = std::fs::read_to_string(third_paths.runtime_log()).unwrap();
     assert!(first_runtime_log.contains("model_state = loaded"));
     assert!(first_runtime_log.contains("thinking_prefill = disabled"));
     assert!(first_runtime_log.contains("llama_cpp_prompt_append:\nUser: first\n"));
@@ -246,6 +284,11 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     assert!(second_runtime_log.contains("rendered_message_history_len = 2"));
     assert!(second_runtime_log.contains("llama_cpp_prompt_append:\nUser: second\n"));
     assert!(!second_runtime_log.contains("User: first\n"));
+    assert!(third_runtime_log.contains("model_state = loaded"));
+    assert!(third_runtime_log.contains("rendered_message_history_len = 0"));
+    assert!(third_runtime_log.contains("User: first\n"));
+    assert!(third_runtime_log.contains("Assistant: first answer\n"));
+    assert!(third_runtime_log.contains("User: third\n"));
 
     let events = std::fs::read_to_string(second_paths.events_jsonl()).unwrap();
     assert!(events.contains("\"backend\":\"llama_cpp\""));
