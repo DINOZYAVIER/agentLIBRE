@@ -7,10 +7,9 @@ repository.workspace = true
 
 [dependencies]
 agl-assets.workspace = true
-agl-extension.workspace = true
+agl-tools.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 
 [dev-dependencies]
-agl-core-guards.workspace = true
-agl-core-tools.workspace = true
+agl-tools.workspace = true

@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use agl_extension::{
-    HookId, SkillId, StaticExtensionRegistry, StaticExtensionRegistryError, ToolId,
-};
+use agl_tools::{HookId, SkillId, ToolCatalog, ToolCatalogError, ToolId};
 
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
@@ -157,14 +155,14 @@ impl SkillRegistry {
     pub fn verify_required_hooks(
         &self,
         id: &SkillId,
-        extensions: &StaticExtensionRegistry,
+        tool_catalog: &ToolCatalog,
     ) -> Result<(), SkillRegistryError> {
         let skill = self.resolve_for_context_injection(id)?;
         let missing = skill
             .harness
             .required_hooks
             .iter()
-            .filter(|hook| !extensions.has_hook(hook))
+            .filter(|hook| !tool_catalog.has_hook(hook))
             .cloned()
             .collect::<Vec<_>>();
         if missing.is_empty() {
@@ -180,14 +178,14 @@ impl SkillRegistry {
     pub fn verify_allowed_tools(
         &self,
         id: &SkillId,
-        extensions: &StaticExtensionRegistry,
+        tool_catalog: &ToolCatalog,
     ) -> Result<(), SkillRegistryError> {
         let skill = self.resolve_for_context_injection(id)?;
         let missing = skill
             .harness
             .allowed_tools
             .iter()
-            .filter(|tool| extensions.tool(tool).is_none())
+            .filter(|tool| tool_catalog.tool(tool).is_none())
             .cloned()
             .collect::<Vec<_>>();
         if missing.is_empty() {
@@ -223,7 +221,7 @@ pub enum SkillRegistryError {
         id: String,
         tools: Vec<ToolId>,
     },
-    ExtensionRegistry(StaticExtensionRegistryError),
+    ToolCatalog(ToolCatalogError),
 }
 
 impl std::fmt::Display for SkillRegistryError {
@@ -252,7 +250,7 @@ impl std::fmt::Display for SkillRegistryError {
                     .join(", ");
                 write!(f, "skill `{id}` is missing allowed tools: {tools}")
             }
-            Self::ExtensionRegistry(err) => write!(f, "{err}"),
+            Self::ToolCatalog(err) => write!(f, "{err}"),
         }
     }
 }
@@ -261,9 +259,8 @@ impl std::error::Error for SkillRegistryError {}
 
 #[cfg(test)]
 mod tests {
-    use agl_extension::{
-        ExtensionId, HookDeclaration, HookEvent, StaticExtensionDeclaration,
-        StaticExtensionRegistry,
+    use agl_tools::{
+        HookDeclaration, HookEvent, ToolCatalog, ToolProviderDeclaration, ToolProviderId,
     };
 
     use super::*;
@@ -343,7 +340,7 @@ mod tests {
     #[test]
     fn missing_required_hooks_fail_preflight() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let extensions = StaticExtensionRegistry::new();
+        let extensions = ToolCatalog::new();
         let err = registry
             .verify_required_hooks(&SkillId::new("core:task-spec").unwrap(), &extensions)
             .unwrap_err();
@@ -363,7 +360,7 @@ mod tests {
     #[test]
     fn present_required_hooks_pass_preflight() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let mut extensions = StaticExtensionRegistry::new();
+        let mut extensions = ToolCatalog::new();
         extensions.register(core_guard_declaration()).unwrap();
 
         registry
@@ -374,7 +371,7 @@ mod tests {
     #[test]
     fn missing_allowed_tools_fail_preflight() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let extensions = StaticExtensionRegistry::new();
+        let extensions = ToolCatalog::new();
         let err = registry
             .verify_allowed_tools(&SkillId::new("core:task-spec").unwrap(), &extensions)
             .unwrap_err();
@@ -393,9 +390,9 @@ mod tests {
         );
     }
 
-    fn core_guard_declaration() -> StaticExtensionDeclaration {
-        StaticExtensionDeclaration::new(
-            ExtensionId::new("core-guards").unwrap(),
+    fn core_guard_declaration() -> ToolProviderDeclaration {
+        ToolProviderDeclaration::new(
+            ToolProviderId::new("core-guards").unwrap(),
             "Core Guards",
             "1",
         )

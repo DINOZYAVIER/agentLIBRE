@@ -1,20 +1,23 @@
+pub mod fs;
+pub mod guards;
 mod registry;
 
-pub use registry::{StaticExtensionRegistry, StaticExtensionRegistryError};
+pub use fs::{CoreTools, FS_EDIT_TOOL_ID, FS_LIST_TOOL_ID, FS_READ_TOOL_ID, FS_SEARCH_TOOL_ID};
+pub use registry::{ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExtensionIdKind {
-    Extension,
+pub enum IdKind {
+    Provider,
     Hook,
     Tool,
     Skill,
 }
 
-impl ExtensionIdKind {
+impl IdKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Extension => "extension",
+            Self::Provider => "provider",
             Self::Hook => "hook",
             Self::Tool => "tool",
             Self::Skill => "skill",
@@ -23,7 +26,7 @@ impl ExtensionIdKind {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ExtensionId(String);
+pub struct ToolProviderId(String);
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HookId(String);
@@ -37,7 +40,7 @@ pub struct SkillId(String);
 macro_rules! id_type {
     ($type:ident, $kind:expr) => {
         impl $type {
-            pub fn new(value: impl Into<String>) -> Result<Self, ExtensionIdError> {
+            pub fn new(value: impl Into<String>) -> Result<Self, ToolProviderIdError> {
                 let value = value.into();
                 validate_id($kind, &value)?;
                 Ok(Self(value))
@@ -75,18 +78,18 @@ macro_rules! id_type {
     };
 }
 
-id_type!(ExtensionId, ExtensionIdKind::Extension);
-id_type!(HookId, ExtensionIdKind::Hook);
-id_type!(ToolId, ExtensionIdKind::Tool);
-id_type!(SkillId, ExtensionIdKind::Skill);
+id_type!(ToolProviderId, IdKind::Provider);
+id_type!(HookId, IdKind::Hook);
+id_type!(ToolId, IdKind::Tool);
+id_type!(SkillId, IdKind::Skill);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExtensionIdError {
-    kind: ExtensionIdKind,
+pub struct ToolProviderIdError {
+    kind: IdKind,
     value: String,
 }
 
-impl std::fmt::Display for ExtensionIdError {
+impl std::fmt::Display for ToolProviderIdError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -97,42 +100,62 @@ impl std::fmt::Display for ExtensionIdError {
     }
 }
 
-impl std::error::Error for ExtensionIdError {}
+impl std::error::Error for ToolProviderIdError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StaticExtensionDeclaration {
-    pub id: ExtensionId,
+pub struct ToolProviderDeclaration {
+    pub id: ToolProviderId,
     pub name: String,
     pub version: String,
+    pub source: ToolProviderSource,
+    pub trust: ToolProviderTrust,
     pub hooks: Vec<HookDeclaration>,
     pub tools: Vec<ToolDeclaration>,
-    pub bundled_skills: Vec<BundledSkillDeclaration>,
 }
 
-pub trait StaticExtension {
-    fn declaration(&self) -> &StaticExtensionDeclaration;
-
-    fn run_hook(&self, input: HookInput) -> HookResult;
-}
-
-impl StaticExtensionDeclaration {
+impl ToolProviderDeclaration {
     pub fn new(
-        id: ExtensionId,
+        id: ToolProviderId,
         name: impl Into<String>,
         version: impl Into<String>,
-    ) -> Result<Self, StaticExtensionDeclarationError> {
+    ) -> Result<Self, ToolProviderDeclarationError> {
         let name = name.into();
         let version = version.into();
-        ensure_non_blank("extension name", &name)?;
-        ensure_non_blank("extension version", &version)?;
+        ensure_non_blank("provider name", &name)?;
+        ensure_non_blank("provider version", &version)?;
         Ok(Self {
             id,
             name,
             version,
+            source: ToolProviderSource::Builtin,
+            trust: ToolProviderTrust::TrustedByBinary,
             hooks: Vec::new(),
             tools: Vec::new(),
-            bundled_skills: Vec::new(),
         })
+    }
+
+    pub fn registered_third_party(
+        id: ToolProviderId,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        trust: ToolProviderTrust,
+    ) -> Result<Self, ToolProviderDeclarationError> {
+        let mut declaration = Self::new(id, name, version)?;
+        declaration.source = ToolProviderSource::ThirdPartyRegistered;
+        declaration.trust = trust;
+        Ok(declaration)
+    }
+
+    pub fn test_fixture(
+        id: ToolProviderId,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        trust: ToolProviderTrust,
+    ) -> Result<Self, ToolProviderDeclarationError> {
+        let mut declaration = Self::new(id, name, version)?;
+        declaration.source = ToolProviderSource::TestFixture;
+        declaration.trust = trust;
+        Ok(declaration)
     }
 
     pub fn with_hook(mut self, hook: HookDeclaration) -> Self {
@@ -145,14 +168,18 @@ impl StaticExtensionDeclaration {
         self
     }
 
-    pub fn with_bundled_skill(mut self, skill: BundledSkillDeclaration) -> Self {
-        self.bundled_skills.push(skill);
+    pub fn with_trust(mut self, trust: ToolProviderTrust) -> Self {
+        self.trust = trust;
         self
     }
 
-    pub fn validate(&self) -> Result<(), StaticExtensionDeclarationError> {
-        ensure_non_blank("extension name", &self.name)?;
-        ensure_non_blank("extension version", &self.version)?;
+    pub fn permits_tool_execution(&self) -> bool {
+        self.trust.permits_tool_execution()
+    }
+
+    pub fn validate(&self) -> Result<(), ToolProviderDeclarationError> {
+        ensure_non_blank("provider name", &self.name)?;
+        ensure_non_blank("provider version", &self.version)?;
         reject_duplicate_ids(self.hooks.iter().map(|hook| hook.id.as_str()), "hook")?;
         reject_duplicate_ids(self.tools.iter().map(|tool| tool.id.as_str()), "tool")?;
         for tool in &self.tools {
@@ -165,11 +192,42 @@ impl StaticExtensionDeclaration {
                 "tool required argument",
             )?;
         }
-        reject_duplicate_ids(
-            self.bundled_skills.iter().map(|skill| skill.id.as_str()),
-            "bundled skill",
-        )?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProviderSource {
+    Builtin,
+    ThirdPartyRegistered,
+    TestFixture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProviderTrust {
+    TrustedByBinary,
+    TrustedRegistered,
+    Unsupported,
+    Unknown,
+    Changed,
+    Revoked,
+}
+
+impl ToolProviderTrust {
+    pub fn permits_tool_execution(self) -> bool {
+        matches!(self, Self::TrustedByBinary | Self::TrustedRegistered)
+    }
+
+    pub fn block_reason(self) -> &'static str {
+        match self {
+            Self::TrustedByBinary | Self::TrustedRegistered => "tool provider is trusted",
+            Self::Unsupported => "tool provider state is unsupported",
+            Self::Unknown => "tool provider trust state is unknown",
+            Self::Changed => "tool provider declaration has changed",
+            Self::Revoked => "tool provider trust was revoked",
+        }
     }
 }
 
@@ -184,12 +242,36 @@ pub struct HookDeclaration {
 pub struct ToolDeclaration {
     pub id: ToolId,
     pub description: String,
+    pub capability: ToolCapability,
     pub required_arguments: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCapability {
+    Read,
+    Write,
+}
+
+impl ToolCapability {
+    pub fn is_visible_in_read_only(self) -> bool {
+        matches!(self, Self::Read)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolInput {
+    pub id: ToolId,
+    pub arguments: serde_json::Value,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BundledSkillDeclaration {
-    pub id: SkillId,
+pub struct ToolOutput {
+    pub observation: String,
+}
+
+pub trait ToolHandler {
+    fn dispatch(&self, input: ToolInput) -> anyhow::Result<ToolOutput>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -284,12 +366,12 @@ impl HookBatchResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StaticExtensionDeclarationError {
+pub enum ToolProviderDeclarationError {
     BlankField { field: &'static str },
     DuplicateId { kind: &'static str, id: String },
 }
 
-impl std::fmt::Display for StaticExtensionDeclarationError {
+impl std::fmt::Display for ToolProviderDeclarationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BlankField { field } => write!(f, "{field} cannot be blank"),
@@ -298,9 +380,9 @@ impl std::fmt::Display for StaticExtensionDeclarationError {
     }
 }
 
-impl std::error::Error for StaticExtensionDeclarationError {}
+impl std::error::Error for ToolProviderDeclarationError {}
 
-fn validate_id(kind: ExtensionIdKind, value: &str) -> Result<(), ExtensionIdError> {
+fn validate_id(kind: IdKind, value: &str) -> Result<(), ToolProviderIdError> {
     let valid = !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase()
@@ -313,19 +395,16 @@ fn validate_id(kind: ExtensionIdKind, value: &str) -> Result<(), ExtensionIdErro
     if valid {
         Ok(())
     } else {
-        Err(ExtensionIdError {
+        Err(ToolProviderIdError {
             kind,
             value: value.to_string(),
         })
     }
 }
 
-fn ensure_non_blank(
-    field: &'static str,
-    value: &str,
-) -> Result<(), StaticExtensionDeclarationError> {
+fn ensure_non_blank(field: &'static str, value: &str) -> Result<(), ToolProviderDeclarationError> {
     if value.trim().is_empty() {
-        Err(StaticExtensionDeclarationError::BlankField { field })
+        Err(ToolProviderDeclarationError::BlankField { field })
     } else {
         Ok(())
     }
@@ -334,11 +413,11 @@ fn ensure_non_blank(
 fn reject_duplicate_ids<'a>(
     ids: impl IntoIterator<Item = &'a str>,
     kind: &'static str,
-) -> Result<(), StaticExtensionDeclarationError> {
+) -> Result<(), ToolProviderDeclarationError> {
     let mut seen = std::collections::BTreeSet::new();
     for id in ids {
         if !seen.insert(id) {
-            return Err(StaticExtensionDeclarationError::DuplicateId {
+            return Err(ToolProviderDeclarationError::DuplicateId {
                 kind,
                 id: id.to_string(),
             });
@@ -381,8 +460,8 @@ mod tests {
 
     #[test]
     fn declaration_rejects_duplicate_hooks() {
-        let declaration = StaticExtensionDeclaration::new(
-            ExtensionId::new("core-guards").unwrap(),
+        let declaration = ToolProviderDeclaration::new(
+            ToolProviderId::new("core-guards").unwrap(),
             "Core Guards",
             "1",
         )
@@ -400,7 +479,7 @@ mod tests {
 
         assert_eq!(
             declaration.validate().unwrap_err(),
-            StaticExtensionDeclarationError::DuplicateId {
+            ToolProviderDeclarationError::DuplicateId {
                 kind: "hook",
                 id: "json.validate".to_string(),
             }
