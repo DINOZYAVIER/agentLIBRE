@@ -71,19 +71,16 @@ pub struct SessionMetadata {
     pub session_id: AgentLibreSessionId,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
-    #[serde(alias = "model_config_path")]
     pub local_inference_config_path: PathBuf,
     pub backend: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLibreSessionFinishReason {
     Eof,
     ExitCommand,
     HostShutdown,
-    #[default]
-    Legacy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +123,6 @@ pub enum ChatSessionEvent {
     },
     SessionFinished {
         session_id: AgentLibreSessionId,
-        #[serde(default)]
         reason: AgentLibreSessionFinishReason,
     },
     SessionFailed {

@@ -73,7 +73,7 @@ tool_call_format = "hermes_json"
 }
 
 #[test]
-fn local_inference_config_accepts_legacy_minimal_runtime_fields() {
+fn local_inference_config_accepts_minimal_runtime_fields() {
     let path = write_temp_config(
         "local-inference-minimal-runtime",
         r#"
