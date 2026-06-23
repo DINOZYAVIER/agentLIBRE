@@ -2,6 +2,7 @@
 members = [
     "crates/agl-assets",
     "crates/agl-cli",
+    "crates/agl-extension",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-oven",
@@ -26,6 +27,7 @@ agl-actions = { path = "crates/agl-actions" }
 agl-assets = { path = "crates/agl-assets" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
+agl-extension = { path = "crates/agl-extension" }
 agl-inference = { path = "crates/agl-inference" }
 agl-loop = { path = "crates/agl-loop" }
 agl-oven = { path = "crates/agl-oven" }
