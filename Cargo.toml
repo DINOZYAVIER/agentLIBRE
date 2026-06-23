@@ -2,6 +2,7 @@
 members = [
     "crates/agl-assets",
     "crates/agl-cli",
+    "crates/agl-core-guards",
     "crates/agl-extension",
     "crates/agl-inference",
     "crates/agl-loop",
@@ -26,6 +27,7 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
 agl-assets = { path = "crates/agl-assets" }
+agl-core-guards = { path = "crates/agl-core-guards" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-extension = { path = "crates/agl-extension" }
