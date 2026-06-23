@@ -1,11 +1,16 @@
+use std::time::Instant;
+
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_events::AgentEvent;
+use agl_extension::{HookBatchRequest, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
-    ModelRequest, StopReason, TurnFailureOperation, TurnInput, TurnOutput, TurnState,
-    TurnTerminalStatus, TurnTransition, TurnTransitionRecord,
+    HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,
+    TurnHookBatch, TurnInput, TurnOutput, TurnState, TurnTerminalStatus, TurnTransition,
+    TurnTransitionRecord,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use serde_json::json;
 
 use crate::AgentLoopHost;
 use crate::event_map::{event_for_record, malformed_kind};
@@ -14,6 +19,8 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
     let mut state = TurnState::new(input);
     let user_input = state.input.user_input.clone();
     apply_emit(host, &mut state, TurnTransition::Start { user_input })?;
+    let payload = context_prepare_payload(&state);
+    run_hook_batch(host, &mut state, HookEvent::ContextPrepare, payload)?;
     let message_count = state.messages.len();
     apply_emit(
         host,
@@ -28,6 +35,8 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
             &mut state,
             TurnTransition::RequestModel { request_index },
         )?;
+        let payload = model_request_payload(&state, request_index);
+        run_hook_batch(host, &mut state, HookEvent::ModelRequest, payload)?;
         let response = match host.generate(ModelRequest {
             turn_id: state.input.turn_id.clone(),
             request_index,
@@ -55,6 +64,8 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
                 content: response.content.clone(),
             },
         )?;
+        let payload = model_response_payload(&state, request_index, response.content.len());
+        run_hook_batch(host, &mut state, HookEvent::ModelResponse, payload)?;
 
         match agl_actions::parse_model_action(&response.content) {
             ModelAction::Answer(answer) => {
@@ -213,6 +224,8 @@ fn finish_answer<H: AgentLoopHost>(
             answer: answer.clone(),
         },
     )?;
+    let payload = turn_finish_payload(state, answer.len());
+    run_hook_batch(host, state, HookEvent::TurnFinish, payload)?;
     apply_emit(
         host,
         state,
@@ -221,6 +234,227 @@ fn finish_answer<H: AgentLoopHost>(
         },
     )?;
     Ok(TurnOutput::Answered { answer })
+}
+
+fn run_hook_batch<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    event: HookEvent,
+    payload: serde_json::Value,
+) -> Result<()> {
+    let batch = hook_batch_for_event(&state.input, event);
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let prepared_summary = batch.summary();
+    apply_emit(
+        host,
+        state,
+        TurnTransition::PrepareHookBatch {
+            summary: prepared_summary.clone(),
+        },
+    )?;
+    apply_emit(
+        host,
+        state,
+        TurnTransition::RunHookBatch {
+            summary: prepared_summary,
+        },
+    )?;
+
+    let started = Instant::now();
+    let result = host.run_hooks(HookBatchRequest {
+        event,
+        hooks: batch.hook_ids(),
+        payload,
+    });
+    let duration_ms = Some(elapsed_millis(started));
+    let summary = match result {
+        Ok(result) if result.event == event => {
+            HookBatchSummary::from_batch_result(&batch, result, duration_ms)
+        }
+        Ok(result) => {
+            let summary = HookBatchSummary::failed_without_results(
+                &batch,
+                duration_ms,
+                "hook.event_mismatch",
+            );
+            finish_and_reject_hook_batch(
+                host,
+                state,
+                summary,
+                format!(
+                    "hook batch `{}` returned mismatched event `{}`",
+                    event.as_str(),
+                    result.event.as_str()
+                ),
+            )?;
+            return Err(anyhow!(
+                "hook batch `{}` returned mismatched event",
+                event.as_str()
+            ));
+        }
+        Err(err) => {
+            let summary =
+                HookBatchSummary::failed_without_results(&batch, duration_ms, "hook.host_error");
+            finish_and_reject_hook_batch(
+                host,
+                state,
+                summary,
+                format!(
+                    "hook batch `{}` host callback failed: {err:#}",
+                    event.as_str()
+                ),
+            )?;
+            return Err(err).with_context(|| format!("hook batch `{}` failed", event.as_str()));
+        }
+    };
+
+    apply_emit(
+        host,
+        state,
+        TurnTransition::FinishHookBatch {
+            summary: summary.clone(),
+        },
+    )?;
+
+    match summary.outcome() {
+        HookBatchOutcome::Pass | HookBatchOutcome::Warn => Ok(()),
+        HookBatchOutcome::Repair => {
+            apply_emit(
+                host,
+                state,
+                TurnTransition::PrepareRepair {
+                    summary: summary.clone(),
+                    attempt: 1,
+                },
+            )?;
+            reject_hook_batch(
+                host,
+                state,
+                summary,
+                format!(
+                    "hook batch `{}` requested repair but no repair handler is available",
+                    event.as_str()
+                ),
+            )?;
+            Err(anyhow!(
+                "hook batch `{}` requested unsupported repair",
+                event.as_str()
+            ))
+        }
+        HookBatchOutcome::Fail => {
+            let failed_required_count = summary.failed_required_count();
+            let missing_required_count = summary.missing_required_count();
+            reject_hook_batch(
+                host,
+                state,
+                summary,
+                format!(
+                    "required hook batch `{}` failed (failed_required_count={}, missing_required_count={})",
+                    event.as_str(),
+                    failed_required_count,
+                    missing_required_count
+                ),
+            )?;
+            Err(anyhow!("required hook batch `{}` failed", event.as_str()))
+        }
+    }
+}
+
+fn finish_and_reject_hook_batch<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    summary: HookBatchSummary,
+    message: String,
+) -> Result<()> {
+    apply_emit(
+        host,
+        state,
+        TurnTransition::FinishHookBatch {
+            summary: summary.clone(),
+        },
+    )?;
+    reject_hook_batch(host, state, summary, message)
+}
+
+fn reject_hook_batch<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    summary: HookBatchSummary,
+    message: String,
+) -> Result<()> {
+    apply_emit(
+        host,
+        state,
+        TurnTransition::RejectHookFailure { summary, message },
+    )?;
+    apply_emit(
+        host,
+        state,
+        TurnTransition::Finish {
+            status: TurnTerminalStatus::Failed,
+        },
+    )?;
+    Ok(())
+}
+
+fn hook_batch_for_event(input: &TurnInput, event: HookEvent) -> TurnHookBatch {
+    let mut batch = TurnHookBatch::new(event);
+    for hook_batch in input
+        .hook_batches
+        .iter()
+        .filter(|hook_batch| hook_batch.event == event)
+    {
+        batch
+            .required_hooks
+            .extend(hook_batch.required_hooks.iter().cloned());
+        batch
+            .optional_hooks
+            .extend(hook_batch.optional_hooks.iter().cloned());
+    }
+    batch
+}
+
+fn context_prepare_payload(state: &TurnState) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "message_count": state.messages.len(),
+        "visible_tool_count": state.input.visible_tools.len(),
+    })
+}
+
+fn model_request_payload(state: &TurnState, request_index: usize) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "request_index": request_index,
+        "message_count": state.messages.len(),
+        "visible_tool_count": state.input.visible_tools.len(),
+    })
+}
+
+fn model_response_payload(
+    state: &TurnState,
+    request_index: usize,
+    content_bytes: usize,
+) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "request_index": request_index,
+        "content_bytes": content_bytes,
+    })
+}
+
+fn turn_finish_payload(state: &TurnState, answer_bytes: usize) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "answer_bytes": answer_bytes,
+    })
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn stop_turn<H: AgentLoopHost>(

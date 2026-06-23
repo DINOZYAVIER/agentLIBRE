@@ -94,6 +94,7 @@ version = "1.0.0-alpha.6"
 dependencies = [
  "agl-actions",
  "agl-events",
+ "agl-extension",
  "agl-turn",
  "anyhow",
  "serde_json",
@@ -147,6 +148,8 @@ name = "agl-turn"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-actions",
+ "agl-extension",
+ "serde",
  "serde_json",
 ]
 

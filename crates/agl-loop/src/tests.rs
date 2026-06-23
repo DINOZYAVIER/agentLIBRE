@@ -13,15 +13,21 @@ enum FakeToolResult {
     Error(String),
 }
 
+enum FakeHookResult {
+    Batch(HookBatchResult),
+}
+
 #[derive(Default)]
 struct FakeHost {
     model_results: Vec<FakeModelResult>,
     tool_results: Vec<FakeToolResult>,
+    hook_results: Vec<FakeHookResult>,
     requests: Vec<&'static str>,
     operations: Vec<String>,
     events: Vec<AgentEvent>,
     transitions: Vec<TurnTransitionRecord>,
     dispatches: Vec<ToolDispatchRequest>,
+    hook_requests: Vec<HookBatchRequest>,
 }
 
 impl FakeHost {
@@ -49,6 +55,11 @@ impl FakeHost {
         self
     }
 
+    fn with_hook_result(mut self, result: HookBatchResult) -> Self {
+        self.hook_results.push(FakeHookResult::Batch(result));
+        self
+    }
+
     fn request_kinds(&self) -> Vec<&'static str> {
         self.requests.clone()
     }
@@ -70,6 +81,16 @@ impl FakeHost {
 }
 
 impl AgentLoopHost for FakeHost {
+    fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
+        self.requests.push("run_hooks");
+        self.operations
+            .push(format!("run_hooks:{}", request.event.as_str()));
+        self.hook_requests.push(request);
+        match self.hook_results.remove(0) {
+            FakeHookResult::Batch(result) => Ok(result),
+        }
+    }
+
     fn generate(&mut self, _request: ModelRequest) -> Result<ModelResponse> {
         self.requests.push("generate");
         self.operations.push("generate".to_string());
@@ -104,6 +125,208 @@ fn read_file_tool() -> VisibleTool {
 
 fn tool_call(path: &str) -> String {
     format!(r#"<tool_call>{{"name":"read_file","arguments":{{"path":"{path}"}}}}</tool_call>"#)
+}
+
+fn hook_id(value: &str) -> HookId {
+    HookId::new(value).unwrap()
+}
+
+fn finish_hook_batch() -> TurnHookBatch {
+    TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"))
+}
+
+fn hook_message(code: &str) -> HookMessage {
+    HookMessage {
+        code: code.to_string(),
+        message: "hidden hook diagnostic".to_string(),
+        fix: Some("hidden hook fix".to_string()),
+    }
+}
+
+fn hook_result(id: &str, status: HookStatus, codes: &[&str]) -> HookResult {
+    HookResult {
+        hook_id: hook_id(id),
+        status,
+        messages: codes.iter().map(|code| hook_message(code)).collect(),
+    }
+}
+
+fn hook_batch_result(
+    event: HookEvent,
+    results: impl IntoIterator<Item = HookResult>,
+) -> HookBatchResult {
+    HookBatchResult {
+        event,
+        results: results.into_iter().collect(),
+    }
+}
+
+#[test]
+fn required_turn_finish_hook_pass_allows_answer() {
+    let mut host = FakeHost::default()
+        .with_model_response("done")
+        .with_hook_result(hook_batch_result(
+            HookEvent::TurnFinish,
+            [hook_result("guard.answer", HookStatus::Pass, &[])],
+        ));
+    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+
+    let output = run_turn(&mut host, input).unwrap();
+
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "done".to_string()
+        }
+    );
+    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
+    assert_eq!(host.hook_requests[0].event, HookEvent::TurnFinish);
+    assert_eq!(host.hook_requests[0].hooks, [hook_id("guard.answer")]);
+    assert_eq!(
+        host.event_kinds(),
+        [
+            "turn.started",
+            "model.request_prepared",
+            "model.requested",
+            "model.response_received",
+            "model.action_parsed",
+            "answer.final",
+            "hook.batch_prepared",
+            "hook.batch_started",
+            "hook.batch_finished",
+            "turn.finished",
+        ]
+    );
+    assert_eq!(
+        host.operation_kinds(),
+        [
+            "transition:start",
+            "transition:prepare_model_request",
+            "transition:request_model",
+            "generate",
+            "transition:receive_model_response",
+            "transition:parse_answer",
+            "transition:final_answer",
+            "transition:prepare_hook_batch",
+            "transition:run_hook_batch",
+            "run_hooks:turn.finish",
+            "transition:finish_hook_batch",
+            "transition:finish",
+        ]
+    );
+}
+
+#[test]
+fn warning_turn_finish_hook_continues_and_records_warning() {
+    let mut host = FakeHost::default()
+        .with_model_response("done")
+        .with_hook_result(hook_batch_result(
+            HookEvent::TurnFinish,
+            [hook_result(
+                "guard.answer",
+                HookStatus::Warn,
+                &["answer.warning"],
+            )],
+        ));
+    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+
+    let output = run_turn(&mut host, input).unwrap();
+
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "done".to_string()
+        }
+    );
+    assert!(matches!(
+        host.events
+            .iter()
+            .find(|event| event.kind() == "hook.batch_finished"),
+        Some(AgentEvent::HookBatchFinished {
+            outcome: agl_events::HookBatchOutcomeEvent::Warn,
+            warning_count: 1,
+            message_codes,
+            ..
+        }) if message_codes == &["answer.warning".to_string()]
+    ));
+}
+
+#[test]
+fn failed_required_turn_finish_hook_fails_closed_before_accepting_answer() {
+    let mut host = FakeHost::default()
+        .with_model_response("blocked answer")
+        .with_hook_result(hook_batch_result(
+            HookEvent::TurnFinish,
+            [hook_result(
+                "guard.answer",
+                HookStatus::Fail,
+                &["answer.blocked"],
+            )],
+        ));
+    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+
+    let err = run_turn(&mut host, input).unwrap_err();
+
+    assert!(format!("{err:#}").contains("required hook batch `turn.finish` failed"));
+    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
+    assert_eq!(
+        host.event_kinds(),
+        [
+            "turn.started",
+            "model.request_prepared",
+            "model.requested",
+            "model.response_received",
+            "model.action_parsed",
+            "answer.final",
+            "hook.batch_prepared",
+            "hook.batch_started",
+            "hook.batch_finished",
+            "hook.batch_blocked",
+            "turn.finished",
+        ]
+    );
+    assert!(matches!(
+        host.events.last(),
+        Some(AgentEvent::TurnFinished {
+            status: agl_events::TurnFinishStatus::Failed,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn missing_required_turn_finish_hook_fails_closed() {
+    let mut host = FakeHost::default()
+        .with_model_response("done")
+        .with_hook_result(hook_batch_result(
+            HookEvent::TurnFinish,
+            Vec::<HookResult>::new(),
+        ));
+    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+
+    let err = run_turn(&mut host, input).unwrap_err();
+
+    assert!(format!("{err:#}").contains("required hook batch `turn.finish` failed"));
+    assert!(matches!(
+        host.events
+            .iter()
+            .find(|event| event.kind() == "hook.batch_finished"),
+        Some(AgentEvent::HookBatchFinished {
+            outcome: agl_events::HookBatchOutcomeEvent::Fail,
+            failed_required_count: 0,
+            missing_required_hooks,
+            ..
+        }) if missing_required_hooks == &["guard.answer".to_string()]
+    ));
+    assert!(matches!(
+        host.events
+            .iter()
+            .find(|event| event.kind() == "hook.batch_blocked"),
+        Some(AgentEvent::HookBatchBlocked {
+            missing_required_hooks,
+            ..
+        }) if missing_required_hooks == &["guard.answer".to_string()]
+    ));
 }
 
 #[test]
