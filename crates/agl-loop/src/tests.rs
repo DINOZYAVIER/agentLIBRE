@@ -28,6 +28,7 @@ struct FakeHost {
     transitions: Vec<TurnTransitionRecord>,
     dispatches: Vec<ToolDispatchRequest>,
     hook_requests: Vec<HookBatchRequest>,
+    turn_messages: Vec<TurnMessage>,
 }
 
 impl FakeHost {
@@ -108,6 +109,11 @@ impl AgentLoopHost for FakeHost {
             FakeToolResult::Observation(observation) => Ok(ToolDispatchResponse { observation }),
             FakeToolResult::Error(message) => Err(anyhow!(message)),
         }
+    }
+
+    fn record_turn_messages(&mut self, messages: &[TurnMessage]) -> Result<()> {
+        self.turn_messages = messages.to_vec();
+        Ok(())
     }
 
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
@@ -466,6 +472,25 @@ fn runs_one_tool_then_answers_with_observation() {
     );
     assert_eq!(host.dispatches[0].name, "read_file");
     assert_eq!(host.dispatches[0].arguments, json!({"path": "README.MD"}));
+    assert_eq!(
+        host.turn_messages,
+        vec![
+            TurnMessage::User {
+                content: "read README".to_string(),
+            },
+            TurnMessage::AssistantToolCall {
+                name: "read_file".to_string(),
+                arguments: json!({"path": "README.MD"}),
+            },
+            TurnMessage::ToolObservation {
+                name: "read_file".to_string(),
+                content: "agentLIBRE readme".to_string(),
+            },
+            TurnMessage::Assistant {
+                content: "README says agentLIBRE.".to_string(),
+            },
+        ]
+    );
     assert_eq!(
         host.operation_kinds(),
         [

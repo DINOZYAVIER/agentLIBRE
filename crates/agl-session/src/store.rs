@@ -107,6 +107,12 @@ pub enum ChatSessionEvent {
         message_id: AgentLibreMessageId,
         content: String,
     },
+    AssistantToolCall {
+        session_id: AgentLibreSessionId,
+        message_id: AgentLibreMessageId,
+        name: String,
+        arguments: serde_json::Value,
+    },
     ToolMessage {
         session_id: AgentLibreSessionId,
         message_id: AgentLibreMessageId,
@@ -322,6 +328,20 @@ impl ChatSessionStore {
         Ok(())
     }
 
+    pub fn append_assistant_tool_call(
+        &mut self,
+        message_id: AgentLibreMessageId,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<()> {
+        let record = self.apply(ChatSessionTransition::RecordAssistantToolCall {
+            message_id,
+            name,
+            arguments,
+        })?;
+        self.append_record_event(&record)
+    }
+
     pub fn append_tool_message(
         &mut self,
         message_id: AgentLibreMessageId,
@@ -435,6 +455,16 @@ impl ChatSessionEvent {
                 message_id: message_id.clone(),
                 content: content.clone(),
             }),
+            ChatSessionTransition::RecordAssistantToolCall {
+                message_id,
+                name,
+                arguments,
+            } => Some(Self::AssistantToolCall {
+                session_id: record.session_id.clone(),
+                message_id: message_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
             ChatSessionTransition::RecordToolMessage {
                 message_id,
                 name,
@@ -475,6 +505,7 @@ impl ChatSessionEvent {
         match self {
             Self::UserMessage { message_id, .. }
             | Self::AssistantMessage { message_id, .. }
+            | Self::AssistantToolCall { message_id, .. }
             | Self::ToolMessage { message_id, .. } => {
                 indexed_suffix(message_id.as_str(), "message-")
             }

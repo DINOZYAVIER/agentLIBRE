@@ -3,7 +3,7 @@ use std::path::Path;
 use agl_events::{AgentEvent, RuntimeEventWriter};
 use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
-    TurnTransitionRecord,
+    TurnMessage, TurnTransitionRecord,
 };
 use agl_tools::{
     HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus, ToolId,
@@ -20,6 +20,7 @@ pub(crate) struct CliLoopHost {
     core_tools: agl_tools::CoreTools,
     tool_runtime: ToolRuntime,
     generated_requests: usize,
+    turn_messages: Vec<TurnMessage>,
 }
 
 impl CliLoopHost {
@@ -35,6 +36,7 @@ impl CliLoopHost {
             core_tools,
             tool_runtime,
             generated_requests: 0,
+            turn_messages: Vec::new(),
         })
     }
 
@@ -52,10 +54,15 @@ impl CliLoopHost {
 
     pub(crate) fn reset_turn_counters(&mut self) {
         self.generated_requests = 0;
+        self.turn_messages.clear();
     }
 
     pub(crate) fn generated_requests(&self) -> usize {
         self.generated_requests
+    }
+
+    pub(crate) fn take_turn_messages(&mut self) -> Vec<TurnMessage> {
+        std::mem::take(&mut self.turn_messages)
     }
 
     pub(crate) fn workspace_root(&self) -> &Path {
@@ -122,6 +129,11 @@ impl AgentLoopHost for CliLoopHost {
         Ok(ToolDispatchResponse {
             observation: output.observation,
         })
+    }
+
+    fn record_turn_messages(&mut self, messages: &[TurnMessage]) -> Result<()> {
+        self.turn_messages = messages.to_vec();
+        Ok(())
     }
 
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {

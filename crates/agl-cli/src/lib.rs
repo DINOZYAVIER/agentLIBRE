@@ -388,49 +388,52 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             }
         };
         let generated_requests = loop_host.generated_requests();
-        messages.push(TurnMessage::User {
-            content: input.to_string(),
-        });
+        let mut next_attempt_to_link = request_index + 1;
+        let linked_attempt_end = request_index + generated_requests;
+        let mut turn_recording = CompletedTurnRecording {
+            session_id: &session_id,
+            message_index: &mut message_index,
+            next_attempt_to_link: &mut next_attempt_to_link,
+            linked_attempt_end,
+            runtime,
+        };
+        let previous_message_count = messages.len();
+        let mut turn_messages = loop_host.take_turn_messages();
+        if turn_messages.is_empty() {
+            turn_messages = messages.clone();
+            turn_messages.push(TurnMessage::User {
+                content: input.to_string(),
+            });
+        }
         match output {
             TurnOutput::Answered { answer } => {
                 let content = assistant_text_for_terminal(&answer);
                 println!("assistant> {content}");
-                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
-                message_index += 1;
-                if let Some(history) = &mut chat_history {
-                    history
-                        .append_assistant_message(assistant_message_id.clone(), content.clone())?;
-                }
-                log_message_metadata(
-                    "assistant",
-                    &session_id,
-                    &assistant_message_id,
-                    &content,
-                    runtime,
-                );
-                messages.push(TurnMessage::Assistant { content });
+                ensure_final_assistant_message(&mut turn_messages, content);
+                record_completed_turn_messages(
+                    &mut chat_history,
+                    &mut turn_recording,
+                    turn_messages
+                        .get(previous_message_count..)
+                        .context("turn transcript is shorter than prior chat context")?,
+                    None,
+                )?;
             }
             TurnOutput::Stopped { reason } => {
                 println!("stopped=true reason={}", reason.as_str());
                 let content = stopped_turn_context_message(reason).to_string();
-                let assistant_message_id = AgentLibreMessageId::indexed(message_index);
-                message_index += 1;
-                if let Some(history) = &mut chat_history {
-                    history.append_assistant_stop_marker(
-                        assistant_message_id.clone(),
-                        content.clone(),
-                    )?;
-                }
-                log_message_metadata(
-                    "assistant",
-                    &session_id,
-                    &assistant_message_id,
-                    &content,
-                    runtime,
-                );
-                messages.push(TurnMessage::Assistant { content });
+                turn_messages.push(TurnMessage::Assistant { content });
+                record_completed_turn_messages(
+                    &mut chat_history,
+                    &mut turn_recording,
+                    turn_messages
+                        .get(previous_message_count..)
+                        .context("turn transcript is shorter than prior chat context")?,
+                    Some(reason),
+                )?;
             }
         }
+        messages = turn_messages;
         request_index += generated_requests;
     }
 
@@ -475,6 +478,98 @@ fn print_turn_output(output: &TurnOutput) {
         TurnOutput::Answered { answer } => println!("{}", assistant_text_for_terminal(answer)),
         TurnOutput::Stopped { reason } => println!("stopped=true reason={}", reason.as_str()),
     }
+}
+
+fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: String) {
+    match messages.last_mut() {
+        Some(TurnMessage::Assistant { content: existing }) => *existing = content,
+        _ => messages.push(TurnMessage::Assistant { content }),
+    }
+}
+
+struct CompletedTurnRecording<'a> {
+    session_id: &'a AgentLibreSessionId,
+    message_index: &'a mut usize,
+    next_attempt_to_link: &'a mut usize,
+    linked_attempt_end: usize,
+    runtime: &'a AgentLibreRuntimeConfig,
+}
+
+fn record_completed_turn_messages(
+    chat_history: &mut Option<ChatSessionStore>,
+    recording: &mut CompletedTurnRecording<'_>,
+    messages: &[TurnMessage],
+    stop_reason: Option<StopReason>,
+) -> Result<()> {
+    let mut pending_stop_reason = stop_reason;
+    for message in messages {
+        match message {
+            TurnMessage::System { .. } | TurnMessage::User { .. } => {}
+            TurnMessage::Assistant { content } => {
+                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
+                *recording.message_index += 1;
+                if let Some(history) = chat_history.as_mut() {
+                    if pending_stop_reason.take().is_some() {
+                        history
+                            .append_assistant_stop_marker(message_id.clone(), content.clone())?;
+                    } else {
+                        history.append_assistant_message(message_id.clone(), content.clone())?;
+                    }
+                }
+                log_message_metadata(
+                    "assistant",
+                    recording.session_id,
+                    &message_id,
+                    content,
+                    recording.runtime,
+                );
+            }
+            TurnMessage::AssistantToolCall { name, arguments } => {
+                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
+                *recording.message_index += 1;
+                if let Some(history) = chat_history.as_mut() {
+                    history.append_assistant_tool_call(
+                        message_id.clone(),
+                        name.clone(),
+                        arguments.clone(),
+                    )?;
+                }
+                log_message_metadata(
+                    "assistant_tool_call",
+                    recording.session_id,
+                    &message_id,
+                    &arguments.to_string(),
+                    recording.runtime,
+                );
+            }
+            TurnMessage::ToolObservation { name, content } => {
+                let message_id = AgentLibreMessageId::indexed(*recording.message_index);
+                *recording.message_index += 1;
+                if let Some(history) = chat_history.as_mut() {
+                    history.append_tool_message(
+                        message_id.clone(),
+                        name.clone(),
+                        content.clone(),
+                    )?;
+                }
+                log_message_metadata(
+                    "tool",
+                    recording.session_id,
+                    &message_id,
+                    content,
+                    recording.runtime,
+                );
+                if let Some(history) = chat_history.as_mut()
+                    && *recording.next_attempt_to_link < recording.linked_attempt_end
+                {
+                    history
+                        .link_attempt(format!("attempt-{:04}", *recording.next_attempt_to_link))?;
+                    *recording.next_attempt_to_link += 1;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn stopped_turn_context_message(reason: StopReason) -> &'static str {
@@ -524,6 +619,14 @@ fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
             ChatSessionEvent::AssistantMessage { content, .. } => {
                 messages.push(TurnMessage::Assistant {
                     content: content.clone(),
+                });
+            }
+            ChatSessionEvent::AssistantToolCall {
+                name, arguments, ..
+            } => {
+                messages.push(TurnMessage::AssistantToolCall {
+                    name: name.clone(),
+                    arguments: arguments.clone(),
                 });
             }
             ChatSessionEvent::ToolMessage { name, content, .. } => {
@@ -585,14 +688,20 @@ mod tests {
                     message_id: AgentLibreMessageId::indexed(2),
                     content: "hi".to_string(),
                 },
+                ChatSessionEvent::AssistantToolCall {
+                    session_id: session_id.clone(),
+                    message_id: AgentLibreMessageId::indexed(3),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "README.MD"}),
+                },
                 ChatSessionEvent::ToolMessage {
                     session_id,
-                    message_id: AgentLibreMessageId::indexed(3),
+                    message_id: AgentLibreMessageId::indexed(4),
                     name: "read_file".to_string(),
                     content: "content".to_string(),
                 },
             ],
-            next_message_index: 4,
+            next_message_index: 5,
             next_attempt_index: 1,
         };
 
@@ -604,6 +713,10 @@ mod tests {
                 },
                 TurnMessage::Assistant {
                     content: "hi".to_string()
+                },
+                TurnMessage::AssistantToolCall {
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "README.MD"})
                 },
                 TurnMessage::ToolObservation {
                     name: "read_file".to_string(),
