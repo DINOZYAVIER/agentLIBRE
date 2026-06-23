@@ -7,6 +7,7 @@ members = [
     "crates/agl-loop",
     "crates/agl-oven",
     "crates/agl-session",
+    "crates/agl-skills",
     "crates/agl-turn",
     "crates/agl-config",
     "crates/agl-events",
@@ -33,12 +34,14 @@ agl-loop = { path = "crates/agl-loop" }
 agl-oven = { path = "crates/agl-oven" }
 agl-runtime = { path = "crates/agl-runtime" }
 agl-session = { path = "crates/agl-session" }
+agl-skills = { path = "crates/agl-skills" }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 directories = "6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 sha2 = "0.10"
 toml = "0.8"
 tracing = "0.1"
