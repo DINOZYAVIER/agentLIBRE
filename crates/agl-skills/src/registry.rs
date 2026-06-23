@@ -277,7 +277,13 @@ mod tests {
         assert_eq!(skill.trust, SkillTrustState::TrustedByBinary);
         assert_eq!(skill.harness.manifest_sha256.len(), 64);
         assert_eq!(skill.harness.tree_sha256.len(), 64);
-        assert_eq!(registry.by_pack("core").count(), 1);
+        assert_eq!(
+            registry
+                .by_pack("core")
+                .map(|skill| skill.harness.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["core:task-spec", "core:tool-smoke"]
+        );
     }
 
     #[test]
@@ -303,7 +309,7 @@ mod tests {
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(skills, vec!["core:task-spec"]);
+        assert_eq!(skills, vec!["core:task-spec", "core:tool-smoke"]);
     }
 
     #[test]

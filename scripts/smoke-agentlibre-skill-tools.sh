@@ -5,10 +5,10 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 
 config="${AGL_SMOKE_CONFIG:-}"
-artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-055-skill-tools-smoke}"
+artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-056-skill-tools-smoke}"
 agl_bin="${AGL_SMOKE_AGL_BIN:-$repo_root/target/debug/agl}"
 max_output_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-160}"
-run_suffix="agl-055-$(date +%s)-$$"
+run_suffix="agl-056-$(date +%s)-$$"
 export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}"
 
 run_id="$run_suffix-run"
@@ -85,19 +85,7 @@ EOF
 
 prompt='You are testing agentLIBRE tool use. Your first model response must be only this exact tool call:
 <tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>
-After the tool observation, do not call another tool. Answer with exactly this compact task spec:
-# Problem
-Live skill tool smoke.
-# Goal
-skill tools smoke ok.
-# Scope
-Read facts.txt through fs.read.
-# Non-goals
-Shell execution.
-# Acceptance Criteria
-fs.read completed and the marker was observed.
-# Verification
-scripts/smoke-agentlibre-skill-tools.sh passes.'
+After the tool observation, do not call another tool. Answer with exactly: skill tools smoke ok'
 
 (
   cd "$workspace"
@@ -106,7 +94,7 @@ scripts/smoke-agentlibre-skill-tools.sh passes.'
     --artifact-root "$run_root" \
     --run-id "$run_id" \
     --workspace-root "$workspace" \
-    --skill core:task-spec \
+    --skill core:tool-smoke \
     --max-output-tokens "$max_output_tokens" \
     --prompt "$prompt" \
     >"$stdout_path"
@@ -120,13 +108,14 @@ response_1="$run_dir/attempts/attempt-0001/response.json"
 latest_response="$(latest_response_file "$run_dir")"
 latest_content="$(json_content "$latest_response")"
 
-require_contains "$skill_context" '"skill_id": "core:task-spec"'
+require_contains "$skill_context" '"skill_id": "core:tool-smoke"'
 require_contains "$skill_context" '"fs.read"'
-require_contains "$skill_context" '"fs.list"'
-require_contains "$skill_context" '"fs.search"'
-require_contains "$skill_context" '"fs.edit"'
+require_not_contains "$skill_context" '"fs.list"'
+require_not_contains "$skill_context" '"fs.search"'
+require_not_contains "$skill_context" '"fs.edit"'
 require_contains "$request_1" "<agentlibre_tool_context>"
 require_contains "$request_1" "fs.read"
+require_not_contains "$request_1" "fs.edit"
 require_contains "$response_1" "<tool_call>"
 require_contains "$response_1" "fs.read"
 require_contains "$events" '"kind":"tool.call_started"'
@@ -148,4 +137,4 @@ echo "skill context: $skill_context"
 echo "first request: $request_1"
 echo "first response: $response_1"
 echo "latest response: $latest_response"
-echo "AGL-055 skill tools live smoke passed"
+echo "AGL-056 skill tools live smoke passed"

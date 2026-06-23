@@ -13,7 +13,7 @@ use agl_skills::{SkillContextEvidence, build_verified_context_bundle};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::args::RunOptions;
+use crate::args::{RunOptions, ToolAccessMode};
 
 const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
@@ -67,9 +67,11 @@ impl InferenceSession {
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
+        let tool_mode = options.tool_mode;
         let skill_context = resolve_skill_context(
             &config.prompt.skills,
             &options.skills,
+            tool_mode,
             &artifact_root,
             &run_id,
         )?;
@@ -256,6 +258,7 @@ pub(crate) struct ResolvedSkillContext {
 fn resolve_skill_context(
     config_skills: &[String],
     option_skills: &[String],
+    tool_mode: ToolAccessMode,
     artifact_root: &std::path::Path,
     run_id: &InferenceRunId,
 ) -> Result<ResolvedSkillContext> {
@@ -276,8 +279,12 @@ fn resolve_skill_context(
             .context("failed to build verified skill context")?;
     let hook_batches =
         selected_skill_hook_batches(&skill_registry, &extension_registry, &selected_skills)?;
-    let visible_tools =
-        selected_skill_visible_tools(&skill_registry, &extension_registry, &selected_skills)?;
+    let visible_tools = selected_skill_visible_tools(
+        &skill_registry,
+        &extension_registry,
+        &selected_skills,
+        tool_mode,
+    )?;
     write_skill_context_evidence(artifact_root, run_id, &bundle.evidence)?;
     Ok(ResolvedSkillContext {
         context: Some(bundle.content),
@@ -336,6 +343,7 @@ fn selected_skill_visible_tools(
     skill_registry: &agl_skills::SkillRegistry,
     extension_registry: &StaticExtensionRegistry,
     selected_skills: &[SkillId],
+    tool_mode: ToolAccessMode,
 ) -> Result<Vec<VisibleTool>> {
     let mut tool_ids = BTreeSet::<ToolId>::new();
     for skill_id in selected_skills {
@@ -346,6 +354,7 @@ fn selected_skill_visible_tools(
 
     tool_ids
         .into_iter()
+        .filter(|tool_id| tool_mode_allows_tool(tool_mode, tool_id))
         .map(|tool_id| {
             let declaration = extension_registry
                 .tool(&tool_id)
@@ -358,6 +367,18 @@ fn selected_skill_visible_tools(
             Ok(visible)
         })
         .collect()
+}
+
+fn tool_mode_allows_tool(mode: ToolAccessMode, tool_id: &ToolId) -> bool {
+    match mode {
+        ToolAccessMode::ReadOnly => matches!(
+            tool_id.as_str(),
+            agl_core_tools::FS_READ_TOOL_ID
+                | agl_core_tools::FS_LIST_TOOL_ID
+                | agl_core_tools::FS_SEARCH_TOOL_ID
+        ),
+        ToolAccessMode::Write => true,
+    }
 }
 
 fn write_skill_context_evidence(
@@ -594,6 +615,7 @@ mod tests {
             &skill_registry,
             &extension_registry,
             &[SkillId::new("core:task-spec").unwrap()],
+            ToolAccessMode::Write,
         )
         .unwrap();
 
@@ -609,6 +631,54 @@ mod tests {
             vec!["path", "old_text", "new_text"]
         );
         assert!(tools[0].description.contains("exact text"));
+    }
+
+    #[test]
+    fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let mut extension_registry = StaticExtensionRegistry::new();
+        agl_core_guards::register(&mut extension_registry).unwrap();
+        agl_core_tools::register(&mut extension_registry).unwrap();
+
+        let tools = selected_skill_visible_tools(
+            &skill_registry,
+            &extension_registry,
+            &[SkillId::new("core:task-spec").unwrap()],
+            ToolAccessMode::ReadOnly,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.list", "fs.read", "fs.search"]
+        );
+    }
+
+    #[test]
+    fn selected_tool_smoke_skill_exposes_only_read_tool() {
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let mut extension_registry = StaticExtensionRegistry::new();
+        agl_core_guards::register(&mut extension_registry).unwrap();
+        agl_core_tools::register(&mut extension_registry).unwrap();
+
+        let tools = selected_skill_visible_tools(
+            &skill_registry,
+            &extension_registry,
+            &[SkillId::new("core:tool-smoke").unwrap()],
+            ToolAccessMode::ReadOnly,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.read"]
+        );
     }
 
     #[test]
