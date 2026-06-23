@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use agl_assets::{BuiltinAsset, BuiltinSkill};
 use agl_extension::{HookId, SkillId, ToolId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSource {
     Builtin,
@@ -13,10 +13,22 @@ pub enum SkillSource {
     ThirdParty,
 }
 
+impl SkillSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Workspace => "workspace",
+            Self::User => "user",
+            Self::ThirdParty => "third_party",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillReference {
     pub path: String,
     pub sha256: String,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +131,9 @@ pub enum SkillManifestError {
     MissingReference {
         path: String,
     },
+    InvalidReferenceUtf8 {
+        path: String,
+    },
     BuiltinIdentityMismatch {
         expected: String,
         actual: String,
@@ -169,6 +184,9 @@ impl std::fmt::Display for SkillManifestError {
                     f,
                     "skill manifest includes missing builtin reference: {path}"
                 )
+            }
+            Self::InvalidReferenceUtf8 { path } => {
+                write!(f, "skill reference is not valid UTF-8: {path}")
             }
             Self::BuiltinIdentityMismatch { expected, actual } => {
                 write!(
@@ -337,9 +355,16 @@ fn resolve_references(
                 path: include.clone(),
             }
         })?;
+        let content = asset
+            .text()
+            .map_err(|_| SkillManifestError::InvalidReferenceUtf8 {
+                path: include.clone(),
+            })?
+            .to_string();
         resolved.push(SkillReference {
             path: include.clone(),
             sha256: asset.sha256.to_string(),
+            content,
         });
     }
     Ok(resolved)

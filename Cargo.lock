@@ -23,16 +23,20 @@ version = "1.0.0-alpha.6"
 dependencies = [
  "agl-assets",
  "agl-config",
+ "agl-core-guards",
  "agl-events",
+ "agl-extension",
  "agl-inference",
  "agl-loop",
  "agl-oven",
  "agl-runtime",
  "agl-session",
+ "agl-skills",
  "agl-turn",
  "anyhow",
  "clap",
  "clap_complete",
+ "serde_json",
  "tracing",
 ]
 
@@ -40,6 +44,7 @@ dependencies = [
 name = "agl-config"
 version = "1.0.0-alpha.6"
 dependencies = [
+ "agl-extension",
  "anyhow",
  "serde",
  "toml",
@@ -131,6 +136,7 @@ name = "agl-skills"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-assets",
+ "agl-core-guards",
  "agl-extension",
  "serde",
  "serde_yaml",
