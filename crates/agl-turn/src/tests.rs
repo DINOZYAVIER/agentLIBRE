@@ -15,6 +15,16 @@ fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
     }
 }
 
+fn hook_id(value: &str) -> HookId {
+    HookId::new(value).unwrap()
+}
+
+fn response_guard_batch() -> TurnHookBatch {
+    TurnHookBatch::new(HookEvent::ModelResponse)
+        .with_required_hook(hook_id("guard.response_required"))
+        .with_optional_hook(hook_id("guard.response_optional"))
+}
+
 #[test]
 fn stop_reason_names_are_stable() {
     assert_eq!(
@@ -75,6 +85,45 @@ fn initializes_turn_state_with_context_and_request_index() {
             },
         ]
     );
+}
+
+#[test]
+fn initializes_turn_state_with_hook_batches() {
+    let hook_batch =
+        TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"));
+    let state = TurnState::new(TurnInput::user("new").with_hook_batch(hook_batch.clone()));
+
+    assert_eq!(state.input.hook_batches, [hook_batch]);
+}
+
+#[test]
+fn hook_batch_summary_serializes_without_hook_message_content() {
+    let batch = response_guard_batch();
+    let summary = HookBatchSummary::from_batch_result(
+        &batch,
+        HookBatchResult {
+            event: HookEvent::ModelResponse,
+            results: vec![HookResult {
+                hook_id: hook_id("guard.response_required"),
+                status: HookStatus::Warn,
+                messages: vec![HookMessage {
+                    code: "response.too_long".to_string(),
+                    message: "secret response text".to_string(),
+                    fix: Some("secret fix text".to_string()),
+                }],
+            }],
+        },
+        Some(7),
+    );
+
+    let json = serde_json::to_string(&summary).unwrap();
+
+    assert!(json.contains(r#""event":"model.response""#), "{json}");
+    assert!(json.contains("guard.response_required"), "{json}");
+    assert!(json.contains("response.too_long"), "{json}");
+    assert!(json.contains(r#""outcome":"warn""#), "{json}");
+    assert!(!json.contains("secret response text"), "{json}");
+    assert!(!json.contains("secret fix text"), "{json}");
 }
 
 #[test]
@@ -374,6 +423,177 @@ fn turn_machine_accepts_repaired_malformed_tool_json() {
             },
         ),
         TurnPhase::ActionParsed
+    );
+}
+
+#[test]
+fn turn_machine_accepts_hook_batch_before_model_response_parse() {
+    let mut machine = TurnMachine::new("turn-hook");
+    let prepared = response_guard_batch().summary();
+    let finished = HookBatchSummary::from_batch_result(
+        &response_guard_batch(),
+        HookBatchResult {
+            event: HookEvent::ModelResponse,
+            results: vec![
+                HookResult {
+                    hook_id: hook_id("guard.response_required"),
+                    status: HookStatus::Pass,
+                    messages: Vec::new(),
+                },
+                HookResult {
+                    hook_id: hook_id("guard.response_optional"),
+                    status: HookStatus::Warn,
+                    messages: vec![HookMessage {
+                        code: "style.warning".to_string(),
+                        message: "non-secret diagnostic".to_string(),
+                        fix: None,
+                    }],
+                },
+            ],
+        },
+        Some(3),
+    );
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "answer".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::PrepareModelRequest { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 1,
+            content: "done".to_string(),
+        },
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::PrepareHookBatch {
+                summary: prepared.clone(),
+            },
+        ),
+        TurnPhase::HookBatchPrepared
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RunHookBatch { summary: prepared },
+        ),
+        TurnPhase::HookBatchRunning
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::FinishHookBatch { summary: finished },
+        ),
+        TurnPhase::ModelResponded
+    );
+    assert_eq!(
+        apply(&mut machine, TurnTransition::ParseAnswer),
+        TurnPhase::ActionParsed
+    );
+}
+
+#[test]
+fn turn_machine_rejects_illegal_hook_transitions() {
+    let mut machine = TurnMachine::new("turn-hook-illegal");
+    let summary = response_guard_batch().summary();
+
+    let err = machine
+        .apply(TurnTransition::RunHookBatch { summary })
+        .unwrap_err();
+
+    assert_eq!(err.phase, TurnPhase::Initialized);
+    assert_eq!(err.transition, "run_hook_batch");
+}
+
+#[test]
+fn turn_machine_accepts_failed_required_hook_terminal_path() {
+    let mut machine = TurnMachine::new("turn-hook-fail");
+    let batch = response_guard_batch();
+    let prepared = batch.summary();
+    let failed = HookBatchSummary::from_batch_result(
+        &batch,
+        HookBatchResult {
+            event: HookEvent::ModelResponse,
+            results: vec![HookResult {
+                hook_id: hook_id("guard.response_required"),
+                status: HookStatus::Fail,
+                messages: vec![HookMessage {
+                    code: "response.blocked".to_string(),
+                    message: "unsafe text".to_string(),
+                    fix: None,
+                }],
+            }],
+        },
+        Some(2),
+    );
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "answer".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::PrepareModelRequest { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 1,
+            content: "done".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::PrepareHookBatch {
+            summary: prepared.clone(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RunHookBatch { summary: prepared },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::FinishHookBatch {
+            summary: failed.clone(),
+        },
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RejectHookFailure {
+                summary: failed,
+                message: "required hook failed".to_string(),
+            },
+        ),
+        TurnPhase::Failed
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::Finish {
+                status: TurnTerminalStatus::Failed,
+            },
+        ),
+        TurnPhase::Finished
     );
 }
 

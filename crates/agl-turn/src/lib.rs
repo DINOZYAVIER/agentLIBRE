@@ -1,6 +1,7 @@
 pub mod policy;
 
 mod fsm;
+mod hook;
 mod input;
 mod output;
 mod state;
@@ -10,6 +11,10 @@ mod transcript;
 pub use fsm::{
     ToolJsonMalformedClassification, TurnFailureOperation, TurnMachine, TurnPhase,
     TurnTerminalStatus, TurnTransition, TurnTransitionError, TurnTransitionRecord,
+};
+pub use hook::{
+    HookBatchOutcome, HookBatchRequest, HookBatchResult, HookBatchSummary, HookEvent, HookId,
+    HookMessage, HookResult, HookResultSummary, HookStatus, TurnHookBatch,
 };
 pub use input::{TurnInput, VisibleTool};
 pub use output::{StopReason, TurnOutput};

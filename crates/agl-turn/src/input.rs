@@ -1,4 +1,4 @@
-use crate::transcript::TurnMessage;
+use crate::{TurnHookBatch, transcript::TurnMessage};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnInput {
@@ -6,6 +6,7 @@ pub struct TurnInput {
     pub user_input: String,
     pub context_messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,
+    pub hook_batches: Vec<TurnHookBatch>,
     pub request_index_start: usize,
     pub max_tool_calls: usize,
 }
@@ -17,6 +18,7 @@ impl TurnInput {
             user_input: user_input.into(),
             context_messages: Vec::new(),
             visible_tools: Vec::new(),
+            hook_batches: Vec::new(),
             request_index_start: 0,
             max_tool_calls: 0,
         }
@@ -39,6 +41,11 @@ impl TurnInput {
 
     pub fn with_visible_tool(mut self, tool: VisibleTool) -> Self {
         self.visible_tools.push(tool);
+        self
+    }
+
+    pub fn with_hook_batch(mut self, hook_batch: TurnHookBatch) -> Self {
+        self.hook_batches.push(hook_batch);
         self
     }
 

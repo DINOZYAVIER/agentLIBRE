@@ -2,7 +2,10 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::{ParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus};
+use crate::{
+    HookBatchOutcomeEvent, ParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind,
+    TurnFinishStatus,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +19,56 @@ pub enum AgentEvent {
     ModelRequestPrepared {
         turn_id: String,
         message_count: usize,
+    },
+    #[serde(rename = "hook.batch_prepared")]
+    HookBatchPrepared {
+        turn_id: String,
+        event: String,
+        required_hooks: Vec<String>,
+        optional_hooks: Vec<String>,
+        required_count: usize,
+        optional_count: usize,
+    },
+    #[serde(rename = "hook.batch_started")]
+    HookBatchStarted {
+        turn_id: String,
+        event: String,
+        hook_ids: Vec<String>,
+        required_count: usize,
+        optional_count: usize,
+    },
+    #[serde(rename = "hook.batch_finished")]
+    HookBatchFinished {
+        turn_id: String,
+        event: String,
+        outcome: HookBatchOutcomeEvent,
+        required_count: usize,
+        optional_count: usize,
+        failed_required_count: usize,
+        warning_count: usize,
+        repair_count: usize,
+        missing_required_hooks: Vec<String>,
+        message_codes: Vec<String>,
+        results: Vec<HookResultEvent>,
+        duration_ms: Option<u64>,
+    },
+    #[serde(rename = "hook.batch_blocked")]
+    HookBatchBlocked {
+        turn_id: String,
+        event: String,
+        outcome: HookBatchOutcomeEvent,
+        message: String,
+        failed_required_count: usize,
+        missing_required_hooks: Vec<String>,
+        message_codes: Vec<String>,
+    },
+    #[serde(rename = "hook.repair_prepared")]
+    HookRepairPrepared {
+        turn_id: String,
+        event: String,
+        attempt: usize,
+        hook_ids: Vec<String>,
+        message_codes: Vec<String>,
     },
     #[serde(rename = "model.requested")]
     ModelRequested {
@@ -119,6 +172,11 @@ impl AgentEvent {
         match self {
             AgentEvent::TurnStarted { .. } => "turn.started",
             AgentEvent::ModelRequestPrepared { .. } => "model.request_prepared",
+            AgentEvent::HookBatchPrepared { .. } => "hook.batch_prepared",
+            AgentEvent::HookBatchStarted { .. } => "hook.batch_started",
+            AgentEvent::HookBatchFinished { .. } => "hook.batch_finished",
+            AgentEvent::HookBatchBlocked { .. } => "hook.batch_blocked",
+            AgentEvent::HookRepairPrepared { .. } => "hook.repair_prepared",
             AgentEvent::ModelRequested { .. } => "model.requested",
             AgentEvent::ModelResponseReceived { .. } => "model.response_received",
             AgentEvent::ModelRequestFailed { .. } => "model.request_failed",
@@ -180,6 +238,56 @@ pub enum SafeAgentEvent {
     ModelRequestPrepared {
         turn_id: String,
         message_count: usize,
+    },
+    #[serde(rename = "hook.batch_prepared")]
+    HookBatchPrepared {
+        turn_id: String,
+        event: String,
+        required_hooks: Vec<String>,
+        optional_hooks: Vec<String>,
+        required_count: usize,
+        optional_count: usize,
+    },
+    #[serde(rename = "hook.batch_started")]
+    HookBatchStarted {
+        turn_id: String,
+        event: String,
+        hook_ids: Vec<String>,
+        required_count: usize,
+        optional_count: usize,
+    },
+    #[serde(rename = "hook.batch_finished")]
+    HookBatchFinished {
+        turn_id: String,
+        event: String,
+        outcome: HookBatchOutcomeEvent,
+        required_count: usize,
+        optional_count: usize,
+        failed_required_count: usize,
+        warning_count: usize,
+        repair_count: usize,
+        missing_required_hooks: Vec<String>,
+        message_codes: Vec<String>,
+        results: Vec<HookResultEvent>,
+        duration_ms: Option<u64>,
+    },
+    #[serde(rename = "hook.batch_blocked")]
+    HookBatchBlocked {
+        turn_id: String,
+        event: String,
+        outcome: HookBatchOutcomeEvent,
+        message_bytes: usize,
+        failed_required_count: usize,
+        missing_required_hooks: Vec<String>,
+        message_codes: Vec<String>,
+    },
+    #[serde(rename = "hook.repair_prepared")]
+    HookRepairPrepared {
+        turn_id: String,
+        event: String,
+        attempt: usize,
+        hook_ids: Vec<String>,
+        message_codes: Vec<String>,
     },
     #[serde(rename = "model.requested")]
     ModelRequested {
@@ -292,6 +400,13 @@ pub struct SafeRuntimeEvent {
     pub event: SafeAgentEvent,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HookResultEvent {
+    pub hook_id: String,
+    pub status: HookBatchOutcomeEvent,
+    pub message_codes: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeEventWriter {
     events_jsonl: PathBuf,
@@ -381,6 +496,11 @@ impl SafeAgentEvent {
         match self {
             SafeAgentEvent::TurnStarted { .. } => "turn.started",
             SafeAgentEvent::ModelRequestPrepared { .. } => "model.request_prepared",
+            SafeAgentEvent::HookBatchPrepared { .. } => "hook.batch_prepared",
+            SafeAgentEvent::HookBatchStarted { .. } => "hook.batch_started",
+            SafeAgentEvent::HookBatchFinished { .. } => "hook.batch_finished",
+            SafeAgentEvent::HookBatchBlocked { .. } => "hook.batch_blocked",
+            SafeAgentEvent::HookRepairPrepared { .. } => "hook.repair_prepared",
             SafeAgentEvent::ModelRequested { .. } => "model.requested",
             SafeAgentEvent::ModelResponseReceived { .. } => "model.response_received",
             SafeAgentEvent::ModelRequestFailed { .. } => "model.request_failed",
@@ -420,6 +540,91 @@ impl From<&AgentEvent> for SafeAgentEvent {
             } => SafeAgentEvent::ModelRequestPrepared {
                 turn_id: turn_id.clone(),
                 message_count: *message_count,
+            },
+            AgentEvent::HookBatchPrepared {
+                turn_id,
+                event,
+                required_hooks,
+                optional_hooks,
+                required_count,
+                optional_count,
+            } => SafeAgentEvent::HookBatchPrepared {
+                turn_id: turn_id.clone(),
+                event: event.clone(),
+                required_hooks: required_hooks.clone(),
+                optional_hooks: optional_hooks.clone(),
+                required_count: *required_count,
+                optional_count: *optional_count,
+            },
+            AgentEvent::HookBatchStarted {
+                turn_id,
+                event,
+                hook_ids,
+                required_count,
+                optional_count,
+            } => SafeAgentEvent::HookBatchStarted {
+                turn_id: turn_id.clone(),
+                event: event.clone(),
+                hook_ids: hook_ids.clone(),
+                required_count: *required_count,
+                optional_count: *optional_count,
+            },
+            AgentEvent::HookBatchFinished {
+                turn_id,
+                event,
+                outcome,
+                required_count,
+                optional_count,
+                failed_required_count,
+                warning_count,
+                repair_count,
+                missing_required_hooks,
+                message_codes,
+                results,
+                duration_ms,
+            } => SafeAgentEvent::HookBatchFinished {
+                turn_id: turn_id.clone(),
+                event: event.clone(),
+                outcome: *outcome,
+                required_count: *required_count,
+                optional_count: *optional_count,
+                failed_required_count: *failed_required_count,
+                warning_count: *warning_count,
+                repair_count: *repair_count,
+                missing_required_hooks: missing_required_hooks.clone(),
+                message_codes: message_codes.clone(),
+                results: results.clone(),
+                duration_ms: *duration_ms,
+            },
+            AgentEvent::HookBatchBlocked {
+                turn_id,
+                event,
+                outcome,
+                message,
+                failed_required_count,
+                missing_required_hooks,
+                message_codes,
+            } => SafeAgentEvent::HookBatchBlocked {
+                turn_id: turn_id.clone(),
+                event: event.clone(),
+                outcome: *outcome,
+                message_bytes: message.len(),
+                failed_required_count: *failed_required_count,
+                missing_required_hooks: missing_required_hooks.clone(),
+                message_codes: message_codes.clone(),
+            },
+            AgentEvent::HookRepairPrepared {
+                turn_id,
+                event,
+                attempt,
+                hook_ids,
+                message_codes,
+            } => SafeAgentEvent::HookRepairPrepared {
+                turn_id: turn_id.clone(),
+                event: event.clone(),
+                attempt: *attempt,
+                hook_ids: hook_ids.clone(),
+                message_codes: message_codes.clone(),
             },
             AgentEvent::ModelRequested {
                 turn_id,
