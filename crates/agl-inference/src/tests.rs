@@ -35,6 +35,7 @@ fn rendered_request() -> RenderedModelRequest {
         }],
         tools: vec![RenderedTool {
             name: "read_file".to_string(),
+            description: "Read a file".to_string(),
             required_arguments: vec!["path".to_string()],
         }],
     }

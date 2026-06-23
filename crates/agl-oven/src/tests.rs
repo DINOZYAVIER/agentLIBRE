@@ -43,6 +43,7 @@ fn renders_user_messages_and_visible_tools() {
         rendered.tools,
         [RenderedTool {
             name: "read_file".to_string(),
+            description: String::new(),
             required_arguments: vec!["path".to_string()],
         }]
     );

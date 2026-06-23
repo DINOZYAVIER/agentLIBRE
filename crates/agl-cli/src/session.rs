@@ -3,14 +3,14 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_config::{ModelConfig, load_local_inference_config};
-use agl_extension::{HookEvent, HookId, SkillId, StaticExtensionRegistry};
+use agl_config::{ModelConfig, ToolCallFormat, load_local_inference_config};
+use agl_extension::{HookEvent, HookId, SkillId, StaticExtensionRegistry, ToolId};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_skills::{SkillContextEvidence, build_verified_context_bundle};
-use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage};
+use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::args::RunOptions;
@@ -24,6 +24,7 @@ pub(crate) struct InferenceSession {
     system_prompt: Option<String>,
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
+    skill_visible_tools: Vec<VisibleTool>,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -81,6 +82,7 @@ impl InferenceSession {
             system_prompt,
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
+            skill_visible_tools: skill_context.visible_tools,
             run_id,
             config_path,
             artifact_root,
@@ -131,6 +133,10 @@ impl InferenceSession {
 
     pub(crate) fn turn_hook_batches(&self) -> &[TurnHookBatch] {
         &self.skill_hook_batches
+    }
+
+    pub(crate) fn turn_visible_tools(&self) -> &[VisibleTool] {
+        &self.skill_visible_tools
     }
 
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
@@ -186,6 +192,15 @@ fn build_inference_request(
             content: skill_context.to_string(),
         });
     }
+    if !request.visible_tools.is_empty() {
+        ensure!(
+            model_config.tool_call_format == ToolCallFormat::HermesJson,
+            "visible CLI tools currently require tool_call_format=hermes_json"
+        );
+        request_messages.push(TurnMessage::System {
+            content: render_tool_context(&request.visible_tools),
+        });
+    }
     request_messages.extend(request.messages);
 
     let model_request = ModelRequest {
@@ -202,10 +217,40 @@ fn build_inference_request(
     })
 }
 
+fn render_tool_context(tools: &[VisibleTool]) -> String {
+    let mut content = String::new();
+    content.push_str("<agentlibre_tool_context>\n");
+    content.push_str(
+        "You may call exactly one available tool by responding with only this Hermes JSON form:\n",
+    );
+    content.push_str(
+        "<tool_call>{\"name\":\"TOOL_NAME\",\"arguments\":{\"arg\":\"value\"}}</tool_call>\n",
+    );
+    content.push_str("Use only the listed tools. Do not use markdown around tool calls.\n");
+    content.push_str("\nAvailable tools:\n");
+    for tool in tools {
+        content.push_str("- ");
+        content.push_str(&tool.name);
+        if !tool.description.trim().is_empty() {
+            content.push_str(": ");
+            content.push_str(tool.description.trim());
+        }
+        if !tool.required_arguments.is_empty() {
+            content.push_str(" Required arguments: ");
+            content.push_str(&tool.required_arguments.join(", "));
+            content.push('.');
+        }
+        content.push('\n');
+    }
+    content.push_str("</agentlibre_tool_context>\n");
+    content
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResolvedSkillContext {
     context: Option<String>,
     hook_batches: Vec<TurnHookBatch>,
+    visible_tools: Vec<VisibleTool>,
 }
 
 fn resolve_skill_context(
@@ -224,15 +269,20 @@ fn resolve_skill_context(
     let mut extension_registry = StaticExtensionRegistry::new();
     agl_core_guards::register(&mut extension_registry)
         .context("failed to register builtin core guard extension")?;
+    agl_core_tools::register(&mut extension_registry)
+        .context("failed to register builtin core tool extension")?;
     let bundle =
         build_verified_context_bundle(&skill_registry, &extension_registry, &selected_skills)
             .context("failed to build verified skill context")?;
     let hook_batches =
         selected_skill_hook_batches(&skill_registry, &extension_registry, &selected_skills)?;
+    let visible_tools =
+        selected_skill_visible_tools(&skill_registry, &extension_registry, &selected_skills)?;
     write_skill_context_evidence(artifact_root, run_id, &bundle.evidence)?;
     Ok(ResolvedSkillContext {
         context: Some(bundle.content),
         hook_batches,
+        visible_tools,
     })
 }
 
@@ -280,6 +330,34 @@ fn selected_skill_hook_batches(
             batch
         })
         .collect())
+}
+
+fn selected_skill_visible_tools(
+    skill_registry: &agl_skills::SkillRegistry,
+    extension_registry: &StaticExtensionRegistry,
+    selected_skills: &[SkillId],
+) -> Result<Vec<VisibleTool>> {
+    let mut tool_ids = BTreeSet::<ToolId>::new();
+    for skill_id in selected_skills {
+        skill_registry.verify_allowed_tools(skill_id, extension_registry)?;
+        let skill = skill_registry.resolve_for_context_injection(skill_id)?;
+        tool_ids.extend(skill.harness.allowed_tools.iter().cloned());
+    }
+
+    tool_ids
+        .into_iter()
+        .map(|tool_id| {
+            let declaration = extension_registry
+                .tool(&tool_id)
+                .with_context(|| format!("selected skill requires missing tool `{tool_id}`"))?;
+            let mut visible =
+                VisibleTool::new(tool_id.as_str()).describe(declaration.description.clone());
+            for argument in &declaration.required_arguments {
+                visible = visible.require_argument(argument.clone());
+            }
+            Ok(visible)
+        })
+        .collect()
 }
 
 fn write_skill_context_evidence(
@@ -431,6 +509,43 @@ mod tests {
     }
 
     #[test]
+    fn build_request_injects_visible_tool_context_for_hermes() {
+        let run_id = InferenceRunId::new("manual-test").unwrap();
+        let config = ModelConfig {
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+        };
+
+        let request = build_inference_request(
+            run_id,
+            ModelRequest {
+                turn_id: "manual-test".to_string(),
+                request_index: 0,
+                messages: vec![TurnMessage::User {
+                    content: "read README".to_string(),
+                }],
+                visible_tools: vec![
+                    VisibleTool::new("fs.read")
+                        .describe("Read a repository file")
+                        .require_argument("path"),
+                ],
+            },
+            &config,
+            Some("system"),
+            Some("skill context"),
+        )
+        .unwrap();
+
+        assert_eq!(request.rendered.messages.len(), 4);
+        assert_eq!(request.rendered.messages[0].content, "system");
+        assert_eq!(request.rendered.messages[1].content, "skill context");
+        assert!(request.rendered.messages[2].content.contains("fs.read"));
+        assert!(request.rendered.messages[2].content.contains("<tool_call>"));
+        assert_eq!(request.rendered.messages[3].content, "read README");
+        assert_eq!(request.rendered.tools[0].name, "fs.read");
+    }
+
+    #[test]
     fn selected_skill_ids_rejects_duplicates_across_config_and_cli() {
         let err = selected_skill_ids(
             &["core:task-spec".to_string()],
@@ -446,6 +561,7 @@ mod tests {
         let skill_registry = agl_skills::builtin_registry().unwrap();
         let mut extension_registry = StaticExtensionRegistry::new();
         agl_core_guards::register(&mut extension_registry).unwrap();
+        agl_core_tools::register(&mut extension_registry).unwrap();
 
         let batches = selected_skill_hook_batches(
             &skill_registry,
@@ -465,6 +581,34 @@ mod tests {
             vec!["repo_path.validate", "task_spec.validate"]
         );
         assert!(batches[0].optional_hooks.is_empty());
+    }
+
+    #[test]
+    fn selected_skill_visible_tools_use_declared_tool_metadata() {
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let mut extension_registry = StaticExtensionRegistry::new();
+        agl_core_guards::register(&mut extension_registry).unwrap();
+        agl_core_tools::register(&mut extension_registry).unwrap();
+
+        let tools = selected_skill_visible_tools(
+            &skill_registry,
+            &extension_registry,
+            &[SkillId::new("core:task-spec").unwrap()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+        );
+        assert_eq!(
+            tools[0].required_arguments,
+            vec!["path", "old_text", "new_text"]
+        );
+        assert!(tools[0].description.contains("exact text"));
     }
 
     #[test]

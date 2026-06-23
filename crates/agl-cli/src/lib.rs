@@ -10,7 +10,7 @@ use agl_runtime::{
 use agl_session::{
     AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
 };
-use agl_turn::{StopReason, TurnHookBatch, TurnMessage};
+use agl_turn::{StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result};
 
 mod args;
@@ -29,6 +29,8 @@ use config::run_config;
 use loop_host::CliLoopHost;
 use session::{InferenceSession, default_run_id};
 use terminal::assistant_text_for_terminal;
+
+const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
 pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
@@ -160,7 +162,7 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
     let session = InferenceSession::new(options, runtime, None)?;
-    let mut loop_host = CliLoopHost::new(session);
+    let mut loop_host = CliLoopHost::new(session)?;
     tracing::info!(
         target: "agentlibre::app",
         run_id = %loop_host.session().run_id(),
@@ -168,11 +170,13 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         "runtime loop host initialized"
     );
     let hook_batches = loop_host.session().turn_hook_batches().to_vec();
+    let visible_tools = loop_host.session().turn_visible_tools().to_vec();
     let input = build_turn_input(
         loop_host.session().run_id().as_str(),
         1,
         &[],
         &hook_batches,
+        &visible_tools,
         &prompt,
     );
     loop_host.reset_turn_counters();
@@ -234,7 +238,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     } else {
         (None, None)
     };
-    let mut loop_host = CliLoopHost::new(session);
+    let mut loop_host = CliLoopHost::new(session)?;
     let mut messages = replay
         .as_ref()
         .map(replay_turn_messages)
@@ -330,6 +334,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             request_index,
             &messages,
             loop_host.session().turn_hook_batches(),
+            loop_host.session().turn_visible_tools(),
             input,
         );
         loop_host.reset_turn_counters();
@@ -406,6 +411,7 @@ fn build_turn_input(
     request_index: usize,
     context_messages: &[TurnMessage],
     hook_batches: &[TurnHookBatch],
+    visible_tools: &[VisibleTool],
     user_input: &str,
 ) -> TurnInput {
     let mut input = TurnInput::user(user_input.to_string())
@@ -414,6 +420,12 @@ fn build_turn_input(
         .with_request_index_start(request_index);
     for hook_batch in hook_batches {
         input = input.with_hook_batch(hook_batch.clone());
+    }
+    for tool in visible_tools {
+        input = input.with_visible_tool(tool.clone());
+    }
+    if !visible_tools.is_empty() {
+        input = input.with_max_tool_calls(MAX_TOOL_CALLS_PER_TURN);
     }
     input
 }
@@ -594,13 +606,27 @@ mod tests {
                 .with_required_hook(agl_loop::HookId::new("task_spec.validate").unwrap()),
         ];
 
-        let input = build_turn_input("run-001", 7, &context, &hook_batches, "new");
+        let visible_tools = vec![
+            VisibleTool::new("fs.read")
+                .describe("Read a repository file")
+                .require_argument("path"),
+        ];
+
+        let input = build_turn_input("run-001", 7, &context, &hook_batches, &visible_tools, "new");
 
         assert_eq!(input.turn_id, "run-001");
         assert_eq!(input.user_input, "new");
         assert_eq!(input.context_messages, context);
         assert_eq!(input.hook_batches, hook_batches);
         assert_eq!(input.request_index_start, 7);
+        assert_eq!(input.visible_tools, visible_tools);
+        assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
+    }
+
+    #[test]
+    fn build_turn_input_keeps_tools_disabled_without_visible_tools() {
+        let input = build_turn_input("run-001", 1, &[], &[], &[], "new");
+
         assert!(input.visible_tools.is_empty());
         assert_eq!(input.max_tool_calls, 0);
     }
