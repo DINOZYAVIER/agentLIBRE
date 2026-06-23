@@ -55,6 +55,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-extension"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-inference"
 version = "1.0.0-alpha.6"
 dependencies = [
