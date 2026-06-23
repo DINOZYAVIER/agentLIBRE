@@ -68,6 +68,7 @@ tool_call_format = "hermes_json"
     assert_eq!(config.model.dialect, ModelDialect::Qwen3);
     assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
+    assert!(config.prompt.skills.is_empty());
 
     std::fs::remove_file(path).unwrap();
 }
@@ -100,6 +101,7 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.flash_attention, None);
     assert_eq!(config.runtime.cache_type_k, None);
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
+    assert!(config.prompt.skills.is_empty());
 
     std::fs::remove_file(path).unwrap();
 }
@@ -160,6 +162,66 @@ system = "builtin:default"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_accepts_prompt_skills() {
+    let path = write_temp_config(
+        "local-inference-prompt-skills",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+
+[prompt]
+skills = ["core:task-spec"]
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert_eq!(config.prompt.skills, vec!["core:task-spec"]);
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn local_inference_config_rejects_invalid_prompt_skills() {
+    let path = write_temp_config(
+        "local-inference-prompt-skills-invalid",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/qwen3.6.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+
+[prompt]
+skills = ["Bad Skill"]
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "prompt skill id is invalid");
 
     std::fs::remove_file(path).unwrap();
 }

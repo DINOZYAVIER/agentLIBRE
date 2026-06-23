@@ -10,3 +10,6 @@ agl-assets.workspace = true
 agl-extension.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+
+[dev-dependencies]
+agl-core-guards.workspace = true
