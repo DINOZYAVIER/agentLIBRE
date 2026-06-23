@@ -22,16 +22,16 @@ impl ExtensionIdKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExtensionId(String);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HookId(String);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ToolId(String);
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SkillId(String);
 
 macro_rules! id_type {
@@ -51,6 +51,25 @@ macro_rules! id_type {
         impl std::fmt::Display for $type {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.as_str())
+            }
+        }
+
+        impl Serialize for $type {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
             }
         }
     };
@@ -339,6 +358,14 @@ mod tests {
         assert!(HookId::new("TaskSpec.Validate").is_err());
         assert!(HookId::new("a:b:c").is_err());
         assert!(HookId::new(":bad").is_err());
+    }
+
+    #[test]
+    fn id_deserialization_uses_validation() {
+        let hook: HookId = serde_json::from_str("\"task_spec.validate\"").unwrap();
+
+        assert_eq!(hook.as_str(), "task_spec.validate");
+        assert!(serde_json::from_str::<HookId>("\"TaskSpec.Validate\"").is_err());
     }
 
     #[test]
