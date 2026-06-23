@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use agl_extension::SkillId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -38,6 +39,7 @@ pub(crate) struct RunOptions {
     pub(crate) no_history: bool,
     pub(crate) new_session: bool,
     pub(crate) max_output_tokens: u32,
+    pub(crate) skills: Vec<String>,
     pub(crate) prompt: Option<String>,
 }
 
@@ -51,6 +53,7 @@ impl Default for RunOptions {
             no_history: false,
             new_session: false,
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            skills: Vec::new(),
             prompt: None,
         }
     }
@@ -138,6 +141,10 @@ struct CommonRunArgs {
     /// Maximum response tokens.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
     max_output_tokens: u32,
+
+    /// Builtin skill id to inject for this turn/session.
+    #[arg(long = "skill", value_name = "ID")]
+    skills: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -252,6 +259,7 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         no_history: false,
         new_session: false,
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        skills: validate_skill_ids(args.common.skills)?,
         prompt,
     };
     Ok(options)
@@ -278,6 +286,7 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         no_history: args.no_history,
         new_session: args.new_session,
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        skills: validate_skill_ids(args.common.skills)?,
         prompt: None,
     })
 }
@@ -294,6 +303,19 @@ fn validate_max_output_tokens(value: u32) -> Result<u32> {
         bail!("--max-output-tokens must be greater than zero");
     }
     Ok(value)
+}
+
+fn validate_skill_ids(values: Vec<String>) -> Result<Vec<String>> {
+    let mut seen = std::collections::BTreeSet::new();
+    for value in &values {
+        if let Err(err) = SkillId::new(value.clone()) {
+            bail!("--skill is invalid: {err}");
+        }
+        if !seen.insert(value) {
+            bail!("--skill is duplicated: {value}");
+        }
+    }
+    Ok(values)
 }
 
 fn retired_infer_command(args: Vec<String>) -> Result<CliCommand> {
@@ -405,6 +427,8 @@ mod tests {
             "manual-test",
             "--max-output-tokens",
             "32",
+            "--skill",
+            "core:task-spec",
         ]);
 
         assert_eq!(
@@ -417,9 +441,25 @@ mod tests {
                 no_history: false,
                 new_session: false,
                 max_output_tokens: 32,
+                skills: vec!["core:task-spec".to_string()],
                 prompt: Some("hello".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn parse_run_rejects_invalid_skill_id() {
+        let error = parse_cli([
+            "agl".to_string(),
+            "run".to_string(),
+            "--skill".to_string(),
+            "Bad Skill".to_string(),
+            "--prompt".to_string(),
+            "hello".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("--skill is invalid"));
     }
 
     #[test]
