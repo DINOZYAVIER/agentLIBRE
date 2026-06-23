@@ -115,6 +115,8 @@ require_not_contains "$skill_context" '"fs.search"'
 require_not_contains "$skill_context" '"fs.edit"'
 require_contains "$request_1" "<agentlibre_tool_context>"
 require_contains "$request_1" "fs.read"
+require_contains "$request_1" "fs.list"
+require_contains "$request_1" "fs.search"
 require_not_contains "$request_1" "fs.edit"
 require_contains "$response_1" "<tool_call>"
 require_contains "$response_1" "fs.read"
