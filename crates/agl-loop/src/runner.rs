@@ -224,6 +224,8 @@ fn finish_answer<H: AgentLoopHost>(
             answer: answer.clone(),
         },
     )?;
+    let payload = artifact_write_payload(state, &answer);
+    run_hook_batch(host, state, HookEvent::ArtifactWrite, payload)?;
     let payload = turn_finish_payload(state, answer.len());
     run_hook_batch(host, state, HookEvent::TurnFinish, payload)?;
     apply_emit(
@@ -443,6 +445,15 @@ fn model_response_payload(
         "turn_id": state.input.turn_id,
         "request_index": request_index,
         "content_bytes": content_bytes,
+    })
+}
+
+fn artifact_write_payload(state: &TurnState, answer: &str) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "artifact_kind": "answer",
+        "content": answer,
+        "content_bytes": answer.len(),
     })
 }
 
