@@ -12,6 +12,7 @@ name = "agl"
 path = "src/main.rs"
 
 [dependencies]
+agl-assets.workspace = true
 agl-config.workspace = true
 agl-events.workspace = true
 agl-inference.workspace = true
