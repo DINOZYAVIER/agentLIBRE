@@ -1,15 +1,16 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_config::{ModelConfig, load_local_inference_config};
-use agl_extension::{SkillId, StaticExtensionRegistry};
+use agl_extension::{HookEvent, HookId, SkillId, StaticExtensionRegistry};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_skills::{SkillContextEvidence, build_verified_context_bundle};
-use agl_turn::{ModelRequest, TurnMessage};
+use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::args::RunOptions;
@@ -22,6 +23,7 @@ pub(crate) struct InferenceSession {
     model_config: ModelConfig,
     system_prompt: Option<String>,
     skill_context: Option<String>,
+    skill_hook_batches: Vec<TurnHookBatch>,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -77,7 +79,8 @@ impl InferenceSession {
             backend,
             model_config,
             system_prompt,
-            skill_context,
+            skill_context: skill_context.context,
+            skill_hook_batches: skill_context.hook_batches,
             run_id,
             config_path,
             artifact_root,
@@ -124,6 +127,10 @@ impl InferenceSession {
 
     pub(crate) fn event_stream_path(&self) -> PathBuf {
         agent_event_stream_path(&self.artifact_root, &self.run_id)
+    }
+
+    pub(crate) fn turn_hook_batches(&self) -> &[TurnHookBatch] {
+        &self.skill_hook_batches
     }
 
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
@@ -195,15 +202,21 @@ fn build_inference_request(
     })
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResolvedSkillContext {
+    context: Option<String>,
+    hook_batches: Vec<TurnHookBatch>,
+}
+
 fn resolve_skill_context(
     config_skills: &[String],
     option_skills: &[String],
     artifact_root: &std::path::Path,
     run_id: &InferenceRunId,
-) -> Result<Option<String>> {
+) -> Result<ResolvedSkillContext> {
     let selected_skills = selected_skill_ids(config_skills, option_skills)?;
     if selected_skills.is_empty() {
-        return Ok(None);
+        return Ok(ResolvedSkillContext::default());
     }
 
     let skill_registry =
@@ -214,8 +227,13 @@ fn resolve_skill_context(
     let bundle =
         build_verified_context_bundle(&skill_registry, &extension_registry, &selected_skills)
             .context("failed to build verified skill context")?;
+    let hook_batches =
+        selected_skill_hook_batches(&skill_registry, &extension_registry, &selected_skills)?;
     write_skill_context_evidence(artifact_root, run_id, &bundle.evidence)?;
-    Ok(Some(bundle.content))
+    Ok(ResolvedSkillContext {
+        context: Some(bundle.content),
+        hook_batches,
+    })
 }
 
 fn selected_skill_ids(config_skills: &[String], option_skills: &[String]) -> Result<Vec<SkillId>> {
@@ -231,6 +249,37 @@ fn selected_skill_ids(config_skills: &[String], option_skills: &[String]) -> Res
         selected.push(id);
     }
     Ok(selected)
+}
+
+fn selected_skill_hook_batches(
+    skill_registry: &agl_skills::SkillRegistry,
+    extension_registry: &StaticExtensionRegistry,
+    selected_skills: &[SkillId],
+) -> Result<Vec<TurnHookBatch>> {
+    let mut hooks_by_event: BTreeMap<HookEvent, BTreeSet<HookId>> = BTreeMap::new();
+    for skill_id in selected_skills {
+        let skill = skill_registry.resolve_for_context_injection(skill_id)?;
+        for hook_id in &skill.harness.required_hooks {
+            let hook = extension_registry.hook(hook_id).with_context(|| {
+                format!("selected skill `{skill_id}` requires missing hook `{hook_id}`")
+            })?;
+            hooks_by_event
+                .entry(hook.event)
+                .or_default()
+                .insert(hook_id.clone());
+        }
+    }
+
+    Ok(hooks_by_event
+        .into_iter()
+        .map(|(event, hooks)| {
+            let mut batch = TurnHookBatch::new(event);
+            for hook in hooks {
+                batch = batch.with_required_hook(hook);
+            }
+            batch
+        })
+        .collect())
 }
 
 fn write_skill_context_evidence(
@@ -390,6 +439,32 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("selected skill id is duplicated"));
+    }
+
+    #[test]
+    fn selected_skill_hook_batches_use_declared_hook_events() {
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let mut extension_registry = StaticExtensionRegistry::new();
+        agl_core_guards::register(&mut extension_registry).unwrap();
+
+        let batches = selected_skill_hook_batches(
+            &skill_registry,
+            &extension_registry,
+            &[SkillId::new("core:task-spec").unwrap()],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].event, HookEvent::ArtifactWrite);
+        assert_eq!(
+            batches[0]
+                .required_hooks
+                .iter()
+                .map(HookId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["repo_path.validate", "task_spec.validate"]
+        );
+        assert!(batches[0].optional_hooks.is_empty());
     }
 
     #[test]

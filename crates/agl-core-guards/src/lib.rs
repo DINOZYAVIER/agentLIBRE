@@ -100,14 +100,6 @@ fn validate_json(input: HookInput) -> HookResult {
 
 fn validate_repo_path(input: HookInput) -> HookResult {
     let paths = payload_paths(&input.payload);
-    if paths.is_empty() {
-        return fail(
-            input.hook_id,
-            "missing_repo_path",
-            "repo_path.validate requires a path string or paths array",
-            None,
-        );
-    }
 
     let invalid = paths
         .iter()
@@ -189,10 +181,42 @@ fn payload_paths(payload: &serde_json::Value) -> Vec<String> {
             .map(ToOwned::to_owned)
             .collect();
     }
+    if let Some(content) = payload_text(payload) {
+        return extract_markdown_repo_paths(content);
+    }
     payload
         .as_str()
         .map(|path| vec![path.to_string()])
         .unwrap_or_default()
+}
+
+fn extract_markdown_repo_paths(content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for candidate in content
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '(' | '[' | ']'))
+        .map(|candidate| {
+            candidate.trim_matches(|ch: char| {
+                matches!(ch, '`' | '"' | '\'' | ':' | '.' | '!' | '?' | '<' | '>')
+            })
+        })
+        .filter(|candidate| candidate.contains('/'))
+    {
+        if looks_like_repo_path(candidate) {
+            paths.push(candidate.to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn looks_like_repo_path(candidate: &str) -> bool {
+    !candidate.contains("://")
+        && !candidate.starts_with('#')
+        && !candidate.starts_with('@')
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
 }
 
 fn validate_single_repo_path(path: &str) -> Result<(), &'static str> {
@@ -333,6 +357,39 @@ mod tests {
                 .run_hook(input(
                     REPO_PATH_VALIDATE_HOOK_ID,
                     json!({"path": ".git/config"})
+                ))
+                .status,
+            HookStatus::Fail
+        );
+    }
+
+    #[test]
+    fn repo_path_guard_accepts_markdown_without_repo_paths() {
+        let guards = CoreGuards::new();
+
+        assert_eq!(
+            guards
+                .run_hook(input(
+                    REPO_PATH_VALIDATE_HOOK_ID,
+                    json!({"content": "No repository paths here."})
+                ))
+                .status,
+            HookStatus::Pass
+        );
+        assert_eq!(
+            guards
+                .run_hook(input(
+                    REPO_PATH_VALIDATE_HOOK_ID,
+                    json!({"content": "Touch crates/agl-cli/src/lib.rs only."})
+                ))
+                .status,
+            HookStatus::Pass
+        );
+        assert_eq!(
+            guards
+                .run_hook(input(
+                    REPO_PATH_VALIDATE_HOOK_ID,
+                    json!({"content": "Never write ../secrets/config."})
                 ))
                 .status,
             HookStatus::Fail

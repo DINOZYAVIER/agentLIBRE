@@ -25,6 +25,10 @@ fn response_guard_batch() -> TurnHookBatch {
         .with_optional_hook(hook_id("guard.response_optional"))
 }
 
+fn artifact_guard_batch() -> TurnHookBatch {
+    TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id("guard.artifact"))
+}
+
 #[test]
 fn stop_reason_names_are_stable() {
     assert_eq!(
@@ -501,6 +505,77 @@ fn turn_machine_accepts_hook_batch_before_model_response_parse() {
     assert_eq!(
         apply(&mut machine, TurnTransition::ParseAnswer),
         TurnPhase::ActionParsed
+    );
+}
+
+#[test]
+fn turn_machine_accepts_artifact_write_hook_before_finish() {
+    let mut machine = TurnMachine::new("turn-artifact-hook");
+    let batch = artifact_guard_batch();
+    let prepared = batch.summary();
+    let finished = HookBatchSummary::from_batch_result(
+        &batch,
+        HookBatchResult {
+            event: HookEvent::ArtifactWrite,
+            results: vec![HookResult {
+                hook_id: hook_id("guard.artifact"),
+                status: HookStatus::Pass,
+                messages: Vec::new(),
+            }],
+        },
+        Some(1),
+    );
+
+    apply(
+        &mut machine,
+        TurnTransition::Start {
+            user_input: "answer".to_string(),
+        },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::PrepareModelRequest { message_count: 1 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::RequestModel { request_index: 0 },
+    );
+    apply(
+        &mut machine,
+        TurnTransition::ReceiveModelResponse {
+            request_index: 0,
+            content: "done".to_string(),
+        },
+    );
+    apply(&mut machine, TurnTransition::ParseAnswer);
+    apply(
+        &mut machine,
+        TurnTransition::FinalAnswer {
+            answer: "done".to_string(),
+        },
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::PrepareHookBatch {
+                summary: prepared.clone(),
+            },
+        ),
+        TurnPhase::HookBatchPrepared
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::RunHookBatch { summary: prepared },
+        ),
+        TurnPhase::HookBatchRunning
+    );
+    assert_eq!(
+        apply(
+            &mut machine,
+            TurnTransition::FinishHookBatch { summary: finished },
+        ),
+        TurnPhase::AnswerReady
     );
 }
 

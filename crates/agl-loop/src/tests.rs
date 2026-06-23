@@ -135,6 +135,10 @@ fn finish_hook_batch() -> TurnHookBatch {
     TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"))
 }
 
+fn artifact_write_hook_batch() -> TurnHookBatch {
+    TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id("guard.artifact"))
+}
+
 fn hook_message(code: &str) -> HookMessage {
     HookMessage {
         code: code.to_string(),
@@ -210,6 +214,45 @@ fn required_turn_finish_hook_pass_allows_answer() {
             "transition:prepare_hook_batch",
             "transition:run_hook_batch",
             "run_hooks:turn.finish",
+            "transition:finish_hook_batch",
+            "transition:finish",
+        ]
+    );
+}
+
+#[test]
+fn required_artifact_write_hook_runs_before_answer_is_accepted() {
+    let mut host = FakeHost::default()
+        .with_model_response("done")
+        .with_hook_result(hook_batch_result(
+            HookEvent::ArtifactWrite,
+            [hook_result("guard.artifact", HookStatus::Pass, &[])],
+        ));
+    let input = TurnInput::user("answer").with_hook_batch(artifact_write_hook_batch());
+
+    let output = run_turn(&mut host, input).unwrap();
+
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "done".to_string()
+        }
+    );
+    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
+    assert_eq!(host.hook_requests[0].event, HookEvent::ArtifactWrite);
+    assert_eq!(
+        host.operation_kinds(),
+        [
+            "transition:start",
+            "transition:prepare_model_request",
+            "transition:request_model",
+            "generate",
+            "transition:receive_model_response",
+            "transition:parse_answer",
+            "transition:final_answer",
+            "transition:prepare_hook_batch",
+            "transition:run_hook_batch",
+            "run_hooks:artifact.write",
             "transition:finish_hook_batch",
             "transition:finish",
         ]

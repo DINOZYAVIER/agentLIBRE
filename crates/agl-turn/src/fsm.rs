@@ -406,6 +406,7 @@ fn hook_boundary_matches(phase: TurnPhase, event: HookEvent) -> bool {
         (TurnPhase::Started, HookEvent::ContextPrepare)
             | (TurnPhase::AwaitingModel, HookEvent::ModelRequest)
             | (TurnPhase::ModelResponded, HookEvent::ModelResponse)
+            | (TurnPhase::AnswerReady, HookEvent::ArtifactWrite)
             | (TurnPhase::AnswerReady, HookEvent::TurnFinish)
     )
 }
