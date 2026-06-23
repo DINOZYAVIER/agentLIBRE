@@ -1,5 +1,3 @@
-use agl_turn::TurnMessage;
-
 pub(crate) const CHAT_COMMANDS_HELP: &str = "\
 Commands:
   /help
@@ -52,12 +50,6 @@ pub(crate) fn parse_chat_input(input: &str) -> ParsedChatInput<'_> {
     }
 }
 
-pub(crate) fn clear_chat_context(messages: &mut Vec<TurnMessage>) -> usize {
-    let cleared_messages = messages.len();
-    messages.clear();
-    cleared_messages
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,22 +93,5 @@ mod tests {
             ParsedChatInput::UnknownCommand("/unknown")
         );
         assert_eq!(parse_chat_input(""), ParsedChatInput::Empty);
-    }
-
-    #[test]
-    fn clear_chat_context_removes_messages() {
-        let mut messages = vec![
-            TurnMessage::User {
-                content: "hello".to_string(),
-            },
-            TurnMessage::Assistant {
-                content: "hi".to_string(),
-            },
-        ];
-
-        let cleared = clear_chat_context(&mut messages);
-
-        assert_eq!(cleared, 2);
-        assert!(messages.is_empty());
     }
 }

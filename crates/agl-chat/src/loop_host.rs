@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 use crate::session::InferenceSession;
 
-pub(crate) struct CliLoopHost {
+pub struct ChatLoopHost {
     session: InferenceSession,
     event_sink: RuntimeEventWriter,
     core_guards: agl_tools::guards::CoreGuards,
@@ -23,8 +23,8 @@ pub(crate) struct CliLoopHost {
     turn_messages: Vec<TurnMessage>,
 }
 
-impl CliLoopHost {
-    pub(crate) fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
+impl ChatLoopHost {
+    pub fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
@@ -40,36 +40,36 @@ impl CliLoopHost {
         })
     }
 
-    pub(crate) fn session(&self) -> &InferenceSession {
+    pub fn session(&self) -> &InferenceSession {
         &self.session
     }
 
-    pub(crate) fn session_mut(&mut self) -> &mut InferenceSession {
+    pub fn session_mut(&mut self) -> &mut InferenceSession {
         &mut self.session
     }
 
-    pub(crate) fn event_sink_path(&self) -> &std::path::Path {
+    pub fn event_sink_path(&self) -> &std::path::Path {
         self.event_sink.path()
     }
 
-    pub(crate) fn reset_turn_counters(&mut self) {
+    pub fn reset_turn_counters(&mut self) {
         self.generated_requests = 0;
         self.turn_messages.clear();
     }
 
-    pub(crate) fn generated_requests(&self) -> usize {
+    pub fn generated_requests(&self) -> usize {
         self.generated_requests
     }
 
-    pub(crate) fn take_turn_messages(&mut self) -> Vec<TurnMessage> {
+    pub fn take_turn_messages(&mut self) -> Vec<TurnMessage> {
         std::mem::take(&mut self.turn_messages)
     }
 
-    pub(crate) fn workspace_root(&self) -> &Path {
+    pub fn workspace_root(&self) -> &Path {
         self.core_tools.root()
     }
 
-    pub(crate) fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
+    pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
         let tool_runtime = core_tool_runtime(&core_tools)?;
@@ -79,7 +79,7 @@ impl CliLoopHost {
     }
 }
 
-impl AgentLoopHost for CliLoopHost {
+impl AgentLoopHost for ChatLoopHost {
     fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
         let results = request
             .hooks

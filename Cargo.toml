@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agl-assets",
+    "crates/agl-chat",
     "crates/agl-cli",
     "crates/agl-tools",
     "crates/agl-hooks",
@@ -27,6 +28,7 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
 agl-assets = { path = "crates/agl-assets" }
+agl-chat = { path = "crates/agl-chat" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-tools = { path = "crates/agl-tools" }

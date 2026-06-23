@@ -1,4 +1,4 @@
-pub(crate) fn assistant_text_for_terminal(content: &str) -> String {
+pub fn assistant_text_for_terminal(content: &str) -> String {
     let mut content = content.trim();
     if let Some(stripped) = content.strip_prefix("Assistant:") {
         content = stripped.trim_start();

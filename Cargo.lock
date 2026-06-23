@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-cli"
+name = "agl-chat"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-assets",
@@ -33,9 +33,21 @@ dependencies = [
  "agl-tools",
  "agl-turn",
  "anyhow",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "agl-cli"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "agl-chat",
+ "agl-loop",
+ "agl-runtime",
+ "agl-tools",
+ "anyhow",
  "clap",
  "clap_complete",
- "serde_json",
  "tracing",
 ]
 

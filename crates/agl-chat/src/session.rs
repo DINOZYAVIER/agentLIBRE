@@ -13,12 +13,12 @@ use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId}
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::args::{RunOptions, ToolAccessMode};
+use crate::{InferenceOptions, ToolAccessMode};
 
 const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 
-pub(crate) struct InferenceSession {
+pub struct InferenceSession {
     backend: LlamaCppBackend,
     model_config: ModelConfig,
     system_prompt: Option<String>,
@@ -31,8 +31,8 @@ pub(crate) struct InferenceSession {
 }
 
 impl InferenceSession {
-    pub(crate) fn new(
-        options: RunOptions,
+    pub fn new(
+        options: InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
         artifact_root_override: Option<PathBuf>,
     ) -> Result<Self> {
@@ -91,8 +91,8 @@ impl InferenceSession {
         })
     }
 
-    pub(crate) fn resolve_config_path(
-        options: &RunOptions,
+    pub fn resolve_config_path(
+        options: &InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
     ) -> PathBuf {
         options
@@ -102,42 +102,42 @@ impl InferenceSession {
             .unwrap_or_else(|| runtime.paths.default_local_inference_config())
     }
 
-    pub(crate) fn resolve_artifact_root(options: &RunOptions) -> Option<PathBuf> {
+    pub fn resolve_artifact_root(options: &InferenceOptions) -> Option<PathBuf> {
         options
             .artifact_root
             .clone()
             .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from))
     }
 
-    pub(crate) fn default_artifact_root(runtime: &AgentLibreRuntimeConfig) -> PathBuf {
+    pub fn default_artifact_root(runtime: &AgentLibreRuntimeConfig) -> PathBuf {
         runtime.paths.default_artifact_root()
     }
 
-    pub(crate) fn run_id(&self) -> &InferenceRunId {
+    pub fn run_id(&self) -> &InferenceRunId {
         &self.run_id
     }
 
-    pub(crate) fn config_path(&self) -> &std::path::Path {
+    pub fn config_path(&self) -> &std::path::Path {
         &self.config_path
     }
 
-    pub(crate) fn artifact_root(&self) -> &std::path::Path {
+    pub fn artifact_root(&self) -> &std::path::Path {
         &self.artifact_root
     }
 
-    pub(crate) fn backend_name(&self) -> &'static str {
+    pub fn backend_name(&self) -> &'static str {
         self.backend.backend_name()
     }
 
-    pub(crate) fn event_stream_path(&self) -> PathBuf {
+    pub fn event_stream_path(&self) -> PathBuf {
         agent_event_stream_path(&self.artifact_root, &self.run_id)
     }
 
-    pub(crate) fn turn_hook_batches(&self) -> &[TurnHookBatch] {
+    pub fn turn_hook_batches(&self) -> &[TurnHookBatch] {
         &self.skill_hook_batches
     }
 
-    pub(crate) fn turn_visible_tools(&self) -> &[VisibleTool] {
+    pub fn turn_visible_tools(&self) -> &[VisibleTool] {
         &self.visible_tools
     }
 
@@ -152,7 +152,7 @@ impl InferenceSession {
         self.backend.generate(request)
     }
 
-    pub(crate) fn clear_context(&mut self) {
+    pub fn clear_context(&mut self) {
         self.backend.clear_context();
     }
 }
@@ -424,7 +424,7 @@ fn write_skill_context_evidence(
         .with_context(|| format!("failed to write skill context evidence {}", path.display()))
 }
 
-pub(crate) fn default_run_id() -> String {
+pub fn default_run_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -749,7 +749,7 @@ mod tests {
             history: agl_runtime::AgentLibreHistoryConfig::default(),
             workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
         };
-        let options = RunOptions::default();
+        let options = InferenceOptions::default();
 
         assert_eq!(
             InferenceSession::resolve_config_path(&options, &runtime),
