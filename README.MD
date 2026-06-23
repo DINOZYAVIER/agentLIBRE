@@ -77,6 +77,21 @@ Start chat:
 ./target/release/agl chat --config /path/to/local.toml
 ```
 
+On Nix/NixOS development machines, use the Vulkan wrapper when building or
+running local llama.cpp smoke tests:
+
+```sh
+scripts/agl-nix-vulkan.sh --build
+scripts/agl-nix-vulkan.sh --diagnose
+scripts/agl-nix-vulkan.sh --smoke-tools /path/to/local.toml
+scripts/agl-nix-vulkan.sh -- ./target/debug/agl chat --config /path/to/local.toml
+```
+
+The wrapper uses `nix/agl-local-vulkan.nix` to provide CMake, Rust, Vulkan,
+SPIR-V, and llama.cpp build/runtime variables. It also pins the Vulkan ICD to
+the system driver when available, which makes GPU discovery failures easier to
+diagnose.
+
 If no config is provided, `agl` looks for the default path shown by:
 
 ```sh
