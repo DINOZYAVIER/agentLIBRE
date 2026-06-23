@@ -1,10 +1,12 @@
 use agl_actions::MalformedToolJsonKind;
 use agl_events::{
-    AgentEvent, ParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
+    AgentEvent, HookBatchOutcomeEvent, HookResultEvent, ParsedActionEvent, StopReasonEvent,
+    ToolJsonMalformedKind, TurnFinishStatus,
 };
 use agl_turn::{
-    StopReason, ToolJsonMalformedClassification, TurnFailureOperation, TurnTerminalStatus,
-    TurnTransition, TurnTransitionRecord,
+    HookBatchOutcome, HookBatchSummary, HookId, HookResultSummary, StopReason,
+    ToolJsonMalformedClassification, TurnFailureOperation, TurnTerminalStatus, TurnTransition,
+    TurnTransitionRecord,
 };
 
 pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> AgentEvent {
@@ -16,6 +18,51 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> AgentEvent {
         TurnTransition::PrepareModelRequest { message_count } => AgentEvent::ModelRequestPrepared {
             turn_id: record.turn_id.clone(),
             message_count: *message_count,
+        },
+        TurnTransition::PrepareHookBatch { summary } => AgentEvent::HookBatchPrepared {
+            turn_id: record.turn_id.clone(),
+            event: hook_event_id(summary),
+            required_hooks: hook_ids(&summary.required_hooks),
+            optional_hooks: hook_ids(&summary.optional_hooks),
+            required_count: summary.required_count(),
+            optional_count: summary.optional_count(),
+        },
+        TurnTransition::RunHookBatch { summary } => AgentEvent::HookBatchStarted {
+            turn_id: record.turn_id.clone(),
+            event: hook_event_id(summary),
+            hook_ids: hook_ids(&summary.hook_ids()),
+            required_count: summary.required_count(),
+            optional_count: summary.optional_count(),
+        },
+        TurnTransition::FinishHookBatch { summary } => AgentEvent::HookBatchFinished {
+            turn_id: record.turn_id.clone(),
+            event: hook_event_id(summary),
+            outcome: hook_outcome_event(summary.outcome()),
+            required_count: summary.required_count(),
+            optional_count: summary.optional_count(),
+            failed_required_count: summary.failed_required_count(),
+            warning_count: summary.warning_count(),
+            repair_count: summary.repair_count(),
+            missing_required_hooks: hook_ids(&summary.missing_required_hooks),
+            message_codes: summary.message_codes.clone(),
+            results: hook_results(&summary.results),
+            duration_ms: summary.duration_ms,
+        },
+        TurnTransition::RejectHookFailure { summary, message } => AgentEvent::HookBatchBlocked {
+            turn_id: record.turn_id.clone(),
+            event: hook_event_id(summary),
+            outcome: hook_outcome_event(summary.outcome()),
+            message: message.clone(),
+            failed_required_count: summary.failed_required_count(),
+            missing_required_hooks: hook_ids(&summary.missing_required_hooks),
+            message_codes: summary.message_codes.clone(),
+        },
+        TurnTransition::PrepareRepair { summary, attempt } => AgentEvent::HookRepairPrepared {
+            turn_id: record.turn_id.clone(),
+            event: hook_event_id(summary),
+            attempt: *attempt,
+            hook_ids: hook_ids(&summary.hook_ids()),
+            message_codes: summary.message_codes.clone(),
         },
         TurnTransition::RequestModel { request_index } => AgentEvent::ModelRequested {
             turn_id: record.turn_id.clone(),
@@ -155,6 +202,36 @@ fn stop_reason_event(reason: &StopReason) -> StopReasonEvent {
         StopReason::ToolLimitReached => StopReasonEvent::ToolLimitReached,
         StopReason::HiddenTool => StopReasonEvent::HiddenTool,
         StopReason::InvalidToolArguments => StopReasonEvent::InvalidToolArguments,
+    }
+}
+
+fn hook_event_id(summary: &HookBatchSummary) -> String {
+    summary.event.as_str().to_string()
+}
+
+fn hook_ids(ids: &[HookId]) -> Vec<String> {
+    ids.iter()
+        .map(|hook_id| hook_id.as_str().to_string())
+        .collect()
+}
+
+fn hook_results(results: &[HookResultSummary]) -> Vec<HookResultEvent> {
+    results
+        .iter()
+        .map(|result| HookResultEvent {
+            hook_id: result.hook_id.as_str().to_string(),
+            status: hook_outcome_event(result.status),
+            message_codes: result.message_codes.clone(),
+        })
+        .collect()
+}
+
+fn hook_outcome_event(outcome: HookBatchOutcome) -> HookBatchOutcomeEvent {
+    match outcome {
+        HookBatchOutcome::Pass => HookBatchOutcomeEvent::Pass,
+        HookBatchOutcome::Warn => HookBatchOutcomeEvent::Warn,
+        HookBatchOutcome::Fail => HookBatchOutcomeEvent::Fail,
+        HookBatchOutcome::Repair => HookBatchOutcomeEvent::Repair,
     }
 }
 

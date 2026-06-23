@@ -3,12 +3,14 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::StopReason;
+use crate::{HookBatchSummary, HookEvent, StopReason};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnPhase {
     Initialized,
     Started,
+    HookBatchPrepared,
+    HookBatchRunning,
     ModelRequestPrepared,
     AwaitingModel,
     ModelResponded,
@@ -28,6 +30,8 @@ impl TurnPhase {
         match self {
             TurnPhase::Initialized => "initialized",
             TurnPhase::Started => "started",
+            TurnPhase::HookBatchPrepared => "hook_batch_prepared",
+            TurnPhase::HookBatchRunning => "hook_batch_running",
             TurnPhase::ModelRequestPrepared => "model_request_prepared",
             TurnPhase::AwaitingModel => "awaiting_model",
             TurnPhase::ModelResponded => "model_responded",
@@ -51,6 +55,23 @@ pub enum TurnTransition {
     },
     PrepareModelRequest {
         message_count: usize,
+    },
+    PrepareHookBatch {
+        summary: HookBatchSummary,
+    },
+    RunHookBatch {
+        summary: HookBatchSummary,
+    },
+    FinishHookBatch {
+        summary: HookBatchSummary,
+    },
+    RejectHookFailure {
+        summary: HookBatchSummary,
+        message: String,
+    },
+    PrepareRepair {
+        summary: HookBatchSummary,
+        attempt: usize,
     },
     RequestModel {
         request_index: usize,
@@ -125,6 +146,11 @@ impl TurnTransition {
         match self {
             TurnTransition::Start { .. } => "start",
             TurnTransition::PrepareModelRequest { .. } => "prepare_model_request",
+            TurnTransition::PrepareHookBatch { .. } => "prepare_hook_batch",
+            TurnTransition::RunHookBatch { .. } => "run_hook_batch",
+            TurnTransition::FinishHookBatch { .. } => "finish_hook_batch",
+            TurnTransition::RejectHookFailure { .. } => "reject_hook_failure",
+            TurnTransition::PrepareRepair { .. } => "prepare_repair",
             TurnTransition::RequestModel { .. } => "request_model",
             TurnTransition::ReceiveModelResponse { .. } => "receive_model_response",
             TurnTransition::ParseAnswer => "parse_answer",
@@ -211,6 +237,13 @@ pub struct TurnMachine {
     turn_id: String,
     phase: TurnPhase,
     sequence: usize,
+    hook_context: Option<HookTransitionContext>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HookTransitionContext {
+    event: HookEvent,
+    return_phase: TurnPhase,
 }
 
 impl TurnMachine {
@@ -219,6 +252,7 @@ impl TurnMachine {
             turn_id: turn_id.into(),
             phase: TurnPhase::Initialized,
             sequence: 0,
+            hook_context: None,
         }
     }
 
@@ -239,7 +273,7 @@ impl TurnMachine {
         transition: TurnTransition,
     ) -> Result<TurnTransitionRecord, TurnTransitionError> {
         let from = self.phase;
-        let Some(to) = next_phase(from, &transition) else {
+        let Some(update) = phase_update(from, self.hook_context, &transition) else {
             return Err(TurnTransitionError {
                 phase: from,
                 transition: transition.as_str(),
@@ -247,12 +281,17 @@ impl TurnMachine {
         };
 
         self.sequence += 1;
-        self.phase = to;
+        self.phase = update.to;
+        match update.hook_context {
+            HookContextUpdate::Keep => {}
+            HookContextUpdate::Set(context) => self.hook_context = Some(context),
+            HookContextUpdate::Clear => self.hook_context = None,
+        }
         Ok(TurnTransitionRecord {
             turn_id: self.turn_id.clone(),
             sequence: self.sequence,
             from,
-            to,
+            to: update.to,
             transition,
         })
     }
@@ -277,7 +316,101 @@ impl fmt::Display for TurnTransitionError {
 
 impl Error for TurnTransitionError {}
 
-fn next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnPhase> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PhaseUpdate {
+    to: TurnPhase,
+    hook_context: HookContextUpdate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HookContextUpdate {
+    Keep,
+    Set(HookTransitionContext),
+    Clear,
+}
+
+fn phase_update(
+    from: TurnPhase,
+    hook_context: Option<HookTransitionContext>,
+    transition: &TurnTransition,
+) -> Option<PhaseUpdate> {
+    if let Some(update) = hook_phase_update(from, hook_context, transition) {
+        return Some(update);
+    }
+
+    base_next_phase(from, transition).map(|to| PhaseUpdate {
+        to,
+        hook_context: HookContextUpdate::Keep,
+    })
+}
+
+fn hook_phase_update(
+    from: TurnPhase,
+    hook_context: Option<HookTransitionContext>,
+    transition: &TurnTransition,
+) -> Option<PhaseUpdate> {
+    use TurnPhase::*;
+    use TurnTransition::*;
+
+    match (from, hook_context, transition) {
+        (phase, None, PrepareHookBatch { summary })
+            if hook_boundary_matches(phase, summary.event) =>
+        {
+            Some(PhaseUpdate {
+                to: HookBatchPrepared,
+                hook_context: HookContextUpdate::Set(HookTransitionContext {
+                    event: summary.event,
+                    return_phase: phase,
+                }),
+            })
+        }
+        (HookBatchPrepared, Some(context), RunHookBatch { summary })
+            if context.event == summary.event =>
+        {
+            Some(PhaseUpdate {
+                to: HookBatchRunning,
+                hook_context: HookContextUpdate::Keep,
+            })
+        }
+        (HookBatchRunning, Some(context), FinishHookBatch { summary })
+            if context.event == summary.event =>
+        {
+            Some(PhaseUpdate {
+                to: context.return_phase,
+                hook_context: HookContextUpdate::Clear,
+            })
+        }
+        (phase, None, RejectHookFailure { summary, .. })
+            if hook_boundary_matches(phase, summary.event) =>
+        {
+            Some(PhaseUpdate {
+                to: Failed,
+                hook_context: HookContextUpdate::Keep,
+            })
+        }
+        (phase, None, PrepareRepair { summary, attempt })
+            if *attempt > 0 && hook_boundary_matches(phase, summary.event) =>
+        {
+            Some(PhaseUpdate {
+                to: phase,
+                hook_context: HookContextUpdate::Keep,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn hook_boundary_matches(phase: TurnPhase, event: HookEvent) -> bool {
+    matches!(
+        (phase, event),
+        (TurnPhase::Started, HookEvent::ContextPrepare)
+            | (TurnPhase::AwaitingModel, HookEvent::ModelRequest)
+            | (TurnPhase::ModelResponded, HookEvent::ModelResponse)
+            | (TurnPhase::AnswerReady, HookEvent::TurnFinish)
+    )
+}
+
+fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnPhase> {
     use TurnPhase::*;
     use TurnTransition::*;
 
