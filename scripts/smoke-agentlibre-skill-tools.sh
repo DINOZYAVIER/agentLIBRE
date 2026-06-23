@@ -105,6 +105,7 @@ scripts/smoke-agentlibre-skill-tools.sh passes.'
     --config "$config" \
     --artifact-root "$run_root" \
     --run-id "$run_id" \
+    --workspace-root "$workspace" \
     --skill core:task-spec \
     --max-output-tokens "$max_output_tokens" \
     --prompt "$prompt" \

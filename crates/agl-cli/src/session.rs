@@ -617,6 +617,7 @@ mod tests {
             paths: agl_runtime::AgentLibrePaths::from_agl_home("/tmp/agl-home"),
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
             history: agl_runtime::AgentLibreHistoryConfig::default(),
+            workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
         };
         let options = RunOptions::default();
 

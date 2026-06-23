@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use agl_events::{AgentEvent, RuntimeEventWriter};
 use agl_extension::{
     HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus,
@@ -20,9 +22,9 @@ pub(crate) struct CliLoopHost {
 }
 
 impl CliLoopHost {
-    pub(crate) fn new(session: InferenceSession) -> Result<Self> {
+    pub(crate) fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
-        let core_tools = agl_core_tools::CoreTools::new(std::env::current_dir()?)
+        let core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
         Ok(Self {
             session,
@@ -51,6 +53,16 @@ impl CliLoopHost {
 
     pub(crate) fn generated_requests(&self) -> usize {
         self.generated_requests
+    }
+
+    pub(crate) fn workspace_root(&self) -> &Path {
+        self.core_tools.root()
+    }
+
+    pub(crate) fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
+        self.core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
+            .context("failed to update core filesystem tool root")?;
+        Ok(())
     }
 }
 
