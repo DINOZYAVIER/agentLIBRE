@@ -4,6 +4,7 @@ members = [
     "crates/agl-cli",
     "crates/agl-core-guards",
     "crates/agl-extension",
+    "crates/agl-hooks",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-oven",
@@ -31,6 +32,7 @@ agl-core-guards = { path = "crates/agl-core-guards" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-extension = { path = "crates/agl-extension" }
+agl-hooks = { path = "crates/agl-hooks" }
 agl-inference = { path = "crates/agl-inference" }
 agl-loop = { path = "crates/agl-loop" }
 agl-oven = { path = "crates/agl-oven" }
