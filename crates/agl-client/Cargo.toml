@@ -1,0 +1,10 @@
+[package]
+name = "agl-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-protocol.workspace = true
+serde_json.workspace = true
