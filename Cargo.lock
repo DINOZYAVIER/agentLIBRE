@@ -24,6 +24,7 @@ dependencies = [
  "agl-assets",
  "agl-config",
  "agl-core-guards",
+ "agl-core-tools",
  "agl-events",
  "agl-extension",
  "agl-inference",
@@ -56,6 +57,16 @@ version = "1.0.0-alpha.6"
 dependencies = [
  "agl-extension",
  "agl-skills",
+ "serde_json",
+]
+
+[[package]]
+name = "agl-core-tools"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "agl-extension",
+ "anyhow",
+ "serde",
  "serde_json",
 ]
 
@@ -149,6 +160,7 @@ version = "1.0.0-alpha.6"
 dependencies = [
  "agl-assets",
  "agl-core-guards",
+ "agl-core-tools",
  "agl-extension",
  "serde",
  "serde_yaml",

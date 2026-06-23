@@ -151,6 +151,7 @@ mod tests {
         .with_tool(ToolDeclaration {
             id: tool_id.clone(),
             description: "Read a file".to_string(),
+            required_arguments: vec!["path".to_string()],
         });
         let mut registry = StaticExtensionRegistry::new();
 
@@ -162,6 +163,10 @@ mod tests {
             HookEvent::ModelResponse
         );
         assert_eq!(registry.tool(&tool_id).unwrap().description, "Read a file");
+        assert_eq!(
+            registry.tool(&tool_id).unwrap().required_arguments,
+            vec!["path"]
+        );
     }
 
     #[test]

@@ -455,6 +455,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["repo_path.validate", "task_spec.validate"]
         );
+        assert_eq!(
+            skill
+                .allowed_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+        );
         assert_eq!(skill.references[0].path, "references/task-spec-contract.md");
         assert_eq!(skill.tree_sha256.len(), 64);
         assert!(skill.body.contains("task spec"));

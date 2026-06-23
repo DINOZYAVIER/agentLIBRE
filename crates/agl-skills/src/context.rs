@@ -1,4 +1,4 @@
-use agl_extension::{HookId, SkillId, StaticExtensionRegistry};
+use agl_extension::{HookId, SkillId, StaticExtensionRegistry, ToolId};
 use serde::Serialize;
 
 use crate::{SkillRegistry, SkillRegistryError};
@@ -25,6 +25,7 @@ pub struct SkillContextEvidence {
     pub manifest_sha256: String,
     pub tree_sha256: String,
     pub required_hooks: Vec<String>,
+    pub allowed_tools: Vec<String>,
     pub included_references: Vec<SkillContextReferenceEvidence>,
     pub context_budget_tokens: u32,
     pub budget_bytes: usize,
@@ -68,6 +69,7 @@ pub fn build_verified_context_bundle(
     let mut blocks = Vec::with_capacity(selections.len());
     for skill_id in selections {
         registry.verify_required_hooks(skill_id, extensions)?;
+        registry.verify_allowed_tools(skill_id, extensions)?;
         let skill = registry.resolve_for_context_injection(skill_id)?;
         blocks.push(build_context_block(skill));
     }
@@ -119,6 +121,12 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
             .map(HookId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
+        allowed_tools: harness
+            .allowed_tools
+            .iter()
+            .map(ToolId::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
         included_references: harness
             .references
             .iter()
@@ -156,6 +164,7 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut extensions = StaticExtensionRegistry::new();
         agl_core_guards::register(&mut extensions).unwrap();
+        agl_core_tools::register(&mut extensions).unwrap();
 
         let bundle = build_verified_context_bundle(
             &registry,
@@ -171,6 +180,10 @@ mod tests {
         assert_eq!(
             bundle.evidence[0].required_hooks,
             vec!["repo_path.validate", "task_spec.validate"]
+        );
+        assert_eq!(
+            bundle.evidence[0].allowed_tools,
+            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
         );
         assert_eq!(
             bundle.evidence[0].included_references[0].path,
