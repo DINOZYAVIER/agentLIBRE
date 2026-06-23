@@ -469,6 +469,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_builtin_tool_smoke_skill() {
+        let skill = SkillHarness::parse_builtin(builtin_skill("core:tool-smoke").unwrap()).unwrap();
+
+        assert_eq!(skill.id.as_str(), "core:tool-smoke");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.pack, "core");
+        assert_eq!(
+            skill
+                .required_hooks
+                .iter()
+                .map(|hook| hook.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repo_path.validate"]
+        );
+        assert_eq!(
+            skill
+                .allowed_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.read"]
+        );
+        assert!(skill.references.is_empty());
+        assert!(skill.body.contains("smoke tests"));
+    }
+
+    #[test]
     fn frontmatter_rejects_unknown_fields() {
         let err = parse_fixture(
             r#"---

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agl_extension::SkillId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
@@ -40,8 +40,25 @@ pub(crate) struct RunOptions {
     pub(crate) no_history: bool,
     pub(crate) new_session: bool,
     pub(crate) max_output_tokens: u32,
+    pub(crate) tool_mode: ToolAccessMode,
     pub(crate) skills: Vec<String>,
     pub(crate) prompt: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum ToolAccessMode {
+    ReadOnly,
+    Write,
+}
+
+impl ToolAccessMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Write => "write",
+        }
+    }
 }
 
 impl Default for RunOptions {
@@ -55,6 +72,7 @@ impl Default for RunOptions {
             no_history: false,
             new_session: false,
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            tool_mode: ToolAccessMode::ReadOnly,
             skills: Vec::new(),
             prompt: None,
         }
@@ -147,6 +165,10 @@ struct CommonRunArgs {
     /// Maximum response tokens.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
     max_output_tokens: u32,
+
+    /// Filesystem tool access mode.
+    #[arg(long, value_enum, default_value_t = ToolAccessMode::ReadOnly)]
+    tool_mode: ToolAccessMode,
 
     /// Builtin skill id to inject for this turn/session.
     #[arg(long = "skill", value_name = "ID")]
@@ -266,6 +288,7 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         no_history: false,
         new_session: false,
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
         prompt,
     };
@@ -294,6 +317,7 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         no_history: args.no_history,
         new_session: args.new_session,
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
         prompt: None,
     })
@@ -439,6 +463,8 @@ mod tests {
             "32",
             "--skill",
             "core:task-spec",
+            "--tool-mode",
+            "write",
         ]);
 
         assert_eq!(
@@ -452,6 +478,7 @@ mod tests {
                 no_history: false,
                 new_session: false,
                 max_output_tokens: 32,
+                tool_mode: ToolAccessMode::Write,
                 skills: vec!["core:task-spec".to_string()],
                 prompt: Some("hello".to_string()),
             })

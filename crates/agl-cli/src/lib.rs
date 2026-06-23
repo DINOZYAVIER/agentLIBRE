@@ -164,6 +164,7 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
     let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+    let tool_mode = options.tool_mode;
     let session = InferenceSession::new(options, runtime, None)?;
     let mut loop_host = CliLoopHost::new(session, &workspace_root)?;
     tracing::info!(
@@ -171,6 +172,7 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         run_id = %loop_host.session().run_id(),
         event_stream = %loop_host.event_sink_path().display(),
         workspace_root = %loop_host.workspace_root().display(),
+        tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
     let hook_batches = loop_host.session().turn_hook_batches().to_vec();
@@ -207,6 +209,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         && ChatSessionStore::exists(runtime.paths.sessions_root(), &session_id);
     let explicit_artifact_root = InferenceSession::resolve_artifact_root(&options);
     let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+    let tool_mode = options.tool_mode;
     let artifact_root_override = if history_enabled {
         explicit_artifact_root.or_else(|| {
             Some(
@@ -265,6 +268,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         artifact_root = %loop_host.session().artifact_root().display(),
         event_stream = %loop_host.event_sink_path().display(),
         workspace_root = %loop_host.workspace_root().display(),
+        tool_mode = tool_mode.as_str(),
         history_enabled,
         resumed = resumed_session,
         replayed_messages = messages.len(),
