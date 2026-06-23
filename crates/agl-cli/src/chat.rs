@@ -4,6 +4,7 @@ pub(crate) const CHAT_COMMANDS_HELP: &str = "\
 Commands:
   /help
   /session
+  /workspace [PATH]
   /clear
   /exit
   /quit
@@ -22,6 +23,7 @@ pub(crate) enum ParsedChatInput<'a> {
     Empty,
     Message(&'a str),
     Command(ChatCommand),
+    Workspace(Option<&'a str>),
     UnknownCommand(&'a str),
 }
 
@@ -34,6 +36,15 @@ pub(crate) fn parse_chat_input(input: &str) -> ParsedChatInput<'_> {
     match input {
         "/help" => ParsedChatInput::Command(ChatCommand::Help),
         "/session" => ParsedChatInput::Command(ChatCommand::Session),
+        "/workspace" => ParsedChatInput::Workspace(None),
+        command if command.starts_with("/workspace ") => {
+            let path = command["/workspace ".len()..].trim();
+            if path.is_empty() {
+                ParsedChatInput::Workspace(None)
+            } else {
+                ParsedChatInput::Workspace(Some(path))
+            }
+        }
         "/clear" => ParsedChatInput::Command(ChatCommand::Clear),
         "/exit" | "/quit" => ParsedChatInput::Command(ChatCommand::Exit),
         unknown if unknown.starts_with('/') => ParsedChatInput::UnknownCommand(unknown),
@@ -60,6 +71,14 @@ mod tests {
         assert_eq!(
             parse_chat_input("/session"),
             ParsedChatInput::Command(ChatCommand::Session)
+        );
+        assert_eq!(
+            parse_chat_input("/workspace"),
+            ParsedChatInput::Workspace(None)
+        );
+        assert_eq!(
+            parse_chat_input("/workspace ../repo"),
+            ParsedChatInput::Workspace(Some("../repo"))
         );
         assert_eq!(
             parse_chat_input("/clear"),

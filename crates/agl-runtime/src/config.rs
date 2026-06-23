@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,9 @@ include_message_text = false
 
 [history]
 enabled = true
+
+[workspace]
+# root = "/path/to/workspace"
 "#;
 
 pub fn write_default_runtime_config(path: impl AsRef<Path>, force: bool) -> Result<()> {
@@ -57,6 +60,7 @@ pub struct AgentLibreRuntimeConfig {
     pub paths: AgentLibrePaths,
     pub logging: AgentLibreLoggingConfig,
     pub history: AgentLibreHistoryConfig,
+    pub workspace: AgentLibreWorkspaceConfig,
 }
 
 impl AgentLibreRuntimeConfig {
@@ -66,11 +70,17 @@ impl AgentLibreRuntimeConfig {
 
     pub fn from_paths(paths: AgentLibrePaths) -> Result<Self> {
         let file_config = AgentLibreRuntimeConfigFile::read(&paths.runtime_config_path())?;
+        let workspace = AgentLibreWorkspaceConfig::from_file_and_env(file_config.workspace)?;
         Ok(Self {
             paths,
             logging: AgentLibreLoggingConfig::from_file_and_env(file_config.logging),
             history: file_config.history.unwrap_or_default(),
+            workspace,
         })
+    }
+
+    pub fn resolve_workspace_root(&self, override_root: Option<&Path>) -> Result<PathBuf> {
+        self.workspace.resolve_root(override_root)
     }
 }
 
@@ -79,6 +89,7 @@ impl AgentLibreRuntimeConfig {
 struct AgentLibreRuntimeConfigFile {
     logging: Option<AgentLibreLoggingConfigFile>,
     history: Option<AgentLibreHistoryConfig>,
+    workspace: Option<AgentLibreWorkspaceConfig>,
 }
 
 impl AgentLibreRuntimeConfigFile {
@@ -216,6 +227,81 @@ impl Default for AgentLibreHistoryConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLibreWorkspaceConfig {
+    pub root: Option<PathBuf>,
+}
+
+impl AgentLibreWorkspaceConfig {
+    fn from_file_and_env(file_config: Option<Self>) -> Result<Self> {
+        let mut config = file_config.unwrap_or_default();
+        if let Some(root) = env_workspace_root() {
+            config.root = Some(root);
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(root) = &self.root {
+            validate_non_empty_path("workspace.root", root)?;
+        }
+        Ok(())
+    }
+
+    pub fn resolve_root(&self, override_root: Option<&Path>) -> Result<PathBuf> {
+        let explicit = override_root.or(self.root.as_deref());
+        resolve_workspace_root_from(std::env::current_dir()?, explicit)
+    }
+}
+
+pub fn resolve_workspace_root_from(
+    start: impl AsRef<Path>,
+    explicit_root: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(root) = explicit_root {
+        validate_non_empty_path("workspace root", root)?;
+        return canonical_workspace_root(root);
+    }
+
+    let start = canonical_workspace_root(start.as_ref())?;
+    Ok(find_git_top(&start).unwrap_or(start))
+}
+
+fn canonical_workspace_root(root: &Path) -> Result<PathBuf> {
+    let canonical = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize workspace root {}", root.display()))?;
+    if canonical.is_dir() {
+        Ok(canonical)
+    } else {
+        bail!("workspace root is not a directory: {}", root.display())
+    }
+}
+
+fn find_git_top(start: &Path) -> Option<PathBuf> {
+    for candidate in start.ancestors() {
+        if candidate.join(".git").exists() {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
+fn env_workspace_root() -> Option<PathBuf> {
+    std::env::var_os("AGL_WORKSPACE_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn validate_non_empty_path(name: &str, path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +323,9 @@ include_message_text = true
 
 [history]
 enabled = false
+
+[workspace]
+root = "/tmp/workspace-root"
 "#,
         )
         .unwrap();
@@ -248,6 +337,10 @@ enabled = false
         assert_eq!(config.logging.stderr, AgentLibreStderrLogMode::Always);
         assert!(config.logging.include_message_text);
         assert!(!config.history.enabled);
+        assert_eq!(
+            config.workspace.root,
+            Some(PathBuf::from("/tmp/workspace-root"))
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -260,6 +353,57 @@ enabled = false
         assert_eq!(config.level, "info");
         assert_eq!(config.format, AgentLibreLogFormat::Compact);
         assert_eq!(config.stderr, AgentLibreStderrLogMode::Never);
+    }
+
+    #[test]
+    fn workspace_root_resolves_git_top_before_cwd() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-workspace-git-{}", std::process::id()));
+        let nested = root.join("crates/agl-cli");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let resolved = resolve_workspace_root_from(&nested, None).unwrap();
+
+        assert_eq!(resolved, root.canonicalize().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_falls_back_to_current_directory_without_git() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-workspace-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        if root.ancestors().any(|path| path.join(".git").exists()) {
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let resolved = resolve_workspace_root_from(&root, None).unwrap();
+
+        assert_eq!(resolved, root.canonicalize().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_root_explicit_override_wins() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-runtime-workspace-explicit-{}",
+            std::process::id()
+        ));
+        let start = root.join("repo/subdir");
+        let explicit = root.join("workspace");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+
+        let resolved = resolve_workspace_root_from(&start, Some(&explicit)).unwrap();
+
+        assert_eq!(resolved, explicit.canonicalize().unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

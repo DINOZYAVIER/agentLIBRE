@@ -206,6 +206,31 @@ fn missing_default_inference_config_points_to_next_steps() {
 }
 
 #[test]
+fn invalid_workspace_root_fails_before_inference_config() {
+    let home = TempHome::new("bad-workspace-root");
+    let home_arg = home.path_string();
+    let missing_workspace = home.path().join("missing-workspace");
+    let missing_workspace_arg = missing_workspace.display().to_string();
+    let output = run_agl(&[
+        "--home",
+        &home_arg,
+        "run",
+        "--workspace-root",
+        &missing_workspace_arg,
+        "hello",
+    ]);
+
+    assert_failure(&output);
+    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "failed to canonicalize workspace root");
+    assert!(
+        !stderr.contains("local inference config"),
+        "invalid workspace root should fail before inference config resolution:\n{stderr}"
+    );
+}
+
+#[test]
 fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
     let home = TempHome::new("chat-model-failure");
     let config_path = home.write_local_inference_config(

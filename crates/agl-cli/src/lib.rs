@@ -1,11 +1,12 @@
 use std::env;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use agl_loop::{TurnInput, TurnOutput, run_turn};
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
-    AgentLibreRuntimeConfig, init_tracing, logged_message_fields,
+    AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing, logged_message_fields,
 };
 use agl_session::{
     AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
@@ -113,6 +114,7 @@ fn runtime_for_command_paths(
             paths,
             logging: AgentLibreLoggingConfig::from_env(),
             history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
         });
     }
 
@@ -161,12 +163,14 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .prompt
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
+    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
     let session = InferenceSession::new(options, runtime, None)?;
-    let mut loop_host = CliLoopHost::new(session)?;
+    let mut loop_host = CliLoopHost::new(session, &workspace_root)?;
     tracing::info!(
         target: "agentlibre::app",
         run_id = %loop_host.session().run_id(),
         event_stream = %loop_host.event_sink_path().display(),
+        workspace_root = %loop_host.workspace_root().display(),
         "runtime loop host initialized"
     );
     let hook_batches = loop_host.session().turn_hook_batches().to_vec();
@@ -202,6 +206,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         && options.session_id.is_some()
         && ChatSessionStore::exists(runtime.paths.sessions_root(), &session_id);
     let explicit_artifact_root = InferenceSession::resolve_artifact_root(&options);
+    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
     let artifact_root_override = if history_enabled {
         explicit_artifact_root.or_else(|| {
             Some(
@@ -238,7 +243,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     } else {
         (None, None)
     };
-    let mut loop_host = CliLoopHost::new(session)?;
+    let mut loop_host = CliLoopHost::new(session, &workspace_root)?;
     let mut messages = replay
         .as_ref()
         .map(replay_turn_messages)
@@ -259,6 +264,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         run_id = %loop_host.session().run_id(),
         artifact_root = %loop_host.session().artifact_root().display(),
         event_stream = %loop_host.event_sink_path().display(),
+        workspace_root = %loop_host.workspace_root().display(),
         history_enabled,
         resumed = resumed_session,
         replayed_messages = messages.len(),
@@ -293,7 +299,37 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
-                print_chat_session_summary(&session_id, loop_host.session());
+                print_chat_session_summary(
+                    &session_id,
+                    loop_host.session(),
+                    loop_host.workspace_root(),
+                );
+                continue;
+            }
+            ParsedChatInput::Workspace(path) => {
+                if let Some(path) = path {
+                    let root = chat_workspace_root(path, loop_host.workspace_root());
+                    if let Err(err) = loop_host.set_workspace_root(&root) {
+                        tracing::warn!(
+                            target: "agentlibre::app",
+                            session_id = %session_id,
+                            run_id = %loop_host.session().run_id(),
+                            requested_workspace_root = %root.display(),
+                            error = %err,
+                            "chat workspace root change failed"
+                        );
+                        println!("workspace_error={err:#}");
+                    } else {
+                        tracing::info!(
+                            target: "agentlibre::app",
+                            session_id = %session_id,
+                            run_id = %loop_host.session().run_id(),
+                            workspace_root = %loop_host.workspace_root().display(),
+                            "chat workspace root changed"
+                        );
+                    }
+                }
+                println!("workspace_root={}", loop_host.workspace_root().display());
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Clear) => {
@@ -454,10 +490,24 @@ fn stopped_turn_context_message(reason: StopReason) -> &'static str {
     }
 }
 
-fn print_chat_session_summary(session_id: &AgentLibreSessionId, session: &InferenceSession) {
+fn print_chat_session_summary(
+    session_id: &AgentLibreSessionId,
+    session: &InferenceSession,
+    workspace_root: &Path,
+) {
     println!("session_id={session_id}");
     println!("run_id={}", session.run_id());
     println!("artifact_root={}", session.artifact_root().display());
+    println!("workspace_root={}", workspace_root.display());
+}
+
+fn chat_workspace_root(input: &str, current_root: &Path) -> PathBuf {
+    let path = PathBuf::from(input);
+    if path.is_absolute() {
+        path
+    } else {
+        current_root.join(path)
+    }
 }
 
 fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
@@ -629,6 +679,18 @@ mod tests {
 
         assert!(input.visible_tools.is_empty());
         assert_eq!(input.max_tool_calls, 0);
+    }
+
+    #[test]
+    fn chat_workspace_root_resolves_relative_to_current_root() {
+        assert_eq!(
+            chat_workspace_root("../next", std::path::Path::new("/tmp/root/current")),
+            PathBuf::from("/tmp/root/current/../next")
+        );
+        assert_eq!(
+            chat_workspace_root("/tmp/absolute", std::path::Path::new("/tmp/root")),
+            PathBuf::from("/tmp/absolute")
+        );
     }
 
     #[test]

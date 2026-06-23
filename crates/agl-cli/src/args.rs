@@ -35,6 +35,7 @@ pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) run_id: Option<String>,
+    pub(crate) workspace_root: Option<PathBuf>,
     pub(crate) session_id: Option<String>,
     pub(crate) no_history: bool,
     pub(crate) new_session: bool,
@@ -49,6 +50,7 @@ impl Default for RunOptions {
             config: None,
             artifact_root: None,
             run_id: None,
+            workspace_root: None,
             session_id: None,
             no_history: false,
             new_session: false,
@@ -137,6 +139,10 @@ struct CommonRunArgs {
     /// Stable run id for artifacts.
     #[arg(long, value_name = "ID")]
     run_id: Option<String>,
+
+    /// Workspace root for filesystem tools.
+    #[arg(long, value_name = "DIR")]
+    workspace_root: Option<PathBuf>,
 
     /// Maximum response tokens.
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
@@ -255,6 +261,7 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         config: args.common.config,
         artifact_root: args.common.artifact_root,
         run_id: args.common.run_id,
+        workspace_root: args.common.workspace_root,
         session_id: None,
         no_history: false,
         new_session: false,
@@ -282,6 +289,7 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         config: args.common.config,
         artifact_root: args.common.artifact_root,
         run_id: args.common.run_id,
+        workspace_root: args.common.workspace_root,
         session_id: args.session_id,
         no_history: args.no_history,
         new_session: args.new_session,
@@ -425,6 +433,8 @@ mod tests {
             "hello",
             "--run-id",
             "manual-test",
+            "--workspace-root",
+            "/tmp/workspace",
             "--max-output-tokens",
             "32",
             "--skill",
@@ -437,6 +447,7 @@ mod tests {
                 config: Some(PathBuf::from("local.toml")),
                 artifact_root: Some(PathBuf::from("artifacts")),
                 run_id: Some("manual-test".to_string()),
+                workspace_root: Some(PathBuf::from("/tmp/workspace")),
                 session_id: None,
                 no_history: false,
                 new_session: false,
@@ -542,13 +553,22 @@ mod tests {
 
     #[test]
     fn parse_chat_session_options() {
-        let command = parse_command(["agl", "chat", "--session-id", "session-001", "--no-history"]);
+        let command = parse_command([
+            "agl",
+            "chat",
+            "--session-id",
+            "session-001",
+            "--no-history",
+            "--workspace-root",
+            "/tmp/workspace",
+        ]);
 
         assert_eq!(
             command,
             CliCommand::Chat(RunOptions {
                 session_id: Some("session-001".to_string()),
                 no_history: true,
+                workspace_root: Some(PathBuf::from("/tmp/workspace")),
                 ..RunOptions::default()
             })
         );
