@@ -1,0 +1,12 @@
+[package]
+name = "agl-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-assets.workspace = true
+agl-extension.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
