@@ -44,6 +44,10 @@ impl LlamaCppBackend {
 }
 
 impl InferenceBackend for LlamaCppBackend {
+    fn backend_name(&self) -> &'static str {
+        self.runtime.config().backend.kind.as_str()
+    }
+
     fn generate(&mut self, request: InferenceRequest) -> Result<InferenceResponse> {
         let paths = self
             .artifact_root
@@ -51,7 +55,7 @@ impl InferenceBackend for LlamaCppBackend {
         let writer = InferenceEventWriter::new(paths.events_jsonl());
         let mut machine =
             InferenceAttemptMachine::new(request.run_id.clone(), request.attempt_id.clone());
-        let backend = self.runtime.config().backend.kind.as_str();
+        let backend = self.backend_name();
         apply_inference_transition(
             &writer,
             &mut machine,
