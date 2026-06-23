@@ -10,7 +10,7 @@ use agl_runtime::{
 use agl_session::{
     AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
 };
-use agl_turn::{StopReason, TurnMessage};
+use agl_turn::{StopReason, TurnHookBatch, TurnMessage};
 use anyhow::{Context, Result};
 
 mod args;
@@ -167,7 +167,14 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         event_stream = %loop_host.event_sink_path().display(),
         "runtime loop host initialized"
     );
-    let input = build_turn_input(loop_host.session().run_id().as_str(), 1, &[], &prompt);
+    let hook_batches = loop_host.session().turn_hook_batches().to_vec();
+    let input = build_turn_input(
+        loop_host.session().run_id().as_str(),
+        1,
+        &[],
+        &hook_batches,
+        &prompt,
+    );
     loop_host.reset_turn_counters();
     let output = run_turn(&mut loop_host, input)?;
     print_turn_output(&output);
@@ -322,6 +329,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             loop_host.session().run_id().as_str(),
             request_index,
             &messages,
+            loop_host.session().turn_hook_batches(),
             input,
         );
         loop_host.reset_turn_counters();
@@ -397,12 +405,17 @@ fn build_turn_input(
     run_id: &str,
     request_index: usize,
     context_messages: &[TurnMessage],
+    hook_batches: &[TurnHookBatch],
     user_input: &str,
 ) -> TurnInput {
-    TurnInput::user(user_input.to_string())
+    let mut input = TurnInput::user(user_input.to_string())
         .with_turn_id(run_id.to_string())
         .with_context_messages(context_messages.to_vec())
-        .with_request_index_start(request_index)
+        .with_request_index_start(request_index);
+    for hook_batch in hook_batches {
+        input = input.with_hook_batch(hook_batch.clone());
+    }
+    input
 }
 
 fn print_turn_output(output: &TurnOutput) {
@@ -576,11 +589,17 @@ mod tests {
             },
         ];
 
-        let input = build_turn_input("run-001", 7, &context, "new");
+        let hook_batches = vec![
+            TurnHookBatch::new(agl_loop::HookEvent::ArtifactWrite)
+                .with_required_hook(agl_loop::HookId::new("task_spec.validate").unwrap()),
+        ];
+
+        let input = build_turn_input("run-001", 7, &context, &hook_batches, "new");
 
         assert_eq!(input.turn_id, "run-001");
         assert_eq!(input.user_input, "new");
         assert_eq!(input.context_messages, context);
+        assert_eq!(input.hook_batches, hook_batches);
         assert_eq!(input.request_index_start, 7);
         assert!(input.visible_tools.is_empty());
         assert_eq!(input.max_tool_calls, 0);
