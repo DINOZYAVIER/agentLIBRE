@@ -12,19 +12,11 @@ name = "agl"
 path = "src/main.rs"
 
 [dependencies]
-agl-assets.workspace = true
-agl-config.workspace = true
+agl-chat.workspace = true
 agl-tools.workspace = true
-agl-events.workspace = true
-agl-inference.workspace = true
 agl-loop.workspace = true
-agl-oven.workspace = true
 agl-runtime.workspace = true
-agl-session.workspace = true
-agl-skills.workspace = true
-agl-turn.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
