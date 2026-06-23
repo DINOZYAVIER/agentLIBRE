@@ -46,6 +46,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-core-guards"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "agl-extension",
+ "agl-skills",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-events"
 version = "1.0.0-alpha.6"
 dependencies = [
