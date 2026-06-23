@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agl_extension::{
+use agl_tools::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookInput, HookMessage, HookResult,
     HookStatus,
 };
@@ -441,7 +441,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agl_extension::HookBatchRequest;
+    use agl_tools::HookBatchRequest;
     use serde_json::json;
 
     use super::*;
@@ -601,7 +601,11 @@ printf '{"schema":"agentlibre.script_hook_result.v1","status":"warn","messages":
 
     fn write_script(name: &str, content: &str) -> PathBuf {
         let path = temp_path(name);
-        std::fs::write(&path, content).unwrap();
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
         make_executable(&path);
         path
     }

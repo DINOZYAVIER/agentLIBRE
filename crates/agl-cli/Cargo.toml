@@ -14,10 +14,8 @@ path = "src/main.rs"
 [dependencies]
 agl-assets.workspace = true
 agl-config.workspace = true
-agl-core-guards.workspace = true
-agl-core-tools.workspace = true
+agl-tools.workspace = true
 agl-events.workspace = true
-agl-extension.workspace = true
 agl-inference.workspace = true
 agl-loop.workspace = true
 agl-oven.workspace = true

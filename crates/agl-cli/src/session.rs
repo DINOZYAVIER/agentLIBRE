@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_config::{ModelConfig, ToolCallFormat, load_local_inference_config};
-use agl_extension::{HookEvent, HookId, SkillId, StaticExtensionRegistry, ToolId};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_skills::{SkillContextEvidence, build_verified_context_bundle};
+use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -265,28 +265,24 @@ fn resolve_skill_context(
     let selected_skills = selected_skill_ids(config_skills, option_skills)?;
     let skill_registry =
         agl_skills::builtin_registry().context("failed to load builtin skill registry")?;
-    let mut extension_registry = StaticExtensionRegistry::new();
-    agl_core_guards::register(&mut extension_registry)
-        .context("failed to register builtin core guard extension")?;
-    agl_core_tools::register(&mut extension_registry)
-        .context("failed to register builtin core tool extension")?;
+    let mut tool_catalog = ToolCatalog::new();
+    agl_tools::guards::register(&mut tool_catalog)
+        .context("failed to register builtin core guard provider")?;
+    agl_tools::fs::register(&mut tool_catalog)
+        .context("failed to register builtin core tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {
         let bundle =
-            build_verified_context_bundle(&skill_registry, &extension_registry, &selected_skills)
+            build_verified_context_bundle(&skill_registry, &tool_catalog, &selected_skills)
                 .context("failed to build verified skill context")?;
         let hook_batches =
-            selected_skill_hook_batches(&skill_registry, &extension_registry, &selected_skills)?;
+            selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?;
         write_skill_context_evidence(artifact_root, run_id, &bundle.evidence)?;
         (Some(bundle.content), hook_batches)
     };
-    let visible_tools = selected_skill_visible_tools(
-        &skill_registry,
-        &extension_registry,
-        &selected_skills,
-        tool_mode,
-    )?;
+    let visible_tools =
+        selected_skill_visible_tools(&skill_registry, &tool_catalog, &selected_skills, tool_mode)?;
     Ok(ResolvedSkillContext {
         context,
         hook_batches,
@@ -311,14 +307,14 @@ fn selected_skill_ids(config_skills: &[String], option_skills: &[String]) -> Res
 
 fn selected_skill_hook_batches(
     skill_registry: &agl_skills::SkillRegistry,
-    extension_registry: &StaticExtensionRegistry,
+    tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
 ) -> Result<Vec<TurnHookBatch>> {
     let mut hooks_by_event: BTreeMap<HookEvent, BTreeSet<HookId>> = BTreeMap::new();
     for skill_id in selected_skills {
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         for hook_id in &skill.harness.required_hooks {
-            let hook = extension_registry.hook(hook_id).with_context(|| {
+            let hook = tool_catalog.hook(hook_id).with_context(|| {
                 format!("selected skill `{skill_id}` requires missing hook `{hook_id}`")
             })?;
             hooks_by_event
@@ -342,60 +338,57 @@ fn selected_skill_hook_batches(
 
 fn selected_skill_visible_tools(
     skill_registry: &agl_skills::SkillRegistry,
-    extension_registry: &StaticExtensionRegistry,
+    tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
 ) -> Result<Vec<VisibleTool>> {
-    let mut tool_ids = core_tool_ids_for_mode(tool_mode)?;
+    let mut tool_ids = core_tool_ids()?;
     for skill_id in selected_skills {
-        skill_registry.verify_allowed_tools(skill_id, extension_registry)?;
+        skill_registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         tool_ids.extend(skill.harness.allowed_tools.iter().cloned());
     }
 
     tool_ids
         .into_iter()
-        .filter(|tool_id| tool_mode_allows_tool(tool_mode, tool_id))
         .map(|tool_id| {
-            let declaration = extension_registry
-                .tool(&tool_id)
+            let declaration = tool_catalog
+                .executable_tool(&tool_id)
                 .with_context(|| format!("selected skill requires missing tool `{tool_id}`"))?;
+            if !tool_mode_allows_capability(tool_mode, declaration.capability) {
+                return Ok(None);
+            }
             let mut visible =
                 VisibleTool::new(tool_id.as_str()).describe(declaration.description.clone());
             for argument in &declaration.required_arguments {
                 visible = visible.require_argument(argument.clone());
             }
-            Ok(visible)
+            Ok(Some(visible))
+        })
+        .filter_map(|result| match result {
+            Ok(Some(tool)) => Some(Ok(tool)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
         })
         .collect()
 }
 
-fn core_tool_ids_for_mode(mode: ToolAccessMode) -> Result<BTreeSet<ToolId>> {
+fn core_tool_ids() -> Result<BTreeSet<ToolId>> {
     [
-        agl_core_tools::FS_READ_TOOL_ID,
-        agl_core_tools::FS_LIST_TOOL_ID,
-        agl_core_tools::FS_SEARCH_TOOL_ID,
-        agl_core_tools::FS_EDIT_TOOL_ID,
+        agl_tools::FS_READ_TOOL_ID,
+        agl_tools::FS_LIST_TOOL_ID,
+        agl_tools::FS_SEARCH_TOOL_ID,
+        agl_tools::FS_EDIT_TOOL_ID,
     ]
     .into_iter()
     .map(ToolId::new)
-    .filter_map(|result| match result {
-        Ok(tool_id) if tool_mode_allows_tool(mode, &tool_id) => Some(Ok(tool_id)),
-        Ok(_) => None,
-        Err(err) => Some(Err(err)),
-    })
     .collect::<std::result::Result<BTreeSet<_>, _>>()
     .context("builtin core tool id is invalid")
 }
 
-fn tool_mode_allows_tool(mode: ToolAccessMode, tool_id: &ToolId) -> bool {
+fn tool_mode_allows_capability(mode: ToolAccessMode, capability: ToolCapability) -> bool {
     match mode {
-        ToolAccessMode::ReadOnly => matches!(
-            tool_id.as_str(),
-            agl_core_tools::FS_READ_TOOL_ID
-                | agl_core_tools::FS_LIST_TOOL_ID
-                | agl_core_tools::FS_SEARCH_TOOL_ID
-        ),
+        ToolAccessMode::ReadOnly => capability.is_visible_in_read_only(),
         ToolAccessMode::Write => true,
     }
 }
@@ -599,9 +592,9 @@ mod tests {
     #[test]
     fn selected_skill_hook_batches_use_declared_hook_events() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let batches = selected_skill_hook_batches(
             &skill_registry,
@@ -626,9 +619,9 @@ mod tests {
     #[test]
     fn selected_skill_visible_tools_use_declared_tool_metadata() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -655,9 +648,9 @@ mod tests {
     #[test]
     fn visible_tools_include_read_only_core_tools_without_skills() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -679,9 +672,9 @@ mod tests {
     #[test]
     fn visible_tools_include_edit_in_write_mode_without_skills() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -703,9 +696,9 @@ mod tests {
     #[test]
     fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -727,9 +720,9 @@ mod tests {
     #[test]
     fn selected_tool_smoke_skill_uses_read_only_core_tool_set() {
         let skill_registry = agl_skills::builtin_registry().unwrap();
-        let mut extension_registry = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extension_registry).unwrap();
-        agl_core_tools::register(&mut extension_registry).unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,

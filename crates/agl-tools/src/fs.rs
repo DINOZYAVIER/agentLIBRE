@@ -1,15 +1,15 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use agl_extension::{
-    ExtensionId, StaticExtensionDeclaration, StaticExtensionRegistry, StaticExtensionRegistryError,
-    ToolDeclaration, ToolId,
+use crate::{
+    ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
+    ToolOutput, ToolProviderDeclaration, ToolProviderId,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
 
-pub const EXTENSION_ID: &str = "core-tools";
+pub const PROVIDER_ID: &str = "core-tools";
 pub const FS_READ_TOOL_ID: &str = "fs.read";
 pub const FS_LIST_TOOL_ID: &str = "fs.list";
 pub const FS_SEARCH_TOOL_ID: &str = "fs.search";
@@ -307,9 +307,16 @@ impl CoreTools {
     }
 }
 
-pub fn declaration() -> StaticExtensionDeclaration {
-    StaticExtensionDeclaration::new(
-        ExtensionId::new(EXTENSION_ID).expect("core tool extension id is valid"),
+impl ToolHandler for CoreTools {
+    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
+        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
+        Ok(ToolOutput { observation })
+    }
+}
+
+pub fn declaration() -> ToolProviderDeclaration {
+    ToolProviderDeclaration::new(
+        ToolProviderId::new(PROVIDER_ID).expect("core tool provider id is valid"),
         "Core Tools",
         env!("CARGO_PKG_VERSION"),
     )
@@ -317,35 +324,43 @@ pub fn declaration() -> StaticExtensionDeclaration {
     .with_tool(tool(
         FS_READ_TOOL_ID,
         "Read a UTF-8 file from the repository with line bounds.",
+        ToolCapability::Read,
         &["path"],
     ))
     .with_tool(tool(
         FS_LIST_TOOL_ID,
         "List repository directory entries.",
+        ToolCapability::Read,
         &["path"],
     ))
     .with_tool(tool(
         FS_SEARCH_TOOL_ID,
         "Search repository text files for a literal pattern.",
+        ToolCapability::Read,
         &["pattern"],
     ))
     .with_tool(tool(
         FS_EDIT_TOOL_ID,
         "Replace one exact text span in an existing repository file.",
+        ToolCapability::Write,
         &["path", "old_text", "new_text"],
     ))
 }
 
-pub fn register(
-    registry: &mut StaticExtensionRegistry,
-) -> Result<(), StaticExtensionRegistryError> {
-    registry.register(declaration())
+pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
+    catalog.register(declaration())
 }
 
-fn tool(id: &str, description: &str, required_arguments: &[&str]) -> ToolDeclaration {
+fn tool(
+    id: &str,
+    description: &str,
+    capability: ToolCapability,
+    required_arguments: &[&str],
+) -> ToolDeclaration {
     ToolDeclaration {
         id: ToolId::new(id).expect("core tool id is valid"),
         description: description.to_string(),
+        capability,
         required_arguments: required_arguments
             .iter()
             .map(|argument| (*argument).to_string())
@@ -445,7 +460,6 @@ struct EditArgs {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agl_extension::{StaticExtensionRegistry, ToolId};
     use serde_json::json;
 
     use super::*;
@@ -455,7 +469,7 @@ mod tests {
     fn temp_root(name: &str) -> PathBuf {
         let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("agl-core-tools-{name}-{}-{id}", std::process::id()));
+            std::env::temp_dir().join(format!("agl-tools-{name}-{}-{id}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
@@ -463,10 +477,10 @@ mod tests {
 
     #[test]
     fn declaration_registers_core_filesystem_tools() {
-        let mut registry = StaticExtensionRegistry::new();
-        register(&mut registry).unwrap();
+        let mut catalog = ToolCatalog::new();
+        register(&mut catalog).unwrap();
 
-        let read = registry
+        let read = catalog
             .tool(&ToolId::new(FS_READ_TOOL_ID).unwrap())
             .unwrap();
         assert_eq!(
@@ -475,7 +489,7 @@ mod tests {
         );
         assert_eq!(read.required_arguments, vec!["path"]);
         assert!(
-            registry
+            catalog
                 .tool(&ToolId::new(FS_EDIT_TOOL_ID).unwrap())
                 .is_some()
         );

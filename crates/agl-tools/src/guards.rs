@@ -1,17 +1,16 @@
-use agl_extension::{
-    ExtensionId, HookDeclaration, HookEvent, HookId, HookInput, HookMessage, HookResult,
-    HookStatus, StaticExtension, StaticExtensionDeclaration, StaticExtensionRegistry,
-    StaticExtensionRegistryError,
+use crate::{
+    HookDeclaration, HookEvent, HookId, HookInput, HookMessage, HookResult, HookStatus,
+    ToolCatalog, ToolCatalogError, ToolProviderDeclaration, ToolProviderId,
 };
 
-pub const EXTENSION_ID: &str = "core-guards";
+pub const PROVIDER_ID: &str = "core-guards";
 pub const JSON_VALIDATE_HOOK_ID: &str = "json.validate";
 pub const REPO_PATH_VALIDATE_HOOK_ID: &str = "repo_path.validate";
 pub const TASK_SPEC_VALIDATE_HOOK_ID: &str = "task_spec.validate";
 
 #[derive(Clone, Debug)]
 pub struct CoreGuards {
-    declaration: StaticExtensionDeclaration,
+    declaration: ToolProviderDeclaration,
 }
 
 impl Default for CoreGuards {
@@ -26,14 +25,12 @@ impl CoreGuards {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-impl StaticExtension for CoreGuards {
-    fn declaration(&self) -> &StaticExtensionDeclaration {
+    pub fn declaration(&self) -> &ToolProviderDeclaration {
         &self.declaration
     }
 
-    fn run_hook(&self, input: HookInput) -> HookResult {
+    pub fn run_hook(&self, input: HookInput) -> HookResult {
         match input.hook_id.as_str() {
             JSON_VALIDATE_HOOK_ID => validate_json(input),
             REPO_PATH_VALIDATE_HOOK_ID => validate_repo_path(input),
@@ -48,9 +45,9 @@ impl StaticExtension for CoreGuards {
     }
 }
 
-pub fn declaration() -> StaticExtensionDeclaration {
-    StaticExtensionDeclaration::new(
-        ExtensionId::new(EXTENSION_ID).expect("core guard extension id is valid"),
+pub fn declaration() -> ToolProviderDeclaration {
+    ToolProviderDeclaration::new(
+        ToolProviderId::new(PROVIDER_ID).expect("core guard provider id is valid"),
         "Core Guards",
         env!("CARGO_PKG_VERSION"),
     )
@@ -72,10 +69,8 @@ pub fn declaration() -> StaticExtensionDeclaration {
     })
 }
 
-pub fn register(
-    registry: &mut StaticExtensionRegistry,
-) -> Result<(), StaticExtensionRegistryError> {
-    registry.register(declaration())
+pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
+    catalog.register(declaration())
 }
 
 fn validate_json(input: HookInput) -> HookResult {
@@ -287,26 +282,12 @@ mod tests {
     }
 
     #[test]
-    fn extension_registers_with_static_registry() {
-        let mut registry = StaticExtensionRegistry::new();
+    fn provider_registers_with_tool_catalog() {
+        let mut catalog = ToolCatalog::new();
 
-        register(&mut registry).unwrap();
+        register(&mut catalog).unwrap();
 
-        assert!(registry.has_hook(&HookId::new(TASK_SPEC_VALIDATE_HOOK_ID).unwrap()));
-    }
-
-    #[test]
-    fn builtin_task_spec_skill_requirements_are_satisfied() {
-        let skills = agl_skills::builtin_registry().unwrap();
-        let mut registry = StaticExtensionRegistry::new();
-        register(&mut registry).unwrap();
-
-        skills
-            .verify_required_hooks(
-                &agl_extension::SkillId::new("core:task-spec").unwrap(),
-                &registry,
-            )
-            .unwrap();
+        assert!(catalog.has_hook(&HookId::new(TASK_SPEC_VALIDATE_HOOK_ID).unwrap()));
     }
 
     #[test]

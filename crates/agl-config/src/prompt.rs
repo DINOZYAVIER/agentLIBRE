@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use agl_extension::SkillId;
+use agl_tools::SkillId;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
