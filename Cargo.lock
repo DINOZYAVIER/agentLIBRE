@@ -117,6 +117,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-protocol"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-runtime"
 version = "1.0.0-alpha.6"
 dependencies = [
