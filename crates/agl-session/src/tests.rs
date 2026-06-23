@@ -287,7 +287,7 @@ fn exit_command_finishes_session_with_reason() {
 }
 
 #[test]
-fn legacy_session_finished_without_reason_still_replays() {
+fn session_finished_without_reason_is_rejected() {
     let session_id = AgentLibreSessionId::new("session-001").unwrap();
     let line = serde_json::json!({
         "kind": "session_finished",
@@ -295,32 +295,23 @@ fn legacy_session_finished_without_reason_still_replays() {
     })
     .to_string();
 
-    let event: ChatSessionEvent = serde_json::from_str(&line).unwrap();
+    let err = serde_json::from_str::<ChatSessionEvent>(&line).unwrap_err();
 
-    assert!(matches!(
-        event,
-        ChatSessionEvent::SessionFinished {
-            reason: AgentLibreSessionFinishReason::Legacy,
-            ..
-        }
-    ));
+    assert!(err.to_string().contains("missing field `reason`"));
 }
 
 #[test]
-fn legacy_session_metadata_model_config_path_still_deserializes() {
-    let metadata: SessionMetadata = serde_json::from_value(serde_json::json!({
+fn session_metadata_model_config_path_is_rejected() {
+    let err = serde_json::from_value::<SessionMetadata>(serde_json::json!({
         "session_id": "session-001",
         "created_at_unix_ms": 1,
         "updated_at_unix_ms": 2,
         "model_config_path": "/tmp/local.toml",
         "backend": "llama_cpp"
     }))
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(
-        metadata.local_inference_config_path,
-        PathBuf::from("/tmp/local.toml")
-    );
+    assert!(err.to_string().contains("local_inference_config_path"));
 }
 
 #[test]
