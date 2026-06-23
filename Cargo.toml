@@ -2,6 +2,7 @@
 members = [
     "crates/agl-assets",
     "crates/agl-chat",
+    "crates/agl-client",
     "crates/agl-cli",
     "crates/agl-tools",
     "crates/agl-hooks",
@@ -16,6 +17,7 @@ members = [
     "crates/agl-events",
     "crates/agl-actions",
     "crates/agl-runtime",
+    "crates/agl-matrix-bridge",
 ]
 resolver = "3"
 
@@ -30,6 +32,7 @@ agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
 agl-assets = { path = "crates/agl-assets" }
 agl-chat = { path = "crates/agl-chat" }
+agl-client = { path = "crates/agl-client" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-tools = { path = "crates/agl-tools" }
