@@ -1,0 +1,13 @@
+[package]
+name = "agl-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true

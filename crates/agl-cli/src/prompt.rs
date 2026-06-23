@@ -1,12 +1,11 @@
 use agl_config::SystemPrompt;
 
-const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../../assets/prompts/system/default.md");
 const VERSION_PLACEHOLDER: &str = "{{AGL_VERSION}}";
 
 pub(crate) fn resolve_system_prompt(selection: SystemPrompt) -> Option<String> {
     match selection {
         SystemPrompt::BuiltinDefault => Some(
-            DEFAULT_SYSTEM_PROMPT
+            agl_assets::default_system_prompt_text()
                 .trim()
                 .replace(VERSION_PLACEHOLDER, env!("CARGO_PKG_VERSION")),
         ),
