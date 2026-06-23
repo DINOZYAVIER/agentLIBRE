@@ -166,7 +166,7 @@ impl NativeLlamaCppRuntime {
         {
             return Err(runtime_error(message, log));
         }
-        let model_state = match self.ensure_session(&mut log) {
+        let model_state = match self.ensure_session(rendered, &mut log) {
             Ok(model_state) => model_state,
             Err(err) => {
                 return Err(runtime_error(format!("{err:#}"), log));
@@ -233,13 +233,18 @@ impl NativeLlamaCppRuntime {
         })
     }
 
-    fn ensure_session(&mut self, log: &mut String) -> Result<LlamaCppModelState> {
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.matches_config(&self.config))
+    fn ensure_session(
+        &mut self,
+        rendered: &RenderedModelRequest,
+        log: &mut String,
+    ) -> Result<LlamaCppModelState> {
+        if let Some(session) = self.session.as_ref()
+            && session.matches_config(&self.config)
         {
-            return Ok(LlamaCppModelState::Reused);
+            if session.can_append_rendered(rendered) {
+                return Ok(LlamaCppModelState::Reused);
+            }
+            log.push_str("llama_cpp_session_reset_reason = rendered_history_not_appendable\n");
         }
 
         self.session = Some(LlamaCppSession::load(&self.config, log)?);
@@ -269,10 +274,12 @@ impl TestLlamaCppRuntime {
             "llama.cpp max_output_tokens cannot be zero"
         );
 
-        let model_state = if self.loaded {
+        let can_append = rendered.messages.len() >= self.rendered_message_history_len;
+        let model_state = if self.loaded && can_append {
             LlamaCppModelState::Reused
         } else {
             self.loaded = true;
+            self.rendered_message_history_len = 0;
             LlamaCppModelState::Loaded
         };
         let mut content = self
@@ -281,12 +288,6 @@ impl TestLlamaCppRuntime {
             .unwrap_or_else(|| "test response".to_string());
         trim_generated_continuation(&mut content);
 
-        ensure!(
-            rendered.messages.len() >= self.rendered_message_history_len,
-            "llama.cpp session cannot append {} rendered messages after {} were recorded",
-            rendered.messages.len(),
-            self.rendered_message_history_len
-        );
         let appended_messages = &rendered.messages[self.rendered_message_history_len..];
         let mut log = test_runtime_log(
             &self.config,

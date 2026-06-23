@@ -64,6 +64,11 @@ pub enum ChatSessionTransition {
         message_id: AgentLibreMessageId,
         content: String,
     },
+    RecordAssistantToolCall {
+        message_id: AgentLibreMessageId,
+        name: String,
+        arguments: serde_json::Value,
+    },
     RecordToolMessage {
         message_id: AgentLibreMessageId,
         name: String,
@@ -93,6 +98,7 @@ impl ChatSessionTransition {
             ChatSessionTransition::RecordAssistantStopMarker { .. } => {
                 "record_assistant_stop_marker"
             }
+            ChatSessionTransition::RecordAssistantToolCall { .. } => "record_assistant_tool_call",
             ChatSessionTransition::RecordToolMessage { .. } => "record_tool_message",
             ChatSessionTransition::ClearContext => "clear_context",
             ChatSessionTransition::FinishSession { .. } => "finish_session",
@@ -194,6 +200,7 @@ fn next_phase(
         (HandlingCommand, ClearContext) => Some(ContextCleared),
         (RecordingUserMessage, RecordUserMessage { .. }) => Some(RunningTurn),
         (RunningTurn, LinkModelAttempt { .. }) => Some(RunningTurn),
+        (RunningTurn, RecordAssistantToolCall { .. }) => Some(RunningTurn),
         (RunningTurn, RecordToolMessage { .. }) => Some(RunningTurn),
         (RunningTurn, RecordAssistantAnswer { .. }) => Some(RecordingAssistantMessage),
         (RunningTurn, RecordAssistantStopMarker { .. }) => Some(RecordingAssistantMessage),

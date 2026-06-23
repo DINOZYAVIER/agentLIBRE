@@ -142,6 +142,10 @@ impl LlamaCppSession {
         &self.load_native_log
     }
 
+    pub(super) fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
+        rendered.messages.len() >= self.rendered_message_history_len
+    }
+
     pub(super) fn set_load_native_log(&mut self, log: String) {
         self.load_native_log = log;
     }
