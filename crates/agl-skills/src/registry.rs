@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use agl_extension::{HookId, SkillId, StaticExtensionRegistry, StaticExtensionRegistryError};
+use agl_extension::{
+    HookId, SkillId, StaticExtensionRegistry, StaticExtensionRegistryError, ToolId,
+};
 
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
@@ -54,6 +56,7 @@ pub struct SkillRegistry {
     skill_index: BTreeMap<SkillId, usize>,
     pack_index: BTreeMap<String, Vec<usize>>,
     hook_index: BTreeMap<HookId, Vec<usize>>,
+    tool_index: BTreeMap<ToolId, Vec<usize>>,
 }
 
 pub fn builtin_registry() -> Result<SkillRegistry, SkillRegistryError> {
@@ -91,6 +94,9 @@ impl SkillRegistry {
         for hook in &skill.harness.required_hooks {
             self.hook_index.entry(hook.clone()).or_default().push(index);
         }
+        for tool in &skill.harness.allowed_tools {
+            self.tool_index.entry(tool.clone()).or_default().push(index);
+        }
         self.skill_index.insert(skill_id, index);
         self.skills.push(skill);
         Ok(())
@@ -115,6 +121,14 @@ impl SkillRegistry {
     pub fn requiring_hook(&self, hook_id: &HookId) -> impl Iterator<Item = &RegisteredSkill> {
         self.hook_index
             .get(hook_id)
+            .into_iter()
+            .flat_map(|indices| indices.iter())
+            .map(|index| &self.skills[*index])
+    }
+
+    pub fn allowing_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+        self.tool_index
+            .get(tool_id)
             .into_iter()
             .flat_map(|indices| indices.iter())
             .map(|index| &self.skills[*index])
@@ -162,6 +176,29 @@ impl SkillRegistry {
             })
         }
     }
+
+    pub fn verify_allowed_tools(
+        &self,
+        id: &SkillId,
+        extensions: &StaticExtensionRegistry,
+    ) -> Result<(), SkillRegistryError> {
+        let skill = self.resolve_for_context_injection(id)?;
+        let missing = skill
+            .harness
+            .allowed_tools
+            .iter()
+            .filter(|tool| extensions.tool(tool).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(SkillRegistryError::MissingAllowedTools {
+                id: id.as_str().to_string(),
+                tools: missing,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -181,6 +218,10 @@ pub enum SkillRegistryError {
     MissingRequiredHooks {
         id: String,
         hooks: Vec<HookId>,
+    },
+    MissingAllowedTools {
+        id: String,
+        tools: Vec<ToolId>,
     },
     ExtensionRegistry(StaticExtensionRegistryError),
 }
@@ -202,6 +243,14 @@ impl std::fmt::Display for SkillRegistryError {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "skill `{id}` is missing required hooks: {hooks}")
+            }
+            Self::MissingAllowedTools { id, tools } => {
+                let tools = tools
+                    .iter()
+                    .map(ToolId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "skill `{id}` is missing allowed tools: {tools}")
             }
             Self::ExtensionRegistry(err) => write!(f, "{err}"),
         }
@@ -238,6 +287,19 @@ mod tests {
 
         let skills = registry
             .requiring_hook(&hook_id)
+            .map(|skill| skill.harness.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(skills, vec!["core:task-spec"]);
+    }
+
+    #[test]
+    fn registry_indexes_allowed_tools() {
+        let registry = SkillRegistry::from_builtin_assets().unwrap();
+        let tool_id = ToolId::new("fs.read").unwrap();
+
+        let skills = registry
+            .allowing_tool(&tool_id)
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
@@ -301,6 +363,28 @@ mod tests {
         registry
             .verify_required_hooks(&SkillId::new("core:task-spec").unwrap(), &extensions)
             .unwrap();
+    }
+
+    #[test]
+    fn missing_allowed_tools_fail_preflight() {
+        let registry = SkillRegistry::from_builtin_assets().unwrap();
+        let extensions = StaticExtensionRegistry::new();
+        let err = registry
+            .verify_allowed_tools(&SkillId::new("core:task-spec").unwrap(), &extensions)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillRegistryError::MissingAllowedTools {
+                id: "core:task-spec".to_string(),
+                tools: vec![
+                    ToolId::new("fs.edit").unwrap(),
+                    ToolId::new("fs.list").unwrap(),
+                    ToolId::new("fs.read").unwrap(),
+                    ToolId::new("fs.search").unwrap(),
+                ],
+            }
+        );
     }
 
     fn core_guard_declaration() -> StaticExtensionDeclaration {

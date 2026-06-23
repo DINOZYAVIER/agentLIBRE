@@ -58,6 +58,7 @@ impl TurnInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisibleTool {
     pub name: String,
+    pub description: String,
     pub required_arguments: Vec<String>,
 }
 
@@ -65,8 +66,14 @@ impl VisibleTool {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            description: String::new(),
             required_arguments: Vec::new(),
         }
+    }
+
+    pub fn describe(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
     }
 
     pub fn require_argument(mut self, name: impl Into<String>) -> Self {

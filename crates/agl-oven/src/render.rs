@@ -33,6 +33,7 @@ pub enum RenderedMessageRole {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedTool {
     pub name: String,
+    pub description: String,
     pub required_arguments: Vec<String>,
 }
 
@@ -58,6 +59,7 @@ pub fn render_model_request(
         .iter()
         .map(|tool| RenderedTool {
             name: tool.name.clone(),
+            description: tool.description.clone(),
             required_arguments: tool.required_arguments.clone(),
         })
         .collect();

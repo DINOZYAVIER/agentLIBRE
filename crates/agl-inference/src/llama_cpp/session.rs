@@ -808,6 +808,7 @@ mod tests {
             ],
             tools: vec![RenderedTool {
                 name: "unused".to_string(),
+                description: String::new(),
                 required_arguments: Vec::new(),
             }],
         };

@@ -155,6 +155,16 @@ impl StaticExtensionDeclaration {
         ensure_non_blank("extension version", &self.version)?;
         reject_duplicate_ids(self.hooks.iter().map(|hook| hook.id.as_str()), "hook")?;
         reject_duplicate_ids(self.tools.iter().map(|tool| tool.id.as_str()), "tool")?;
+        for tool in &self.tools {
+            ensure_non_blank("tool description", &tool.description)?;
+            for argument in &tool.required_arguments {
+                ensure_non_blank("tool required argument", argument)?;
+            }
+            reject_duplicate_ids(
+                tool.required_arguments.iter().map(String::as_str),
+                "tool required argument",
+            )?;
+        }
         reject_duplicate_ids(
             self.bundled_skills.iter().map(|skill| skill.id.as_str()),
             "bundled skill",
@@ -174,6 +184,7 @@ pub struct HookDeclaration {
 pub struct ToolDeclaration {
     pub id: ToolId,
     pub description: String,
+    pub required_arguments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -7,7 +7,7 @@ use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
     TurnTransitionRecord,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 
 use crate::session::InferenceSession;
 
@@ -15,18 +15,22 @@ pub(crate) struct CliLoopHost {
     session: InferenceSession,
     event_sink: RuntimeEventWriter,
     core_guards: agl_core_guards::CoreGuards,
+    core_tools: agl_core_tools::CoreTools,
     generated_requests: usize,
 }
 
 impl CliLoopHost {
-    pub(crate) fn new(session: InferenceSession) -> Self {
+    pub(crate) fn new(session: InferenceSession) -> Result<Self> {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
-        Self {
+        let core_tools = agl_core_tools::CoreTools::new(std::env::current_dir()?)
+            .context("failed to initialize core filesystem tools")?;
+        Ok(Self {
             session,
             event_sink,
             core_guards: agl_core_guards::CoreGuards::new(),
+            core_tools,
             generated_requests: 0,
-        }
+        })
     }
 
     pub(crate) fn session(&self) -> &InferenceSession {
@@ -88,10 +92,11 @@ impl AgentLoopHost for CliLoopHost {
     }
 
     fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
-        bail!(
-            "tool dispatch is not implemented in the CLI alpha; model requested hidden or unavailable tool `{}`",
-            request.name
-        )
+        let observation = self
+            .core_tools
+            .dispatch(&request.name, request.arguments)
+            .with_context(|| format!("core tool `{}` failed", request.name))?;
+        Ok(ToolDispatchResponse { observation })
     }
 
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
