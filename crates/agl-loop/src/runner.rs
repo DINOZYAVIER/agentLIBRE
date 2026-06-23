@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_events::AgentEvent;
-use agl_extension::{HookBatchRequest, HookEvent};
+use agl_tools::{HookBatchRequest, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,

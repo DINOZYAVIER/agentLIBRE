@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agl_extension::SkillId;
+use agl_tools::SkillId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};

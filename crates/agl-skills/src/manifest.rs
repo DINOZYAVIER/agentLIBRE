@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use agl_assets::{BuiltinAsset, BuiltinSkill};
-use agl_extension::{HookId, SkillId, ToolId};
+use agl_tools::{HookId, SkillId, ToolId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]

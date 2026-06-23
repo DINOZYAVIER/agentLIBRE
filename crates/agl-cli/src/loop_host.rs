@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use agl_events::{AgentEvent, RuntimeEventWriter};
-use agl_extension::{
-    HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus,
-    StaticExtension,
-};
 use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
     TurnTransitionRecord,
+};
+use agl_tools::{
+    HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus, ToolId,
+    ToolInput, ToolRuntime,
 };
 use anyhow::{Context, Result};
 
@@ -16,21 +16,24 @@ use crate::session::InferenceSession;
 pub(crate) struct CliLoopHost {
     session: InferenceSession,
     event_sink: RuntimeEventWriter,
-    core_guards: agl_core_guards::CoreGuards,
-    core_tools: agl_core_tools::CoreTools,
+    core_guards: agl_tools::guards::CoreGuards,
+    core_tools: agl_tools::CoreTools,
+    tool_runtime: ToolRuntime,
     generated_requests: usize,
 }
 
 impl CliLoopHost {
     pub(crate) fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
-        let core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
+        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
+        let tool_runtime = core_tool_runtime(&core_tools)?;
         Ok(Self {
             session,
             event_sink,
-            core_guards: agl_core_guards::CoreGuards::new(),
+            core_guards: agl_tools::guards::CoreGuards::new(),
             core_tools,
+            tool_runtime,
             generated_requests: 0,
         })
     }
@@ -60,8 +63,11 @@ impl CliLoopHost {
     }
 
     pub(crate) fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
-        self.core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
+        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
+        let tool_runtime = core_tool_runtime(&core_tools)?;
+        self.core_tools = core_tools;
+        self.tool_runtime = tool_runtime;
         Ok(())
     }
 }
@@ -104,11 +110,18 @@ impl AgentLoopHost for CliLoopHost {
     }
 
     fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
-        let observation = self
-            .core_tools
-            .dispatch(&request.name, request.arguments)
-            .with_context(|| format!("core tool `{}` failed", request.name))?;
-        Ok(ToolDispatchResponse { observation })
+        let tool_id = ToolId::new(request.name.clone())
+            .with_context(|| format!("tool id is invalid: {}", request.name))?;
+        let output = self
+            .tool_runtime
+            .dispatch(ToolInput {
+                id: tool_id,
+                arguments: request.arguments,
+            })
+            .with_context(|| format!("tool `{}` failed", request.name))?;
+        Ok(ToolDispatchResponse {
+            observation: output.observation,
+        })
     }
 
     fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
@@ -123,7 +136,7 @@ impl AgentLoopHost for CliLoopHost {
     }
 }
 
-fn missing_hook_result(hook_id: agl_extension::HookId) -> HookResult {
+fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
     HookResult {
         hook_id,
         status: HookStatus::Fail,
@@ -133,4 +146,24 @@ fn missing_hook_result(hook_id: agl_extension::HookId) -> HookResult {
             fix: None,
         }],
     }
+}
+
+fn core_tool_runtime(core_tools: &agl_tools::CoreTools) -> Result<ToolRuntime> {
+    let mut runtime = ToolRuntime::new();
+    runtime
+        .register_provider(agl_tools::fs::declaration())
+        .context("failed to register core filesystem tool provider")?;
+    for tool_id in [
+        agl_tools::FS_READ_TOOL_ID,
+        agl_tools::FS_LIST_TOOL_ID,
+        agl_tools::FS_SEARCH_TOOL_ID,
+        agl_tools::FS_EDIT_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, core_tools.clone())
+            .with_context(|| {
+                format!("failed to register core filesystem tool handler {tool_id}")
+            })?;
+    }
+    Ok(runtime)
 }

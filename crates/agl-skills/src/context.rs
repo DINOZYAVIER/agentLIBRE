@@ -1,4 +1,4 @@
-use agl_extension::{HookId, SkillId, StaticExtensionRegistry, ToolId};
+use agl_tools::{HookId, SkillId, ToolCatalog, ToolId};
 use serde::Serialize;
 
 use crate::{SkillRegistry, SkillRegistryError};
@@ -63,13 +63,13 @@ impl From<SkillRegistryError> for SkillContextError {
 
 pub fn build_verified_context_bundle(
     registry: &SkillRegistry,
-    extensions: &StaticExtensionRegistry,
+    tool_catalog: &ToolCatalog,
     selections: &[SkillId],
 ) -> Result<SkillContextBundle, SkillContextError> {
     let mut blocks = Vec::with_capacity(selections.len());
     for skill_id in selections {
-        registry.verify_required_hooks(skill_id, extensions)?;
-        registry.verify_allowed_tools(skill_id, extensions)?;
+        registry.verify_required_hooks(skill_id, tool_catalog)?;
+        registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = registry.resolve_for_context_injection(skill_id)?;
         blocks.push(build_context_block(skill));
     }
@@ -155,20 +155,20 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use agl_extension::StaticExtensionRegistry;
+    use agl_tools::ToolCatalog;
 
     use super::*;
 
     #[test]
     fn verified_context_bundle_records_hashes_without_reference_text_in_evidence() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let mut extensions = StaticExtensionRegistry::new();
-        agl_core_guards::register(&mut extensions).unwrap();
-        agl_core_tools::register(&mut extensions).unwrap();
+        let mut tool_catalog = ToolCatalog::new();
+        agl_tools::guards::register(&mut tool_catalog).unwrap();
+        agl_tools::fs::register(&mut tool_catalog).unwrap();
 
         let bundle = build_verified_context_bundle(
             &registry,
-            &extensions,
+            &tool_catalog,
             &[SkillId::new("core:task-spec").unwrap()],
         )
         .unwrap();

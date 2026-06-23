@@ -1,5 +1,5 @@
 use agl_events::AgentEvent;
-use agl_extension::{HookBatchRequest, HookBatchResult};
+use agl_tools::{HookBatchRequest, HookBatchResult};
 use agl_turn::{
     ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnTransitionRecord,
 };
