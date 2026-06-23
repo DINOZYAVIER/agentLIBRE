@@ -1,0 +1,13 @@
+[package]
+name = "agl-core-guards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-extension.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+agl-skills.workspace = true
