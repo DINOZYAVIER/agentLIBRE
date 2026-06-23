@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::evidence::{InferenceAttemptId, InferenceRunId};
 
 pub trait InferenceBackend {
+    fn backend_name(&self) -> &'static str;
+
     fn generate(&mut self, request: InferenceRequest) -> Result<InferenceResponse>;
 }
 

@@ -100,6 +100,20 @@ fn local_config_without_device() -> LocalInferenceConfig {
 }
 
 #[test]
+fn llama_cpp_backend_reports_backend_name() {
+    let root_path = temp_root("backend-name");
+    let backend = LlamaCppBackend::new(
+        local_config(),
+        InferenceArtifactRoot::new(root_path.as_path()),
+    )
+    .unwrap();
+
+    assert_eq!(backend.backend_name(), "llama_cpp");
+
+    let _ = std::fs::remove_dir_all(root_path);
+}
+
+#[test]
 fn rendered_model_request_round_trips_for_artifacts() {
     let rendered = rendered_request();
 

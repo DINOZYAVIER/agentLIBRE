@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_config::{BackendKind, ModelConfig, load_local_inference_config};
+use agl_config::{ModelConfig, load_local_inference_config};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
@@ -17,7 +17,6 @@ const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 
 pub(crate) struct InferenceSession {
     backend: LlamaCppBackend,
-    backend_kind: BackendKind,
     model_config: ModelConfig,
     system_prompt: Option<String>,
     run_id: InferenceRunId,
@@ -59,7 +58,6 @@ impl InferenceSession {
                 config_path.display()
             )
         })?;
-        let backend_kind = config.backend.kind;
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
@@ -68,7 +66,6 @@ impl InferenceSession {
 
         Ok(Self {
             backend,
-            backend_kind,
             model_config,
             system_prompt,
             run_id,
@@ -112,7 +109,7 @@ impl InferenceSession {
     }
 
     pub(crate) fn backend_name(&self) -> &'static str {
-        self.backend_kind.as_str()
+        self.backend.backend_name()
     }
 
     pub(crate) fn event_stream_path(&self) -> PathBuf {
