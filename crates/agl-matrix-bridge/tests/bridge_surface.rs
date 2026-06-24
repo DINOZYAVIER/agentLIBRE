@@ -233,8 +233,8 @@ allowed_users = ["@user:example"]
 }
 
 #[test]
-fn verify_device_fails_closed_until_interactive_verification_exists() {
-    let temp = TempDir::new("verify-device-placeholder");
+fn verify_device_requires_session_before_network() {
+    let temp = TempDir::new("verify-device-missing-session");
     let store = temp.path.join("matrix-store");
     let config = temp.write(
         "bridge.toml",
@@ -266,7 +266,7 @@ allowed_users = ["@user:example"]
     assert_failure(&output);
     assert_contains(
         &stderr(&output),
-        "Matrix device verification is not implemented in this alpha",
+        "matrix.access_token is required when matrix.session_path is not set",
     );
 }
 
@@ -300,6 +300,85 @@ allowed_users = ["@user:example"]
     assert_contains(
         &stderr(&output),
         "matrix.store_path is required for Matrix device verification",
+    );
+}
+
+#[test]
+fn verify_device_rejects_invalid_target_user_before_network() {
+    let temp = TempDir::new("verify-device-invalid-user");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&[
+        "verify-device",
+        "--config",
+        &config.display().to_string(),
+        "--user-id",
+        "not-a-user",
+        "--device-id",
+        "DEVICE",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "invalid Matrix target user id");
+}
+
+#[test]
+fn verify_device_rejects_zero_timeout_before_network() {
+    let temp = TempDir::new("verify-device-zero-timeout");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&[
+        "verify-device",
+        "--config",
+        &config.display().to_string(),
+        "--user-id",
+        "@user:example",
+        "--device-id",
+        "DEVICE",
+        "--timeout-seconds",
+        "0",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(
+        &stderr(&output),
+        "--timeout-seconds must be greater than zero",
     );
 }
 
