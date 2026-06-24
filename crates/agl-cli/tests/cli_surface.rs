@@ -19,6 +19,8 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "generate");
     assert_contains(&stdout, "chat");
+    assert_contains(&stdout, "serve");
+    assert_contains(&stdout, "status");
     assert!(
         !stdout.contains("Compatibility"),
         "help should not describe a second binary:\n{stdout}"
@@ -56,6 +58,8 @@ fn command_help_exits_successfully_for_public_commands() {
         &["chat", "--help"][..],
         &["run", "--help"][..],
         &["generate", "--help"][..],
+        &["serve", "--help"][..],
+        &["status", "--help"][..],
     ] {
         let output = run_agl(args);
 
@@ -63,6 +67,23 @@ fn command_help_exits_successfully_for_public_commands() {
         assert_empty_stderr(&output);
         assert_contains(&stdout(&output), "Usage: agl");
     }
+}
+
+#[test]
+fn status_without_daemon_reports_not_running_without_model_config() {
+    let home = TempHome::new("status-no-daemon");
+    let home_arg = home.path_string();
+    let output = run_agl(&["--home", &home_arg, "status"]);
+
+    assert_success(&output);
+    assert_empty_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=not_running");
+    assert_contains(
+        &stdout,
+        &format!("socket_path={home_arg}/state/daemon/agl.sock"),
+    );
+    assert_contains(&stdout, "next_step=agl serve");
 }
 
 #[test]
@@ -91,6 +112,8 @@ fn completion_bash_emits_agl_completion_function() {
             "completion should not expose hidden command {hidden_command:?}:\n{stdout}"
         );
     }
+    assert_contains(&stdout, "serve");
+    assert_contains(&stdout, "status");
 }
 
 #[test]
