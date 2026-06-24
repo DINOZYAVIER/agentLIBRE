@@ -7,7 +7,6 @@ pub enum BridgeConfigError {
     MissingAccessPolicy,
     MissingHomeserverUrl,
     MissingUserId,
-    MissingAccessToken,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,9 +26,12 @@ pub struct BridgeConfig {
 pub struct MatrixConfig {
     pub homeserver_url: String,
     pub user_id: String,
-    pub access_token: String,
+    #[serde(default)]
+    pub access_token: Option<String>,
     #[serde(default)]
     pub device_id: Option<String>,
+    #[serde(default)]
+    pub session_path: Option<String>,
     #[serde(default = "default_command_prefix")]
     pub command_prefix: String,
     #[serde(default)]
@@ -88,9 +90,6 @@ impl BridgeConfig {
         if self.matrix.user_id.trim().is_empty() {
             return Err(BridgeConfigError::MissingUserId);
         }
-        if self.matrix.access_token.trim().is_empty() {
-            return Err(BridgeConfigError::MissingAccessToken);
-        }
         if self.matrix.command_prefix.trim().is_empty() {
             return Err(BridgeConfigError::EmptyCommandPrefix);
         }
@@ -110,8 +109,9 @@ mod tests {
         let config = MatrixConfig {
             homeserver_url: "https://matrix.example".to_owned(),
             user_id: "@agent:example".to_owned(),
-            access_token: "token".to_owned(),
+            access_token: Some("token".to_owned()),
             device_id: None,
+            session_path: None,
             command_prefix: default_command_prefix(),
             normal_chat: false,
             encrypted_rooms: EncryptedRoomPolicy::Reject,
@@ -126,8 +126,9 @@ mod tests {
             matrix: MatrixConfig {
                 homeserver_url: "https://matrix.example".to_owned(),
                 user_id: "@agent:example".to_owned(),
-                access_token: "token".to_owned(),
+                access_token: Some("token".to_owned()),
                 device_id: None,
+                session_path: None,
                 command_prefix: default_command_prefix(),
                 normal_chat: false,
                 encrypted_rooms: EncryptedRoomPolicy::Reject,

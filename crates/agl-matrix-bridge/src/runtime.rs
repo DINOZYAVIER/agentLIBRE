@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -28,6 +28,47 @@ pub struct MatrixRuntime {
 
 type MatrixMessageRelation = Relation<RoomMessageEventContentWithoutRelation>;
 
+pub struct MatrixPasswordLogin {
+    pub username: String,
+    pub password: String,
+    pub device_display_name: String,
+}
+
+pub struct MatrixLoginResult {
+    pub user_id: String,
+    pub device_id: String,
+    pub session_path: PathBuf,
+}
+
+pub const ENV_MATRIX_USERNAME: &str = "AGL_MATRIX_USERNAME";
+pub const ENV_MATRIX_PASSWORD: &str = "AGL_MATRIX_PASSWORD";
+pub const ENV_MATRIX_DEVICE_DISPLAY_NAME: &str = "AGL_MATRIX_DEVICE_DISPLAY_NAME";
+
+impl MatrixPasswordLogin {
+    pub fn from_env() -> Result<Self> {
+        let username = required_env(ENV_MATRIX_USERNAME, "password login")?;
+        let password = required_env(ENV_MATRIX_PASSWORD, "password login")?;
+        let device_display_name = std::env::var(ENV_MATRIX_DEVICE_DISPLAY_NAME)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "agl-matrix-bridge".to_string());
+
+        Ok(Self {
+            username,
+            password,
+            device_display_name,
+        })
+    }
+}
+
+fn required_env(name: &str, purpose: &str) -> Result<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("{name} is required for {purpose}"))
+}
+
 impl MatrixRuntime {
     pub async fn from_config(config: BridgeConfig, socket_path: PathBuf) -> Result<Self> {
         config
@@ -52,6 +93,37 @@ impl MatrixRuntime {
             app,
             socket_path,
             bot_user_id,
+        })
+    }
+
+    pub async fn login_with_password(
+        config: BridgeConfig,
+        login: MatrixPasswordLogin,
+    ) -> Result<MatrixLoginResult> {
+        config
+            .validate()
+            .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
+        let session_path = matrix_session_path(&config.matrix)?;
+        let client = Client::builder()
+            .homeserver_url(config.matrix.homeserver_url.as_str())
+            .build()
+            .await
+            .context("failed to build Matrix client")?;
+        let response = client
+            .matrix_auth()
+            .login_username(&login.username, &login.password)
+            .initial_device_display_name(&login.device_display_name)
+            .send()
+            .await
+            .context("Matrix password login failed")?;
+        let session: MatrixSession = (&response).into();
+        validate_session_user(&session, &config.matrix.user_id)?;
+        save_matrix_session(&session_path, &session)?;
+
+        Ok(MatrixLoginResult {
+            user_id: session.meta.user_id.to_string(),
+            device_id: session.meta.device_id.to_string(),
+            session_path,
         })
     }
 
@@ -232,6 +304,27 @@ fn thread_relation(context: &MatrixReplyContext) -> Result<MatrixMessageRelation
 }
 
 fn matrix_session_from_config(config: &MatrixConfig) -> Result<MatrixSession> {
+    if let Some(path) = config
+        .session_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let session = load_matrix_session(path)?;
+        validate_session_user(&session, &config.user_id)?;
+        return Ok(session);
+    }
+
+    matrix_session_from_access_token(config)
+}
+
+fn matrix_session_from_access_token(config: &MatrixConfig) -> Result<MatrixSession> {
+    let access_token = config
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|access_token| !access_token.is_empty())
+        .context("matrix.access_token is required when matrix.session_path is not set")?;
     let device_id = config
         .device_id
         .as_deref()
@@ -246,10 +339,73 @@ fn matrix_session_from_config(config: &MatrixConfig) -> Result<MatrixSession> {
             device_id: device_id.into(),
         },
         tokens: SessionTokens {
-            access_token: config.access_token.clone(),
+            access_token: access_token.to_string(),
             refresh_token: None,
         },
     })
+}
+
+fn matrix_session_path(config: &MatrixConfig) -> Result<PathBuf> {
+    config
+        .session_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .context("matrix.session_path is required for password login")
+}
+
+fn load_matrix_session(path: impl AsRef<Path>) -> Result<MatrixSession> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read Matrix session {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse Matrix session {}", path.display()))
+}
+
+fn save_matrix_session(path: impl AsRef<Path>, session: &MatrixSession) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create Matrix session dir {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(session).context("failed to serialize Matrix session")?;
+    write_private_file(path, &bytes)
+        .with_context(|| format!("failed to write Matrix session {}", path.display()))
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn validate_session_user(session: &MatrixSession, expected_user_id: &str) -> Result<()> {
+    if session.meta.user_id.as_str() != expected_user_id {
+        anyhow::bail!(
+            "Matrix session user {} does not match config user {}",
+            session.meta.user_id,
+            expected_user_id
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -260,8 +416,9 @@ mod tests {
         MatrixConfig {
             homeserver_url: "https://matrix.example".to_string(),
             user_id: "@agl:example".to_string(),
-            access_token: "secret-token".to_string(),
+            access_token: Some("secret-token".to_string()),
             device_id: device_id.map(ToOwned::to_owned),
+            session_path: None,
             command_prefix: "!agl".to_string(),
             normal_chat: false,
             encrypted_rooms: crate::EncryptedRoomPolicy::Reject,
@@ -292,6 +449,28 @@ mod tests {
         assert_eq!(session.meta.user_id.as_str(), "@agl:example");
         assert_eq!(session.meta.device_id.as_str(), "DEVICE");
         assert_eq!(session.tokens.access_token, "secret-token");
+    }
+
+    #[test]
+    fn session_file_is_preferred_over_inline_token() {
+        let path = std::env::temp_dir().join(format!(
+            "agl-matrix-session-{}-preferred.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut saved = matrix_config(Some("DEVICE"));
+        saved.access_token = Some("session-token".to_string());
+        let session = matrix_session_from_config(&saved).unwrap();
+        save_matrix_session(&path, &session).unwrap();
+        let mut config = matrix_config(None);
+        config.access_token = None;
+        config.session_path = Some(path.display().to_string());
+
+        let loaded = matrix_session_from_config(&config).unwrap();
+
+        assert_eq!(loaded.meta.device_id.as_str(), "DEVICE");
+        assert_eq!(loaded.tokens.access_token, "session-token");
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

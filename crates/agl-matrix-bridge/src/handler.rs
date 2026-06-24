@@ -267,8 +267,9 @@ mod tests {
         MatrixConfig {
             homeserver_url: "https://matrix.example".to_string(),
             user_id: "@agl:example".to_string(),
-            access_token: "token".to_string(),
+            access_token: Some("token".to_string()),
             device_id: None,
+            session_path: None,
             command_prefix: "!agl".to_string(),
             normal_chat,
             encrypted_rooms: EncryptedRoomPolicy::Reject,
