@@ -12,7 +12,7 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::{OwnedEventId, OwnedUserId};
 use matrix_sdk::store::RoomLoadSettings;
-use matrix_sdk::{Client, Room, SessionMeta, SessionTokens};
+use matrix_sdk::{Client, ClientBuilder, Room, SessionMeta, SessionTokens};
 
 use crate::{
     BridgeApp, BridgeConfig, BridgeInboundEvent, BridgeOutboundAction, EncryptionState,
@@ -38,6 +38,7 @@ pub struct MatrixLoginResult {
     pub user_id: String,
     pub device_id: String,
     pub session_path: PathBuf,
+    pub store_path: Option<PathBuf>,
 }
 
 pub const ENV_MATRIX_USERNAME: &str = "AGL_MATRIX_USERNAME";
@@ -76,11 +77,7 @@ impl MatrixRuntime {
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
         let session = matrix_session_from_config(&config.matrix)?;
         let bot_user_id = config.matrix.user_id.clone();
-        let client = Client::builder()
-            .homeserver_url(config.matrix.homeserver_url.as_str())
-            .build()
-            .await
-            .context("failed to build Matrix client")?;
+        let client = build_matrix_client(&config.matrix).await?;
         client
             .matrix_auth()
             .restore_session(session, RoomLoadSettings::default())
@@ -104,11 +101,8 @@ impl MatrixRuntime {
             .validate()
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
         let session_path = matrix_session_path(&config.matrix)?;
-        let client = Client::builder()
-            .homeserver_url(config.matrix.homeserver_url.as_str())
-            .build()
-            .await
-            .context("failed to build Matrix client")?;
+        let store_path = matrix_store_path(&config.matrix);
+        let client = build_matrix_client(&config.matrix).await?;
         let response = client
             .matrix_auth()
             .login_username(&login.username, &login.password)
@@ -124,6 +118,7 @@ impl MatrixRuntime {
             user_id: session.meta.user_id.to_string(),
             device_id: session.meta.device_id.to_string(),
             session_path,
+            store_path,
         })
     }
 
@@ -318,6 +313,31 @@ fn matrix_session_from_config(config: &MatrixConfig) -> Result<MatrixSession> {
     matrix_session_from_access_token(config)
 }
 
+async fn build_matrix_client(config: &MatrixConfig) -> Result<Client> {
+    matrix_client_builder(config)
+        .build()
+        .await
+        .context("failed to build Matrix client")
+}
+
+fn matrix_client_builder(config: &MatrixConfig) -> ClientBuilder {
+    let builder = Client::builder().homeserver_url(config.homeserver_url.as_str());
+    if let Some(path) = matrix_store_path(config) {
+        builder.sqlite_store(path, None)
+    } else {
+        builder
+    }
+}
+
+fn matrix_store_path(config: &MatrixConfig) -> Option<PathBuf> {
+    config
+        .store_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 fn matrix_session_from_access_token(config: &MatrixConfig) -> Result<MatrixSession> {
     let access_token = config
         .access_token
@@ -419,6 +439,7 @@ mod tests {
             access_token: Some("secret-token".to_string()),
             device_id: device_id.map(ToOwned::to_owned),
             session_path: None,
+            store_path: None,
             command_prefix: "!agl".to_string(),
             normal_chat: false,
             encrypted_rooms: crate::EncryptedRoomPolicy::Reject,
@@ -471,6 +492,20 @@ mod tests {
         assert_eq!(loaded.meta.device_id.as_str(), "DEVICE");
         assert_eq!(loaded.tokens.access_token, "session-token");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn matrix_store_path_ignores_blank_values() {
+        let mut config = matrix_config(Some("DEVICE"));
+        config.store_path = Some("  ".to_string());
+
+        assert_eq!(matrix_store_path(&config), None);
+
+        config.store_path = Some("/tmp/agl-matrix-store".to_string());
+        assert_eq!(
+            matrix_store_path(&config),
+            Some(PathBuf::from("/tmp/agl-matrix-store"))
+        );
     }
 
     #[test]
