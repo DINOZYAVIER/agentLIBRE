@@ -208,6 +208,39 @@ allowed_users = ["@user:example"]
     assert_contains(&stderr(&output), "AGL_MATRIX_USERNAME is required");
 }
 
+#[test]
+fn verify_device_fails_closed_until_interactive_verification_exists() {
+    let temp = TempDir::new("verify-device-placeholder");
+    let config = temp.write(
+        "bridge.toml",
+        r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+    );
+
+    let output = run_bridge(&[
+        "verify-device",
+        "--config",
+        &config.display().to_string(),
+        "--user-id",
+        "@user:example",
+        "--device-id",
+        "DEVICE",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(
+        &stderr(&output),
+        "Matrix device verification is not implemented in this alpha",
+    );
+}
+
 fn run_bridge(args: &[&str]) -> Output {
     Command::new(BRIDGE_BIN)
         .args(args)
