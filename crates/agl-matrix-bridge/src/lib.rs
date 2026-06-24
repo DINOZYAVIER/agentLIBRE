@@ -31,7 +31,11 @@ pub use handler::{
     EncryptionState,
 };
 #[cfg(unix)]
-pub use runtime::{MatrixLoginResult, MatrixPasswordLogin, MatrixRuntime};
+pub use runtime::{
+    MatrixDeviceVerificationRequest, MatrixDeviceVerificationResult,
+    MatrixDeviceVerificationStatus, MatrixLoginResult, MatrixPasswordLogin, MatrixRuntime,
+    MatrixSasEmoji, MatrixSasPresentation,
+};
 pub use state::BridgeState;
 pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};
 

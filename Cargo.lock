@@ -176,6 +176,7 @@ dependencies = [
  "agl-protocol",
  "anyhow",
  "clap",
+ "futures-util",
  "matrix-sdk",
  "serde",
  "serde_json",
