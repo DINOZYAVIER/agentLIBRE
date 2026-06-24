@@ -144,6 +144,10 @@ fn check_config(path: PathBuf) -> Result<()> {
     println!("command_prefix={}", config.matrix.command_prefix());
     println!("normal_chat={}", config.matrix.normal_chat);
     println!("encrypted_rooms={:?}", config.matrix.encrypted_rooms);
+    println!(
+        "store_path_configured={}",
+        has_config_value(&config.matrix.store_path)
+    );
     println!("allowed_rooms={}", config.access.allowed_rooms.len());
     println!("allowed_users={}", config.access.allowed_users.len());
     println!("bindings={}", state.bindings.len());
@@ -203,6 +207,9 @@ async fn login_password(path: PathBuf) -> Result<()> {
     println!("user_id={}", result.user_id);
     println!("device_id={}", result.device_id);
     println!("session_path={}", result.session_path.display());
+    if let Some(store_path) = result.store_path {
+        println!("store_path={}", store_path.display());
+    }
     Ok(())
 }
 
@@ -224,9 +231,20 @@ fn verify_device(path: PathBuf, user_id: String, device_id: String) -> Result<()
     if device_id.trim().is_empty() {
         anyhow::bail!("--device-id is required for Matrix device verification");
     }
+    if !has_config_value(&config.matrix.store_path) {
+        anyhow::bail!("matrix.store_path is required for Matrix device verification");
+    }
     anyhow::bail!(
         "Matrix device verification is not implemented in this alpha; it requires a persistent crypto store and interactive SAS verification loop"
     )
+}
+
+fn has_config_value(value: &Option<String>) -> bool {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 #[cfg(unix)]
