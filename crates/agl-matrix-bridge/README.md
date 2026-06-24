@@ -17,6 +17,14 @@ cargo build --release -p agl-cli -p agl-matrix-bridge
 ./target/release/agl serve --config /path/to/local-inference.toml
 ```
 
+For a user-systemd daemon:
+
+```sh
+scripts/agentlibre-daemon-systemd-service.sh --dry-run
+scripts/agentlibre-daemon-systemd-service.sh --enable --restart
+./target/release/agl status
+```
+
 Copy `examples/config.toml` to
 `~/.config/agentLIBRE/matrix-bridge/config.toml` and edit:
 
