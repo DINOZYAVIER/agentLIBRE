@@ -5,6 +5,7 @@
 //! contract used by Matrix event handling code.
 
 pub mod access;
+pub mod app;
 pub mod client;
 pub mod command;
 pub mod config;
@@ -16,8 +17,13 @@ use anyhow::Result;
 
 pub use access::{AccessDecision, AccessPolicy};
 pub use agl_client::{AgentLibreClient, ClientError};
+pub use app::BridgeApp;
+#[cfg(unix)]
+pub use client::LazyDaemonClient;
 pub use command::{BridgeCommand, CommandParseError};
-pub use config::{AglConfig, BindingConfig, BridgeConfig, BridgeConfigError, MatrixConfig};
+pub use config::{
+    AglConfig, BindingConfig, BridgeConfig, BridgeConfigError, EncryptedRoomPolicy, MatrixConfig,
+};
 pub use handler::{
     BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
     EncryptionState,
