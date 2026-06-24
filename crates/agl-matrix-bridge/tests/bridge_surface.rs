@@ -123,6 +123,32 @@ allowed_users = ["@allowed:example"]
     assert_contains(&stdout(&output), "action=ignore reason=user is not allowed");
 }
 
+#[test]
+fn sync_requires_device_id_before_daemon_connect() {
+    let temp = TempDir::new("sync-missing-device");
+    let config = temp.write(
+        "bridge.toml",
+        r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+
+[agl]
+socket_path = "/tmp/agl-matrix-bridge-test-missing.sock"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+    );
+
+    let output = run_bridge(&["sync", "--config", &config.display().to_string()]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "matrix.device_id is required");
+}
+
 fn run_bridge(args: &[&str]) -> Output {
     Command::new(BRIDGE_BIN)
         .args(args)

@@ -438,4 +438,17 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn cli_manifest_does_not_depend_on_matrix_sdk() {
+        let manifest = include_str!("../Cargo.toml");
+
+        assert!(
+            !manifest.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("matrix-sdk.") || line.starts_with("matrix-sdk =")
+            }),
+            "agl-cli must not depend on matrix-sdk; Matrix SDK stays in agl-matrix-bridge"
+        );
+    }
 }
