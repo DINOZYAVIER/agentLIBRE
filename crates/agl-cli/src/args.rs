@@ -20,6 +20,8 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Serve(ServeOptions),
+    Status(StatusOptions),
     Infer(RunOptions),
     Chat(RunOptions),
 }
@@ -43,6 +45,23 @@ pub(crate) struct RunOptions {
     pub(crate) tool_mode: ToolAccessMode,
     pub(crate) skills: Vec<String>,
     pub(crate) prompt: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ServeOptions {
+    pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) artifact_root: Option<PathBuf>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) max_output_tokens: u32,
+    pub(crate) tool_mode: ToolAccessMode,
+    pub(crate) skills: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StatusOptions {
+    pub(crate) socket_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -121,6 +140,10 @@ enum Commands {
     Generate(RunArgs),
     /// Start an interactive chat session.
     Chat(ChatArgs),
+    /// Run the local agent runtime daemon in the foreground.
+    Serve(ServeArgs),
+    /// Report local agent runtime daemon status.
+    Status(StatusArgs),
     /// Planned public setup command.
     #[command(hide = true)]
     Setup(ReservedCommandArgs),
@@ -208,6 +231,23 @@ struct ChatArgs {
 }
 
 #[derive(Debug, Args)]
+struct ServeArgs {
+    #[command(flatten)]
+    common: CommonRunArgs,
+
+    /// Unix socket path for the daemon.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct StatusArgs {
+    /// Unix socket path for the daemon.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct ReservedCommandArgs {
     #[arg(value_name = "ARGS", num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -251,6 +291,10 @@ impl Cli {
                 CliCommand::Infer(run_options_from_args(args)?)
             }
             Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
+            Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
+            Some(Commands::Status(args)) => CliCommand::Status(StatusOptions {
+                socket_path: args.socket,
+            }),
             Some(Commands::Setup(args)) => unavailable_command("setup", args.args)?,
             Some(Commands::Doctor(args)) => unavailable_command("doctor", args.args)?,
             Some(Commands::Model(args)) => unavailable_command("model", args.args)?,
@@ -320,6 +364,19 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
         prompt: None,
+    })
+}
+
+fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
+    Ok(ServeOptions {
+        socket_path: args.socket,
+        config: args.common.config,
+        artifact_root: args.common.artifact_root,
+        run_id: args.common.run_id,
+        workspace_root: args.common.workspace_root,
+        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
+        tool_mode: args.common.tool_mode,
+        skills: validate_skill_ids(args.common.skills)?,
     })
 }
 
@@ -432,6 +489,10 @@ enum PublicCompletionCommands {
     Generate(RunArgs),
     /// Start an interactive chat session.
     Chat(ChatArgs),
+    /// Run the local agent runtime daemon in the foreground.
+    Serve(ServeArgs),
+    /// Report local agent runtime daemon status.
+    Status(StatusArgs),
 }
 
 #[cfg(test)]
@@ -539,6 +600,54 @@ mod tests {
             CliCommand::Infer(RunOptions {
                 prompt: Some("hello".to_string()),
                 ..RunOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_serve_command_with_daemon_options() {
+        let command = parse_command([
+            "agl",
+            "serve",
+            "--socket",
+            "/tmp/agl.sock",
+            "--config",
+            "local.toml",
+            "--artifact-root",
+            "artifacts",
+            "--workspace-root",
+            "/tmp/workspace",
+            "--max-output-tokens",
+            "33",
+            "--tool-mode",
+            "write",
+            "--skill",
+            "core:tool-smoke",
+        ]);
+
+        assert_eq!(
+            command,
+            CliCommand::Serve(ServeOptions {
+                socket_path: Some(PathBuf::from("/tmp/agl.sock")),
+                config: Some(PathBuf::from("local.toml")),
+                artifact_root: Some(PathBuf::from("artifacts")),
+                run_id: None,
+                workspace_root: Some(PathBuf::from("/tmp/workspace")),
+                max_output_tokens: 33,
+                tool_mode: ToolAccessMode::Write,
+                skills: vec!["core:tool-smoke".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_status_command_with_socket_override() {
+        let command = parse_command(["agl", "status", "--socket", "/tmp/agl.sock"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Status(StatusOptions {
+                socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             })
         );
     }

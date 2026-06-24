@@ -42,7 +42,10 @@ name = "agl-cli"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-chat",
+ "agl-client",
+ "agl-daemon",
  "agl-loop",
+ "agl-protocol",
  "agl-runtime",
  "agl-tools",
  "anyhow",
@@ -67,6 +70,19 @@ dependencies = [
  "anyhow",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "agl-daemon"
+version = "1.0.0-alpha.6"
+dependencies = [
+ "agl-chat",
+ "agl-protocol",
+ "agl-runtime",
+ "agl-session",
+ "anyhow",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -1,25 +1,15 @@
 [package]
-name = "agl-cli"
+name = "agl-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-build = "build.rs"
-autobins = false
-
-[[bin]]
-name = "agl"
-path = "src/main.rs"
 
 [dependencies]
 agl-chat.workspace = true
-agl-client.workspace = true
-agl-daemon.workspace = true
 agl-protocol.workspace = true
-agl-tools.workspace = true
-agl-loop.workspace = true
 agl-runtime.workspace = true
+agl-session.workspace = true
 anyhow.workspace = true
-clap.workspace = true
-clap_complete.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
