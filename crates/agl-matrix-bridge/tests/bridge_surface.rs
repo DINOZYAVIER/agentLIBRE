@@ -33,6 +33,7 @@ path = "/tmp/agl-matrix-bindings.json"
     assert_success(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "config=ok");
+    assert_contains(&stdout, "store_path_configured=false");
     assert_contains(&stdout, "allowed_rooms=1");
     assert_contains(&stdout, "allowed_users=1");
     assert!(
@@ -81,6 +82,29 @@ allowed_rooms = ["!room:example"]
 
     assert_failure(&output);
     assert_contains(&stderr(&output), "unknown field");
+}
+
+#[test]
+fn check_config_requires_store_for_encrypted_room_allow_policy() {
+    let temp = TempDir::new("encrypted-without-store");
+    let config = temp.write(
+        "bridge.toml",
+        r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+encrypted_rooms = "allow-decrypted"
+
+[access]
+allowed_rooms = ["!room:example"]
+"#,
+    );
+
+    let output = run_bridge(&["check-config", "--config", &config.display().to_string()]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "MissingStorePathForEncryptedRooms");
 }
 
 #[test]
@@ -211,6 +235,44 @@ allowed_users = ["@user:example"]
 #[test]
 fn verify_device_fails_closed_until_interactive_verification_exists() {
     let temp = TempDir::new("verify-device-placeholder");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&[
+        "verify-device",
+        "--config",
+        &config.display().to_string(),
+        "--user-id",
+        "@user:example",
+        "--device-id",
+        "DEVICE",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(
+        &stderr(&output),
+        "Matrix device verification is not implemented in this alpha",
+    );
+}
+
+#[test]
+fn verify_device_requires_store_path_before_interactive_work() {
+    let temp = TempDir::new("verify-device-missing-store");
     let config = temp.write(
         "bridge.toml",
         r#"
@@ -237,7 +299,7 @@ allowed_users = ["@user:example"]
     assert_failure(&output);
     assert_contains(
         &stderr(&output),
-        "Matrix device verification is not implemented in this alpha",
+        "matrix.store_path is required for Matrix device verification",
     );
 }
 

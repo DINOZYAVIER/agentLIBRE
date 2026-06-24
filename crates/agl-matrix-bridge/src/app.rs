@@ -122,6 +122,7 @@ mod tests {
                 access_token: Some("token".to_string()),
                 device_id: None,
                 session_path: None,
+                store_path: None,
                 command_prefix: "!agl".to_string(),
                 normal_chat: false,
                 encrypted_rooms: EncryptedRoomPolicy::Reject,

@@ -6,6 +6,7 @@ pub enum BridgeConfigError {
     EmptyCommandPrefix,
     MissingAccessPolicy,
     MissingHomeserverUrl,
+    MissingStorePathForEncryptedRooms,
     MissingUserId,
 }
 
@@ -32,6 +33,8 @@ pub struct MatrixConfig {
     pub device_id: Option<String>,
     #[serde(default)]
     pub session_path: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
     #[serde(default = "default_command_prefix")]
     pub command_prefix: String,
     #[serde(default)]
@@ -93,6 +96,17 @@ impl BridgeConfig {
         if self.matrix.command_prefix.trim().is_empty() {
             return Err(BridgeConfigError::EmptyCommandPrefix);
         }
+        if self.matrix.encrypted_rooms == EncryptedRoomPolicy::AllowDecrypted
+            && self
+                .matrix
+                .store_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .is_none()
+        {
+            return Err(BridgeConfigError::MissingStorePathForEncryptedRooms);
+        }
         if self.access.allowed_rooms.is_empty() && self.access.allowed_users.is_empty() {
             return Err(BridgeConfigError::MissingAccessPolicy);
         }
@@ -112,6 +126,7 @@ mod tests {
             access_token: Some("token".to_owned()),
             device_id: None,
             session_path: None,
+            store_path: None,
             command_prefix: default_command_prefix(),
             normal_chat: false,
             encrypted_rooms: EncryptedRoomPolicy::Reject,
@@ -129,17 +144,46 @@ mod tests {
                 access_token: Some("token".to_owned()),
                 device_id: None,
                 session_path: None,
+                store_path: None,
                 command_prefix: default_command_prefix(),
                 normal_chat: false,
                 encrypted_rooms: EncryptedRoomPolicy::Reject,
             },
             agl: AglConfig::default(),
-            access: crate::access::AccessPolicy::default(),
+            access: crate::access::AccessPolicy {
+                allowed_rooms: vec!["!room:example".to_owned()],
+                allowed_users: vec![],
+            },
             bindings: BindingConfig::default(),
         };
 
         assert!(!config.matrix.normal_chat);
         assert_eq!(config.matrix.encrypted_rooms, EncryptedRoomPolicy::Reject);
         assert_eq!(config.matrix.command_prefix(), "!agl");
+    }
+
+    #[test]
+    fn encrypted_room_allow_policy_requires_store_path() {
+        let config = BridgeConfig {
+            matrix: MatrixConfig {
+                homeserver_url: "https://matrix.example".to_owned(),
+                user_id: "@agent:example".to_owned(),
+                access_token: Some("token".to_owned()),
+                device_id: None,
+                session_path: None,
+                store_path: None,
+                command_prefix: default_command_prefix(),
+                normal_chat: false,
+                encrypted_rooms: EncryptedRoomPolicy::AllowDecrypted,
+            },
+            agl: AglConfig::default(),
+            access: crate::access::AccessPolicy::default(),
+            bindings: BindingConfig::default(),
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err(BridgeConfigError::MissingStorePathForEncryptedRooms)
+        );
     }
 }
