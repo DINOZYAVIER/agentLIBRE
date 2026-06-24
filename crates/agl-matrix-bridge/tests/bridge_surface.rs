@@ -43,6 +43,19 @@ path = "/tmp/agl-matrix-bindings.json"
 }
 
 #[test]
+fn example_config_matches_current_schema() {
+    let config = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/config.toml");
+
+    let output = run_bridge(&["check-config", "--config", &config.display().to_string()]);
+
+    assert_success(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "config=ok");
+    assert_contains(&stdout, "command_prefix=!agl");
+    assert_contains(&stdout, "encrypted_rooms=AllowDecrypted");
+}
+
+#[test]
 fn check_config_fails_closed_without_access_policy() {
     let temp = TempDir::new("empty-access");
     let config = temp.write(

@@ -1,0 +1,18 @@
+[matrix]
+homeserver_url = "https://matrix.example.org"
+user_id = "@agl-bot:example.org"
+session_path = "/home/alice/.local/share/agentLIBRE/matrix-bridge/store/session.json"
+store_path = "/home/alice/.local/share/agentLIBRE/matrix-bridge/store"
+command_prefix = "!agl"
+normal_chat = false
+encrypted_rooms = "allow-decrypted"
+
+[agl]
+socket_path = "/home/alice/.local/state/agentLIBRE/daemon/agl.sock"
+
+[access]
+allowed_users = ["@alice:example.org"]
+allowed_rooms = ["!roomid:example.org"]
+
+[bindings]
+path = "/home/alice/.local/share/agentLIBRE/matrix-bridge/state.json"
