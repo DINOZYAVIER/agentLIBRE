@@ -10,6 +10,7 @@ use agl_matrix_bridge::{
 use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -105,10 +106,26 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
     if let Err(err) = run(Cli::parse()).await {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
+}
+
+fn init_tracing() {
+    let filter = if std::env::var_os("AGL_MATRIX_LOG").is_some() {
+        EnvFilter::from_env("AGL_MATRIX_LOG")
+    } else if std::env::var_os("RUST_LOG").is_some() {
+        EnvFilter::from_default_env()
+    } else {
+        EnvFilter::new("agl_matrix_bridge=info,matrix_sdk=warn,warn")
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 async fn run(cli: Cli) -> Result<()> {
