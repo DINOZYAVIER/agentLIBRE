@@ -138,7 +138,7 @@ Description=agentLIBRE Matrix bridge
 
 [Service]
 Type=simple
-WorkingDirectory=$(systemd_quote "$cwd")
+WorkingDirectory=$cwd
 Environment=AGL_MATRIX_LOG=$log_filter
 ExecStart=$(systemd_quote "$binary") sync --config $(systemd_quote "$config")
 Restart=always

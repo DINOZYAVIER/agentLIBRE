@@ -46,12 +46,15 @@ agl-protocol = { path = "crates/agl-protocol" }
 agl-runtime = { path = "crates/agl-runtime" }
 agl-session = { path = "crates/agl-session" }
 agl-skills = { path = "crates/agl-skills" }
+aes-gcm = "0.10"
 anyhow = "1.0"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 directories = "6"
 futures-util = "0.3"
 matrix-sdk = { version = "=0.14.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption", "rustls-tls"] }
+pbkdf2 = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
