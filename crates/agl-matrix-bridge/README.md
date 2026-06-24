@@ -48,6 +48,16 @@ export AGL_MATRIX_PASSWORD='...'
   --config ~/.config/agentLIBRE/matrix-bridge/config.toml
 ```
 
+To migrate an encrypted session from the legacy bridge without logging in again:
+
+```sh
+./target/release/agl-matrix-bridge migrate-legacy-session \
+  --input ~/.local/share/agentLIBRE/matrix-bridge/store/session.json \
+  --passphrase-file ~/.local/share/agentLIBRE/matrix-bridge/store-passphrase \
+  --output ~/.local/share/agentLIBRE/matrix-bridge/store/session-agl.json \
+  --user-id '@agl-bot:example.org'
+```
+
 For encrypted rooms, verify the bridge device from a trusted Matrix device:
 
 ```sh
