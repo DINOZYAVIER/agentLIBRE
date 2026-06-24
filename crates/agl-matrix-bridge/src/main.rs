@@ -54,6 +54,18 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
     },
+    /// Fail closed until interactive Matrix device verification is implemented.
+    VerifyDevice {
+        /// Matrix bridge config TOML path.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+        /// Matrix user id that owns the device.
+        #[arg(long, value_name = "USER_ID")]
+        user_id: String,
+        /// Matrix device id to verify.
+        #[arg(long, value_name = "DEVICE_ID")]
+        device_id: String,
+    },
     /// Run handler/state logic against one synthetic Matrix text event.
     HandleTestEvent {
         /// Matrix bridge config TOML path.
@@ -100,6 +112,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Status { config, socket } => status(config, socket),
         Command::Sync { config, socket } => sync(config, socket).await,
         Command::LoginPassword { config } => login_password(config).await,
+        Command::VerifyDevice {
+            config,
+            user_id,
+            device_id,
+        } => verify_device(config, user_id, device_id),
         Command::HandleTestEvent {
             config,
             room,
@@ -193,6 +210,22 @@ async fn login_password(path: PathBuf) -> Result<()> {
 async fn login_password(_path: PathBuf) -> Result<()> {
     anyhow::bail!(
         "agl-matrix-bridge login-password is only available on Unix platforms in this alpha"
+    )
+}
+
+fn verify_device(path: PathBuf, user_id: String, device_id: String) -> Result<()> {
+    let config = BridgeConfig::load(&path)?;
+    config
+        .validate()
+        .map_err(|err| anyhow::anyhow!("bridge config is invalid: {err:?}"))?;
+    if user_id.trim().is_empty() {
+        anyhow::bail!("--user-id is required for Matrix device verification");
+    }
+    if device_id.trim().is_empty() {
+        anyhow::bail!("--device-id is required for Matrix device verification");
+    }
+    anyhow::bail!(
+        "Matrix device verification is not implemented in this alpha; it requires a persistent crypto store and interactive SAS verification loop"
     )
 }
 
