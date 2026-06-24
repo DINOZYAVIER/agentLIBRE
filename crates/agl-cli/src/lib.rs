@@ -7,7 +7,10 @@ use agl_chat::{
     ToolAccessMode as ChatToolAccessMode, assistant_text_for_terminal, build_turn_input,
     chat_workspace_root, default_run_id,
 };
+use agl_client::AgentLibreClient;
+use agl_daemon::{DaemonOptions, DaemonServer, default_socket_path};
 use agl_loop::{TurnOutput, run_turn};
+use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
@@ -18,7 +21,9 @@ mod args;
 mod chat;
 mod config;
 
-use args::{CliCommand, RunOptions, parse_cli, print_completion, print_usage};
+use args::{
+    CliCommand, RunOptions, ServeOptions, StatusOptions, parse_cli, print_completion, print_usage,
+};
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
 
@@ -98,7 +103,7 @@ fn runtime_for_command_paths(
     command: &CliCommand,
     paths: AgentLibrePaths,
 ) -> Result<AgentLibreRuntimeConfig> {
-    if matches!(command, CliCommand::Config(_)) {
+    if matches!(command, CliCommand::Config(_) | CliCommand::Status(_)) {
         return Ok(AgentLibreRuntimeConfig {
             paths,
             logging: AgentLibreLoggingConfig::from_env(),
@@ -113,7 +118,9 @@ fn runtime_for_command_paths(
 fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
     match command {
         CliCommand::Infer(_) | CliCommand::Chat(_) => AgentLibreProcessMode::Interactive,
-        CliCommand::Help { .. }
+        CliCommand::Serve(_)
+        | CliCommand::Status(_)
+        | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
         | CliCommand::Completion { .. }
         | CliCommand::Config(_) => AgentLibreProcessMode::Batch,
@@ -129,8 +136,21 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
             Ok(())
         }
         CliCommand::Config(command) => run_config(command, runtime),
+        CliCommand::Serve(options) => run_serve(options, runtime),
+        CliCommand::Status(options) => run_status(options, runtime),
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
+    }
+}
+
+fn inference_options_from_serve_options(options: &ServeOptions) -> InferenceOptions {
+    InferenceOptions {
+        config: options.config.clone(),
+        artifact_root: options.artifact_root.clone(),
+        run_id: options.run_id.clone(),
+        max_output_tokens: options.max_output_tokens,
+        tool_mode: chat_tool_mode(options.tool_mode),
+        skills: options.skills.clone(),
     }
 }
 
@@ -207,6 +227,58 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
     let output = run_turn(&mut loop_host, input)?;
     print_turn_output(&output);
     Ok(())
+}
+
+fn run_serve(options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "serve", "starting command");
+    let mut daemon_options = DaemonOptions::new(
+        &runtime.paths,
+        inference_options_from_serve_options(&options),
+    );
+    if let Some(socket_path) = options.socket_path {
+        daemon_options.socket_path = socket_path;
+    }
+    println!("socket_path={}", daemon_options.socket_path.display());
+    DaemonServer::new(runtime.clone(), daemon_options).run_foreground()
+}
+
+fn run_status(options: StatusOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "status", "starting command");
+    let socket_path = options
+        .socket_path
+        .unwrap_or_else(|| default_socket_path(&runtime.paths));
+    match AgentLibreClient::connect(&socket_path) {
+        Ok(mut client) => match client.hello(HelloRequest {
+            client_name: Some("agl-status".to_string()),
+            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
+        }) {
+            Ok(hello) => {
+                println!("state=running");
+                println!("socket_path={}", socket_path.display());
+                println!("protocol_version={}", hello.protocol_version);
+                println!("product_version={}", hello.product_version);
+                Ok(())
+            }
+            Err(err) => {
+                println!("state=unhealthy");
+                println!("socket_path={}", socket_path.display());
+                println!("error={err:#}");
+                Ok(())
+            }
+        },
+        Err(err) => {
+            println!("state=not_running");
+            println!("socket_path={}", socket_path.display());
+            println!("next_step=agl serve");
+            tracing::debug!(
+                target: "agentlibre::app",
+                socket_path = %socket_path.display(),
+                error = %err,
+                "daemon status connection failed"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {

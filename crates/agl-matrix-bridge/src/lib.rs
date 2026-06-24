@@ -7,6 +7,7 @@
 pub mod access;
 pub mod command;
 pub mod config;
+pub mod handler;
 pub mod thread_binding;
 
 use anyhow::Result;
@@ -14,34 +15,80 @@ use anyhow::Result;
 pub use access::{AccessDecision, AccessPolicy};
 pub use agl_client::{AgentLibreClient, ClientError};
 pub use command::{BridgeCommand, CommandParseError};
-pub use config::{BridgeConfig, MatrixConfig};
+pub use config::{AglConfig, BindingConfig, BridgeConfig, MatrixConfig};
+pub use handler::{
+    BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
+    EncryptionState,
+};
 pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};
 
 /// Minimal daemon boundary expected by Matrix-facing bridge code.
 pub trait AgentClient {
-    fn send_message(&self, session_id: &str, message: &str) -> Result<()>;
+    fn daemon_status(&mut self) -> Result<String>;
+    fn validate_session(&mut self, session_id: &str) -> Result<()>;
+    fn open_session(&mut self) -> Result<String>;
+    fn send_message(
+        &mut self,
+        session_id: &str,
+        message: &str,
+        idempotency_key: &str,
+    ) -> Result<String>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct RecordingClient;
+    struct RecordingClient {
+        messages: Vec<(String, String, String)>,
+    }
 
     impl AgentClient for RecordingClient {
-        fn send_message(&self, session_id: &str, message: &str) -> Result<()> {
-            assert_eq!(session_id, "matrix:!room:example/$thread");
-            assert_eq!(message, "hello");
+        fn daemon_status(&mut self) -> Result<String> {
+            Ok("running".to_string())
+        }
+
+        fn validate_session(&mut self, _session_id: &str) -> Result<()> {
             Ok(())
+        }
+
+        fn open_session(&mut self) -> Result<String> {
+            Ok("session-1".to_string())
+        }
+
+        fn send_message(
+            &mut self,
+            session_id: &str,
+            message: &str,
+            idempotency_key: &str,
+        ) -> Result<String> {
+            self.messages.push((
+                session_id.to_string(),
+                message.to_string(),
+                idempotency_key.to_string(),
+            ));
+            Ok("assistant reply".to_string())
         }
     }
 
     #[test]
     fn client_trait_covers_daemon_boundary() {
-        let client = RecordingClient;
-        client
-            .send_message("matrix:!room:example/$thread", "hello")
+        let mut client = RecordingClient {
+            messages: Vec::new(),
+        };
+        let session_id = client.open_session().unwrap();
+        let reply = client
+            .send_message(&session_id, "hello", "$event")
             .expect("message should be accepted");
+        assert_eq!(reply, "assistant reply");
+        assert_eq!(
+            client.messages,
+            vec![(
+                "session-1".to_string(),
+                "hello".to_string(),
+                "$event".to_string()
+            )]
+        );
     }
 
     #[test]
