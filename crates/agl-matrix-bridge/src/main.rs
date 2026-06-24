@@ -1,9 +1,11 @@
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::{io::Write, time::Duration};
 
 #[cfg(unix)]
 use agl_matrix_bridge::{
     AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient,
-    MatrixPasswordLogin, MatrixRuntime,
+    MatrixDeviceVerificationRequest, MatrixPasswordLogin, MatrixRuntime, MatrixSasPresentation,
 };
 use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
@@ -54,7 +56,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
     },
-    /// Fail closed until interactive Matrix device verification is implemented.
+    /// Run interactive Matrix SAS device verification.
     VerifyDevice {
         /// Matrix bridge config TOML path.
         #[arg(long, value_name = "PATH")]
@@ -65,6 +67,9 @@ enum Command {
         /// Matrix device id to verify.
         #[arg(long, value_name = "DEVICE_ID")]
         device_id: String,
+        /// Seconds to wait for each Matrix verification phase.
+        #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+        timeout_seconds: u64,
     },
     /// Run handler/state logic against one synthetic Matrix text event.
     HandleTestEvent {
@@ -116,7 +121,8 @@ async fn run(cli: Cli) -> Result<()> {
             config,
             user_id,
             device_id,
-        } => verify_device(config, user_id, device_id),
+            timeout_seconds,
+        } => verify_device(config, user_id, device_id, timeout_seconds).await,
         Command::HandleTestEvent {
             config,
             room,
@@ -220,23 +226,74 @@ async fn login_password(_path: PathBuf) -> Result<()> {
     )
 }
 
-fn verify_device(path: PathBuf, user_id: String, device_id: String) -> Result<()> {
+#[cfg(unix)]
+async fn verify_device(
+    path: PathBuf,
+    user_id: String,
+    device_id: String,
+    timeout_seconds: u64,
+) -> Result<()> {
     let config = BridgeConfig::load(&path)?;
-    config
-        .validate()
-        .map_err(|err| anyhow::anyhow!("bridge config is invalid: {err:?}"))?;
     if user_id.trim().is_empty() {
         anyhow::bail!("--user-id is required for Matrix device verification");
     }
     if device_id.trim().is_empty() {
         anyhow::bail!("--device-id is required for Matrix device verification");
     }
-    if !has_config_value(&config.matrix.store_path) {
-        anyhow::bail!("matrix.store_path is required for Matrix device verification");
+    if timeout_seconds == 0 {
+        anyhow::bail!("--timeout-seconds must be greater than zero");
     }
-    anyhow::bail!(
-        "Matrix device verification is not implemented in this alpha; it requires a persistent crypto store and interactive SAS verification loop"
+    let result = MatrixRuntime::verify_device(
+        config,
+        MatrixDeviceVerificationRequest {
+            user_id,
+            device_id,
+            timeout: Duration::from_secs(timeout_seconds),
+        },
+        prompt_sas_confirmation,
     )
+    .await?;
+    println!("verification={}", result.status.as_str());
+    println!("user_id={}", result.user_id);
+    println!("device_id={}", result.device_id);
+    if let Some(flow_id) = result.flow_id {
+        println!("flow_id={flow_id}");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn verify_device(
+    _path: PathBuf,
+    _user_id: String,
+    _device_id: String,
+    _timeout_seconds: u64,
+) -> Result<()> {
+    anyhow::bail!(
+        "agl-matrix-bridge verify-device is only available on Unix platforms in this alpha"
+    )
+}
+
+#[cfg(unix)]
+fn prompt_sas_confirmation(presentation: &MatrixSasPresentation) -> Result<bool> {
+    println!("flow_id={}", presentation.flow_id);
+    println!("sas_user_id={}", presentation.user_id);
+    println!("sas_device_id={}", presentation.device_id);
+    if !presentation.emojis.is_empty() {
+        println!("sas_emojis:");
+        for emoji in &presentation.emojis {
+            println!("  {} {}", emoji.symbol, emoji.description);
+        }
+    }
+    if let Some((first, second, third)) = presentation.decimals {
+        println!("sas_decimals={first}-{second}-{third}");
+    }
+    print!("Type yes if the SAS matches on the other Matrix device: ");
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().eq_ignore_ascii_case("yes"))
 }
 
 fn has_config_value(value: &Option<String>) -> bool {

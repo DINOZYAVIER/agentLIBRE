@@ -1,16 +1,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use futures_util::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::EncryptionInfo;
+use matrix_sdk::encryption::verification::{
+    EmojiShortAuthString, SasState, SasVerification, VerificationRequest, VerificationRequestState,
+};
+use matrix_sdk::ruma::events::key::verification::VerificationMethod;
 use matrix_sdk::ruma::events::relation::Thread;
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::{OwnedEventId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedDeviceId, OwnedEventId, OwnedUserId};
 use matrix_sdk::store::RoomLoadSettings;
 use matrix_sdk::{Client, ClientBuilder, Room, SessionMeta, SessionTokens};
 
@@ -39,6 +45,47 @@ pub struct MatrixLoginResult {
     pub device_id: String,
     pub session_path: PathBuf,
     pub store_path: Option<PathBuf>,
+}
+
+pub struct MatrixDeviceVerificationRequest {
+    pub user_id: String,
+    pub device_id: String,
+    pub timeout: Duration,
+}
+
+pub struct MatrixDeviceVerificationResult {
+    pub user_id: String,
+    pub device_id: String,
+    pub flow_id: Option<String>,
+    pub status: MatrixDeviceVerificationStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatrixDeviceVerificationStatus {
+    AlreadyVerified,
+    Verified,
+}
+
+impl MatrixDeviceVerificationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AlreadyVerified => "already_verified",
+            Self::Verified => "verified",
+        }
+    }
+}
+
+pub struct MatrixSasPresentation {
+    pub flow_id: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub emojis: Vec<MatrixSasEmoji>,
+    pub decimals: Option<(u16, u16, u16)>,
+}
+
+pub struct MatrixSasEmoji {
+    pub symbol: String,
+    pub description: String,
 }
 
 pub const ENV_MATRIX_USERNAME: &str = "AGL_MATRIX_USERNAME";
@@ -130,6 +177,43 @@ impl MatrixRuntime {
             .context("Matrix sync loop exited with error")
     }
 
+    pub async fn verify_device<F>(
+        config: BridgeConfig,
+        request: MatrixDeviceVerificationRequest,
+        mut confirm_sas: F,
+    ) -> Result<MatrixDeviceVerificationResult>
+    where
+        F: FnMut(&MatrixSasPresentation) -> Result<bool>,
+    {
+        config
+            .validate()
+            .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
+        if request.timeout.is_zero() {
+            bail!("Matrix device verification timeout must be greater than zero");
+        }
+        let _store_path = matrix_store_path(&config.matrix)
+            .context("matrix.store_path is required for Matrix device verification")?;
+        let target_user_id = OwnedUserId::try_from(request.user_id.as_str())
+            .with_context(|| format!("invalid Matrix target user id {}", request.user_id))?;
+        let target_device_id = OwnedDeviceId::from(request.device_id.as_str());
+        let session = matrix_session_from_config(&config.matrix)?;
+        let client = build_matrix_client(&config.matrix).await?;
+        client
+            .matrix_auth()
+            .restore_session(session, RoomLoadSettings::default())
+            .await
+            .context("failed to restore Matrix access-token session")?;
+
+        verify_device_with_client(
+            &client,
+            target_user_id,
+            target_device_id,
+            request.timeout,
+            &mut confirm_sas,
+        )
+        .await
+    }
+
     fn register_bridge_handler(&self) {
         let app = Arc::clone(&self.app);
         let socket_path = self.socket_path.clone();
@@ -179,6 +263,243 @@ impl MatrixRuntime {
             },
         );
     }
+}
+
+async fn verify_device_with_client<F>(
+    client: &Client,
+    target_user_id: OwnedUserId,
+    target_device_id: OwnedDeviceId,
+    timeout: Duration,
+    confirm_sas: &mut F,
+) -> Result<MatrixDeviceVerificationResult>
+where
+    F: FnMut(&MatrixSasPresentation) -> Result<bool>,
+{
+    client
+        .encryption()
+        .request_user_identity(&target_user_id)
+        .await
+        .with_context(|| format!("failed to query Matrix identity for {}", target_user_id))?;
+    let devices = client
+        .encryption()
+        .get_user_devices(&target_user_id)
+        .await
+        .with_context(|| format!("failed to read Matrix devices for {}", target_user_id))?;
+    let device = devices.get(&target_device_id).with_context(|| {
+        format!(
+            "Matrix device {} for user {} was not found in the crypto store",
+            target_device_id, target_user_id
+        )
+    })?;
+
+    if device.is_verified() {
+        return Ok(MatrixDeviceVerificationResult {
+            user_id: target_user_id.to_string(),
+            device_id: target_device_id.to_string(),
+            flow_id: None,
+            status: MatrixDeviceVerificationStatus::AlreadyVerified,
+        });
+    }
+
+    let verification = device
+        .request_verification_with_methods(vec![VerificationMethod::SasV1])
+        .await
+        .context("failed to start Matrix device verification request")?;
+    let flow_id = verification.flow_id().to_string();
+
+    let sas = match tokio::time::timeout(timeout, wait_for_sas_verification(client, &verification))
+        .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = verification.cancel().await;
+            bail!(
+                "timed out waiting for Matrix device {} to accept SAS verification",
+                target_device_id
+            );
+        }
+    };
+
+    match tokio::time::timeout(
+        timeout,
+        run_sas_verification(client, &flow_id, &sas, confirm_sas),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = sas.cancel().await;
+            bail!(
+                "timed out waiting for Matrix SAS verification to finish for device {}",
+                target_device_id
+            );
+        }
+    }
+
+    Ok(MatrixDeviceVerificationResult {
+        user_id: target_user_id.to_string(),
+        device_id: target_device_id.to_string(),
+        flow_id: Some(flow_id),
+        status: MatrixDeviceVerificationStatus::Verified,
+    })
+}
+
+async fn wait_for_sas_verification(
+    client: &Client,
+    verification: &VerificationRequest,
+) -> Result<SasVerification> {
+    if let Some(sas) = sas_from_request_state(verification, verification.state()).await? {
+        return Ok(sas);
+    }
+
+    let mut changes = verification.changes();
+    loop {
+        let sync_once = client.sync_once(verification_sync_settings());
+        tokio::pin!(sync_once);
+        tokio::select! {
+            state = changes.next() => {
+                let Some(state) = state else {
+                    bail!("Matrix verification request ended before SAS verification started");
+                };
+                if let Some(sas) = sas_from_request_state(verification, state).await? {
+                    return Ok(sas);
+                }
+            }
+            sync_result = &mut sync_once => {
+                sync_result.context("Matrix sync failed while waiting for SAS verification")?;
+            }
+        }
+    }
+}
+
+async fn sas_from_request_state(
+    verification: &VerificationRequest,
+    state: VerificationRequestState,
+) -> Result<Option<SasVerification>> {
+    match state {
+        VerificationRequestState::Ready { .. } => {
+            if let Some(sas) = verification.start_sas().await? {
+                Ok(Some(sas))
+            } else {
+                Ok(None)
+            }
+        }
+        VerificationRequestState::Transitioned { verification } => {
+            if let Some(sas) = verification.sas() {
+                Ok(Some(sas))
+            } else {
+                bail!("Matrix verification transitioned to an unsupported non-SAS flow")
+            }
+        }
+        VerificationRequestState::Done => {
+            bail!("Matrix verification request finished before SAS verification started")
+        }
+        VerificationRequestState::Cancelled(info) => {
+            bail!(
+                "Matrix verification request was cancelled: {}",
+                info.reason()
+            )
+        }
+        VerificationRequestState::Created { .. } | VerificationRequestState::Requested { .. } => {
+            Ok(None)
+        }
+    }
+}
+
+async fn run_sas_verification<F>(
+    client: &Client,
+    flow_id: &str,
+    sas: &SasVerification,
+    confirm_sas: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&MatrixSasPresentation) -> Result<bool>,
+{
+    let mut confirmed = false;
+    if handle_sas_state(flow_id, sas, sas.state(), &mut confirmed, confirm_sas).await? {
+        return Ok(());
+    }
+
+    let mut changes = sas.changes();
+    loop {
+        let sync_once = client.sync_once(verification_sync_settings());
+        tokio::pin!(sync_once);
+        tokio::select! {
+            state = changes.next() => {
+                let Some(state) = state else {
+                    bail!("Matrix SAS verification ended before a terminal state");
+                };
+                if handle_sas_state(flow_id, sas, state, &mut confirmed, confirm_sas).await? {
+                    return Ok(());
+                }
+            }
+            sync_result = &mut sync_once => {
+                sync_result.context("Matrix sync failed during SAS verification")?;
+            }
+        }
+    }
+}
+
+async fn handle_sas_state<F>(
+    flow_id: &str,
+    sas: &SasVerification,
+    state: SasState,
+    confirmed: &mut bool,
+    confirm_sas: &mut F,
+) -> Result<bool>
+where
+    F: FnMut(&MatrixSasPresentation) -> Result<bool>,
+{
+    match state {
+        SasState::KeysExchanged { emojis, decimals } => {
+            if !*confirmed {
+                let presentation = sas_presentation(flow_id, sas, emojis, decimals);
+                if confirm_sas(&presentation)? {
+                    sas.confirm().await?;
+                    *confirmed = true;
+                } else {
+                    sas.mismatch().await?;
+                    bail!("Matrix SAS verification cancelled because the SAS did not match");
+                }
+            }
+            Ok(false)
+        }
+        SasState::Done { .. } => Ok(true),
+        SasState::Cancelled(info) => {
+            bail!("Matrix SAS verification was cancelled: {}", info.reason())
+        }
+        SasState::Created { .. }
+        | SasState::Started { .. }
+        | SasState::Accepted { .. }
+        | SasState::Confirmed => Ok(false),
+    }
+}
+
+fn sas_presentation(
+    flow_id: &str,
+    sas: &SasVerification,
+    emojis: Option<EmojiShortAuthString>,
+    decimals: (u16, u16, u16),
+) -> MatrixSasPresentation {
+    MatrixSasPresentation {
+        flow_id: flow_id.to_string(),
+        user_id: sas.other_user_id().to_string(),
+        device_id: sas.other_device().device_id().to_string(),
+        emojis: emojis
+            .map(|sas| sas.emojis.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|emoji| MatrixSasEmoji {
+                symbol: emoji.symbol.to_string(),
+                description: emoji.description.to_string(),
+            })
+            .collect(),
+        decimals: Some(decimals),
+    }
+}
+
+fn verification_sync_settings() -> SyncSettings {
+    SyncSettings::default().timeout(Duration::from_secs(1))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
