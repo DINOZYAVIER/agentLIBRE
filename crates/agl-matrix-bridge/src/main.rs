@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use agl_matrix_bridge::{
-    AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient, MatrixRuntime,
+    AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient,
+    MatrixPasswordLogin, MatrixRuntime,
 };
 use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
@@ -46,6 +47,12 @@ enum Command {
         /// Override daemon Unix socket path.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+    },
+    /// Login to Matrix with password credentials from environment and save session.
+    LoginPassword {
+        /// Matrix bridge config TOML path.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
     },
     /// Run handler/state logic against one synthetic Matrix text event.
     HandleTestEvent {
@@ -92,6 +99,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::CheckConfig { config } => check_config(config),
         Command::Status { config, socket } => status(config, socket),
         Command::Sync { config, socket } => sync(config, socket).await,
+        Command::LoginPassword { config } => login_password(config).await,
         Command::HandleTestEvent {
             config,
             room,
@@ -167,6 +175,25 @@ async fn sync(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
 #[cfg(not(unix))]
 async fn sync(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("agl-matrix-bridge sync is only available on Unix platforms in this alpha")
+}
+
+#[cfg(unix)]
+async fn login_password(path: PathBuf) -> Result<()> {
+    let config = BridgeConfig::load(&path)?;
+    let login = MatrixPasswordLogin::from_env()?;
+    let result = MatrixRuntime::login_with_password(config, login).await?;
+    println!("login=ok");
+    println!("user_id={}", result.user_id);
+    println!("device_id={}", result.device_id);
+    println!("session_path={}", result.session_path.display());
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn login_password(_path: PathBuf) -> Result<()> {
+    anyhow::bail!(
+        "agl-matrix-bridge login-password is only available on Unix platforms in this alpha"
+    )
 }
 
 #[cfg(unix)]

@@ -149,9 +149,78 @@ allowed_users = ["@user:example"]
     assert_contains(&stderr(&output), "matrix.device_id is required");
 }
 
+#[test]
+fn sync_requires_session_or_access_token_before_network() {
+    let temp = TempDir::new("sync-missing-session-and-token");
+    let config = temp.write(
+        "bridge.toml",
+        r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+
+[agl]
+socket_path = "/tmp/agl-matrix-bridge-test-missing.sock"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+    );
+
+    let output = run_bridge(&["sync", "--config", &config.display().to_string()]);
+
+    assert_failure(&output);
+    assert_contains(
+        &stderr(&output),
+        "matrix.access_token is required when matrix.session_path is not set",
+    );
+}
+
+#[test]
+fn login_password_requires_env_before_network() {
+    let temp = TempDir::new("login-missing-env");
+    let session = temp.path.join("session.json");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+session_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            session.display()
+        ),
+    );
+
+    let output = run_bridge_without_matrix_env(&[
+        "login-password",
+        "--config",
+        &config.display().to_string(),
+    ]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "AGL_MATRIX_USERNAME is required");
+}
+
 fn run_bridge(args: &[&str]) -> Output {
     Command::new(BRIDGE_BIN)
         .args(args)
+        .output()
+        .expect("failed to run agl-matrix-bridge")
+}
+
+fn run_bridge_without_matrix_env(args: &[&str]) -> Output {
+    Command::new(BRIDGE_BIN)
+        .args(args)
+        .env_remove("AGL_MATRIX_USERNAME")
+        .env_remove("AGL_MATRIX_PASSWORD")
+        .env_remove("AGL_MATRIX_DEVICE_DISPLAY_NAME")
         .output()
         .expect("failed to run agl-matrix-bridge")
 }
