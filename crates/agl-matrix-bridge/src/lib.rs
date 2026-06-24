@@ -10,6 +10,8 @@ pub mod client;
 pub mod command;
 pub mod config;
 pub mod handler;
+#[cfg(unix)]
+pub mod runtime;
 pub mod state;
 pub mod thread_binding;
 
@@ -28,6 +30,8 @@ pub use handler::{
     BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
     EncryptionState,
 };
+#[cfg(unix)]
+pub use runtime::MatrixRuntime;
 pub use state::BridgeState;
 pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};
 
@@ -105,6 +109,7 @@ mod tests {
         let manifest = include_str!("../Cargo.toml");
 
         assert!(manifest.contains("agl-client.workspace = true"));
+        assert!(manifest.contains("matrix-sdk.workspace = true"));
         for forbidden in ["agl-chat", "agl-loop", "agl-inference", "agl-cli"] {
             assert!(
                 !has_dependency(manifest, forbidden),

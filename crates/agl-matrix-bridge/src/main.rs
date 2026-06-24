@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use agl_matrix_bridge::{
-    AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient,
+    AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient, MatrixRuntime,
 };
 use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
@@ -29,6 +29,16 @@ enum Command {
     },
     /// Report daemon status through the bridge client boundary.
     Status {
+        /// Matrix bridge config TOML path.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+
+        /// Override daemon Unix socket path.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+    /// Run foreground Matrix sync loop.
+    Sync {
         /// Matrix bridge config TOML path.
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
@@ -69,17 +79,19 @@ enum Command {
     },
 }
 
-fn main() {
-    if let Err(err) = run(Cli::parse()) {
+#[tokio::main]
+async fn main() {
+    if let Err(err) = run(Cli::parse()).await {
         eprintln!("error: {err:#}");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::CheckConfig { config } => check_config(config),
         Command::Status { config, socket } => status(config, socket),
+        Command::Sync { config, socket } => sync(config, socket).await,
         Command::HandleTestEvent {
             config,
             room,
@@ -131,6 +143,30 @@ fn status(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
 #[cfg(not(unix))]
 fn status(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("agl-matrix-bridge status is only available on Unix platforms in this alpha")
+}
+
+#[cfg(unix)]
+async fn sync(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
+    let mut config = BridgeConfig::load(&path)?;
+    config
+        .validate()
+        .map_err(|err| anyhow::anyhow!("bridge config is invalid: {err:?}"))?;
+    if let Some(socket) = socket {
+        config.agl.socket_path = Some(socket.display().to_string());
+    }
+    let socket_path = config
+        .agl
+        .socket_path
+        .clone()
+        .map(PathBuf::from)
+        .context("daemon socket path is required: set [agl].socket_path or pass --socket")?;
+    let runtime = MatrixRuntime::from_config(config, socket_path).await?;
+    runtime.sync_forever().await
+}
+
+#[cfg(not(unix))]
+async fn sync(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
+    anyhow::bail!("agl-matrix-bridge sync is only available on Unix platforms in this alpha")
 }
 
 #[cfg(unix)]

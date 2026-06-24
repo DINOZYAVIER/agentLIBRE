@@ -28,6 +28,8 @@ pub struct MatrixConfig {
     pub homeserver_url: String,
     pub user_id: String,
     pub access_token: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
     #[serde(default = "default_command_prefix")]
     pub command_prefix: String,
     #[serde(default)]
@@ -109,6 +111,7 @@ mod tests {
             homeserver_url: "https://matrix.example".to_owned(),
             user_id: "@agent:example".to_owned(),
             access_token: "token".to_owned(),
+            device_id: None,
             command_prefix: default_command_prefix(),
             normal_chat: false,
             encrypted_rooms: EncryptedRoomPolicy::Reject,
@@ -124,6 +127,7 @@ mod tests {
                 homeserver_url: "https://matrix.example".to_owned(),
                 user_id: "@agent:example".to_owned(),
                 access_token: "token".to_owned(),
+                device_id: None,
                 command_prefix: default_command_prefix(),
                 normal_chat: false,
                 encrypted_rooms: EncryptedRoomPolicy::Reject,
