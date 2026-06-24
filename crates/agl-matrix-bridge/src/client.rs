@@ -1,11 +1,72 @@
+#[cfg(unix)]
+use std::path::PathBuf;
+
+#[cfg(unix)]
+use agl_client::UnixTransport;
 use agl_client::{AgentLibreClient, DaemonTransport};
 use agl_protocol::{
     HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, SessionOpenRequest, SessionStatus,
     SessionStatusRequest, SessionTurnRequest, TurnTerminalStatus,
 };
+#[cfg(unix)]
+use anyhow::Context;
 use anyhow::{Result, bail};
 
 use crate::AgentClient;
+
+#[cfg(unix)]
+pub struct LazyDaemonClient {
+    socket_path: PathBuf,
+    inner: Option<AgentLibreClient<UnixTransport>>,
+}
+
+#[cfg(unix)]
+impl LazyDaemonClient {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self {
+            socket_path,
+            inner: None,
+        }
+    }
+
+    fn inner(&mut self) -> Result<&mut AgentLibreClient<UnixTransport>> {
+        if self.inner.is_none() {
+            self.inner = Some(
+                AgentLibreClient::connect(&self.socket_path).with_context(|| {
+                    format!(
+                        "failed to connect to daemon socket {}",
+                        self.socket_path.display()
+                    )
+                })?,
+            );
+        }
+        Ok(self.inner.as_mut().expect("client initialized"))
+    }
+}
+
+#[cfg(unix)]
+impl AgentClient for LazyDaemonClient {
+    fn daemon_status(&mut self) -> Result<String> {
+        AgentClient::daemon_status(self.inner()?)
+    }
+
+    fn validate_session(&mut self, session_id: &str) -> Result<()> {
+        AgentClient::validate_session(self.inner()?, session_id)
+    }
+
+    fn open_session(&mut self) -> Result<String> {
+        AgentClient::open_session(self.inner()?)
+    }
+
+    fn send_message(
+        &mut self,
+        session_id: &str,
+        message: &str,
+        idempotency_key: &str,
+    ) -> Result<String> {
+        AgentClient::send_message(self.inner()?, session_id, message, idempotency_key)
+    }
+}
 
 impl<T> AgentClient for AgentLibreClient<T>
 where

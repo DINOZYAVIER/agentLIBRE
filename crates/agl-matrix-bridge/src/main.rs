@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 
-use agl_matrix_bridge::{AgentClient, BridgeConfig, BridgeState};
+#[cfg(unix)]
+use agl_matrix_bridge::{
+    AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient,
+};
+use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
@@ -33,6 +37,36 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
     },
+    /// Run handler/state logic against one synthetic Matrix text event.
+    HandleTestEvent {
+        /// Matrix bridge config TOML path.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+
+        /// Matrix room id.
+        #[arg(long, value_name = "ID")]
+        room: String,
+
+        /// Matrix sender user id.
+        #[arg(long, value_name = "ID")]
+        sender: String,
+
+        /// Matrix event id.
+        #[arg(long, value_name = "ID")]
+        event: String,
+
+        /// Matrix thread root event id.
+        #[arg(long, value_name = "ID")]
+        thread: Option<String>,
+
+        /// Plaintext message body.
+        #[arg(long, value_name = "TEXT")]
+        body: String,
+
+        /// Override daemon Unix socket path.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -46,6 +80,15 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::CheckConfig { config } => check_config(config),
         Command::Status { config, socket } => status(config, socket),
+        Command::HandleTestEvent {
+            config,
+            room,
+            sender,
+            event,
+            thread,
+            body,
+            socket,
+        } => handle_test_event(config, room, sender, event, thread, body, socket),
     }
 }
 
@@ -80,13 +123,7 @@ fn status(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
     let socket_path = socket
         .or_else(|| config.agl.socket_path.map(PathBuf::from))
         .context("daemon socket path is required: set [agl].socket_path or pass --socket")?;
-    let mut client =
-        agl_matrix_bridge::AgentLibreClient::connect(&socket_path).with_context(|| {
-            format!(
-                "failed to connect to daemon socket {}",
-                socket_path.display()
-            )
-        })?;
+    let mut client = LazyDaemonClient::new(socket_path);
     println!("{}", client.daemon_status()?);
     Ok(())
 }
@@ -94,4 +131,91 @@ fn status(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
 #[cfg(not(unix))]
 fn status(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("agl-matrix-bridge status is only available on Unix platforms in this alpha")
+}
+
+#[cfg(unix)]
+fn handle_test_event(
+    path: PathBuf,
+    room: String,
+    sender: String,
+    event: String,
+    thread: Option<String>,
+    body: String,
+    socket: Option<PathBuf>,
+) -> Result<()> {
+    let mut config = BridgeConfig::load(&path)?;
+    config
+        .validate()
+        .map_err(|err| anyhow::anyhow!("bridge config is invalid: {err:?}"))?;
+    if let Some(socket) = socket {
+        config.agl.socket_path = Some(socket.display().to_string());
+    }
+    let socket_path = config
+        .agl
+        .socket_path
+        .clone()
+        .map(PathBuf::from)
+        .context("daemon socket path is required: set [agl].socket_path or pass --socket")?;
+    let mut app = BridgeApp::from_config(config)?;
+    let mut client = LazyDaemonClient::new(socket_path);
+    let actions = app.handle_event(
+        BridgeInboundEvent {
+            event_id: event,
+            room_id: room,
+            sender_user_id: sender,
+            thread_root_event_id: thread,
+            body,
+            encryption: EncryptionState::Plaintext,
+        },
+        &mut client,
+    )?;
+    print_actions(&actions);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn handle_test_event(
+    _path: PathBuf,
+    _room: String,
+    _sender: String,
+    _event: String,
+    _thread: Option<String>,
+    _body: String,
+    _socket: Option<PathBuf>,
+) -> Result<()> {
+    anyhow::bail!(
+        "agl-matrix-bridge handle-test-event is only available on Unix platforms in this alpha"
+    )
+}
+
+fn print_actions(actions: &[BridgeOutboundAction]) {
+    for action in actions {
+        match action {
+            BridgeOutboundAction::Ignore { reason } => println!("action=ignore reason={reason}"),
+            BridgeOutboundAction::ReplyInThread { body } => {
+                println!("action=reply bytes={}", body.len())
+            }
+            BridgeOutboundAction::NoticeInThread { body } => {
+                println!("action=notice bytes={}", body.len())
+            }
+            BridgeOutboundAction::MarkProcessed { event_id } => {
+                println!("action=mark_processed event_id={event_id}")
+            }
+            BridgeOutboundAction::PersistBinding { key, session_id } => {
+                println!(
+                    "action=persist_binding room_id={} thread_root_event_id={} session_id={}",
+                    key.room_id,
+                    key.thread_root_event_id.as_deref().unwrap_or(""),
+                    session_id
+                )
+            }
+            BridgeOutboundAction::RemoveBinding { key } => {
+                println!(
+                    "action=remove_binding room_id={} thread_root_event_id={}",
+                    key.room_id,
+                    key.thread_root_event_id.as_deref().unwrap_or("")
+                )
+            }
+        }
+    }
 }
