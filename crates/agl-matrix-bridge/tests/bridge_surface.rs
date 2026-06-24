@@ -83,6 +83,46 @@ allowed_rooms = ["!room:example"]
     assert_contains(&stderr(&output), "unknown field");
 }
 
+#[test]
+fn handle_test_event_denies_before_daemon_connect() {
+    let temp = TempDir::new("handle-denied");
+    let config = temp.write(
+        "bridge.toml",
+        r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+
+[agl]
+socket_path = "/tmp/agl-matrix-bridge-test-missing.sock"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@allowed:example"]
+"#,
+    );
+
+    let output = run_bridge(&[
+        "handle-test-event",
+        "--config",
+        &config.display().to_string(),
+        "--room",
+        "!room:example",
+        "--sender",
+        "@denied:example",
+        "--event",
+        "$event",
+        "--thread",
+        "$thread",
+        "--body",
+        "!agl send hello",
+    ]);
+
+    assert_success(&output);
+    assert_contains(&stdout(&output), "action=ignore reason=user is not allowed");
+}
+
 fn run_bridge(args: &[&str]) -> Output {
     Command::new(BRIDGE_BIN)
         .args(args)

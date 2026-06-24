@@ -72,6 +72,13 @@ impl BridgeState {
             .sort_by(|left, right| left.key.cmp(&right.key));
     }
 
+    pub fn unbind(&mut self, key: &BindingKey) -> Option<String> {
+        self.bindings
+            .iter()
+            .position(|binding| &binding.key == key)
+            .map(|index| self.bindings.remove(index).session_id)
+    }
+
     pub fn mark_processed(&mut self, event_id: impl Into<String>) {
         self.processed_event_ids.insert(event_id.into());
     }

@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use anyhow::{Result, anyhow, bail};
 
 use crate::{
-    AccessDecision, AccessPolicy, AgentClient, BindingKey, BridgeCommand, MatrixConfig,
-    ThreadBindingStore,
+    AccessDecision, AccessPolicy, AgentClient, BindingKey, BridgeCommand, BridgeState,
+    MatrixConfig, ThreadBindingStore,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +81,10 @@ impl BridgeEventHandler {
 
     pub fn processed(&self) -> &BridgeProcessedEvents {
         &self.processed
+    }
+
+    pub fn state(&self) -> BridgeState {
+        BridgeState::from_parts(&self.bindings, &self.processed)
     }
 
     pub fn handle<C: AgentClient>(
