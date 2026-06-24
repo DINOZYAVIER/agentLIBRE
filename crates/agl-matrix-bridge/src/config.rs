@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum BridgeConfigError {
+    EmptyCommandPrefix,
+    MissingAccessPolicy,
+    MissingHomeserverUrl,
+    MissingUserId,
+    MissingAccessToken,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BridgeConfig {
     pub matrix: MatrixConfig,
     #[serde(default)]
@@ -12,6 +23,7 @@ pub struct BridgeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatrixConfig {
     pub homeserver_url: String,
     pub user_id: String,
@@ -25,12 +37,14 @@ pub struct MatrixConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AglConfig {
     #[serde(default)]
     pub socket_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BindingConfig {
     #[serde(default)]
     pub path: Option<String>,
@@ -51,6 +65,37 @@ fn default_command_prefix() -> String {
 impl MatrixConfig {
     pub fn command_prefix(&self) -> &str {
         self.command_prefix.as_str()
+    }
+}
+
+impl BridgeConfig {
+    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let content = std::fs::read_to_string(path).map_err(|err| {
+            anyhow::anyhow!("failed to read bridge config {}: {err}", path.display())
+        })?;
+        toml::from_str(&content).map_err(|err| {
+            anyhow::anyhow!("failed to parse bridge config {}: {err}", path.display())
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), BridgeConfigError> {
+        if self.matrix.homeserver_url.trim().is_empty() {
+            return Err(BridgeConfigError::MissingHomeserverUrl);
+        }
+        if self.matrix.user_id.trim().is_empty() {
+            return Err(BridgeConfigError::MissingUserId);
+        }
+        if self.matrix.access_token.trim().is_empty() {
+            return Err(BridgeConfigError::MissingAccessToken);
+        }
+        if self.matrix.command_prefix.trim().is_empty() {
+            return Err(BridgeConfigError::EmptyCommandPrefix);
+        }
+        if self.access.allowed_rooms.is_empty() && self.access.allowed_users.is_empty() {
+            return Err(BridgeConfigError::MissingAccessPolicy);
+        }
+        Ok(())
     }
 }
 

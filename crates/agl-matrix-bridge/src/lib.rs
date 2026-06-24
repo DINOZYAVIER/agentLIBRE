@@ -5,9 +5,11 @@
 //! contract used by Matrix event handling code.
 
 pub mod access;
+pub mod client;
 pub mod command;
 pub mod config;
 pub mod handler;
+pub mod state;
 pub mod thread_binding;
 
 use anyhow::Result;
@@ -15,11 +17,12 @@ use anyhow::Result;
 pub use access::{AccessDecision, AccessPolicy};
 pub use agl_client::{AgentLibreClient, ClientError};
 pub use command::{BridgeCommand, CommandParseError};
-pub use config::{AglConfig, BindingConfig, BridgeConfig, MatrixConfig};
+pub use config::{AglConfig, BindingConfig, BridgeConfig, BridgeConfigError, MatrixConfig};
 pub use handler::{
     BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
     EncryptionState,
 };
+pub use state::BridgeState;
 pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};
 
 /// Minimal daemon boundary expected by Matrix-facing bridge code.

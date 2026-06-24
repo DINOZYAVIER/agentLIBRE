@@ -47,6 +47,10 @@ impl BridgeProcessedEvents {
     pub fn contains(&self, event_id: &str) -> bool {
         self.event_ids.contains(event_id)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.event_ids.iter()
+    }
 }
 
 pub struct BridgeEventHandler {
