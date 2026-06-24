@@ -134,8 +134,12 @@ name = "agl-matrix-bridge"
 version = "1.0.0-alpha.6"
 dependencies = [
  "agl-client",
+ "agl-protocol",
  "anyhow",
+ "clap",
  "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
