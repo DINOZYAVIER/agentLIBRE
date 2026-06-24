@@ -185,7 +185,7 @@ Description=agentLIBRE daemon
 
 [Service]
 Type=simple
-WorkingDirectory=$(systemd_quote "$cwd")
+WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
 ExecStart=$(systemd_quote "$binary") serve --config $(systemd_quote "$config") --socket $(systemd_quote "$socket") --workspace-root $(systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
