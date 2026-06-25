@@ -85,7 +85,7 @@ fn add_skills(
         return;
     }
     reject_symlink(&skills_root);
-    for pack in ["core", "dev"] {
+    for pack in ["agl", "dev"] {
         let pack_root = skills_root.join(pack);
         if !pack_root.exists() {
             continue;
@@ -107,7 +107,7 @@ fn add_skills(
             if !skill_md.is_file() {
                 panic!("builtin skill {} is missing SKILL.md", skill_dir.display());
             }
-            let id = format!("{pack}:{name}");
+            let id = name.to_string();
             let skill_asset_index = assets.len();
             assets.push(asset(&id, AssetKind::Skill, repo_root, &skill_md));
 
@@ -129,7 +129,7 @@ fn add_skills(
             );
             if skill_dir.join("scripts").exists() {
                 panic!(
-                    "builtin core/dev skill scripts are not executable assets in this wave: {}",
+                    "builtin agl/dev skill scripts are not executable assets: {}",
                     skill_dir.join("scripts").display()
                 );
             }

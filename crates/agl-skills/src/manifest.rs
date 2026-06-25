@@ -222,7 +222,7 @@ fn parse_skill_text(
     })?;
     validate_raw_manifest(&raw)?;
 
-    let actual_id = format!("{}:{}", raw.pack, raw.name);
+    let actual_id = raw.name.clone();
     if expected_id != actual_id {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
             expected: expected_id.to_string(),
@@ -240,7 +240,12 @@ fn parse_skill_text(
     }
 
     let reference_policy = normalize_references(raw.references)?;
-    let references = resolve_references(expected_id, reference_assets, &reference_policy.include)?;
+    let references = resolve_references(
+        expected_pack,
+        &raw.name,
+        reference_assets,
+        &reference_policy.include,
+    )?;
     if body.trim().is_empty() {
         return Err(SkillManifestError::EmptyBody);
     }
@@ -331,15 +336,12 @@ fn normalize_references(
 }
 
 fn resolve_references(
-    skill_id: &str,
+    pack: &str,
+    name: &str,
     reference_assets: &[&'static BuiltinAsset],
     includes: &[String],
 ) -> Result<Vec<SkillReference>, SkillManifestError> {
-    let prefix = format!(
-        "assets/skills/{}/{}/",
-        pack_name(skill_id).0,
-        pack_name(skill_id).1
-    );
+    let prefix = format!("assets/skills/{pack}/{name}/");
     let mut references_by_path = BTreeMap::new();
     for asset in reference_assets {
         let relative_path = asset
@@ -368,12 +370,6 @@ fn resolve_references(
         });
     }
     Ok(resolved)
-}
-
-fn pack_name(skill_id: &str) -> (&str, &str) {
-    skill_id
-        .split_once(':')
-        .expect("builtin skill ids must contain a pack separator")
 }
 
 fn validate_reference_path(path: &str) -> Result<(), SkillManifestError> {
@@ -442,11 +438,11 @@ mod tests {
 
     #[test]
     fn parses_builtin_task_spec_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("core:task-spec").unwrap()).unwrap();
+        let skill = SkillHarness::parse_builtin(builtin_skill("task-spec").unwrap()).unwrap();
 
-        assert_eq!(skill.id.as_str(), "core:task-spec");
+        assert_eq!(skill.id.as_str(), "task-spec");
         assert_eq!(skill.source, SkillSource::Builtin);
-        assert_eq!(skill.pack, "core");
+        assert_eq!(skill.pack, "agl");
         assert_eq!(
             skill
                 .required_hooks
@@ -470,11 +466,11 @@ mod tests {
 
     #[test]
     fn parses_builtin_tool_smoke_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("core:tool-smoke").unwrap()).unwrap();
+        let skill = SkillHarness::parse_builtin(builtin_skill("tool-smoke").unwrap()).unwrap();
 
-        assert_eq!(skill.id.as_str(), "core:tool-smoke");
+        assert_eq!(skill.id.as_str(), "tool-smoke");
         assert_eq!(skill.source, SkillSource::Builtin);
-        assert_eq!(skill.pack, "core");
+        assert_eq!(skill.pack, "agl");
         assert_eq!(
             skill
                 .required_hooks
@@ -503,7 +499,7 @@ name: task-spec
 description: Write specs.
 version: 1
 source: builtin
-pack: core
+pack: agl
 required_hooks:
   - task_spec.validate
 allowed_tools: []
@@ -532,7 +528,7 @@ name: task-spec
 description: Write specs.
 version: 1
 source: builtin
-pack: core
+pack: agl
 required_hooks:
   - Bad Hook
 allowed_tools: []
@@ -559,7 +555,7 @@ name: task-spec
 description: Write specs.
 version: 1
 source: builtin
-pack: core
+pack: agl
 required_hooks:
   - task_spec.validate
 allowed_tools: []
@@ -587,15 +583,15 @@ Body.
 
     fn parse_fixture(text: &str) -> Result<SkillHarness, SkillManifestError> {
         let manifest_asset = BuiltinAsset {
-            id: "core:task-spec",
+            id: "task-spec",
             kind: agl_assets::BuiltinAssetKind::Skill,
-            source_path: "assets/skills/core/task-spec/SKILL.md",
+            source_path: "assets/skills/agl/task-spec/SKILL.md",
             sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             bytes: b"",
         };
         parse_skill_text(
-            "core:task-spec",
-            "core",
+            "task-spec",
+            "agl",
             &manifest_asset,
             &[],
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

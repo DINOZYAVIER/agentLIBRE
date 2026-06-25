@@ -169,14 +169,14 @@ mod tests {
         let bundle = build_verified_context_bundle(
             &registry,
             &tool_catalog,
-            &[SkillId::new("core:task-spec").unwrap()],
+            &[SkillId::new("task-spec").unwrap()],
         )
         .unwrap();
 
         assert!(bundle.content.contains("Use this skill"));
         assert!(bundle.content.contains("Task Spec Contract"));
         assert_eq!(bundle.evidence.len(), 1);
-        assert_eq!(bundle.evidence[0].skill_id, "core:task-spec");
+        assert_eq!(bundle.evidence[0].skill_id, "task-spec");
         assert_eq!(
             bundle.evidence[0].required_hooks,
             vec!["repo_path.validate", "task_spec.validate"]

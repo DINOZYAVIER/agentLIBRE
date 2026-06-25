@@ -580,11 +580,8 @@ mod tests {
 
     #[test]
     fn selected_skill_ids_rejects_duplicates_across_config_and_cli() {
-        let err = selected_skill_ids(
-            &["core:task-spec".to_string()],
-            &["core:task-spec".to_string()],
-        )
-        .unwrap_err();
+        let err =
+            selected_skill_ids(&["task-spec".to_string()], &["task-spec".to_string()]).unwrap_err();
 
         assert!(err.to_string().contains("selected skill id is duplicated"));
     }
@@ -599,7 +596,7 @@ mod tests {
         let batches = selected_skill_hook_batches(
             &skill_registry,
             &extension_registry,
-            &[SkillId::new("core:task-spec").unwrap()],
+            &[SkillId::new("task-spec").unwrap()],
         )
         .unwrap();
 
@@ -626,7 +623,7 @@ mod tests {
         let tools = selected_skill_visible_tools(
             &skill_registry,
             &extension_registry,
-            &[SkillId::new("core:task-spec").unwrap()],
+            &[SkillId::new("task-spec").unwrap()],
             ToolAccessMode::Write,
         )
         .unwrap();
@@ -703,7 +700,7 @@ mod tests {
         let tools = selected_skill_visible_tools(
             &skill_registry,
             &extension_registry,
-            &[SkillId::new("core:task-spec").unwrap()],
+            &[SkillId::new("task-spec").unwrap()],
             ToolAccessMode::ReadOnly,
         )
         .unwrap();
@@ -727,7 +724,7 @@ mod tests {
         let tools = selected_skill_visible_tools(
             &skill_registry,
             &extension_registry,
-            &[SkillId::new("core:tool-smoke").unwrap()],
+            &[SkillId::new("tool-smoke").unwrap()],
             ToolAccessMode::ReadOnly,
         )
         .unwrap();
