@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
-        assert!(builtin_skill("core:missing").is_none());
+        assert!(builtin_skill("missing").is_none());
         assert_eq!(builtin_skills_by_pack("missing").count(), 0);
     }
 

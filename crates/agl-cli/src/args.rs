@@ -523,7 +523,7 @@ mod tests {
             "--max-output-tokens",
             "32",
             "--skill",
-            "core:task-spec",
+            "task-spec",
             "--tool-mode",
             "write",
         ]);
@@ -540,7 +540,7 @@ mod tests {
                 new_session: false,
                 max_output_tokens: 32,
                 tool_mode: ToolAccessMode::Write,
-                skills: vec!["core:task-spec".to_string()],
+                skills: vec!["task-spec".to_string()],
                 prompt: Some("hello".to_string()),
             })
         );
@@ -622,7 +622,7 @@ mod tests {
             "--tool-mode",
             "write",
             "--skill",
-            "core:tool-smoke",
+            "tool-smoke",
         ]);
 
         assert_eq!(
@@ -635,7 +635,7 @@ mod tests {
                 workspace_root: Some(PathBuf::from("/tmp/workspace")),
                 max_output_tokens: 33,
                 tool_mode: ToolAccessMode::Write,
-                skills: vec!["core:tool-smoke".to_string()],
+                skills: vec!["tool-smoke".to_string()],
             })
         );
     }

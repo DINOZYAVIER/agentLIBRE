@@ -3,7 +3,7 @@ name: tool-smoke
 description: Exercise read-only filesystem tool use for local model smoke tests.
 version: 1
 source: builtin
-pack: core
+pack: agl
 required_hooks:
   - repo_path.validate
 allowed_tools:
