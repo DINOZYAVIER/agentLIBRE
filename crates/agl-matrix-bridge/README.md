@@ -35,6 +35,8 @@ Copy `examples/config.toml` to
 - `agl.socket_path`
 - `access.allowed_users`
 - `access.allowed_rooms`
+- `verification.device_id` for encrypted-room SAS self-verification. This must
+  be a trusted Matrix device belonging to `matrix.user_id`.
 - `bindings.path`
 
 Use absolute paths for service-managed runs.
@@ -45,6 +47,19 @@ Log in and save the Matrix session:
 export AGL_MATRIX_USERNAME='agl-bot'
 export AGL_MATRIX_PASSWORD='...'
 ./target/release/agl-matrix-bridge login-password \
+  --config ~/.config/agentLIBRE/matrix-bridge/config.toml
+```
+
+Password login creates a new Matrix device. Use a fresh `matrix.session_path`
+and an empty or new `matrix.store_path`; the command refuses to overwrite an
+existing session unless `--replace-session` is passed, and it still will not use
+a non-empty crypto store for the new device.
+
+For local interactive use without putting the Matrix password in shell history,
+environment, or TOML:
+
+```sh
+scripts/agentlibre-matrix-login-password.sh \
   --config ~/.config/agentLIBRE/matrix-bridge/config.toml
 ```
 
@@ -61,11 +76,20 @@ To migrate an encrypted session from the legacy bridge without logging in again:
 For encrypted rooms, verify the bridge device from a trusted Matrix device:
 
 ```sh
+./target/release/agl-matrix-bridge list-devices \
+  --config ~/.config/agentLIBRE/matrix-bridge/config.toml
 ./target/release/agl-matrix-bridge verify-device \
-  --config ~/.config/agentLIBRE/matrix-bridge/config.toml \
-  --user-id '@alice:example.org' \
-  --device-id DEVICEID
+  --config ~/.config/agentLIBRE/matrix-bridge/config.toml
 ```
+
+`verify-device` performs self-verification for the configured bridge account.
+Log into `matrix.user_id` on a trusted Matrix client, put that trusted device id
+in `[verification].device_id`, then confirm the SAS on both sides.
+
+When `scripts/agentlibre-matrix-login-password.sh` runs verification after a
+fresh login, it waits for the trusted Matrix client to start verification for
+the new bridge device. Do not also run a separate outgoing verification request;
+use the trusted client prompt and let the CLI accept it.
 
 Validate local config and daemon connectivity:
 
@@ -93,4 +117,7 @@ In an allowed Matrix room:
 ```
 
 If `matrix.normal_chat = true`, normal text messages from allowed users are also
-sent to the daemon. Otherwise only `!agl send ...` sends a turn.
+sent to the daemon. Otherwise only `!agl send ...` sends a turn. Messages in the
+main room share a room-level agent session and replies appear in the main
+timeline as Matrix replies. Messages inside an existing Matrix thread keep a
+separate thread-level agent session and replies stay in that thread.

@@ -10,8 +10,10 @@ use matrix_sdk::deserialized_responses::EncryptionInfo;
 use matrix_sdk::encryption::verification::{
     EmojiShortAuthString, SasState, SasVerification, VerificationRequest, VerificationRequestState,
 };
-use matrix_sdk::ruma::events::key::verification::VerificationMethod;
-use matrix_sdk::ruma::events::relation::Thread;
+use matrix_sdk::ruma::events::key::verification::{
+    VerificationMethod, request::ToDeviceKeyVerificationRequestEvent,
+};
+use matrix_sdk::ruma::events::relation::{InReplyTo, Thread};
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
@@ -51,6 +53,7 @@ pub struct MatrixDeviceVerificationRequest {
     pub user_id: String,
     pub device_id: String,
     pub timeout: Duration,
+    pub accept_incoming: bool,
 }
 
 pub struct MatrixDeviceVerificationResult {
@@ -58,6 +61,13 @@ pub struct MatrixDeviceVerificationResult {
     pub device_id: String,
     pub flow_id: Option<String>,
     pub status: MatrixDeviceVerificationStatus,
+}
+
+pub struct MatrixUserDevice {
+    pub user_id: String,
+    pub device_id: String,
+    pub display_name: Option<String>,
+    pub verified: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,13 +153,15 @@ impl MatrixRuntime {
     pub async fn login_with_password(
         config: BridgeConfig,
         login: MatrixPasswordLogin,
+        replace_session: bool,
     ) -> Result<MatrixLoginResult> {
         config
             .validate()
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
         let session_path = matrix_session_path(&config.matrix)?;
         let store_path = matrix_store_path(&config.matrix);
-        let client = build_matrix_client(&config.matrix).await?;
+        validate_password_login_paths(&session_path, store_path.as_deref(), replace_session)?;
+        let client = build_matrix_auth_client(&config.matrix).await?;
         let response = client
             .matrix_auth()
             .login_username(&login.username, &login.password)
@@ -197,6 +209,19 @@ impl MatrixRuntime {
             .with_context(|| format!("invalid Matrix target user id {}", request.user_id))?;
         let target_device_id = OwnedDeviceId::from(request.device_id.as_str());
         let session = matrix_session_from_config(&config.matrix)?;
+        if target_user_id != session.meta.user_id {
+            bail!(
+                "Matrix device verification only supports self-verification for the restored bridge session: target user {} does not match session user {}",
+                target_user_id,
+                session.meta.user_id
+            );
+        }
+        if target_device_id == session.meta.device_id {
+            bail!(
+                "Matrix trusted device {} must be different from the bridge session device",
+                target_device_id
+            );
+        }
         let client = build_matrix_client(&config.matrix).await?;
         client
             .matrix_auth()
@@ -204,14 +229,65 @@ impl MatrixRuntime {
             .await
             .context("failed to restore Matrix access-token session")?;
 
-        verify_device_with_client(
-            &client,
-            target_user_id,
-            target_device_id,
-            request.timeout,
-            &mut confirm_sas,
-        )
-        .await
+        if request.accept_incoming {
+            accept_incoming_device_verification(
+                &client,
+                target_user_id,
+                target_device_id,
+                request.timeout,
+                &mut confirm_sas,
+            )
+            .await
+        } else {
+            verify_device_with_client(
+                &client,
+                target_user_id,
+                target_device_id,
+                request.timeout,
+                &mut confirm_sas,
+            )
+            .await
+        }
+    }
+
+    pub async fn list_user_devices(
+        config: BridgeConfig,
+        user_id: String,
+    ) -> Result<Vec<MatrixUserDevice>> {
+        config
+            .validate()
+            .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
+        let target_user_id = OwnedUserId::try_from(user_id.as_str())
+            .with_context(|| format!("invalid Matrix target user id {user_id}"))?;
+        let session = matrix_session_from_config(&config.matrix)?;
+        let client = build_matrix_client(&config.matrix).await?;
+        client
+            .matrix_auth()
+            .restore_session(session, RoomLoadSettings::default())
+            .await
+            .context("failed to restore Matrix access-token session")?;
+        client
+            .encryption()
+            .request_user_identity(&target_user_id)
+            .await
+            .with_context(|| format!("failed to query Matrix identity for {}", target_user_id))?;
+        let devices = client
+            .encryption()
+            .get_user_devices(&target_user_id)
+            .await
+            .with_context(|| format!("failed to read Matrix devices for {}", target_user_id))?;
+
+        let mut devices = devices
+            .devices()
+            .map(|device| MatrixUserDevice {
+                user_id: device.user_id().to_string(),
+                device_id: device.device_id().to_string(),
+                display_name: device.display_name().map(ToOwned::to_owned),
+                verified: device.is_verified(),
+            })
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        Ok(devices)
     }
 
     fn register_bridge_handler(&self) {
@@ -342,6 +418,162 @@ where
         flow_id: Some(flow_id),
         status: MatrixDeviceVerificationStatus::Verified,
     })
+}
+
+async fn accept_incoming_device_verification<F>(
+    client: &Client,
+    target_user_id: OwnedUserId,
+    target_device_id: OwnedDeviceId,
+    timeout: Duration,
+    confirm_sas: &mut F,
+) -> Result<MatrixDeviceVerificationResult>
+where
+    F: FnMut(&MatrixSasPresentation) -> Result<bool>,
+{
+    let flow_id = wait_for_incoming_verification_request(
+        client,
+        target_user_id.clone(),
+        target_device_id.clone(),
+        timeout,
+    )
+    .await?;
+    let verification = client
+        .encryption()
+        .get_verification_request(&target_user_id, &flow_id)
+        .await
+        .with_context(|| {
+            format!(
+                "Matrix verification request {flow_id} from device {} was not found after sync",
+                target_device_id
+            )
+        })?;
+    ensure_verification_request_device(&verification, &target_device_id)?;
+    if matches!(
+        verification.state(),
+        VerificationRequestState::Requested { .. }
+    ) {
+        verification
+            .accept_with_methods(vec![VerificationMethod::SasV1])
+            .await
+            .context("failed to accept Matrix device verification request")?;
+    }
+
+    let sas = match tokio::time::timeout(timeout, wait_for_sas_verification(client, &verification))
+        .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = verification.cancel().await;
+            bail!(
+                "timed out waiting for Matrix device {} to start SAS verification",
+                target_device_id
+            );
+        }
+    };
+
+    match tokio::time::timeout(
+        timeout,
+        run_sas_verification(client, &flow_id, &sas, confirm_sas),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = sas.cancel().await;
+            bail!(
+                "timed out waiting for Matrix SAS verification to finish for device {}",
+                target_device_id
+            );
+        }
+    }
+
+    Ok(MatrixDeviceVerificationResult {
+        user_id: target_user_id.to_string(),
+        device_id: target_device_id.to_string(),
+        flow_id: Some(flow_id),
+        status: MatrixDeviceVerificationStatus::Verified,
+    })
+}
+
+async fn wait_for_incoming_verification_request(
+    client: &Client,
+    target_user_id: OwnedUserId,
+    target_device_id: OwnedDeviceId,
+    timeout: Duration,
+) -> Result<String> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    client.add_event_handler(move |event: ToDeviceKeyVerificationRequestEvent| {
+        let sender = sender.clone();
+        let target_user_id = target_user_id.clone();
+        let target_device_id = target_device_id.clone();
+        async move {
+            if event.sender == target_user_id && event.content.from_device == target_device_id {
+                let _ = sender.send(event.content.transaction_id.to_string());
+            }
+        }
+    });
+
+    tokio::time::timeout(timeout, async {
+        loop {
+            let sync_once = client.sync_once(verification_sync_settings());
+            tokio::pin!(sync_once);
+            tokio::select! {
+                flow_id = receiver.recv() => {
+                    return flow_id.context("Matrix verification request channel closed");
+                }
+                sync_result = &mut sync_once => {
+                    sync_result.context("Matrix sync failed while waiting for incoming verification request")?;
+                }
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for incoming Matrix verification request")?
+}
+
+fn ensure_verification_request_device(
+    verification: &VerificationRequest,
+    target_device_id: &OwnedDeviceId,
+) -> Result<()> {
+    match verification.state() {
+        VerificationRequestState::Requested {
+            other_device_data, ..
+        }
+        | VerificationRequestState::Ready {
+            other_device_data, ..
+        } => {
+            if other_device_data.device_id() != target_device_id {
+                bail!(
+                    "incoming Matrix verification request came from device {}, expected {}",
+                    other_device_data.device_id(),
+                    target_device_id
+                );
+            }
+            Ok(())
+        }
+        VerificationRequestState::Transitioned { verification } => {
+            if let Some(sas) = verification.sas()
+                && sas.other_device().device_id() != target_device_id
+            {
+                bail!(
+                    "incoming Matrix SAS verification came from device {}, expected {}",
+                    sas.other_device().device_id(),
+                    target_device_id
+                );
+            }
+            Ok(())
+        }
+        VerificationRequestState::Cancelled(info) => {
+            bail!(
+                "Matrix verification request was cancelled: {}",
+                info.reason()
+            )
+        }
+        VerificationRequestState::Done => Ok(()),
+        VerificationRequestState::Created { .. } => {
+            bail!("incoming Matrix verification request is unexpectedly marked as created by us")
+        }
+    }
 }
 
 async fn wait_for_sas_verification(
@@ -504,7 +736,7 @@ fn verification_sync_settings() -> SyncSettings {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MatrixReplyContext {
-    thread_root_event_id: String,
+    thread_root_event_id: Option<String>,
     reply_event_id: String,
 }
 
@@ -535,9 +767,7 @@ fn inbound_event_from_original(
         return None;
     };
     let reply_context = MatrixReplyContext {
-        thread_root_event_id: thread_root_event_id
-            .clone()
-            .unwrap_or_else(|| event_id.clone()),
+        thread_root_event_id: thread_root_event_id.clone(),
         reply_event_id: event_id.clone(),
     };
     let encryption = if was_decrypted {
@@ -590,7 +820,7 @@ async fn send_outbound_actions(
 
 async fn send_matrix_text(room: &Room, context: &MatrixReplyContext, body: &str) -> Result<()> {
     let mut content = RoomMessageEventContent::text_plain(body);
-    content.relates_to = Some(thread_relation(context)?);
+    content.relates_to = Some(message_relation(context)?);
     room.send(content)
         .await
         .context("Matrix room send failed")?;
@@ -599,24 +829,30 @@ async fn send_matrix_text(room: &Room, context: &MatrixReplyContext, body: &str)
 
 async fn send_matrix_notice(room: &Room, context: &MatrixReplyContext, body: &str) -> Result<()> {
     let mut content = RoomMessageEventContent::notice_plain(body);
-    content.relates_to = Some(thread_relation(context)?);
+    content.relates_to = Some(message_relation(context)?);
     room.send(content)
         .await
         .context("Matrix room send failed")?;
     Ok(())
 }
 
-fn thread_relation(context: &MatrixReplyContext) -> Result<MatrixMessageRelation> {
-    let root =
-        OwnedEventId::try_from(context.thread_root_event_id.as_str()).with_context(|| {
-            format!(
-                "invalid Matrix thread root event id {}",
-                context.thread_root_event_id
-            )
-        })?;
+fn message_relation(context: &MatrixReplyContext) -> Result<MatrixMessageRelation> {
     let reply_to = OwnedEventId::try_from(context.reply_event_id.as_str())
         .with_context(|| format!("invalid Matrix reply event id {}", context.reply_event_id))?;
-    Ok(Relation::Thread(Thread::plain(root, reply_to)))
+
+    if let Some(thread_root_event_id) = context.thread_root_event_id.as_deref() {
+        let root = OwnedEventId::try_from(thread_root_event_id).with_context(|| {
+            format!(
+                "invalid Matrix thread root event id {}",
+                thread_root_event_id
+            )
+        })?;
+        Ok(Relation::Thread(Thread::reply(root, reply_to)))
+    } else {
+        Ok(Relation::Reply {
+            in_reply_to: InReplyTo::new(reply_to),
+        })
+    }
 }
 
 fn matrix_session_from_config(config: &MatrixConfig) -> Result<MatrixSession> {
@@ -639,6 +875,14 @@ async fn build_matrix_client(config: &MatrixConfig) -> Result<Client> {
         .build()
         .await
         .context("failed to build Matrix client")
+}
+
+async fn build_matrix_auth_client(config: &MatrixConfig) -> Result<Client> {
+    Client::builder()
+        .homeserver_url(config.homeserver_url.as_str())
+        .build()
+        .await
+        .context("failed to build Matrix auth client")
 }
 
 fn matrix_client_builder(config: &MatrixConfig) -> ClientBuilder {
@@ -694,6 +938,42 @@ fn matrix_session_path(config: &MatrixConfig) -> Result<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .context("matrix.session_path is required for password login")
+}
+
+fn validate_password_login_paths(
+    session_path: &Path,
+    store_path: Option<&Path>,
+    replace_session: bool,
+) -> Result<()> {
+    if session_path.exists() && !replace_session {
+        bail!(
+            "Matrix session already exists: {}. Password login creates a new Matrix device; choose a fresh matrix.session_path and matrix.store_path, or pass --replace-session after archiving the old store",
+            session_path.display()
+        );
+    }
+
+    if let Some(store_path) = store_path
+        && path_has_entries(store_path)?
+    {
+        bail!(
+            "matrix.store_path is not empty: {}. Password login creates a new Matrix device; choose a fresh store path or archive the old store before replacing the session",
+            store_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn path_has_entries(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if path.is_file() {
+        return Ok(true);
+    }
+    let mut entries = std::fs::read_dir(path)
+        .with_context(|| format!("failed to read Matrix store dir {}", path.display()))?;
+    Ok(entries.next().transpose()?.is_some())
 }
 
 fn load_matrix_session(path: impl AsRef<Path>) -> Result<MatrixSession> {
@@ -830,13 +1110,48 @@ mod tests {
     }
 
     #[test]
-    fn thread_relation_rejects_invalid_event_ids() {
+    fn message_relation_replies_to_room_event() {
         let context = MatrixReplyContext {
-            thread_root_event_id: "not-event".to_string(),
+            thread_root_event_id: None,
             reply_event_id: "$event:example".to_string(),
         };
 
-        let error = thread_relation(&context).unwrap_err();
+        match message_relation(&context).unwrap() {
+            Relation::Reply { in_reply_to } => {
+                assert_eq!(in_reply_to.event_id.as_str(), "$event:example");
+            }
+            relation => panic!("expected reply relation, got {relation:?}"),
+        }
+    }
+
+    #[test]
+    fn message_relation_replies_inside_existing_thread() {
+        let context = MatrixReplyContext {
+            thread_root_event_id: Some("$thread:example".to_string()),
+            reply_event_id: "$event:example".to_string(),
+        };
+
+        match message_relation(&context).unwrap() {
+            Relation::Thread(thread) => {
+                assert_eq!(thread.event_id.as_str(), "$thread:example");
+                assert_eq!(
+                    thread.in_reply_to.unwrap().event_id.as_str(),
+                    "$event:example"
+                );
+                assert!(!thread.is_falling_back);
+            }
+            relation => panic!("expected thread relation, got {relation:?}"),
+        }
+    }
+
+    #[test]
+    fn message_relation_rejects_invalid_thread_event_ids() {
+        let context = MatrixReplyContext {
+            thread_root_event_id: Some("not-event".to_string()),
+            reply_event_id: "$event:example".to_string(),
+        };
+
+        let error = message_relation(&context).unwrap_err();
 
         assert!(
             error

@@ -10,6 +10,9 @@ encrypted_rooms = "allow-decrypted"
 [agl]
 socket_path = "/home/alice/.local/state/agentLIBRE/daemon/agl.sock"
 
+[verification]
+device_id = "TRUSTEDBOTDEVICE"
+
 [access]
 allowed_users = ["@alice:example.org"]
 allowed_rooms = ["!roomid:example.org"]

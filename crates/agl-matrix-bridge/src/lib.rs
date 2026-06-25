@@ -25,6 +25,7 @@ pub use client::LazyDaemonClient;
 pub use command::{BridgeCommand, CommandParseError};
 pub use config::{
     AglConfig, BindingConfig, BridgeConfig, BridgeConfigError, EncryptedRoomPolicy, MatrixConfig,
+    VerificationConfig,
 };
 pub use handler::{
     BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
@@ -34,7 +35,7 @@ pub use handler::{
 pub use runtime::{
     MatrixDeviceVerificationRequest, MatrixDeviceVerificationResult,
     MatrixDeviceVerificationStatus, MatrixLoginResult, MatrixPasswordLogin, MatrixRuntime,
-    MatrixSasEmoji, MatrixSasPresentation,
+    MatrixSasEmoji, MatrixSasPresentation, MatrixUserDevice,
 };
 pub use state::BridgeState;
 pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};

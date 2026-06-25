@@ -201,14 +201,7 @@ impl BridgeEventHandler {
 
 impl BridgeInboundEvent {
     pub fn binding_key(&self) -> BindingKey {
-        BindingKey::new(
-            self.room_id.clone(),
-            Some(
-                self.thread_root_event_id
-                    .clone()
-                    .unwrap_or_else(|| self.event_id.clone()),
-            ),
-        )
+        BindingKey::new(self.room_id.clone(), self.thread_root_event_id.clone())
     }
 }
 
@@ -292,6 +285,13 @@ mod tests {
             thread_root_event_id: Some("$thread".to_string()),
             body: body.to_string(),
             encryption: EncryptionState::Plaintext,
+        }
+    }
+
+    fn room_event(body: &str) -> BridgeInboundEvent {
+        BridgeInboundEvent {
+            thread_root_event_id: None,
+            ..event(body)
         }
     }
 
@@ -401,6 +401,38 @@ mod tests {
             ]
         );
         assert!(client.sent.is_empty());
+    }
+
+    #[test]
+    fn normal_room_chat_uses_room_binding() {
+        let mut handler = BridgeEventHandler::new(
+            matrix(true),
+            access(),
+            ThreadBindingStore::default(),
+            BridgeProcessedEvents::default(),
+        );
+        let mut client = FakeClient::default();
+
+        let actions = handler.handle(room_event("hello"), &mut client).unwrap();
+
+        assert_eq!(
+            client.sent,
+            vec![(
+                "session-1".to_string(),
+                "hello".to_string(),
+                "$event".to_string()
+            )]
+        );
+        assert!(actions.contains(&BridgeOutboundAction::PersistBinding {
+            key: BindingKey::new("!room:example", None),
+            session_id: "session-1".to_string(),
+        }));
+        assert_eq!(
+            handler
+                .bindings()
+                .session_for(&BindingKey::new("!room:example", None)),
+            Some("session-1")
+        );
     }
 
     #[test]

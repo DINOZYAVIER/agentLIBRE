@@ -128,6 +128,7 @@ mod tests {
                 encrypted_rooms: EncryptedRoomPolicy::Reject,
             },
             agl: AglConfig::default(),
+            verification: crate::VerificationConfig::default(),
             access: AccessPolicy {
                 allowed_rooms: vec!["!room:example".to_string()],
                 allowed_users: vec!["@user:example".to_string()],
