@@ -17,6 +17,8 @@ pub struct BridgeConfig {
     #[serde(default)]
     pub agl: AglConfig,
     #[serde(default)]
+    pub verification: VerificationConfig,
+    #[serde(default)]
     pub access: crate::access::AccessPolicy,
     #[serde(default)]
     pub bindings: BindingConfig,
@@ -48,6 +50,15 @@ pub struct MatrixConfig {
 pub struct AglConfig {
     #[serde(default)]
     pub socket_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationConfig {
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +161,7 @@ mod tests {
                 encrypted_rooms: EncryptedRoomPolicy::Reject,
             },
             agl: AglConfig::default(),
+            verification: VerificationConfig::default(),
             access: crate::access::AccessPolicy {
                 allowed_rooms: vec!["!room:example".to_owned()],
                 allowed_users: vec![],
@@ -177,6 +189,7 @@ mod tests {
                 encrypted_rooms: EncryptedRoomPolicy::AllowDecrypted,
             },
             agl: AglConfig::default(),
+            verification: VerificationConfig::default(),
             access: crate::access::AccessPolicy::default(),
             bindings: BindingConfig::default(),
         };

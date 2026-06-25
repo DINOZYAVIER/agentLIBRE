@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const BRIDGE_BIN: &str = env!("CARGO_BIN_EXE_agl-matrix-bridge");
@@ -246,6 +247,123 @@ allowed_users = ["@user:example"]
 }
 
 #[test]
+fn login_password_accepts_password_stdin_without_env() {
+    let temp = TempDir::new("login-password-stdin");
+    let session = temp.path.join("session.json");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+session_path = "{}"
+"#,
+            session.display()
+        ),
+    );
+
+    let output = run_bridge_without_matrix_env_with_stdin(
+        &[
+            "login-password",
+            "--config",
+            &config.display().to_string(),
+            "--username",
+            "@agl:example",
+            "--password-stdin",
+        ],
+        "secret-password\n",
+    );
+
+    assert_failure(&output);
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "MissingAccessPolicy");
+    assert!(
+        !stderr.contains("AGL_MATRIX_PASSWORD"),
+        "password stdin mode must not require password env:\n{stderr}"
+    );
+}
+
+#[test]
+fn login_password_refuses_existing_session_before_network() {
+    let temp = TempDir::new("login-existing-session");
+    let session = temp.write("session.json", "{}");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+session_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            session.display()
+        ),
+    );
+
+    let output = run_bridge_without_matrix_env_with_stdin(
+        &[
+            "login-password",
+            "--config",
+            &config.display().to_string(),
+            "--username",
+            "@agl:example",
+            "--password-stdin",
+        ],
+        "secret-password\n",
+    );
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "Matrix session already exists");
+}
+
+#[test]
+fn login_password_refuses_nonempty_store_before_network() {
+    let temp = TempDir::new("login-nonempty-store");
+    let session = temp.path.join("session.json");
+    let store = temp.path.join("matrix-store");
+    std::fs::create_dir_all(&store).expect("failed to create store dir");
+    std::fs::write(store.join("stale.sqlite"), "stale").expect("failed to write store marker");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+session_path = "{}"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            session.display(),
+            store.display()
+        ),
+    );
+
+    let output = run_bridge_without_matrix_env_with_stdin(
+        &[
+            "login-password",
+            "--config",
+            &config.display().to_string(),
+            "--username",
+            "@agl:example",
+            "--password-stdin",
+        ],
+        "secret-password\n",
+    );
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "matrix.store_path is not empty");
+}
+
+#[test]
 fn verify_device_requires_session_before_network() {
     let temp = TempDir::new("verify-device-missing-session");
     let store = temp.path.join("matrix-store");
@@ -270,8 +388,6 @@ allowed_users = ["@user:example"]
         "verify-device",
         "--config",
         &config.display().to_string(),
-        "--user-id",
-        "@user:example",
         "--device-id",
         "DEVICE",
     ]);
@@ -303,8 +419,6 @@ allowed_users = ["@user:example"]
         "verify-device",
         "--config",
         &config.display().to_string(),
-        "--user-id",
-        "@user:example",
         "--device-id",
         "DEVICE",
     ]);
@@ -317,8 +431,37 @@ allowed_users = ["@user:example"]
 }
 
 #[test]
-fn verify_device_rejects_invalid_target_user_before_network() {
-    let temp = TempDir::new("verify-device-invalid-user");
+fn verify_device_requires_cli_or_config_device_before_network() {
+    let temp = TempDir::new("verify-device-missing-device");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&["verify-device", "--config", &config.display().to_string()]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "[verification].device_id");
+}
+
+#[test]
+fn verify_device_accept_incoming_requires_config_device_before_network() {
+    let temp = TempDir::new("verify-device-accept-incoming-missing-device");
     let store = temp.path.join("matrix-store");
     let config = temp.write(
         "bridge.toml",
@@ -343,8 +486,108 @@ allowed_users = ["@user:example"]
         "verify-device",
         "--config",
         &config.display().to_string(),
+        "--accept-incoming",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "[verification].device_id");
+}
+
+#[test]
+fn list_devices_rejects_invalid_user_before_network() {
+    let temp = TempDir::new("list-devices-invalid-user");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&[
+        "list-devices",
+        "--config",
+        &config.display().to_string(),
         "--user-id",
         "not-a-user",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "invalid Matrix target user id");
+}
+
+#[test]
+fn verify_device_rejects_mismatched_config_user_before_network() {
+    let temp = TempDir::new("verify-device-mismatched-config-user");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "@agl:example"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[verification]
+user_id = "not-a-user"
+device_id = "DEVICE"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&["verify-device", "--config", &config.display().to_string()]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "self-verification");
+}
+
+#[test]
+fn verify_device_rejects_invalid_target_user_before_network() {
+    let temp = TempDir::new("verify-device-invalid-bridge-user");
+    let store = temp.path.join("matrix-store");
+    let config = temp.write(
+        "bridge.toml",
+        &format!(
+            r#"
+[matrix]
+homeserver_url = "https://matrix.example"
+user_id = "not-a-user"
+access_token = "secret-token"
+device_id = "AGLDEVICE"
+store_path = "{}"
+
+[access]
+allowed_rooms = ["!room:example"]
+allowed_users = ["@user:example"]
+"#,
+            store.display()
+        ),
+    );
+
+    let output = run_bridge(&[
+        "verify-device",
+        "--config",
+        &config.display().to_string(),
         "--device-id",
         "DEVICE",
     ]);
@@ -380,8 +623,6 @@ allowed_users = ["@user:example"]
         "verify-device",
         "--config",
         &config.display().to_string(),
-        "--user-id",
-        "@user:example",
         "--device-id",
         "DEVICE",
         "--timeout-seconds",
@@ -410,6 +651,28 @@ fn run_bridge_without_matrix_env(args: &[&str]) -> Output {
         .env_remove("AGL_MATRIX_DEVICE_DISPLAY_NAME")
         .output()
         .expect("failed to run agl-matrix-bridge")
+}
+
+fn run_bridge_without_matrix_env_with_stdin(args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(BRIDGE_BIN)
+        .args(args)
+        .env_remove("AGL_MATRIX_USERNAME")
+        .env_remove("AGL_MATRIX_PASSWORD")
+        .env_remove("AGL_MATRIX_DEVICE_DISPLAY_NAME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn agl-matrix-bridge");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(input.as_bytes())
+        .expect("failed to write agl-matrix-bridge stdin");
+    child
+        .wait_with_output()
+        .expect("failed to wait for agl-matrix-bridge")
 }
 
 fn assert_success(output: &Output) {
