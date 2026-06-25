@@ -3,7 +3,7 @@ name: task-spec
 description: Write and validate agentLIBRE task specs.
 version: 1
 source: builtin
-pack: core
+pack: agl
 required_hooks:
   - repo_path.validate
   - task_spec.validate

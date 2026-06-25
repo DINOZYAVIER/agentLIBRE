@@ -185,13 +185,13 @@ dialect = "qwen3"
 tool_call_format = "hermes_json"
 
 [prompt]
-skills = ["core:task-spec"]
+skills = ["task-spec"]
 "#,
     );
 
     let config = load_local_inference_config(&path).unwrap();
 
-    assert_eq!(config.prompt.skills, vec!["core:task-spec"]);
+    assert_eq!(config.prompt.skills, vec!["task-spec"]);
 
     std::fs::remove_file(path).unwrap();
 }

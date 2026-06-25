@@ -1,0 +1,507 @@
+use crate::{HookId, HookInput, HookMessage, HookResult, HookStatus};
+
+pub(crate) fn validate_json(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return fail(
+            input.hook_id,
+            "missing_json_text",
+            "json.validate requires a string payload field named text, content, json, or artifact",
+            None,
+        );
+    };
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(_) => pass(input.hook_id),
+        Err(err) => fail(
+            input.hook_id,
+            "invalid_json",
+            "payload is not valid JSON",
+            Some(err.to_string()),
+        ),
+    }
+}
+
+pub(crate) fn validate_repo_path(input: HookInput) -> HookResult {
+    let paths = payload_paths(&input.payload);
+
+    let invalid = paths
+        .iter()
+        .filter_map(|path| {
+            validate_single_repo_path(path)
+                .err()
+                .map(|reason| (path, reason))
+        })
+        .collect::<Vec<_>>();
+    if invalid.is_empty() {
+        pass(input.hook_id)
+    } else {
+        let details = invalid
+            .into_iter()
+            .map(|(path, reason)| format!("{path}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        fail(
+            input.hook_id,
+            "invalid_repo_path",
+            "one or more repository paths are invalid",
+            Some(details),
+        )
+    }
+}
+
+pub(crate) fn validate_task_spec(input: HookInput) -> HookResult {
+    let Some(markdown) = payload_text(&input.payload) else {
+        return fail(
+            input.hook_id,
+            "missing_task_spec_text",
+            "task_spec.validate requires a string payload field named text, content, markdown, or artifact",
+            None,
+        );
+    };
+    let lower = markdown.to_ascii_lowercase();
+    let required = [
+        "problem",
+        "goal",
+        "scope",
+        "non-goals",
+        "acceptance criteria",
+        "verification",
+    ];
+    let missing = required
+        .iter()
+        .filter(|section| !lower.contains(**section))
+        .copied()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "task_spec_missing_sections",
+            "task spec is missing required sections",
+            Some(missing.join(", ")),
+        )
+    }
+}
+
+pub(crate) fn validate_secret_scan(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return pass(input.hook_id);
+    };
+    let lower = text.to_ascii_lowercase();
+    let findings = [
+        (
+            lower.contains("-----begin ") && lower.contains(" private key-----"),
+            "private key material",
+        ),
+        (
+            contains_token_prefix(text, "github_pat_", 20),
+            "GitHub token",
+        ),
+        (contains_token_prefix(text, "ghp_", 20), "GitHub token"),
+        (contains_token_prefix(text, "glpat-", 20), "GitLab token"),
+        (contains_token_prefix(text, "xoxb-", 20), "Slack token"),
+        (contains_token_prefix(text, "xoxp-", 20), "Slack token"),
+        (contains_token_prefix(text, "sk-", 24), "API key"),
+        (
+            contains_token_prefix(text, "syt_", 20),
+            "Matrix access token",
+        ),
+        (contains_token_prefix(text, "AKIA", 12), "AWS access key id"),
+    ];
+    let found = findings
+        .into_iter()
+        .filter_map(|(found, label)| found.then_some(label))
+        .collect::<Vec<_>>();
+    if found.is_empty() {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "secret_scan_findings",
+            "artifact appears to contain secret material",
+            Some(found.join(", ")),
+        )
+    }
+}
+
+pub(crate) fn validate_diff_scope(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return pass(input.hook_id);
+    };
+    let paths = extract_diff_paths(text);
+    let blocked = paths
+        .iter()
+        .filter(|path| is_blocked_diff_path(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if blocked.is_empty() {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "diff_scope_blocked_paths",
+            "diff includes paths that should not be part of a source change",
+            Some(blocked.join(", ")),
+        )
+    }
+}
+
+pub(crate) fn validate_verification(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return fail(
+            input.hook_id,
+            "missing_verification_text",
+            "verification.validate requires text, content, markdown, or artifact payload",
+            None,
+        );
+    };
+    let lower = text.to_ascii_lowercase();
+    let has_evidence = [
+        "verification",
+        "verified",
+        "tests",
+        "tested",
+        "cargo test",
+        "cargo check",
+        "not run",
+        "not executed",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if has_evidence {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "verification_missing",
+            "artifact must state what verification was run or why it was not run",
+            None,
+        )
+    }
+}
+
+pub(crate) fn validate_commit_message(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return pass(input.hook_id);
+    };
+    let mut findings = Vec::new();
+    for line in text.lines().map(str::trim) {
+        let lower = line.to_ascii_lowercase();
+        if (lower.starts_with("signed-off-by:") || lower.starts_with("co-authored-by:"))
+            && mentions_llm_agent(&lower)
+        {
+            findings.push(format!("LLM attestation trailer is not allowed: {line}"));
+        }
+        if lower.starts_with("assisted-by:") && !assisted_by_has_agent_and_model(line) {
+            findings.push(format!("Assisted-by trailer is incomplete: {line}"));
+        }
+    }
+    if findings.is_empty() {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "commit_message_invalid_trailers",
+            "commit message contains invalid LLM-assistance trailers",
+            Some(findings.join("; ")),
+        )
+    }
+}
+
+pub(crate) fn validate_skill_manifest(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return pass(input.hook_id);
+    };
+    let Some(frontmatter) = frontmatter_block(text) else {
+        return pass(input.hook_id);
+    };
+    let required_fields = [
+        "name:",
+        "description:",
+        "version:",
+        "source:",
+        "pack:",
+        "required_hooks:",
+        "allowed_tools:",
+        "context_budget_tokens:",
+        "references:",
+        "guarantees:",
+    ];
+    let missing = required_fields
+        .iter()
+        .filter(|field| {
+            !frontmatter
+                .lines()
+                .any(|line| line.trim_start().starts_with(**field))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return fail(
+            input.hook_id,
+            "skill_manifest_missing_fields",
+            "skill manifest frontmatter is missing required agentLIBRE fields",
+            Some(missing.join(", ")),
+        );
+    }
+    if frontmatter
+        .lines()
+        .any(|line| line.trim_start().starts_with("scripts:"))
+    {
+        return fail(
+            input.hook_id,
+            "skill_manifest_builtin_scripts",
+            "builtin skills may not include executable scripts",
+            None,
+        );
+    }
+    pass(input.hook_id)
+}
+
+pub(crate) fn validate_review_pack(input: HookInput) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return pass(input.hook_id);
+    };
+    if !looks_like_review_pack_output(text) {
+        return pass(input.hook_id);
+    }
+    let required = [
+        "review-manifest.json",
+        "payload.json",
+        "pr.html",
+        "index.html",
+    ];
+    let missing = required
+        .iter()
+        .filter(|name| !text.contains(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        pass(input.hook_id)
+    } else {
+        fail(
+            input.hook_id,
+            "review_pack_missing_artifacts",
+            "review pack output is missing expected generated artifacts",
+            Some(missing.join(", ")),
+        )
+    }
+}
+
+fn contains_token_prefix(text: &str, prefix: &str, min_suffix_chars: usize) -> bool {
+    let text_bytes = text.as_bytes();
+    let prefix_bytes = prefix.as_bytes();
+    if prefix_bytes.is_empty() || text_bytes.len() < prefix_bytes.len() + min_suffix_chars {
+        return false;
+    }
+    for index in 0..=text_bytes.len() - prefix_bytes.len() {
+        if !text_bytes[index..].starts_with(prefix_bytes) {
+            continue;
+        }
+        let suffix_start = index + prefix_bytes.len();
+        let suffix_len = text_bytes[suffix_start..]
+            .iter()
+            .take_while(|byte| is_token_suffix_byte(**byte))
+            .count();
+        if suffix_len >= min_suffix_chars {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_token_suffix_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+
+fn extract_diff_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in text.lines().map(str::trim_start) {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            for part in rest.split_whitespace().take(2) {
+                push_diff_path(&mut paths, part);
+            }
+        } else if let Some(path) = line.strip_prefix("+++ ") {
+            push_diff_path(&mut paths, path);
+        } else if let Some(path) = line.strip_prefix("--- ") {
+            push_diff_path(&mut paths, path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn push_diff_path(paths: &mut Vec<String>, raw: &str) {
+    if let Some(path) = normalize_diff_path(raw) {
+        paths.push(path);
+    }
+}
+
+fn normalize_diff_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|ch| matches!(ch, '"' | '`' | '\''));
+    if trimmed == "/dev/null" {
+        return None;
+    }
+    trimmed
+        .strip_prefix("a/")
+        .or_else(|| trimmed.strip_prefix("b/"))
+        .map(ToOwned::to_owned)
+}
+
+fn is_blocked_diff_path(path: &str) -> bool {
+    path == ".DS_Store"
+        || path.ends_with("/.DS_Store")
+        || path.starts_with(".agl/")
+        || path.starts_with(".git/")
+        || path.starts_with("target/")
+        || path.starts_with("node_modules/")
+        || path.contains("/__pycache__/")
+        || path.ends_with("/__pycache__")
+}
+
+fn mentions_llm_agent(lower: &str) -> bool {
+    ["codex", "openai", "gpt", "llm", "assistant"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn assisted_by_has_agent_and_model(line: &str) -> bool {
+    let Some((_, value)) = line.split_once(':') else {
+        return false;
+    };
+    value
+        .split_whitespace()
+        .next()
+        .is_some_and(|agent_model| agent_model.contains(':') && !agent_model.ends_with(':'))
+}
+
+fn frontmatter_block(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    let first = lines.next()?.trim();
+    if first != "---" {
+        return None;
+    }
+    let start = text.find('\n')? + 1;
+    let rest = &text[start..];
+    let end = rest
+        .lines()
+        .scan(0usize, |offset, line| {
+            let current = *offset;
+            *offset += line.len() + 1;
+            Some((current, line))
+        })
+        .find_map(|(offset, line)| (line.trim() == "---").then_some(offset))?;
+    Some(&rest[..end])
+}
+
+fn looks_like_review_pack_output(text: &str) -> bool {
+    [
+        ".agl/reviews",
+        "review-manifest.json",
+        "diff_review.html",
+        "implementation_review.html",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn payload_text(payload: &serde_json::Value) -> Option<&str> {
+    for field in ["text", "content", "json", "markdown", "artifact"] {
+        if let Some(value) = payload.get(field).and_then(serde_json::Value::as_str) {
+            return Some(value);
+        }
+    }
+    payload.as_str()
+}
+
+fn payload_paths(payload: &serde_json::Value) -> Vec<String> {
+    if let Some(path) = payload.get("path").and_then(serde_json::Value::as_str) {
+        return vec![path.to_string()];
+    }
+    if let Some(paths) = payload.get("paths").and_then(serde_json::Value::as_array) {
+        return paths
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    if let Some(content) = payload_text(payload) {
+        return extract_markdown_repo_paths(content);
+    }
+    payload
+        .as_str()
+        .map(|path| vec![path.to_string()])
+        .unwrap_or_default()
+}
+
+fn extract_markdown_repo_paths(content: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for candidate in content
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '(' | '[' | ']'))
+        .map(|candidate| {
+            candidate.trim_matches(|ch: char| {
+                matches!(ch, '`' | '"' | '\'' | ':' | '.' | '!' | '?' | '<' | '>')
+            })
+        })
+        .filter(|candidate| candidate.contains('/'))
+    {
+        if looks_like_repo_path(candidate) {
+            paths.push(candidate.to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn looks_like_repo_path(candidate: &str) -> bool {
+    !candidate.contains("://")
+        && !candidate.starts_with('#')
+        && !candidate.starts_with('@')
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+}
+
+fn validate_single_repo_path(path: &str) -> Result<(), &'static str> {
+    if path.is_empty() {
+        return Err("empty");
+    }
+    if path.starts_with('/') {
+        return Err("absolute path");
+    }
+    if path.contains('\\') {
+        return Err("backslashes are not accepted");
+    }
+    if path.contains('\0') {
+        return Err("NUL byte");
+    }
+    if path
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".." | ".git"))
+    {
+        return Err("contains empty, dot, parent, or .git segment");
+    }
+    Ok(())
+}
+
+fn pass(hook_id: HookId) -> HookResult {
+    HookResult {
+        hook_id,
+        status: HookStatus::Pass,
+        messages: Vec::new(),
+    }
+}
+
+pub(crate) fn fail(hook_id: HookId, code: &str, message: &str, fix: Option<String>) -> HookResult {
+    HookResult {
+        hook_id,
+        status: HookStatus::Fail,
+        messages: vec![HookMessage {
+            code: code.to_string(),
+            message: message.to_string(),
+            fix,
+        }],
+    }
+}

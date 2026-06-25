@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn builtin_registry_loads_trusted_core_skill() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let id = SkillId::new("core:task-spec").unwrap();
+        let id = SkillId::new("task-spec").unwrap();
         let skill = registry.resolve_for_context_injection(&id).unwrap();
 
         assert_eq!(skill.trust, SkillTrustState::TrustedByBinary);
@@ -276,10 +276,20 @@ mod tests {
         assert_eq!(skill.harness.tree_sha256.len(), 64);
         assert_eq!(
             registry
-                .by_pack("core")
+                .by_pack("agl")
                 .map(|skill| skill.harness.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["core:task-spec", "core:tool-smoke"]
+            vec![
+                "change",
+                "commit",
+                "review-pack",
+                "rust",
+                "security-review",
+                "skill",
+                "task-spec",
+                "test-triage",
+                "tool-smoke",
+            ]
         );
     }
 
@@ -293,7 +303,7 @@ mod tests {
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(skills, vec!["core:task-spec"]);
+        assert_eq!(skills, vec!["task-spec"]);
     }
 
     #[test]
@@ -306,7 +316,20 @@ mod tests {
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(skills, vec!["core:task-spec", "core:tool-smoke"]);
+        assert_eq!(
+            skills,
+            vec![
+                "change",
+                "commit",
+                "review-pack",
+                "rust",
+                "security-review",
+                "skill",
+                "task-spec",
+                "test-triage",
+                "tool-smoke",
+            ]
+        );
     }
 
     #[test]
@@ -326,13 +349,13 @@ mod tests {
     fn unknown_skill_is_rejected_before_context_injection() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let err = registry
-            .resolve_for_context_injection(&SkillId::new("core:missing").unwrap())
+            .resolve_for_context_injection(&SkillId::new("missing").unwrap())
             .unwrap_err();
 
         assert_eq!(
             err,
             SkillRegistryError::UnknownSkill {
-                id: "core:missing".to_string(),
+                id: "missing".to_string(),
             }
         );
     }
@@ -342,13 +365,13 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let extensions = ToolCatalog::new();
         let err = registry
-            .verify_required_hooks(&SkillId::new("core:task-spec").unwrap(), &extensions)
+            .verify_required_hooks(&SkillId::new("task-spec").unwrap(), &extensions)
             .unwrap_err();
 
         assert_eq!(
             err,
             SkillRegistryError::MissingRequiredHooks {
-                id: "core:task-spec".to_string(),
+                id: "task-spec".to_string(),
                 hooks: vec![
                     HookId::new("repo_path.validate").unwrap(),
                     HookId::new("task_spec.validate").unwrap(),
@@ -364,7 +387,7 @@ mod tests {
         extensions.register(core_guard_declaration()).unwrap();
 
         registry
-            .verify_required_hooks(&SkillId::new("core:task-spec").unwrap(), &extensions)
+            .verify_required_hooks(&SkillId::new("task-spec").unwrap(), &extensions)
             .unwrap();
     }
 
@@ -373,13 +396,13 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let extensions = ToolCatalog::new();
         let err = registry
-            .verify_allowed_tools(&SkillId::new("core:task-spec").unwrap(), &extensions)
+            .verify_allowed_tools(&SkillId::new("task-spec").unwrap(), &extensions)
             .unwrap_err();
 
         assert_eq!(
             err,
             SkillRegistryError::MissingAllowedTools {
-                id: "core:task-spec".to_string(),
+                id: "task-spec".to_string(),
                 tools: vec![
                     ToolId::new("fs.edit").unwrap(),
                     ToolId::new("fs.list").unwrap(),
