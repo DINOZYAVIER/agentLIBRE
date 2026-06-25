@@ -23,7 +23,7 @@ Defaults:
   --unit        agl-matrix-bridge.service
   --cwd         current git repo root, or current directory outside git
   --binary      ./target/release/agl-matrix-bridge under the repo root
-  --config      ~/.config/agentLIBRE/matrix-bridge/config.toml
+  --config      ~/.config/agentLIBRE/matrix-bridge/agl.toml
   --log-filter  agl_matrix_bridge=info,matrix_sdk=warn,warn
 EOF
 }
@@ -35,7 +35,7 @@ config_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
 unit="agl-matrix-bridge.service"
 cwd="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo_root")"
 binary="${AGL_MATRIX_BRIDGE_BINARY:-$repo_root/target/release/agl-matrix-bridge}"
-config="${AGL_MATRIX_BRIDGE_CONFIG:-$config_home/agentLIBRE/matrix-bridge/config.toml}"
+config="${AGL_MATRIX_BRIDGE_CONFIG:-$config_home/agentLIBRE/matrix-bridge/agl.toml}"
 log_filter="${AGL_MATRIX_LOG:-agl_matrix_bridge=info,matrix_sdk=warn,warn}"
 enable=0
 restart=0
@@ -135,10 +135,13 @@ unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
 unit_content="[Unit]
 Description=agentLIBRE Matrix bridge
+Wants=agl.service
+After=agl.service
 
 [Service]
 Type=simple
 WorkingDirectory=$cwd
+UMask=0077
 Environment=AGL_MATRIX_LOG=$log_filter
 ExecStart=$(systemd_quote "$binary") sync --config $(systemd_quote "$config")
 Restart=always
@@ -177,4 +180,4 @@ if [[ "$restart" -eq 1 ]]; then
   systemctl --user restart "$unit"
 fi
 
-systemctl --user show "$unit" -p UnitFileState -p ActiveState -p ExecStart
+systemctl --user --no-pager show "$unit" -p UnitFileState -p ActiveState -p ExecStart
