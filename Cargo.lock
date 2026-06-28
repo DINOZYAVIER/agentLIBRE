@@ -99,11 +99,14 @@ dependencies = [
  "agl-daemon",
  "agl-loop",
  "agl-protocol",
+ "agl-repo",
  "agl-runtime",
+ "agl-skills",
  "agl-tools",
  "anyhow",
  "clap",
  "clap_complete",
+ "serde_json",
  "tracing",
 ]
 
@@ -224,6 +227,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-repo"
+version = "1.0.0-alpha.7"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "agl-runtime"
 version = "1.0.0-alpha.7"
 dependencies = [
@@ -249,9 +261,13 @@ name = "agl-skills"
 version = "1.0.0-alpha.7"
 dependencies = [
  "agl-assets",
+ "agl-repo",
  "agl-tools",
+ "anyhow",
  "serde",
  "serde_yaml",
+ "sha2",
+ "toml",
 ]
 
 [[package]]
