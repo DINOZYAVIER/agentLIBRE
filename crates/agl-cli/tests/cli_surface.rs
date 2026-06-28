@@ -73,6 +73,7 @@ fn command_help_exits_successfully_for_public_commands() {
         &["status", "--help"][..],
         &["skill", "--help"][..],
         &["skill", "list", "--help"][..],
+        &["skill", "inspect", "--help"][..],
         &["skill", "verify", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
@@ -83,6 +84,15 @@ fn command_help_exits_successfully_for_public_commands() {
         assert_empty_stderr(&output);
         assert_contains(&stdout(&output), "Usage: agl");
     }
+}
+
+#[test]
+fn run_help_describes_trusted_workspace_skills() {
+    let output = run_agl(&["run", "--help"]);
+
+    assert_success(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "Builtin or trusted workspace skill id");
 }
 
 #[test]
@@ -199,6 +209,48 @@ fn skill_lock_refuses_plain_workspace_skills_directory() {
     assert_contains(&stdout, "state=invalid");
     assert_contains(&stdout, "error=skills_component_not_usable");
     assert_contains(&stderr(&output), "workspace skill lock failed");
+}
+
+#[test]
+fn skill_inspect_runtime_succeeds_for_builtin_skill() {
+    let output = run_agl(&["skill", "inspect", "change", "--runtime"]);
+
+    assert_success(&output);
+    assert_empty_stderr(&output);
+    assert_contains(&stdout(&output), "skill name=change");
+    assert_contains(&stdout(&output), "usable=true");
+}
+
+#[test]
+fn skill_inspect_runtime_rejects_untrusted_workspace_skill() {
+    let repo = TempRepo::new("skill-inspect-runtime");
+    let home = TempHome::new("skill-inspect-runtime");
+    let home_arg = home.path_string();
+    let init = run_agl_in(repo.path(), &["--home", &home_arg, "init"]);
+    assert_success(&init);
+    write_workspace_skill(repo.path(), "repo-change");
+
+    let output = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "skill",
+            "inspect",
+            "repo-change",
+            "--runtime",
+        ],
+    );
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "skill name=repo-change");
+    assert_contains(&stdout, "usable=false");
+    assert_contains(&stderr(&output), "skill is not runtime usable: repo-change");
+    assert!(
+        !stderr(&output).contains("local inference config"),
+        "skill preflight should not enter inference config resolution"
+    );
 }
 
 #[test]

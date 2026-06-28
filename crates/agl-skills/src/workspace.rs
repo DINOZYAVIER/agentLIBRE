@@ -218,7 +218,6 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
 
     let component_usable = component.as_ref().is_some_and(component_git_usable);
     for skill in &mut skills {
-        skill.usable = component_usable && skill.valid && !skill.shadowed_by_builtin;
         if skill.valid && !component_usable {
             skill.warnings.push("component_not_usable".to_string());
         }
@@ -238,38 +237,32 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         &mut errors,
     );
 
-    let state = if !errors.is_empty() {
-        SkillReportState::Invalid
-    } else if !warnings.is_empty() || skills.iter().any(|skill| !skill.warnings.is_empty()) {
-        SkillReportState::Warning
-    } else {
-        SkillReportState::Ok
-    };
-
-    let mut next_steps = Vec::new();
-    if warnings
-        .iter()
-        .any(|warning| warning == "skills_lock_missing")
-    {
-        next_steps.push("agl skill lock".to_string());
-    }
-    if !component_usable {
-        next_steps.push("initialize .agl/skills submodule".to_string());
-    }
-    if !errors.is_empty() {
-        next_steps.push("agl skill status --json".to_string());
-    }
-
-    Ok(WorkspaceSkillReport {
-        state,
+    let mut report = WorkspaceSkillReport {
+        state: SkillReportState::Ok,
         workspace_root,
         component,
         lock_path,
         skills,
         warnings,
         errors,
-        next_steps,
-    })
+        next_steps: Vec::new(),
+    };
+    let empty_store = SkillTrustStore::default();
+    apply_trust_store(&mut report, &empty_store);
+
+    report.state = if !report.errors.is_empty() {
+        SkillReportState::Invalid
+    } else if !report.warnings.is_empty()
+        || report.skills.iter().any(|skill| !skill.warnings.is_empty())
+    {
+        SkillReportState::Warning
+    } else {
+        SkillReportState::Ok
+    };
+
+    report.next_steps = workspace_skill_next_steps(&report);
+
+    Ok(report)
 }
 
 pub fn workspace_skill_report_with_trust(
@@ -291,7 +284,7 @@ pub fn trusted_workspace_registry(
     for skill in report
         .skills
         .into_iter()
-        .filter(|skill| skill.trust_state == SkillTrustState::TrustedLocal)
+        .filter(|skill| skill.usable && skill.trust_state == SkillTrustState::TrustedLocal)
     {
         let Some(harness) = skill.harness else {
             continue;
@@ -357,13 +350,23 @@ pub fn lock_workspace_skills(
             .with_context(|| format!("failed to write {}", report.lock_path.display()))?;
     }
 
+    let warnings = if options.dry_run {
+        report.warnings
+    } else {
+        report
+            .warnings
+            .into_iter()
+            .filter(|warning| warning != "skills_lock_missing")
+            .collect()
+    };
+
     Ok(SkillLockReport {
         workspace_root: report.workspace_root,
         lock_path: report.lock_path,
         dry_run: options.dry_run,
         wrote,
         lock: Some(lock),
-        warnings: report.warnings,
+        warnings,
         errors: Vec::new(),
     })
 }
@@ -454,7 +457,7 @@ pub fn revoke_workspace_skill(
     let identity = record.expect("record checked above");
     let mut store = read_trust_store(&trust_store_path)?;
     let revoked = revoke_trust_record(&mut store, &identity);
-    if !revoked {
+    if revoked.is_none() {
         errors.push("trust_record_not_found".to_string());
         return Ok(SkillTrustUpdateReport {
             workspace_root: report.workspace_root,
@@ -469,6 +472,7 @@ pub fn revoke_workspace_skill(
         });
     }
     write_trust_store(&trust_store_path, &store)?;
+    let record = revoked.expect("revoked record checked above");
 
     Ok(SkillTrustUpdateReport {
         workspace_root: report.workspace_root,
@@ -477,7 +481,7 @@ pub fn revoke_workspace_skill(
         action: SkillTrustAction::Revoked,
         dry_run: false,
         wrote: true,
-        record: Some(identity),
+        record: Some(record),
         warnings: report.warnings,
         errors: Vec::new(),
     })
@@ -801,6 +805,9 @@ fn apply_trust_store(report: &mut WorkspaceSkillReport, store: &SkillTrustStore)
     for index in 0..report.skills.len() {
         let state = classify_trust_state(report, &report.skills[index], store);
         report.skills[index].trust_state = state;
+        report.skills[index].usable = state.permits_context_injection()
+            && report.skills[index].valid
+            && !report.skills[index].shadowed_by_builtin;
     }
 }
 
@@ -977,14 +984,17 @@ fn upsert_trust_record(store: &mut SkillTrustStore, record: TrustedSkillRecord) 
     }
 }
 
-fn revoke_trust_record(store: &mut SkillTrustStore, identity: &TrustedSkillRecord) -> bool {
-    let mut revoked = false;
+fn revoke_trust_record(
+    store: &mut SkillTrustStore,
+    identity: &TrustedSkillRecord,
+) -> Option<TrustedSkillRecord> {
+    let mut revoked = None;
     let revoked_at = lock_timestamp();
     for record in &mut store.records {
         if trust_identity_matches(record, identity) {
             record.revoked = true;
             record.revoked_at = Some(revoked_at.clone());
-            revoked = true;
+            revoked = Some(record.clone());
         }
     }
     revoked
@@ -1023,6 +1033,56 @@ fn skill_error_keys(skill: &WorkspaceSkillStatus) -> Vec<String> {
         .iter()
         .map(|error| format!("skill.{label}.{error}"))
         .collect()
+}
+
+fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
+    let mut next_steps = Vec::new();
+    if report
+        .warnings
+        .iter()
+        .any(|warning| warning == "skills_lock_missing")
+    {
+        next_steps.push("agl skill lock".to_string());
+    }
+    if report.errors.iter().any(|error| {
+        error.contains("skills_lock_commit_mismatch")
+            || error.contains("skills_lock_tree_mismatch")
+            || error.contains("skills_lock_remote_mismatch")
+            || error.contains("skills_lock_entry_missing")
+    }) {
+        next_steps.push("review .agl/skills and run agl skill lock".to_string());
+    }
+    if report
+        .errors
+        .iter()
+        .any(|error| error.contains("dirty_worktree") || error.contains("untracked_content"))
+    {
+        next_steps.push("clean .agl/skills worktree".to_string());
+    }
+    if report
+        .errors
+        .iter()
+        .any(|error| error.contains("remote_mismatch"))
+    {
+        next_steps.push("restore .agl/skills remote URL".to_string());
+    }
+    if report.warnings.iter().any(|warning| {
+        matches!(
+            warning.as_str(),
+            "component.skills.missing"
+                | "component.skills.not_registered_submodule"
+                | "component.skills.gitlink_missing"
+        )
+    }) || report.errors.iter().any(|error| {
+        error.contains("not_component_git_worktree") || error.contains("remote_missing")
+    }) {
+        next_steps.push("initialize .agl/skills submodule".to_string());
+    }
+    if !report.errors.is_empty() {
+        next_steps.push("agl skill status --json".to_string());
+    }
+    next_steps.dedup();
+    next_steps
 }
 
 fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
@@ -1138,22 +1198,73 @@ Body.
                 .contains(&"skills_lock_missing".to_string())
         );
         assert_eq!(unlocked.skills[0].name.as_deref(), Some("repo-change"));
-        assert!(unlocked.skills[0].usable);
+        assert!(!unlocked.skills[0].usable);
+        assert_eq!(unlocked.skills[0].trust_state, SkillTrustState::Unsupported);
 
         let first_lock =
             lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
         assert!(!first_lock.has_errors());
         assert!(first_lock.wrote);
+        assert!(
+            !first_lock
+                .warnings
+                .contains(&"skills_lock_missing".to_string())
+        );
         assert!(first_lock.lock_path.exists());
 
         let locked = workspace_skill_report(&root).unwrap();
         assert_eq!(locked.state, SkillReportState::Ok);
-        assert!(locked.skills[0].usable);
+        assert!(!locked.skills[0].usable);
+        assert_eq!(locked.skills[0].trust_state, SkillTrustState::Unknown);
 
         let second_lock =
             lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
         assert!(!second_lock.has_errors());
         assert!(!second_lock.wrote);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source).unwrap();
+    }
+
+    #[test]
+    fn lock_mismatch_marks_workspace_skills_not_usable() {
+        let (root, source) = clean_skills_submodule_fixture("lock-mismatch");
+        lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+        let lock_path = root.join(SKILLS_LOCK_PATH);
+        let lock = fs::read_to_string(&lock_path).unwrap();
+        let lock = lock
+            .lines()
+            .map(|line| {
+                if line.starts_with("commit = ") {
+                    "commit = \"0000000000000000000000000000000000000000\""
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&lock_path, format!("{lock}\n")).unwrap();
+
+        let report = workspace_skill_report(&root).unwrap();
+
+        assert_eq!(report.state, SkillReportState::Invalid);
+        assert!(
+            report
+                .errors
+                .contains(&"skills_lock_commit_mismatch".to_string())
+        );
+        assert_eq!(report.skills[0].trust_state, SkillTrustState::RevMismatch);
+        assert!(!report.skills[0].usable);
+        assert!(
+            !report
+                .next_steps
+                .contains(&"initialize .agl/skills submodule".to_string())
+        );
+        assert!(
+            report
+                .next_steps
+                .contains(&"review .agl/skills and run agl skill lock".to_string())
+        );
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(source).unwrap();
@@ -1167,6 +1278,7 @@ Body.
 
         let pending = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
         assert_eq!(pending.skills[0].trust_state, SkillTrustState::Unknown);
+        assert!(!pending.skills[0].usable);
 
         let approval = trust_workspace_skill(
             &root,
@@ -1183,6 +1295,7 @@ Body.
 
         let trusted = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
         assert_eq!(trusted.skills[0].trust_state, SkillTrustState::TrustedLocal);
+        assert!(trusted.skills[0].usable);
 
         let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
         let trusted_skill = registry
@@ -1193,8 +1306,15 @@ Body.
         let revoke = revoke_workspace_skill(&root, &trust_store, "repo-change").unwrap();
         assert!(!revoke.has_errors());
         assert!(revoke.wrote);
+        let record = revoke
+            .record
+            .expect("revoke should return persisted record");
+        assert!(record.revoked);
+        assert!(record.revoked_at.is_some());
+        assert_eq!(record.agentlibre_version, "test-version");
         let revoked = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
         assert_eq!(revoked.skills[0].trust_state, SkillTrustState::Revoked);
+        assert!(!revoked.skills[0].usable);
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(source).unwrap();
