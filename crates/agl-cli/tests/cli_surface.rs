@@ -18,9 +18,12 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "Usage: agl");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "generate");
+    assert_contains(&stdout, "init");
     assert_contains(&stdout, "chat");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
+    assert_contains(&stdout, "skill");
+    assert_contains(&stdout, "install-hooks");
     assert!(
         !stdout.contains("Compatibility"),
         "help should not describe a second binary:\n{stdout}"
@@ -29,6 +32,12 @@ fn agl_help_uses_public_alias_and_hides_infer() {
         !stdout.contains("\n  infer"),
         "hidden infer command should not appear in top-level help:\n{stdout}"
     );
+    for hidden_command in ["repo", "daemon"] {
+        assert!(
+            !stdout.contains(&format!("\n  {hidden_command}")),
+            "hidden command should not appear in top-level help:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -56,10 +65,17 @@ fn version_output_uses_public_alias() {
 fn command_help_exits_successfully_for_public_commands() {
     for args in [
         &["chat", "--help"][..],
+        &["init", "--help"][..],
+        &["install-hooks", "--help"][..],
         &["run", "--help"][..],
         &["generate", "--help"][..],
         &["serve", "--help"][..],
         &["status", "--help"][..],
+        &["skill", "--help"][..],
+        &["skill", "list", "--help"][..],
+        &["skill", "verify", "--help"][..],
+        &["skill", "trust", "--help"][..],
+        &["skill", "revoke", "--help"][..],
     ] {
         let output = run_agl(args);
 
@@ -70,10 +86,126 @@ fn command_help_exits_successfully_for_public_commands() {
 }
 
 #[test]
-fn status_without_daemon_reports_not_running_without_model_config() {
+fn hidden_repo_help_remains_available_for_advanced_usage() {
+    let output = run_agl(&["repo", "--help"]);
+
+    assert_success(&output);
+    assert_empty_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "Usage: agl repo");
+    assert_contains(&stdout, "init");
+    assert_contains(&stdout, "status");
+    assert_contains(&stdout, "install-hooks");
+}
+
+#[test]
+fn status_without_workspace_manifest_points_to_init() {
+    let repo = TempRepo::new("missing-workspace-manifest");
+    let output = run_agl_in(repo.path(), &["status"]);
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=invalid");
+    assert_contains(&stdout, "error=workspace_manifest_missing");
+    assert_contains(&stdout, "next_step=agl init");
+}
+
+#[test]
+fn init_and_repo_init_dry_run_are_equivalent() {
+    let repo = TempRepo::new("init-dry-run");
+    let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
+    let repo_init = run_agl_in(repo.path(), &["repo", "init", "--dry-run"]);
+
+    assert_success(&init);
+    assert_success(&repo_init);
+    assert_empty_stderr(&init);
+    assert_empty_stderr(&repo_init);
+    assert_eq!(stdout(&init), stdout(&repo_init));
+}
+
+#[test]
+fn init_then_status_reports_missing_skills_submodule_warning() {
+    let repo = TempRepo::new("status-after-init");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+
+    let output = run_agl_in(repo.path(), &["status"]);
+
+    assert_success(&output);
+    assert_empty_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=warning");
+    assert_contains(&stdout, "component.skills.warning=missing");
+    assert_contains(&stdout, "next_step=initialize .agl/skills submodule");
+}
+
+#[test]
+fn status_strict_fails_on_missing_skills_submodule_warning() {
+    let repo = TempRepo::new("status-strict");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+
+    let output = run_agl_in(repo.path(), &["status", "--strict"]);
+
+    assert_failure(&output);
+    assert_contains(&stdout(&output), "state=warning");
+    assert_contains(&stderr(&output), "repo workspace status is not healthy");
+}
+
+#[test]
+fn skill_list_reports_workspace_candidates_without_trusting_plain_dir() {
+    let repo = TempRepo::new("skill-list-plain-dir");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+    write_workspace_skill(repo.path(), "repo-change");
+
+    let output = run_agl_in(repo.path(), &["skill", "list"]);
+
+    assert_success(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "skill name=repo-change");
+    assert_contains(&stdout, "valid=true");
+    assert_contains(&stdout, "usable=false");
+    assert_contains(&stdout, "component_not_usable");
+}
+
+#[test]
+fn skill_verify_fails_until_skills_component_is_locked_and_healthy() {
+    let repo = TempRepo::new("skill-verify-missing");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+
+    let output = run_agl_in(repo.path(), &["skill", "verify"]);
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=warning");
+    assert_contains(&stdout, "warning=component.skills.missing");
+    assert_contains(&stdout, "warning=skills_lock_missing");
+    assert_contains(&stderr(&output), "workspace skill verification failed");
+}
+
+#[test]
+fn skill_lock_refuses_plain_workspace_skills_directory() {
+    let repo = TempRepo::new("skill-lock-plain-dir");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+    write_workspace_skill(repo.path(), "repo-change");
+
+    let output = run_agl_in(repo.path(), &["skill", "lock"]);
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=invalid");
+    assert_contains(&stdout, "error=skills_component_not_usable");
+    assert_contains(&stderr(&output), "workspace skill lock failed");
+}
+
+#[test]
+fn daemon_status_without_daemon_reports_not_running_without_model_config() {
     let home = TempHome::new("status-no-daemon");
     let home_arg = home.path_string();
-    let output = run_agl(&["--home", &home_arg, "status"]);
+    let output = run_agl(&["--home", &home_arg, "daemon", "status"]);
 
     assert_success(&output);
     assert_empty_stderr(&output);
@@ -113,7 +245,10 @@ fn completion_bash_emits_agl_completion_function() {
         );
     }
     assert_contains(&stdout, "serve");
+    assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
+    assert_contains(&stdout, "skill");
+    assert_contains(&stdout, "install-hooks");
 }
 
 #[test]
@@ -301,6 +436,14 @@ fn run_agl(args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
 }
 
+fn run_agl_in(cwd: &std::path::Path, args: &[&str]) -> Output {
+    Command::new(AGL_BIN)
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
+}
+
 fn run_agl_with_stdin(args: &[&str], input: &str) -> Output {
     let mut child = Command::new(AGL_BIN)
         .args(args)
@@ -318,6 +461,35 @@ fn run_agl_with_stdin(args: &[&str], input: &str) -> Output {
     child
         .wait_with_output()
         .expect("failed to wait for agl process")
+}
+
+fn write_workspace_skill(repo: &std::path::Path, name: &str) {
+    let skill_dir = repo.join(".agl/skills/agl").join(name);
+    fs::create_dir_all(&skill_dir)
+        .unwrap_or_else(|err| panic!("failed to create skill dir {}: {err}", skill_dir.display()));
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: {name}
+description: Review repository changes.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+guarantees:
+  - repository paths are checked
+---
+Body.
+"#
+        ),
+    )
+    .unwrap_or_else(|err| panic!("failed to write workspace skill {name}: {err}"));
 }
 
 fn stdout(output: &Output) -> String {
@@ -432,6 +604,34 @@ tool_call_format = "hermes_json"
 }
 
 impl Drop for TempHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+struct TempRepo {
+    path: PathBuf,
+}
+
+impl TempRepo {
+    fn new(label: &str) -> Self {
+        let id = TEMP_HOME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "agl-cli-surface-repo-{label}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(path.join(".git"))
+            .unwrap_or_else(|err| panic!("failed to create temp repo {}: {err}", path.display()));
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempRepo {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
