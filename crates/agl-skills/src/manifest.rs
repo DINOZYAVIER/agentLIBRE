@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::str;
 
 use agl_assets::{BuiltinAsset, BuiltinSkill};
 use agl_tools::{HookId, SkillId, ToolId};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +78,32 @@ impl SkillHarness {
         )
     }
 
+    pub fn parse_workspace_dir(
+        skill_dir: impl AsRef<Path>,
+        component_root: impl AsRef<Path>,
+        tree_sha256: &str,
+    ) -> Result<Self, SkillManifestError> {
+        let skill_dir = skill_dir.as_ref();
+        let component_root = component_root.as_ref();
+        let manifest_path = skill_dir.join("SKILL.md");
+        let source_path = relative_source_path(&manifest_path, component_root);
+        let bytes = fs::read(&manifest_path).map_err(|err| SkillManifestError::ReadManifest {
+            source_path: source_path.clone(),
+            message: err.to_string(),
+        })?;
+        let text = str::from_utf8(&bytes).map_err(|_| SkillManifestError::InvalidUtf8 {
+            source_path: source_path.clone(),
+        })?;
+        parse_workspace_text(
+            skill_dir,
+            component_root,
+            &source_path,
+            &bytes,
+            tree_sha256,
+            text,
+        )
+    }
+
     pub fn is_trusted_source(&self) -> bool {
         self.source == SkillSource::Builtin
     }
@@ -104,6 +134,10 @@ struct RawReferencePolicy {
 pub enum SkillManifestError {
     InvalidUtf8 {
         source_path: String,
+    },
+    ReadManifest {
+        source_path: String,
+        message: String,
     },
     MissingFrontmatter {
         source_path: String,
@@ -139,8 +173,12 @@ pub enum SkillManifestError {
         actual: String,
     },
     BuiltinSourceMismatch,
+    WorkspaceSourceMismatch,
     ContextBudgetZero,
     EmptyBody,
+    ReferenceEscapesSkill {
+        path: String,
+    },
 }
 
 impl std::fmt::Display for SkillManifestError {
@@ -149,6 +187,10 @@ impl std::fmt::Display for SkillManifestError {
             Self::InvalidUtf8 { source_path } => {
                 write!(f, "skill manifest is not valid UTF-8: {source_path}")
             }
+            Self::ReadManifest {
+                source_path,
+                message,
+            } => write!(f, "failed to read skill manifest {source_path}: {message}"),
             Self::MissingFrontmatter { source_path } => {
                 write!(
                     f,
@@ -197,8 +239,14 @@ impl std::fmt::Display for SkillManifestError {
             Self::BuiltinSourceMismatch => {
                 write!(f, "builtin skill manifest must use source=builtin")
             }
+            Self::WorkspaceSourceMismatch => {
+                write!(f, "workspace skill manifest must use source=workspace")
+            }
             Self::ContextBudgetZero => write!(f, "skill context budget must be greater than zero"),
             Self::EmptyBody => write!(f, "skill body cannot be empty"),
+            Self::ReferenceEscapesSkill { path } => {
+                write!(f, "skill reference escapes the skill directory: {path}")
+            }
         }
     }
 }
@@ -269,6 +317,55 @@ fn parse_skill_text(
         body: body.to_string(),
         source_path: manifest_asset.source_path.to_string(),
         manifest_sha256: manifest_asset.sha256.to_string(),
+        tree_sha256: tree_sha256.to_string(),
+    })
+}
+
+fn parse_workspace_text(
+    skill_dir: &Path,
+    component_root: &Path,
+    source_path: &str,
+    manifest_bytes: &[u8],
+    tree_sha256: &str,
+    text: &str,
+) -> Result<SkillHarness, SkillManifestError> {
+    let (frontmatter, body) = split_frontmatter(source_path, text)?;
+    let raw = serde_yaml::from_str::<RawSkillManifest>(frontmatter).map_err(|err| {
+        SkillManifestError::InvalidYaml {
+            source_path: source_path.to_string(),
+            message: err.to_string(),
+        }
+    })?;
+    validate_raw_manifest(&raw)?;
+    if raw.source != SkillSource::Workspace {
+        return Err(SkillManifestError::WorkspaceSourceMismatch);
+    }
+
+    let reference_policy = normalize_references(raw.references)?;
+    let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
+    if body.trim().is_empty() {
+        return Err(SkillManifestError::EmptyBody);
+    }
+
+    Ok(SkillHarness {
+        id: SkillId::new(raw.name.clone()).map_err(|err| SkillManifestError::InvalidYaml {
+            source_path: source_path.to_string(),
+            message: err.to_string(),
+        })?,
+        name: raw.name,
+        description: raw.description,
+        version: raw.version,
+        source: raw.source,
+        pack: raw.pack,
+        required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
+        allowed_tools: sort_unique_ids(raw.allowed_tools, "allowed_tools")?,
+        context_budget_tokens: raw.context_budget_tokens,
+        reference_policy,
+        references,
+        guarantees: sort_unique_strings(raw.guarantees, "guarantees")?,
+        body: body.to_string(),
+        source_path: source_path.to_string(),
+        manifest_sha256: sha256_hex(manifest_bytes),
         tree_sha256: tree_sha256.to_string(),
     })
 }
@@ -372,6 +469,47 @@ fn resolve_references(
     Ok(resolved)
 }
 
+fn resolve_workspace_references(
+    skill_dir: &Path,
+    component_root: &Path,
+    policy: &SkillReferencePolicy,
+) -> Result<Vec<SkillReference>, SkillManifestError> {
+    let canonical_skill_dir =
+        skill_dir
+            .canonicalize()
+            .map_err(|err| SkillManifestError::ReadManifest {
+                source_path: relative_source_path(&skill_dir.join("SKILL.md"), component_root),
+                message: err.to_string(),
+            })?;
+    let mut resolved = Vec::with_capacity(policy.include.len());
+    for include in &policy.include {
+        let path = skill_dir.join(include);
+        let canonical_path =
+            fs::canonicalize(&path).map_err(|_| SkillManifestError::MissingReference {
+                path: include.clone(),
+            })?;
+        if !canonical_path.starts_with(&canonical_skill_dir) {
+            return Err(SkillManifestError::ReferenceEscapesSkill {
+                path: include.clone(),
+            });
+        }
+        let bytes = fs::read(&path).map_err(|_| SkillManifestError::MissingReference {
+            path: include.clone(),
+        })?;
+        let content = String::from_utf8(bytes.clone()).map_err(|_| {
+            SkillManifestError::InvalidReferenceUtf8 {
+                path: include.clone(),
+            }
+        })?;
+        resolved.push(SkillReference {
+            path: include.clone(),
+            sha256: sha256_hex(&bytes),
+            content,
+        });
+    }
+    Ok(resolved)
+}
+
 fn validate_reference_path(path: &str) -> Result<(), SkillManifestError> {
     let invalid = path.is_empty()
         || path.starts_with('/')
@@ -428,6 +566,22 @@ fn reject_duplicate_values(
         }
     }
     Ok(())
+}
+
+fn relative_source_path(path: &Path, component_root: &Path) -> String {
+    let relative = path.strip_prefix(component_root).unwrap_or(path);
+    slash_path(relative)
+}
+
+fn slash_path(path: &Path) -> String {
+    let mut result = PathBuf::new();
+    result.push(path);
+    result.to_string_lossy().replace('\\', "/")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -597,5 +751,89 @@ Body.
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             text,
         )
+    }
+
+    #[test]
+    fn parses_workspace_skill_from_directory() {
+        let root = temp_root("workspace-skill");
+        let skill_dir = root.join("agl/repo-change");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(skill_dir.join("references/policy.md"), "Policy").unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: repo-change
+description: Review repository changes.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include:
+    - references/policy.md
+guarantees:
+  - repository paths are checked
+---
+# Repo Change
+
+Review changes.
+"#,
+        )
+        .unwrap();
+
+        let skill = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap();
+
+        assert_eq!(skill.id.as_str(), "repo-change");
+        assert_eq!(skill.source, SkillSource::Workspace);
+        assert_eq!(skill.source_path, "agl/repo-change/SKILL.md");
+        assert_eq!(skill.references[0].path, "references/policy.md");
+        assert_eq!(skill.references[0].sha256.len(), 64);
+        assert_eq!(skill.tree_sha256, "tree-sha");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_parser_rejects_builtin_source() {
+        let root = temp_root("workspace-source");
+        let skill_dir = root.join("agl/repo-change");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: repo-change
+description: Review repository changes.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+guarantees:
+  - repository paths are checked
+---
+Body.
+"#,
+        )
+        .unwrap();
+
+        let err = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap_err();
+
+        assert_eq!(err, SkillManifestError::WorkspaceSourceMismatch);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("agl-skills-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 }

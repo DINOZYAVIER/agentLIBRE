@@ -4,19 +4,27 @@ use agl_tools::{HookId, SkillId, ToolCatalog, ToolCatalogError, ToolId};
 
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillTrustState {
     TrustedByBinary,
     Unsupported,
     Unknown,
     Changed,
+    RemoteMismatch,
+    RevMismatch,
+    DirtyWorkingTree,
+    UntrackedContent,
     Revoked,
     TrustedLocal,
+    Invalid,
 }
 
 impl SkillTrustState {
     pub fn permits_context_injection(self) -> bool {
-        matches!(self, Self::TrustedByBinary)
+        matches!(self, Self::TrustedByBinary | Self::TrustedLocal)
     }
 }
 
@@ -24,7 +32,8 @@ impl SkillSource {
     pub fn default_trust_state(self) -> SkillTrustState {
         match self {
             Self::Builtin => SkillTrustState::TrustedByBinary,
-            Self::Workspace | Self::User | Self::ThirdParty => SkillTrustState::Unsupported,
+            Self::Workspace => SkillTrustState::Unknown,
+            Self::User | Self::ThirdParty => SkillTrustState::Unsupported,
         }
     }
 }
@@ -44,7 +53,11 @@ impl RegisteredSkill {
     }
 
     pub fn permits_context_injection(&self) -> bool {
-        self.trust.permits_context_injection() && self.harness.is_trusted_source()
+        matches!(
+            (self.trust, self.harness.source),
+            (SkillTrustState::TrustedByBinary, SkillSource::Builtin)
+                | (SkillTrustState::TrustedLocal, SkillSource::Workspace)
+        )
     }
 }
 
@@ -333,16 +346,18 @@ mod tests {
     }
 
     #[test]
-    fn non_builtin_sources_default_to_unsupported() {
+    fn non_builtin_sources_default_to_non_injectable_states() {
         assert_eq!(
             SkillSource::Workspace.default_trust_state(),
-            SkillTrustState::Unsupported
+            SkillTrustState::Unknown
         );
         assert_eq!(
             SkillSource::ThirdParty.default_trust_state(),
             SkillTrustState::Unsupported
         );
+        assert!(!SkillTrustState::Unknown.permits_context_injection());
         assert!(!SkillTrustState::Unsupported.permits_context_injection());
+        assert!(SkillTrustState::TrustedLocal.permits_context_injection());
     }
 
     #[test]

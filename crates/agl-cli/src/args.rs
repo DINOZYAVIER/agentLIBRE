@@ -20,8 +20,10 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Repo(RepoCommand),
+    Skill(SkillCommand),
+    DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
-    Status(StatusOptions),
     Infer(RunOptions),
     Chat(RunOptions),
 }
@@ -30,6 +32,85 @@ pub(crate) enum CliCommand {
 pub(crate) enum ConfigCommand {
     Paths,
     Init { force: bool },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RepoCommand {
+    Init(RepoInitOptions),
+    Status(RepoStatusOptions),
+    InstallHooks(RepoHooksOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SkillCommand {
+    List(SkillListOptions),
+    Inspect(SkillInspectOptions),
+    Status(SkillStatusOptions),
+    Verify(SkillVerifyOptions),
+    Lock(SkillLockOptions),
+    Trust(SkillTrustOptions),
+    Revoke(SkillRevokeOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoInitOptions {
+    pub(crate) profile: String,
+    pub(crate) dry_run: bool,
+    pub(crate) force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoStatusOptions {
+    pub(crate) json: bool,
+    pub(crate) component: Option<String>,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoHooksOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillListOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillInspectOptions {
+    pub(crate) name: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillStatusOptions {
+    pub(crate) json: bool,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillVerifyOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillLockOptions {
+    pub(crate) json: bool,
+    pub(crate) dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillTrustOptions {
+    pub(crate) name: String,
+    pub(crate) json: bool,
+    pub(crate) yes: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillRevokeOptions {
+    pub(crate) name: String,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,7 +141,7 @@ pub(crate) struct ServeOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StatusOptions {
+pub(crate) struct DaemonStatusOptions {
     pub(crate) socket_path: Option<PathBuf>,
 }
 
@@ -131,6 +212,8 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Initialize the repo-local AgentLIBRE workspace.
+    Init(RepoInitArgs),
     /// Retired internal command name.
     #[command(hide = true, disable_help_flag = true)]
     Infer(ReservedCommandArgs),
@@ -142,8 +225,27 @@ enum Commands {
     Chat(ChatArgs),
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),
-    /// Report local agent runtime daemon status.
-    Status(StatusArgs),
+    /// Report repo-local AgentLIBRE workspace status.
+    Status(RepoStatusArgs),
+    /// Inspect and verify AgentLIBRE skills.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+    /// Install AgentLIBRE git hooks for this repository.
+    InstallHooks(RepoHooksArgs),
+    /// Advanced repo workspace commands.
+    #[command(hide = true)]
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommands,
+    },
+    /// Advanced daemon commands.
+    #[command(hide = true)]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
     /// Planned public setup command.
     #[command(hide = true)]
     Setup(ReservedCommandArgs),
@@ -165,6 +267,154 @@ enum ConfigCommands {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoCommands {
+    /// Initialize the repo-local AgentLIBRE workspace.
+    Init(RepoInitArgs),
+    /// Report repo-local AgentLIBRE workspace status.
+    Status(RepoStatusArgs),
+    /// Install AgentLIBRE git hooks for this repository.
+    InstallHooks(RepoHooksArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommands {
+    /// List builtin and workspace skills.
+    List(SkillListArgs),
+    /// Inspect one skill by name.
+    Inspect(SkillInspectArgs),
+    /// Report workspace skill component and lock status.
+    Status(SkillStatusArgs),
+    /// Verify workspace skills and lock state.
+    Verify(SkillVerifyArgs),
+    /// Write or preview .agl/skills.lock.
+    Lock(SkillLockArgs),
+    /// Locally approve a locked workspace skill identity.
+    Trust(SkillTrustArgs),
+    /// Revoke local approval for a workspace skill identity.
+    Revoke(SkillRevokeArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommands {
+    /// Report local agent runtime daemon status.
+    Status(StatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct RepoInitArgs {
+    /// Repo workflow profile to initialize.
+    #[arg(long, default_value = "repo-workflow")]
+    profile: String,
+
+    /// Print planned changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Repair or replace AgentLIBRE-managed files.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepoStatusArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Limit status to one component.
+    #[arg(long, value_name = "NAME")]
+    component: Option<String>,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepoHooksArgs {
+    /// Print planned hook changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Replace AgentLIBRE-managed hooks or overwrite conflicts.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillListArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillInspectArgs {
+    /// Skill name to inspect.
+    #[arg(value_name = "NAME")]
+    name: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillStatusArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillVerifyArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillLockArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Print planned lock changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillTrustArgs {
+    /// Workspace skill name to trust.
+    #[arg(value_name = "NAME")]
+    name: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Approve after reviewing the printed git identity.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillRevokeArgs {
+    /// Workspace skill name to revoke.
+    #[arg(value_name = "NAME")]
+    name: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -286,15 +536,34 @@ impl Cli {
                 ConfigCommands::Paths => ConfigCommand::Paths,
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
+            Some(Commands::Init(args)) => {
+                CliCommand::Repo(RepoCommand::Init(repo_init_options(args)))
+            }
             Some(Commands::Infer(args)) => retired_infer_command(args.args)?,
             Some(Commands::Run(args) | Commands::Generate(args)) => {
                 CliCommand::Infer(run_options_from_args(args)?)
             }
             Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
-            Some(Commands::Status(args)) => CliCommand::Status(StatusOptions {
-                socket_path: args.socket,
+            Some(Commands::Status(args)) => {
+                CliCommand::Repo(RepoCommand::Status(repo_status_options(args)))
+            }
+            Some(Commands::Skill { command }) => CliCommand::Skill(skill_command(command)),
+            Some(Commands::InstallHooks(args)) => {
+                CliCommand::Repo(RepoCommand::InstallHooks(repo_hooks_options(args)))
+            }
+            Some(Commands::Repo { command }) => CliCommand::Repo(match command {
+                RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)),
+                RepoCommands::Status(args) => RepoCommand::Status(repo_status_options(args)),
+                RepoCommands::InstallHooks(args) => {
+                    RepoCommand::InstallHooks(repo_hooks_options(args))
+                }
             }),
+            Some(Commands::Daemon { command }) => match command {
+                DaemonCommands::Status(args) => CliCommand::DaemonStatus(DaemonStatusOptions {
+                    socket_path: args.socket,
+                }),
+            },
             Some(Commands::Setup(args)) => unavailable_command("setup", args.args)?,
             Some(Commands::Doctor(args)) => unavailable_command("doctor", args.args)?,
             Some(Commands::Model(args)) => unavailable_command("model", args.args)?,
@@ -308,6 +577,57 @@ impl Cli {
             command,
             home: self.home,
         })
+    }
+}
+
+fn repo_init_options(args: RepoInitArgs) -> RepoInitOptions {
+    RepoInitOptions {
+        profile: args.profile,
+        dry_run: args.dry_run,
+        force: args.force,
+    }
+}
+
+fn repo_status_options(args: RepoStatusArgs) -> RepoStatusOptions {
+    RepoStatusOptions {
+        json: args.json,
+        component: args.component,
+        strict: args.strict,
+    }
+}
+
+fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
+    RepoHooksOptions {
+        dry_run: args.dry_run,
+        force: args.force,
+    }
+}
+
+fn skill_command(command: SkillCommands) -> SkillCommand {
+    match command {
+        SkillCommands::List(args) => SkillCommand::List(SkillListOptions { json: args.json }),
+        SkillCommands::Inspect(args) => SkillCommand::Inspect(SkillInspectOptions {
+            name: args.name,
+            json: args.json,
+        }),
+        SkillCommands::Status(args) => SkillCommand::Status(SkillStatusOptions {
+            json: args.json,
+            strict: args.strict,
+        }),
+        SkillCommands::Verify(args) => SkillCommand::Verify(SkillVerifyOptions { json: args.json }),
+        SkillCommands::Lock(args) => SkillCommand::Lock(SkillLockOptions {
+            json: args.json,
+            dry_run: args.dry_run,
+        }),
+        SkillCommands::Trust(args) => SkillCommand::Trust(SkillTrustOptions {
+            name: args.name,
+            json: args.json,
+            yes: args.yes,
+        }),
+        SkillCommands::Revoke(args) => SkillCommand::Revoke(SkillRevokeOptions {
+            name: args.name,
+            json: args.json,
+        }),
     }
 }
 
@@ -483,6 +803,8 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Initialize the repo-local AgentLIBRE workspace.
+    Init(RepoInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
     /// Alias for `run`.
@@ -491,8 +813,15 @@ enum PublicCompletionCommands {
     Chat(ChatArgs),
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),
-    /// Report local agent runtime daemon status.
-    Status(StatusArgs),
+    /// Report repo-local AgentLIBRE workspace status.
+    Status(RepoStatusArgs),
+    /// Inspect and verify AgentLIBRE skills.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+    /// Install AgentLIBRE git hooks for this repository.
+    InstallHooks(RepoHooksArgs),
 }
 
 #[cfg(test)]
@@ -641,12 +970,136 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_command_with_socket_override() {
-        let command = parse_command(["agl", "status", "--socket", "/tmp/agl.sock"]);
+    fn parse_init_command() {
+        let command = parse_command(["agl", "init", "--dry-run"]);
 
         assert_eq!(
             command,
-            CliCommand::Status(StatusOptions {
+            CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+                profile: "repo-workflow".to_string(),
+                dry_run: true,
+                force: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_repo_init_hidden_alias() {
+        let command = parse_command(["agl", "repo", "init", "--force"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+                profile: "repo-workflow".to_string(),
+                dry_run: false,
+                force: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_status_command_with_repo_options() {
+        let command = parse_command([
+            "agl",
+            "status",
+            "--json",
+            "--component",
+            "skills",
+            "--strict",
+        ]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
+                json: true,
+                component: Some("skills".to_string()),
+                strict: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_repo_status_hidden_alias() {
+        let command = parse_command(["agl", "repo", "status", "--json"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
+                json: true,
+                component: None,
+                strict: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_install_hooks_command() {
+        let command = parse_command(["agl", "install-hooks", "--dry-run"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::InstallHooks(RepoHooksOptions {
+                dry_run: true,
+                force: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_skill_commands() {
+        assert_eq!(
+            parse_command(["agl", "skill", "list", "--json"]),
+            CliCommand::Skill(SkillCommand::List(SkillListOptions { json: true }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "inspect", "repo-change", "--json"]),
+            CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
+                name: "repo-change".to_string(),
+                json: true,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "status", "--strict"]),
+            CliCommand::Skill(SkillCommand::Status(SkillStatusOptions {
+                json: false,
+                strict: true,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "verify", "--json"]),
+            CliCommand::Skill(SkillCommand::Verify(SkillVerifyOptions { json: true }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "lock", "--dry-run"]),
+            CliCommand::Skill(SkillCommand::Lock(SkillLockOptions {
+                json: false,
+                dry_run: true,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "trust", "repo-change", "--yes"]),
+            CliCommand::Skill(SkillCommand::Trust(SkillTrustOptions {
+                name: "repo-change".to_string(),
+                json: false,
+                yes: true,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "revoke", "repo-change", "--json"]),
+            CliCommand::Skill(SkillCommand::Revoke(SkillRevokeOptions {
+                name: "repo-change".to_string(),
+                json: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_daemon_status_command_with_socket_override() {
+        let command = parse_command(["agl", "daemon", "status", "--socket", "/tmp/agl.sock"]);
+
+        assert_eq!(
+            command,
+            CliCommand::DaemonStatus(DaemonStatusOptions {
                 socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             })
         );
