@@ -1,0 +1,42 @@
+version = 1
+name = "agl/repo-workflow"
+pack_version = "0.1.0"
+profile = "repo-workflow"
+agentlibre_version = ">=1.0.0-alpha.7"
+
+[submodule]
+path = ".agl/skills"
+url = "git@github.com:agentlibre/agl-skills.git"
+rev = "v0.1.0"
+
+[[skills]]
+name = "repo-change"
+path = "agl/repo-change"
+
+[[skills]]
+name = "repo-commit"
+path = "agl/repo-commit"
+
+[[skills]]
+name = "repo-review-pack"
+path = "agl/repo-review-pack"
+
+[[skills]]
+name = "repo-rust"
+path = "agl/repo-rust"
+
+[[skills]]
+name = "repo-security-review"
+path = "agl/repo-security-review"
+
+[[skills]]
+name = "repo-skill-author"
+path = "agl/repo-skill-author"
+
+[[skills]]
+name = "repo-task-spec"
+path = "agl/repo-task-spec"
+
+[[skills]]
+name = "repo-test-triage"
+path = "agl/repo-test-triage"
