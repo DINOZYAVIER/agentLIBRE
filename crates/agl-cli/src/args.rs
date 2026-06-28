@@ -81,6 +81,7 @@ pub(crate) struct SkillListOptions {
 pub(crate) struct SkillInspectOptions {
     pub(crate) name: String,
     pub(crate) json: bool,
+    pub(crate) runtime: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -360,6 +361,10 @@ struct SkillInspectArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+
+    /// Require the skill to be injectable by the runtime now.
+    #[arg(long)]
+    runtime: bool,
 }
 
 #[derive(Debug, Args)]
@@ -443,7 +448,7 @@ struct CommonRunArgs {
     #[arg(long, value_enum, default_value_t = ToolAccessMode::ReadOnly)]
     tool_mode: ToolAccessMode,
 
-    /// Builtin skill id to inject for this turn/session.
+    /// Builtin or trusted workspace skill id to inject for this turn/session.
     #[arg(long = "skill", value_name = "ID")]
     skills: Vec<String>,
 }
@@ -609,6 +614,7 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
         SkillCommands::Inspect(args) => SkillCommand::Inspect(SkillInspectOptions {
             name: args.name,
             json: args.json,
+            runtime: args.runtime,
         }),
         SkillCommands::Status(args) => SkillCommand::Status(SkillStatusOptions {
             json: args.json,
@@ -1056,6 +1062,15 @@ mod tests {
             CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
                 name: "repo-change".to_string(),
                 json: true,
+                runtime: false,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "skill", "inspect", "repo-change", "--runtime"]),
+            CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
+                name: "repo-change".to_string(),
+                json: false,
+                runtime: true,
             }))
         );
         assert_eq!(

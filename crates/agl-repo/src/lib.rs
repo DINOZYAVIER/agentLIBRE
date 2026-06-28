@@ -157,6 +157,8 @@ pub enum HookInstallAction {
     AlreadyManaged,
     WouldReplaceManaged,
     ReplacedManaged,
+    WouldReplaceUnmanaged,
+    ReplacedUnmanaged,
     Conflict,
 }
 
@@ -360,7 +362,21 @@ pub fn install_repo_hooks(
     let mut hooks = Vec::new();
     let mut errors = Vec::new();
     for hook in ["pre-commit", "pre-push"] {
-        hooks.push(install_hook(&hooks_dir, hook, options, &mut errors)?);
+        let status = plan_hook_install(&hooks_dir, hook, options)?;
+        if status.action == HookInstallAction::Conflict {
+            errors.push(format!("hook_conflict: {}", status.path.display()));
+        }
+        hooks.push(status);
+    }
+
+    if !errors.is_empty() {
+        for status in &mut hooks {
+            status.action = dry_run_hook_action(status.action);
+        }
+    } else if !options.dry_run {
+        for status in &mut hooks {
+            apply_hook_install(&hooks_dir, status)?;
+        }
     }
 
     Ok(HookInstallReport {
@@ -791,20 +807,17 @@ fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn install_hook(
+fn plan_hook_install(
     hooks_dir: &Path,
     hook: &str,
     options: &RepoHooksOptions,
-    errors: &mut Vec<String>,
 ) -> Result<HookInstallStatus> {
     let path = hooks_dir.join(hook);
-    let content = hook_content(hook);
 
     if path.exists() {
         let existing = fs::read_to_string(&path).unwrap_or_default();
         let managed = existing.contains(MANAGED_HOOK_MARKER);
         if !managed && !options.force {
-            errors.push(format!("hook_conflict: {}", path.display()));
             return Ok(HookInstallStatus {
                 hook: hook.to_string(),
                 path,
@@ -822,18 +835,21 @@ fn install_hook(
             return Ok(HookInstallStatus {
                 hook: hook.to_string(),
                 path,
-                action: HookInstallAction::WouldReplaceManaged,
+                action: if managed {
+                    HookInstallAction::WouldReplaceManaged
+                } else {
+                    HookInstallAction::WouldReplaceUnmanaged
+                },
             });
         }
-        fs::create_dir_all(hooks_dir)
-            .with_context(|| format!("failed to create hooks directory {}", hooks_dir.display()))?;
-        fs::write(&path, content)
-            .with_context(|| format!("failed to write hook {}", path.display()))?;
-        make_executable(&path)?;
         return Ok(HookInstallStatus {
             hook: hook.to_string(),
             path,
-            action: HookInstallAction::ReplacedManaged,
+            action: if managed {
+                HookInstallAction::ReplacedManaged
+            } else {
+                HookInstallAction::ReplacedUnmanaged
+            },
         });
     }
 
@@ -844,11 +860,6 @@ fn install_hook(
             action: HookInstallAction::WouldInstall,
         });
     }
-    fs::create_dir_all(hooks_dir)
-        .with_context(|| format!("failed to create hooks directory {}", hooks_dir.display()))?;
-    fs::write(&path, content)
-        .with_context(|| format!("failed to write hook {}", path.display()))?;
-    make_executable(&path)?;
     Ok(HookInstallStatus {
         hook: hook.to_string(),
         path,
@@ -856,13 +867,42 @@ fn install_hook(
     })
 }
 
+fn apply_hook_install(hooks_dir: &Path, status: &mut HookInstallStatus) -> Result<()> {
+    if matches!(
+        status.action,
+        HookInstallAction::AlreadyManaged | HookInstallAction::Conflict
+    ) {
+        return Ok(());
+    }
+    let content = hook_content(&status.hook);
+    fs::create_dir_all(hooks_dir)
+        .with_context(|| format!("failed to create hooks directory {}", hooks_dir.display()))?;
+    fs::write(&status.path, content)
+        .with_context(|| format!("failed to write hook {}", status.path.display()))?;
+    make_executable(&status.path)
+}
+
+fn dry_run_hook_action(action: HookInstallAction) -> HookInstallAction {
+    match action {
+        HookInstallAction::Installed => HookInstallAction::WouldInstall,
+        HookInstallAction::ReplacedManaged => HookInstallAction::WouldReplaceManaged,
+        HookInstallAction::ReplacedUnmanaged => HookInstallAction::WouldReplaceUnmanaged,
+        other => other,
+    }
+}
+
 fn hook_content(hook: &str) -> String {
     format!(
         r#"#!/bin/sh
 # {MANAGED_HOOK_MARKER}: {hook}
 set -eu
-agl status --strict
-agl skill verify
+AGL_BIN="${{AGL_BIN:-agl}}"
+if ! command -v "$AGL_BIN" >/dev/null 2>&1; then
+  echo "agentLIBRE hook error: $AGL_BIN not found on PATH; install agl or set AGL_BIN." >&2
+  exit 127
+fi
+"$AGL_BIN" status --strict
+"$AGL_BIN" skill verify
 "#
     )
 }
@@ -1018,13 +1058,62 @@ mod tests {
         .unwrap();
 
         assert!(report.has_errors());
+        assert_eq!(
+            report.hooks[0].action,
+            HookInstallAction::Conflict,
+            "pre-commit should report conflict"
+        );
+        assert_eq!(
+            report.hooks[1].action,
+            HookInstallAction::WouldInstall,
+            "pre-push should be planned but not written when another hook conflicts"
+        );
         assert!(
             report
                 .errors
                 .iter()
                 .any(|error| error.contains("hook_conflict"))
         );
+        assert!(
+            !hooks.join("pre-push").exists(),
+            "hook install must be atomic when conflicts are present"
+        );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn install_hooks_labels_unmanaged_force_replacement() {
+        let root = temp_root("hooks-force-unmanaged");
+        let hooks = root.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 0\n").unwrap();
+
+        let report = install_repo_hooks(
+            &root,
+            &RepoHooksOptions {
+                dry_run: true,
+                force: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!report.has_errors());
+        assert_eq!(
+            report.hooks[0].action,
+            HookInstallAction::WouldReplaceUnmanaged
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_hook_checks_agl_binary_before_running() {
+        let content = hook_content("pre-commit");
+
+        assert!(content.contains("command -v \"$AGL_BIN\""));
+        assert!(content.contains("agentLIBRE hook error"));
+        assert!(content.contains("\"$AGL_BIN\" status --strict"));
+        assert!(content.contains("\"$AGL_BIN\" skill verify"));
     }
 }
