@@ -8,7 +8,7 @@ use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, Inferen
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_skills::{SkillContextEvidence, build_verified_context_bundle};
+use agl_skills::{SkillContextEvidence, build_verified_context_bundle, trusted_workspace_registry};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -67,6 +67,7 @@ impl InferenceSession {
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
+        let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let tool_mode = options.tool_mode;
         let skill_context = resolve_skill_context(
             &config.prompt.skills,
@@ -74,6 +75,8 @@ impl InferenceSession {
             tool_mode,
             &artifact_root,
             &run_id,
+            &workspace_root,
+            &runtime.paths.state_dir.join("skill-trust.toml"),
         )?;
         let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
@@ -261,10 +264,12 @@ fn resolve_skill_context(
     tool_mode: ToolAccessMode,
     artifact_root: &std::path::Path,
     run_id: &InferenceRunId,
+    workspace_root: &std::path::Path,
+    trust_store_path: &std::path::Path,
 ) -> Result<ResolvedSkillContext> {
     let selected_skills = selected_skill_ids(config_skills, option_skills)?;
-    let skill_registry =
-        agl_skills::builtin_registry().context("failed to load builtin skill registry")?;
+    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
+        .context("failed to load skill registry")?;
     let mut tool_catalog = ToolCatalog::new();
     agl_tools::guards::register(&mut tool_catalog)
         .context("failed to register builtin core guard provider")?;
