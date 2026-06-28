@@ -1,0 +1,10 @@
+[package]
+name = "agl-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-runtime.workspace = true
+rusqlite.workspace = true

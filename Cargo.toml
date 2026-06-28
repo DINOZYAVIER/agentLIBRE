@@ -19,6 +19,7 @@ members = [
     "crates/agl-events",
     "crates/agl-actions",
     "crates/agl-runtime",
+    "crates/agl-store",
     "crates/agl-matrix-bridge",
 ]
 resolver = "3"
@@ -48,6 +49,7 @@ agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }
 agl-session = { path = "crates/agl-session" }
 agl-skills = { path = "crates/agl-skills" }
+agl-store = { path = "crates/agl-store" }
 aes-gcm = "0.10"
 anyhow = "1.0"
 base64 = "0.22"
@@ -57,6 +59,7 @@ directories = "6"
 futures-util = "0.3"
 matrix-sdk = { version = "=0.14.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption", "rustls-tls"] }
 pbkdf2 = "0.12"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"

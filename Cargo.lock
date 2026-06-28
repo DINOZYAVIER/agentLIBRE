@@ -271,6 +271,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-store"
+version = "1.0.0-alpha.7"
+dependencies = [
+ "agl-runtime",
+ "rusqlite",
+]
+
+[[package]]
 name = "agl-tools"
 version = "1.0.0-alpha.7"
 dependencies = [
