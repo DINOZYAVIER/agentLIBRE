@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::layer::SubscriberExt;
@@ -51,14 +53,13 @@ pub fn init_tracing(
         let log_dir = paths.state_dir.join("logs");
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
-        let app_appender = tracing_appender::rolling::never(&log_dir, "agentLIBRE.log");
-        let (app_writer, app_guard) = tracing_appender::non_blocking(app_appender);
+        let app_log = open_log_file(&paths.app_log_path())?;
+        let (app_writer, app_guard) = tracing_appender::non_blocking(app_log);
         guards.push(app_guard);
         layers.push(format_layer(config.format, app_writer).with_filter_boxed(log_filter(config)));
 
-        let inference_appender = tracing_appender::rolling::never(&log_dir, "inference.log");
-        let (inference_writer, inference_guard) =
-            tracing_appender::non_blocking(inference_appender);
+        let inference_log = open_log_file(&paths.inference_log_path())?;
+        let (inference_writer, inference_guard) = tracing_appender::non_blocking(inference_log);
         guards.push(inference_guard);
         let inference_filter =
             Targets::new().with_target("agentlibre::inference", LevelFilter::TRACE);
@@ -79,6 +80,14 @@ pub fn init_tracing(
         .context("failed to initialize tracing subscriber")?;
 
     Ok(TracingGuards { _guards: guards })
+}
+
+fn open_log_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open log file {}", path.display()))
 }
 
 fn stderr_logs_enabled(mode: AgentLibreStderrLogMode, process_mode: AgentLibreProcessMode) -> bool {
@@ -173,6 +182,32 @@ mod tests {
             AgentLibreStderrLogMode::Always,
             AgentLibreProcessMode::Batch
         ));
+    }
+
+    #[test]
+    fn file_logging_returns_error_for_invalid_log_directory() {
+        let root =
+            std::env::temp_dir().join(format!("agl-runtime-bad-log-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = AgentLibrePaths::from_agl_home(&root);
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(paths.state_dir.join("logs"), "not a directory").unwrap();
+        let config = AgentLibreLoggingConfig {
+            stderr: AgentLibreStderrLogMode::Never,
+            ..AgentLibreLoggingConfig::default()
+        };
+
+        let err = match init_tracing(&paths, &config, AgentLibreProcessMode::Batch) {
+            Ok(_) => panic!("file logging should reject invalid log directory"),
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
+
+        assert!(
+            message.contains("failed to create log directory"),
+            "unexpected error: {message}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

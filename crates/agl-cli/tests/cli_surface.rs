@@ -121,6 +121,36 @@ fn status_without_workspace_manifest_points_to_init() {
 }
 
 #[test]
+fn logging_init_failure_warns_without_panicking() {
+    let repo = TempRepo::new("bad-log-directory");
+    let home = TempHome::new("bad-log-directory");
+    let state_dir = home.path().join("state");
+    fs::create_dir_all(&state_dir)
+        .unwrap_or_else(|err| panic!("failed to create state dir {}: {err}", state_dir.display()));
+    fs::write(state_dir.join("logs"), "not a directory").unwrap_or_else(|err| {
+        panic!(
+            "failed to create invalid logs path in {}: {err}",
+            state_dir.display()
+        )
+    });
+    let home_arg = home.path_string();
+
+    let output = run_agl_in(repo.path(), &["--home", &home_arg, "status"]);
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=invalid");
+    assert_contains(&stdout, "error=workspace_manifest_missing");
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "warning: failed to initialize logging");
+    assert_contains(&stderr, "failed to create log directory");
+    assert!(
+        !stderr.contains("panicked at"),
+        "logging fallback should not panic:\n{stderr}"
+    );
+}
+
+#[test]
 fn init_and_repo_init_dry_run_are_equivalent() {
     let repo = TempRepo::new("init-dry-run");
     let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
