@@ -321,6 +321,10 @@ fn run_skill_inspect(
     if builtins.is_empty() && workspace_skills.is_empty() {
         bail!("skill not found: {}", options.name);
     }
+    let runtime_usable = builtins
+        .iter()
+        .any(|skill| skill.permits_context_injection())
+        || workspace_skills.iter().any(|skill| skill.usable);
 
     if options.json {
         let builtins = builtins
@@ -361,6 +365,10 @@ fn run_skill_inspect(
         for skill in workspace_skills {
             print_workspace_skill_status(skill);
         }
+    }
+
+    if options.runtime && !runtime_usable {
+        bail!("skill is not runtime usable: {}", options.name);
     }
 
     Ok(())
