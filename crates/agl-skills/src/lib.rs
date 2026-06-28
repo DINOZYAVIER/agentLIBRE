@@ -1,5 +1,6 @@
 mod context;
 mod manifest;
+mod pack;
 mod registry;
 mod workspace;
 
@@ -9,6 +10,9 @@ pub use context::{
 };
 pub use manifest::{
     SkillHarness, SkillManifestError, SkillReference, SkillReferencePolicy, SkillSource,
+};
+pub use pack::{
+    SkillPackEntry, SkillPackManifest, SkillPackSubmodule, ValidatedSkillPack, validate_skill_pack,
 };
 pub use registry::{
     RegisteredSkill, SkillRegistry, SkillRegistryError, SkillTrustState, builtin_registry,
