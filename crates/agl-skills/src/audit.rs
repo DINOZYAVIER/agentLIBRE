@@ -47,12 +47,26 @@ struct AuditSkill {
     pack: String,
     classification: String,
     allowed_tools: Vec<ToolId>,
+    requestable_tools: Vec<ToolId>,
+    denied_tools: Vec<ToolId>,
+    permission_request_templates: Vec<AuditPermissionRequestTemplate>,
     required_hooks: Vec<HookId>,
     state_effects: Vec<ToolStateEffect>,
     memory_read_scopes: Vec<String>,
     notes_read: bool,
     notes_write: bool,
     risks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuditPermissionRequestTemplate {
+    id: String,
+    tools: Vec<ToolId>,
+    max_operation_kind: Option<ToolOperationKind>,
+    state_effects: Vec<ToolStateEffect>,
+    default_duration: String,
+    reason_template: String,
 }
 
 #[test]
@@ -132,6 +146,78 @@ fn tool_lens_audit_fixture_covers_builtin_skills() {
             "{}",
             skill.id
         );
+        assert_eq!(
+            expected
+                .requestable_tools
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            skill
+                .requestable_tools
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            "{}",
+            skill.id
+        );
+        assert_eq!(
+            expected
+                .denied_tools
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            skill.denied_tools.iter().cloned().collect::<BTreeSet<_>>(),
+            "{}",
+            skill.id
+        );
+        assert_eq!(
+            expected
+                .permission_request_templates
+                .iter()
+                .map(|template| template.id.as_str())
+                .collect::<Vec<_>>(),
+            skill
+                .permission_request_templates
+                .iter()
+                .map(|template| template.id.as_str())
+                .collect::<Vec<_>>(),
+            "{}",
+            skill.id
+        );
+        for expected_template in &expected.permission_request_templates {
+            let actual = skill
+                .permission_request_templates
+                .iter()
+                .find(|template| template.id == expected_template.id)
+                .unwrap_or_else(|| {
+                    panic!("{} missing template {}", skill.id, expected_template.id)
+                });
+            assert_eq!(
+                expected_template.tools, actual.tools,
+                "{}:{}",
+                skill.id, actual.id
+            );
+            assert_eq!(
+                expected_template.max_operation_kind, actual.max_operation_kind,
+                "{}:{}",
+                skill.id, actual.id
+            );
+            assert_eq!(
+                expected_template.state_effects, actual.state_effects,
+                "{}:{}",
+                skill.id, actual.id
+            );
+            assert_eq!(
+                expected_template.default_duration, actual.default_duration,
+                "{}:{}",
+                skill.id, actual.id
+            );
+            assert_eq!(
+                expected_template.reason_template, actual.reason_template,
+                "{}:{}",
+                skill.id, actual.id
+            );
+        }
         assert_eq!(
             expected
                 .required_hooks

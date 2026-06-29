@@ -11,6 +11,8 @@ allowed_tools:
   - fs.read
   - fs.search
   - memory.suggest
+denied_tools:
+  - memory.approve
 context_budget_tokens: 1536
 references:
   include: []

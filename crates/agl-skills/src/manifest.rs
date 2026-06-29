@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use agl_assets::{BuiltinAsset, BuiltinSkill};
-use agl_tools::{HookId, SkillId, ToolId};
+use agl_tools::{HookId, SkillId, ToolId, ToolOperationKind, ToolStateEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -50,6 +50,9 @@ pub struct SkillHarness {
     pub pack: String,
     pub required_hooks: Vec<HookId>,
     pub allowed_tools: Vec<ToolId>,
+    pub requestable_tools: Vec<ToolId>,
+    pub denied_tools: Vec<ToolId>,
+    pub permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     pub permissions: SkillPermissions,
     pub context_budget_tokens: u32,
     pub reference_policy: SkillReferencePolicy,
@@ -108,6 +111,19 @@ impl SkillHarness {
     pub fn is_trusted_source(&self) -> bool {
         self.source == SkillSource::Builtin
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillPermissionRequestTemplate {
+    pub id: String,
+    pub tools: Vec<ToolId>,
+    #[serde(default)]
+    pub max_operation_kind: Option<ToolOperationKind>,
+    #[serde(default)]
+    pub state_effects: Vec<ToolStateEffect>,
+    pub default_duration: String,
+    pub reason_template: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -176,6 +192,12 @@ struct RawSkillManifest {
     required_hooks: Vec<HookId>,
     allowed_tools: Vec<ToolId>,
     #[serde(default)]
+    requestable_tools: Vec<ToolId>,
+    #[serde(default)]
+    denied_tools: Vec<ToolId>,
+    #[serde(default, alias = "permission_requests")]
+    permission_request_templates: Vec<SkillPermissionRequestTemplate>,
+    #[serde(default)]
     permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
@@ -216,6 +238,15 @@ pub enum SkillManifestError {
     DuplicateValue {
         field: &'static str,
         value: String,
+    },
+    ConflictingToolRouting {
+        tool: String,
+        first_field: &'static str,
+        second_field: &'static str,
+    },
+    TemplateToolNotRequestable {
+        template_id: String,
+        tool: String,
     },
     InvalidReferencePath {
         path: String,
@@ -276,6 +307,18 @@ impl std::fmt::Display for SkillManifestError {
                     "skill manifest field `{field}` has duplicate value `{value}`"
                 )
             }
+            Self::ConflictingToolRouting {
+                tool,
+                first_field,
+                second_field,
+            } => write!(
+                f,
+                "skill manifest tool `{tool}` appears in both `{first_field}` and `{second_field}`"
+            ),
+            Self::TemplateToolNotRequestable { template_id, tool } => write!(
+                f,
+                "skill permission request template `{template_id}` references non-requestable tool `{tool}`"
+            ),
             Self::InvalidReferencePath { path } => {
                 write!(f, "skill manifest reference path is invalid: {path}")
             }
@@ -355,6 +398,14 @@ fn parse_skill_text(
     if body.trim().is_empty() {
         return Err(SkillManifestError::EmptyBody);
     }
+    let allowed_tools = sort_unique_ids(raw.allowed_tools, "allowed_tools")?;
+    let requestable_tools = sort_unique_ids(raw.requestable_tools, "requestable_tools")?;
+    let denied_tools = sort_unique_ids(raw.denied_tools, "denied_tools")?;
+    validate_tool_routing(&allowed_tools, &requestable_tools, &denied_tools)?;
+    let permission_request_templates = normalize_permission_request_templates(
+        raw.permission_request_templates,
+        &requestable_tools,
+    )?;
 
     Ok(SkillHarness {
         id: SkillId::new(expected_id).map_err(|err| SkillManifestError::InvalidYaml {
@@ -367,7 +418,10 @@ fn parse_skill_text(
         source: raw.source,
         pack: expected_pack.to_string(),
         required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
-        allowed_tools: sort_unique_ids(raw.allowed_tools, "allowed_tools")?,
+        allowed_tools,
+        requestable_tools,
+        denied_tools,
+        permission_request_templates,
         permissions: normalize_permissions(raw.permissions)?,
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
@@ -405,6 +459,14 @@ fn parse_workspace_text(
     if body.trim().is_empty() {
         return Err(SkillManifestError::EmptyBody);
     }
+    let allowed_tools = sort_unique_ids(raw.allowed_tools, "allowed_tools")?;
+    let requestable_tools = sort_unique_ids(raw.requestable_tools, "requestable_tools")?;
+    let denied_tools = sort_unique_ids(raw.denied_tools, "denied_tools")?;
+    validate_tool_routing(&allowed_tools, &requestable_tools, &denied_tools)?;
+    let permission_request_templates = normalize_permission_request_templates(
+        raw.permission_request_templates,
+        &requestable_tools,
+    )?;
 
     Ok(SkillHarness {
         id: SkillId::new(raw.name.clone()).map_err(|err| SkillManifestError::InvalidYaml {
@@ -417,7 +479,10 @@ fn parse_workspace_text(
         source: raw.source,
         pack: raw.pack,
         required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
-        allowed_tools: sort_unique_ids(raw.allowed_tools, "allowed_tools")?,
+        allowed_tools,
+        requestable_tools,
+        denied_tools,
+        permission_request_templates,
         permissions: normalize_permissions(raw.permissions)?,
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
@@ -480,6 +545,97 @@ fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestErro
         ensure_non_blank("guarantees", guarantee)?;
     }
     Ok(())
+}
+
+fn validate_tool_routing(
+    allowed_tools: &[ToolId],
+    requestable_tools: &[ToolId],
+    denied_tools: &[ToolId],
+) -> Result<(), SkillManifestError> {
+    reject_tool_overlap(
+        allowed_tools,
+        requestable_tools,
+        "allowed_tools",
+        "requestable_tools",
+    )?;
+    reject_tool_overlap(allowed_tools, denied_tools, "allowed_tools", "denied_tools")?;
+    reject_tool_overlap(
+        requestable_tools,
+        denied_tools,
+        "requestable_tools",
+        "denied_tools",
+    )?;
+    Ok(())
+}
+
+fn reject_tool_overlap(
+    first: &[ToolId],
+    second: &[ToolId],
+    first_field: &'static str,
+    second_field: &'static str,
+) -> Result<(), SkillManifestError> {
+    let first = first.iter().collect::<BTreeSet<_>>();
+    for tool in second {
+        if first.contains(tool) {
+            return Err(SkillManifestError::ConflictingToolRouting {
+                tool: tool.as_str().to_string(),
+                first_field,
+                second_field,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_permission_request_templates(
+    templates: Vec<SkillPermissionRequestTemplate>,
+    requestable_tools: &[ToolId],
+) -> Result<Vec<SkillPermissionRequestTemplate>, SkillManifestError> {
+    let requestable = requestable_tools.iter().collect::<BTreeSet<_>>();
+    let mut normalized = Vec::with_capacity(templates.len());
+    let mut seen_ids = BTreeSet::new();
+    for mut template in templates {
+        ensure_non_blank("permission_request_templates.id", &template.id)?;
+        ensure_non_blank(
+            "permission_request_templates.default_duration",
+            &template.default_duration,
+        )?;
+        ensure_non_blank(
+            "permission_request_templates.reason_template",
+            &template.reason_template,
+        )?;
+        if !seen_ids.insert(template.id.clone()) {
+            return Err(SkillManifestError::DuplicateValue {
+                field: "permission_request_templates.id",
+                value: template.id,
+            });
+        }
+        if template.tools.is_empty() {
+            return Err(SkillManifestError::EmptyList {
+                field: "permission_request_templates.tools",
+            });
+        }
+        template.tools = sort_unique_ids(template.tools, "permission_request_templates.tools")?;
+        for tool in &template.tools {
+            if !requestable.contains(tool) {
+                return Err(SkillManifestError::TemplateToolNotRequestable {
+                    template_id: template.id.clone(),
+                    tool: tool.as_str().to_string(),
+                });
+            }
+        }
+        template.state_effects.sort();
+        reject_duplicate_values(
+            template
+                .state_effects
+                .iter()
+                .map(|effect| format!("{effect:?}")),
+            "permission_request_templates.state_effects",
+        )?;
+        normalized.push(template);
+    }
+    normalized.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(normalized)
 }
 
 fn normalize_references(
@@ -688,6 +844,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
         );
+        assert!(skill.requestable_tools.is_empty());
+        assert!(skill.denied_tools.is_empty());
+        assert!(skill.permission_request_templates.is_empty());
         assert_eq!(skill.references[0].path, "references/task-spec-contract.md");
         assert_eq!(skill.tree_sha256.len(), 64);
         assert!(skill.body.contains("task spec"));
@@ -866,6 +1025,159 @@ Body.
         assert_eq!(skill.permissions.memory_read_scopes(), vec!["user", "repo"]);
         assert!(skill.permissions.notes.read);
         assert!(!skill.permissions.notes.write);
+    }
+
+    #[test]
+    fn frontmatter_parses_permission_routing_fields() {
+        let skill = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools:
+  - fs.read
+requestable_tools:
+  - cron.add
+  - matrix.outbox.enqueue
+denied_tools:
+  - matrix.outbox.deliver
+permission_requests:
+  - id: schedule-matrix-cron
+    tools:
+      - matrix.outbox.enqueue
+      - cron.add
+    max_operation_kind: write
+    state_effects:
+      - store_permission_requests
+    default_duration: one_turn
+    reason_template: Schedule a recurring Matrix notification.
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            skill
+                .allowed_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.read"]
+        );
+        assert_eq!(
+            skill
+                .requestable_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cron.add", "matrix.outbox.enqueue"]
+        );
+        assert_eq!(
+            skill
+                .denied_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["matrix.outbox.deliver"]
+        );
+        assert_eq!(skill.permission_request_templates.len(), 1);
+        let template = &skill.permission_request_templates[0];
+        assert_eq!(template.id, "schedule-matrix-cron");
+        assert_eq!(
+            template
+                .tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cron.add", "matrix.outbox.enqueue"]
+        );
+        assert_eq!(template.max_operation_kind, Some(ToolOperationKind::Write));
+    }
+
+    #[test]
+    fn frontmatter_rejects_allowed_requestable_overlap() {
+        let err = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools:
+  - fs.read
+requestable_tools:
+  - fs.read
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillManifestError::ConflictingToolRouting {
+                tool: "fs.read".to_string(),
+                first_field: "allowed_tools",
+                second_field: "requestable_tools",
+            }
+        );
+    }
+
+    #[test]
+    fn frontmatter_rejects_template_tool_outside_requestable_set() {
+        let err = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools: []
+requestable_tools:
+  - cron.add
+permission_request_templates:
+  - id: bad-template
+    tools:
+      - matrix.outbox.enqueue
+    default_duration: one_turn
+    reason_template: Queue a Matrix message.
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillManifestError::TemplateToolNotRequestable {
+                template_id: "bad-template".to_string(),
+                tool: "matrix.outbox.enqueue".to_string(),
+            }
+        );
     }
 
     #[test]
