@@ -155,6 +155,16 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             model_tools: &[],
         },
         RuntimeCapability {
+            id: "permissions",
+            title: "Permissions",
+            summary: "inspect current grants and request exact tool access",
+            read_only_actions: &["status", "request"],
+            write_actions: &["grant", "revoke"],
+            commands: &["agl chat --tool-mode write"],
+            requires: &["agl-store for durable request/grant evidence"],
+            model_tools: &["permissions.status", "permissions.request"],
+        },
+        RuntimeCapability {
             id: "filesystem_tools",
             title: "Filesystem tools",
             summary: "only listed repository fs tools are callable",
@@ -278,9 +288,9 @@ fn render_context(
         content.push_str(".\n");
     }
     if options.tool_mode == "read-only" {
-        content.push_str("Read-only mode: do not offer to schedule, run, send, lock, trust, revoke, or write; explain the CLI/daemon path instead.\n");
+        content.push_str("Read-only mode: do not offer to schedule, run, send, lock, trust, revoke, or write. If permissions.request is listed, request exact tools; otherwise explain the CLI/daemon path.\n");
     }
-    content.push_str("Boundary: capability IDs are not tool names. Do not call cron, matrix, skills, repo, store, memory, notes, or daemon unless that exact name appears in agentlibre_tool_context.\n");
+    content.push_str("Boundary: capability IDs are not tool names. Do not call cron, matrix, skills, repo, store, memory, notes, permissions, or daemon unless that exact name appears in agentlibre_tool_context.\n");
     content.push_str(
         "Policy: capabilities are not permissions; call only model_tools/tool_context.\n",
     );

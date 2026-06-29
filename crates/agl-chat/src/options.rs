@@ -5,6 +5,9 @@ pub enum ToolAccessMode {
     #[default]
     ReadOnly,
     Write,
+    Execute,
+    Approve,
+    Admin,
 }
 
 impl ToolAccessMode {
@@ -12,6 +15,19 @@ impl ToolAccessMode {
         match self {
             Self::ReadOnly => "read-only",
             Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Approve => "approve",
+            Self::Admin => "admin",
+        }
+    }
+
+    pub fn operation_ceiling(self) -> Option<agl_tools::ToolOperationKind> {
+        match self {
+            Self::ReadOnly => None,
+            Self::Write => Some(agl_tools::ToolOperationKind::Write),
+            Self::Execute => Some(agl_tools::ToolOperationKind::Execute),
+            Self::Approve => Some(agl_tools::ToolOperationKind::Approve),
+            Self::Admin => Some(agl_tools::ToolOperationKind::Admin),
         }
     }
 }

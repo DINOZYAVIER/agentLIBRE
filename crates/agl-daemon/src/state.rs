@@ -391,5 +391,8 @@ fn chat_tool_mode(mode: ProtocolToolMode) -> ChatToolMode {
     match mode {
         ProtocolToolMode::ReadOnly => ChatToolMode::ReadOnly,
         ProtocolToolMode::Write => ChatToolMode::Write,
+        ProtocolToolMode::Execute => ChatToolMode::Execute,
+        ProtocolToolMode::Approve => ChatToolMode::Approve,
+        ProtocolToolMode::Admin => ChatToolMode::Admin,
     }
 }

@@ -232,6 +232,9 @@ pub enum ProtocolToolMode {
     #[default]
     ReadOnly,
     Write,
+    Execute,
+    Approve,
+    Admin,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     HookDeclaration, HookId, ToolDeclaration, ToolHandler, ToolId, ToolInput, ToolOutput,
@@ -122,6 +122,7 @@ impl ToolCatalog {
 pub struct ToolRuntime {
     catalog: ToolCatalog,
     handlers: BTreeMap<ToolId, Box<dyn ToolHandler>>,
+    allowed_tools: Option<BTreeSet<ToolId>>,
 }
 
 impl Default for ToolRuntime {
@@ -135,6 +136,7 @@ impl ToolRuntime {
         Self {
             catalog: ToolCatalog::new(),
             handlers: BTreeMap::new(),
+            allowed_tools: None,
         }
     }
 
@@ -163,8 +165,23 @@ impl ToolRuntime {
         Ok(())
     }
 
+    pub fn set_allowed_tools(&mut self, allowed_tools: impl IntoIterator<Item = ToolId>) {
+        self.allowed_tools = Some(allowed_tools.into_iter().collect());
+    }
+
+    pub fn clear_allowed_tools(&mut self) {
+        self.allowed_tools = None;
+    }
+
     pub fn dispatch(&self, input: ToolInput) -> Result<ToolOutput, ToolDispatchError> {
         self.catalog.executable_tool(&input.id)?;
+        if let Some(allowed_tools) = &self.allowed_tools
+            && !allowed_tools.contains(&input.id)
+        {
+            return Err(ToolDispatchError::ToolNotAllowed {
+                id: input.id.as_str().to_string(),
+            });
+        }
         let handler =
             self.handlers
                 .get(&input.id)
@@ -211,6 +228,9 @@ pub enum ToolDispatchError {
         provider_id: String,
         trust: ToolProviderTrust,
     },
+    ToolNotAllowed {
+        id: String,
+    },
     Handler(anyhow::Error),
 }
 
@@ -228,6 +248,9 @@ impl std::fmt::Display for ToolDispatchError {
                 "tool `{tool_id}` provider `{provider_id}` is not trusted for execution: {}",
                 trust.block_reason()
             ),
+            Self::ToolNotAllowed { id } => {
+                write!(f, "tool `{id}` is not allowed in the current session")
+            }
             Self::Handler(err) => write!(f, "{err:#}"),
         }
     }
@@ -381,6 +404,39 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("not trusted"));
+    }
+
+    #[test]
+    fn runtime_rejects_tool_outside_session_allowlist() {
+        let tool_id = ToolId::new("example.echo").unwrap();
+        let declaration = ToolProviderDeclaration::test_fixture(
+            ToolProviderId::new("example-provider").unwrap(),
+            "Example Provider",
+            "1",
+            ToolProviderTrust::TrustedRegistered,
+        )
+        .unwrap()
+        .with_tool(ToolDeclaration::new(
+            tool_id.clone(),
+            "Echo text",
+            ToolCapability::Read,
+            ["text"],
+        ));
+        let mut runtime = ToolRuntime::new();
+        runtime.register_provider(declaration).unwrap();
+        runtime
+            .register_handler(tool_id.clone(), EchoHandler)
+            .unwrap();
+        runtime.set_allowed_tools([ToolId::new("example.other").unwrap()]);
+
+        let err = runtime
+            .dispatch(ToolInput {
+                id: tool_id,
+                arguments: serde_json::json!({ "text": "hello" }),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, ToolDispatchError::ToolNotAllowed { .. }));
     }
 
     #[test]
