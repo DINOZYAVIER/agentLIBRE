@@ -10,6 +10,7 @@ members = [
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-memory",
+    "crates/agl-notes",
     "crates/agl-oven",
     "crates/agl-protocol",
     "crates/agl-repo",
@@ -45,6 +46,7 @@ agl-hooks = { path = "crates/agl-hooks" }
 agl-inference = { path = "crates/agl-inference" }
 agl-loop = { path = "crates/agl-loop" }
 agl-memory = { path = "crates/agl-memory" }
+agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }

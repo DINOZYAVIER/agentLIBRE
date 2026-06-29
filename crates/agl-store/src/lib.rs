@@ -6,7 +6,7 @@ use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -75,6 +75,32 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ON memory_entries(scope_kind, scope_key, deleted_at);
             CREATE VIRTUAL TABLE memory_entries_fts
                 USING fts5(id UNINDEXED, title, body);
+        "#,
+    },
+    StoreMigration {
+        version: 4,
+        name: "004_notes",
+        sql: r#"
+            CREATE TABLE notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX notes_deleted_idx
+                ON notes(deleted_at, updated_at);
+            CREATE TABLE note_links (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                target_ref TEXT NOT NULL,
+                label TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(note_id) REFERENCES notes(id)
+            );
+            CREATE INDEX note_links_note_idx
+                ON note_links(note_id, created_at);
         "#,
     },
 ];
