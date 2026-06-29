@@ -191,22 +191,13 @@ pub struct WorkspaceProfile {
     pub skill_pack: Option<WorkspaceSkillPackIdentity>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceProfilePolicy {
     #[serde(default)]
     pub hooks: WorkspaceHookPolicy,
     #[serde(default)]
     pub trust: WorkspaceTrustPolicy,
-}
-
-impl Default for WorkspaceProfilePolicy {
-    fn default() -> Self {
-        Self {
-            hooks: WorkspaceHookPolicy::default(),
-            trust: WorkspaceTrustPolicy::default(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -225,18 +216,10 @@ impl Default for WorkspaceHookPolicy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceTrustPolicy {
     pub import_local_trust: bool,
-}
-
-impl Default for WorkspaceTrustPolicy {
-    fn default() -> Self {
-        Self {
-            import_local_trust: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -631,12 +614,24 @@ fn profile_from_workspace_manifest(
     manifest: &WorkspaceManifest,
     status: &RepoStatusReport,
 ) -> WorkspaceProfile {
+    let skill_pack = workspace_skill_pack_identity(manifest, status);
+    let mut components = manifest.components.clone();
+    if let Some(identity) = &skill_pack
+        && let Some(component) = components.get_mut(&identity.component)
+    {
+        component.path = identity.path.clone();
+        component.url = identity.url.clone();
+        component.rev = identity.rev.clone();
+        component.commit = identity.commit.clone();
+        component.tree = identity.tree.clone();
+        component.lock = identity.lock.clone();
+    }
     WorkspaceProfile {
         version: manifest.version,
         name: manifest.profile.clone(),
-        components: manifest.components.clone(),
+        components,
         policy: WorkspaceProfilePolicy::default(),
-        skill_pack: workspace_skill_pack_identity(manifest, status),
+        skill_pack,
     }
 }
 
@@ -821,10 +816,50 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
         },
         &mut errors,
     );
+    if let Some(skill_pack) = &profile.skill_pack {
+        match profile.components.get(&skill_pack.component) {
+            Some(component) => validate_skill_pack_matches_component(
+                &mut errors,
+                &skill_pack.component,
+                skill_pack,
+                component,
+            ),
+            None => errors.push(format!(
+                "skill_pack_component_missing: {}",
+                skill_pack.component
+            )),
+        }
+    }
     if !errors.is_empty() {
         bail!("workspace profile is invalid: {}", errors.join(", "));
     }
     Ok(())
+}
+
+fn validate_skill_pack_matches_component(
+    errors: &mut Vec<String>,
+    component_name: &str,
+    skill_pack: &WorkspaceSkillPackIdentity,
+    component: &WorkspaceComponent,
+) {
+    if skill_pack.path != component.path {
+        errors.push(format!("skill_pack.{component_name}.path_mismatch"));
+    }
+    if skill_pack.url != component.url {
+        errors.push(format!("skill_pack.{component_name}.url_mismatch"));
+    }
+    if skill_pack.rev != component.rev {
+        errors.push(format!("skill_pack.{component_name}.rev_mismatch"));
+    }
+    if skill_pack.commit != component.commit {
+        errors.push(format!("skill_pack.{component_name}.commit_mismatch"));
+    }
+    if skill_pack.tree != component.tree {
+        errors.push(format!("skill_pack.{component_name}.tree_mismatch"));
+    }
+    if skill_pack.lock != component.lock {
+        errors.push(format!("skill_pack.{component_name}.lock_mismatch"));
+    }
 }
 
 fn validate_component_path(path: &Path) -> Result<()> {
@@ -1194,6 +1229,33 @@ mod tests {
         assert!(status.success(), "git init failed for {}", root.display());
     }
 
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("git {:?} failed to start: {err}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} failed in {}\nstdout:\n{}\nstderr:\n{}",
+            args,
+            root.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_with_identity(root: &Path, args: &[&str]) {
+        let mut full_args = vec![
+            "-c",
+            "user.name=agl-test",
+            "-c",
+            "user.email=agl-test@example.invalid",
+        ];
+        full_args.extend_from_slice(args);
+        git(root, &full_args);
+    }
+
     #[test]
     fn init_creates_manifest_and_local_component_dirs() {
         let root = temp_root("init");
@@ -1319,11 +1381,11 @@ kind = "ignored"
         assert!(root.join(".agl/state").is_dir());
         assert!(!root.join(".agl/tasks").exists());
         assert!(report.changes.iter().any(|change| {
-            change.path == PathBuf::from(".agl/tasks")
+            change.path == Path::new(".agl/tasks")
                 && change.action == RepoInitAction::DeclaredGitComponent
         }));
         assert!(report.changes.iter().any(|change| {
-            change.path == PathBuf::from(".agl/reviews")
+            change.path == Path::new(".agl/reviews")
                 && change.action == RepoInitAction::DeclaredSubmodule
         }));
 
@@ -1382,6 +1444,108 @@ kind = "ignored"
                 .to_string()
                 .contains("failed to create profile export")
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_profile_round_trips_actual_skills_component_identity() {
+        let root = temp_root("export-profile-actual-skills");
+        let source = temp_root("export-profile-actual-skills-source");
+        fs::remove_dir_all(source.join(".git")).unwrap();
+        init_git_repo(&source);
+        fs::write(source.join("README.md"), "skills\n").unwrap();
+        git(&source, &["add", "."]);
+        git_with_identity(&source, &["commit", "-m", "Add skills"]);
+        let commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
+        let tree = git_output(&source, ["rev-parse", "HEAD^{tree}"]).unwrap();
+
+        init_git_repo(&root);
+        init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+        git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                source.to_str().unwrap(),
+                ".agl/skills",
+            ],
+        );
+
+        let out = root.join("repo-workflow.toml");
+        export_repo_profile(
+            &root,
+            &RepoExportProfileOptions {
+                out: out.clone(),
+                force: false,
+            },
+        )
+        .unwrap();
+        let profile = read_workspace_profile(&out).unwrap();
+        let component = profile.components.get("skills").unwrap();
+        let skill_pack = profile.skill_pack.as_ref().unwrap();
+
+        assert_eq!(component.url.as_deref(), Some(source.to_str().unwrap()));
+        assert_eq!(component.commit.as_deref(), Some(commit.trim()));
+        assert_eq!(component.tree.as_deref(), Some(tree.trim()));
+        assert_eq!(skill_pack.url, component.url);
+        assert_eq!(skill_pack.commit, component.commit);
+        assert_eq!(skill_pack.tree, component.tree);
+
+        let imported = temp_root("export-profile-imported");
+        init_git_repo(&imported);
+        init_repo_workspace(
+            &imported,
+            &RepoInitOptions {
+                profile: DEFAULT_PROFILE.to_string(),
+                profile_file: Some(out),
+                dry_run: false,
+                force: false,
+            },
+        )
+        .unwrap();
+        let imported_manifest = fs::read_to_string(imported.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+        assert!(imported_manifest.contains(source.to_str().unwrap()));
+        assert!(imported_manifest.contains(commit.trim()));
+        assert!(imported_manifest.contains(tree.trim()));
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source).unwrap();
+        fs::remove_dir_all(imported).unwrap();
+    }
+
+    #[test]
+    fn profile_validation_rejects_mismatched_skill_pack_identity() {
+        let root = temp_root("profile-skill-pack-mismatch");
+        let profile_path = root.join("profile.toml");
+        fs::write(
+            &profile_path,
+            r#"
+version = 1
+name = "repo-workflow"
+
+[components.skills]
+path = ".agl/skills"
+kind = "submodule"
+url = "git@example.com:agentlibre/agl-skills.git"
+rev = "v0.1.0"
+lock = ".agl/skills.lock"
+
+[skill_pack]
+component = "skills"
+path = ".agl/skills"
+url = "git@example.com:agentlibre/other-skills.git"
+rev = "v0.1.0"
+lock = ".agl/skills.lock"
+same_ids_when_pinned = true
+"#,
+        )
+        .unwrap();
+
+        let err = read_workspace_profile(&profile_path).unwrap_err();
+        assert!(err.to_string().contains("skill_pack.skills.url_mismatch"));
 
         fs::remove_dir_all(root).unwrap();
     }
