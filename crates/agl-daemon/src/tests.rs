@@ -1,4 +1,5 @@
 use agl_chat::InferenceOptions;
+use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, EVENT_SCHEMA,
     HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode, SessionListEvent, SessionListRequest,
@@ -9,6 +10,7 @@ use agl_runtime::{
     AgentLibreWorkspaceConfig,
 };
 use agl_session::{AgentLibreSessionId, ChatSessionEvent};
+use agl_store::AglStore;
 
 use super::*;
 
@@ -146,4 +148,57 @@ fn daemon_events_keep_current_schema() {
     );
 
     assert_eq!(event.schema, EVENT_SCHEMA);
+}
+
+#[test]
+fn cron_tick_records_due_run_and_notifies_once() {
+    let root = std::env::temp_dir().join(format!("agl-daemon-cron-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = AglStore::open_at(&root).unwrap();
+    let repo = agl_cron::CronRepository::new(&store);
+    let mut draft = CronJobDraft::new(
+        "Store status",
+        CronTargetKind::Builtin,
+        "store-status",
+        "hourly",
+    );
+    draft.notify_ref = Some("matrix-room:!room".to_string());
+    let job = repo.add_job(draft).unwrap();
+    let mut executor = FakeCronExecutor;
+    let mut notifier = FakeCronNotifier::default();
+
+    let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
+    let second = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
+
+    assert_eq!(first.due_jobs, 1);
+    assert_eq!(first.recorded_runs.len(), 1);
+    assert_eq!(first.recorded_runs[0].job_id, job.id);
+    assert_eq!(first.recorded_runs[0].status, CronRunStatus::Succeeded);
+    assert_eq!(first.notifications, 1);
+    assert_eq!(second.recorded_runs[0].id, first.recorded_runs[0].id);
+    assert_eq!(second.notifications, 0);
+    assert_eq!(notifier.notifications.len(), 1);
+    assert_eq!(notifier.notifications[0].notify_ref, "matrix-room:!room");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+struct FakeCronExecutor;
+
+impl CronTargetExecutor for FakeCronExecutor {
+    fn execute(&mut self, job: &CronJob) -> CronExecution {
+        CronExecution::succeeded(format!("fake:{}", job.target_ref))
+    }
+}
+
+#[derive(Default)]
+struct FakeCronNotifier {
+    notifications: Vec<CronNotification>,
+}
+
+impl CronNotifier for FakeCronNotifier {
+    fn notify(&mut self, notification: CronNotification) -> anyhow::Result<()> {
+        self.notifications.push(notification);
+        Ok(())
+    }
 }
