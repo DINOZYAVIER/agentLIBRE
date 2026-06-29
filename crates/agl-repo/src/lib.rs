@@ -45,6 +45,12 @@ pub struct RepoHooksOptions {
     pub force: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoExportProfileOptions {
+    pub out: PathBuf,
+    pub force: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepoInitReport {
     pub workspace_root: PathBuf,
@@ -179,6 +185,84 @@ pub struct WorkspaceProfile {
     pub version: u32,
     pub name: String,
     pub components: BTreeMap<String, WorkspaceComponent>,
+    #[serde(default)]
+    pub policy: WorkspaceProfilePolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_pack: Option<WorkspaceSkillPackIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceProfilePolicy {
+    #[serde(default)]
+    pub hooks: WorkspaceHookPolicy,
+    #[serde(default)]
+    pub trust: WorkspaceTrustPolicy,
+}
+
+impl Default for WorkspaceProfilePolicy {
+    fn default() -> Self {
+        Self {
+            hooks: WorkspaceHookPolicy::default(),
+            trust: WorkspaceTrustPolicy::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceHookPolicy {
+    pub managed: bool,
+    pub install: Vec<String>,
+}
+
+impl Default for WorkspaceHookPolicy {
+    fn default() -> Self {
+        Self {
+            managed: true,
+            install: vec!["pre-commit".to_string(), "pre-push".to_string()],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTrustPolicy {
+    pub import_local_trust: bool,
+}
+
+impl Default for WorkspaceTrustPolicy {
+    fn default() -> Self {
+        Self {
+            import_local_trust: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSkillPackIdentity {
+    pub component: String,
+    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock: Option<PathBuf>,
+    pub same_ids_when_pinned: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepoExportProfileReport {
+    pub workspace_root: PathBuf,
+    pub profile_path: PathBuf,
+    pub wrote: bool,
+    pub profile: WorkspaceProfile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -412,6 +496,57 @@ pub fn install_repo_hooks(
     })
 }
 
+pub fn export_repo_profile(
+    start: impl AsRef<Path>,
+    options: &RepoExportProfileOptions,
+) -> Result<RepoExportProfileReport> {
+    let workspace_root = resolve_repo_root(start)?;
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    let manifest = read_manifest(&manifest_path).with_context(|| {
+        format!(
+            "failed to read workspace manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let status = status_repo_workspace(
+        &workspace_root,
+        &RepoStatusOptions {
+            component: None,
+            strict: false,
+        },
+    )?;
+    let profile = profile_from_workspace_manifest(&manifest, &status);
+    validate_profile(&profile)?;
+
+    let content = toml::to_string_pretty(&profile).context("failed to render workspace profile")?;
+    if let Some(parent) = options.out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    let mut open = fs::OpenOptions::new();
+    open.write(true).create(true);
+    if options.force {
+        open.truncate(true);
+    } else {
+        open.create_new(true);
+    }
+    let mut file = open
+        .open(&options.out)
+        .with_context(|| format!("failed to create profile export {}", options.out.display()))?;
+    use std::io::Write;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write profile export {}", options.out.display()))?;
+
+    Ok(RepoExportProfileReport {
+        workspace_root,
+        profile_path: options.out.clone(),
+        wrote: true,
+        profile,
+    })
+}
+
 fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
     if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;
@@ -490,6 +625,46 @@ fn default_manifest() -> WorkspaceManifest {
             ),
         ]),
     }
+}
+
+fn profile_from_workspace_manifest(
+    manifest: &WorkspaceManifest,
+    status: &RepoStatusReport,
+) -> WorkspaceProfile {
+    WorkspaceProfile {
+        version: manifest.version,
+        name: manifest.profile.clone(),
+        components: manifest.components.clone(),
+        policy: WorkspaceProfilePolicy::default(),
+        skill_pack: workspace_skill_pack_identity(manifest, status),
+    }
+}
+
+fn workspace_skill_pack_identity(
+    manifest: &WorkspaceManifest,
+    status: &RepoStatusReport,
+) -> Option<WorkspaceSkillPackIdentity> {
+    let component = manifest.components.get("skills")?;
+    let component_status = status
+        .components
+        .iter()
+        .find(|status| status.name == "skills");
+    Some(WorkspaceSkillPackIdentity {
+        component: "skills".to_string(),
+        path: component.path.clone(),
+        url: component_status
+            .and_then(|status| status.actual_url.clone())
+            .or_else(|| component.url.clone()),
+        rev: component.rev.clone(),
+        commit: component_status
+            .and_then(|status| status.actual_commit.clone())
+            .or_else(|| component.commit.clone()),
+        tree: component_status
+            .and_then(|status| status.actual_tree.clone())
+            .or_else(|| component.tree.clone()),
+        lock: component.lock.clone(),
+        same_ids_when_pinned: true,
+    })
 }
 
 fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
@@ -633,6 +808,9 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
     }
     if profile.components.is_empty() {
         bail!("workspace profile must define at least one component");
+    }
+    if profile.policy.trust.import_local_trust {
+        bail!("workspace profile must not import local trust");
     }
     let mut errors = Vec::new();
     validate_manifest(
@@ -1148,6 +1326,62 @@ kind = "ignored"
             change.path == PathBuf::from(".agl/reviews")
                 && change.action == RepoInitAction::DeclaredSubmodule
         }));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_profile_writes_policy_and_excludes_local_state() {
+        let root = temp_root("export-profile");
+        init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+        fs::write(
+            root.join(".agl/skill-trust.toml"),
+            "SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".agl/state/cache"),
+            "SECRET_STATE_SHOULD_NOT_EXPORT",
+        )
+        .unwrap();
+        let out = root.join("repo-workflow.toml");
+
+        let report = export_repo_profile(
+            &root,
+            &RepoExportProfileOptions {
+                out: out.clone(),
+                force: false,
+            },
+        )
+        .unwrap();
+        let content = fs::read_to_string(&out).unwrap();
+        let profile = read_workspace_profile(&out).unwrap();
+
+        assert!(report.wrote);
+        assert_eq!(profile.name, DEFAULT_PROFILE);
+        assert!(profile.components.contains_key("skills"));
+        assert!(profile.policy.hooks.managed);
+        assert_eq!(
+            profile.policy.hooks.install,
+            vec!["pre-commit".to_string(), "pre-push".to_string()]
+        );
+        assert!(!profile.policy.trust.import_local_trust);
+        assert!(
+            profile
+                .skill_pack
+                .as_ref()
+                .is_some_and(|identity| identity.same_ids_when_pinned)
+        );
+        assert!(!content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"));
+        assert!(!content.contains("SECRET_STATE_SHOULD_NOT_EXPORT"));
+
+        let overwrite = export_repo_profile(&root, &RepoExportProfileOptions { out, force: false })
+            .unwrap_err();
+        assert!(
+            overwrite
+                .to_string()
+                .contains("failed to create profile export")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
