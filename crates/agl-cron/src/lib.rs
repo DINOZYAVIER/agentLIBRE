@@ -10,6 +10,36 @@ pub type Result<T> = std::result::Result<T, CronError>;
 const DEFAULT_TIMEZONE: &str = "local";
 const IDEMPOTENCY_NAMESPACE: &str = "cron.run";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CronFieldKind {
+    Minute,
+    Hour,
+    DayOfMonth,
+    Month,
+    DayOfWeek,
+}
+
+impl CronFieldKind {
+    fn range(self) -> (u32, u32) {
+        match self {
+            Self::Minute => (0, 59),
+            Self::Hour => (0, 23),
+            Self::DayOfMonth => (1, 31),
+            Self::Month => (1, 12),
+            Self::DayOfWeek => (0, 7),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UtcMinuteFields {
+    minute: u32,
+    hour: u32,
+    day_of_month: u32,
+    month: u32,
+    weekday_sunday_zero: u32,
+}
+
 #[derive(Debug)]
 pub enum CronError {
     InvalidValue {
@@ -426,7 +456,7 @@ pub fn validate_schedule_expr(value: &str) -> Result<()> {
     if parts.len() == 3 && parts[0] == "weekly" && valid_weekday(parts[1]) && valid_time(parts[2]) {
         return Ok(());
     }
-    if parts.len() == 5 && parts.iter().all(|part| valid_cron_field(part)) {
+    if parts.len() == 5 && valid_cron_expression(&parts) {
         return Ok(());
     }
     Err(CronError::InvalidValue {
@@ -518,46 +548,60 @@ fn valid_weekday(value: &str) -> bool {
     matches!(value, "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun")
 }
 
-fn valid_cron_field(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '*' | '/' | ',' | '-'))
+fn valid_cron_expression(parts: &[&str]) -> bool {
+    cron_field_valid(parts[0], CronFieldKind::Minute)
+        && cron_field_valid(parts[1], CronFieldKind::Hour)
+        && cron_field_valid(parts[2], CronFieldKind::DayOfMonth)
+        && cron_field_valid(parts[3], CronFieldKind::Month)
+        && cron_field_valid(parts[4], CronFieldKind::DayOfWeek)
+}
+
+fn cron_field_valid(field: &str, kind: CronFieldKind) -> bool {
+    !field.is_empty()
+        && field
+            .split(',')
+            .all(|part| cron_field_part_bounds(part, kind).is_ok())
 }
 
 fn schedule_matches(expr: &str, unix_seconds: u64) -> Result<bool> {
     let expr = expr.trim();
-    let minute = ((unix_seconds / 60) % 60) as u32;
-    let hour = ((unix_seconds / 3600) % 24) as u32;
-    let day = unix_seconds / 86_400;
-    let weekday = ((day + 3) % 7) as u32;
+    let fields = utc_minute_fields(unix_seconds);
 
     if expr == "hourly" {
-        return Ok(minute == 0);
+        return Ok(fields.minute == 0);
     }
     let parts = expr.split_whitespace().collect::<Vec<_>>();
     if parts.len() == 2 && parts[0] == "daily" {
         let (expected_hour, expected_minute) = parse_time(parts[1])?;
-        return Ok(hour == expected_hour && minute == expected_minute);
+        return Ok(fields.hour == expected_hour && fields.minute == expected_minute);
     }
     if parts.len() == 3 && parts[0] == "weekly" {
         let expected_weekday = parse_weekday(parts[1])?;
         let (expected_hour, expected_minute) = parse_time(parts[2])?;
-        return Ok(weekday == expected_weekday
-            && hour == expected_hour
-            && minute == expected_minute);
+        let weekday_monday_zero = (fields.weekday_sunday_zero + 6) % 7;
+        return Ok(weekday_monday_zero == expected_weekday
+            && fields.hour == expected_hour
+            && fields.minute == expected_minute);
     }
     if parts.len() == 5 {
-        let day_month_weekday_are_any = parts[2] == "*" && parts[3] == "*" && parts[4] == "*";
-        if !day_month_weekday_are_any {
-            return Err(CronError::InvalidValue {
-                field: "schedule_expr",
-                value: expr.to_string(),
-                reason: "daemon scheduler currently supports cron expressions with * day/month/weekday fields",
-            });
-        }
-        return Ok(cron_field_matches(parts[0], minute, 0, 59)?
-            && cron_field_matches(parts[1], hour, 0, 23)?);
+        let day_of_month_matches =
+            cron_field_matches(parts[2], fields.day_of_month, CronFieldKind::DayOfMonth)?;
+        let day_of_week_matches = cron_field_matches(
+            parts[4],
+            fields.weekday_sunday_zero,
+            CronFieldKind::DayOfWeek,
+        )?;
+        let day_matches = if !cron_field_is_any(parts[2]) && !cron_field_is_any(parts[4]) {
+            day_of_month_matches || day_of_week_matches
+        } else {
+            day_of_month_matches && day_of_week_matches
+        };
+        return Ok(
+            cron_field_matches(parts[0], fields.minute, CronFieldKind::Minute)?
+                && cron_field_matches(parts[1], fields.hour, CronFieldKind::Hour)?
+                && day_matches
+                && cron_field_matches(parts[3], fields.month, CronFieldKind::Month)?,
+        );
     }
     validate_schedule_expr(expr)?;
     Ok(false)
@@ -592,16 +636,25 @@ fn parse_weekday(value: &str) -> Result<u32> {
     }
 }
 
-fn cron_field_matches(field: &str, value: u32, min: u32, max: u32) -> Result<bool> {
+fn cron_field_matches(field: &str, value: u32, kind: CronFieldKind) -> Result<bool> {
     for part in field.split(',') {
-        if cron_field_part_matches(part, value, min, max)? {
+        if cron_field_part_matches(part, value, kind)?
+            || (kind == CronFieldKind::DayOfWeek
+                && value == 0
+                && cron_field_part_matches(part, 7, kind)?)
+        {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn cron_field_part_matches(part: &str, value: u32, min: u32, max: u32) -> Result<bool> {
+fn cron_field_part_matches(part: &str, value: u32, kind: CronFieldKind) -> Result<bool> {
+    let (start, end, step) = cron_field_part_bounds(part, kind)?;
+    Ok(value >= start && value <= end && (value - start).is_multiple_of(step))
+}
+
+fn cron_field_part_bounds(part: &str, kind: CronFieldKind) -> Result<(u32, u32, u32)> {
     let (base, step) = if let Some((base, step)) = part.split_once('/') {
         let step = step.parse::<u32>().map_err(|_| CronError::InvalidValue {
             field: "schedule_expr",
@@ -619,16 +672,21 @@ fn cron_field_part_matches(part: &str, value: u32, min: u32, max: u32) -> Result
     } else {
         (part, 1)
     };
+    if base.is_empty() {
+        return Err(CronError::InvalidValue {
+            field: "schedule_expr",
+            value: part.to_string(),
+            reason: "cron field base cannot be empty",
+        });
+    }
 
+    let (min, max) = kind.range();
     let (start, end) = if base == "*" {
         (min, max)
     } else if let Some((start, end)) = base.split_once('-') {
-        (
-            parse_cron_number(start, min, max)?,
-            parse_cron_number(end, min, max)?,
-        )
+        (parse_cron_atom(start, kind)?, parse_cron_atom(end, kind)?)
     } else {
-        let number = parse_cron_number(base, min, max)?;
+        let number = parse_cron_atom(base, kind)?;
         (number, number)
     };
     if start > end {
@@ -638,15 +696,49 @@ fn cron_field_part_matches(part: &str, value: u32, min: u32, max: u32) -> Result
             reason: "cron range start cannot be greater than range end",
         });
     }
-    Ok(value >= start && value <= end && (value - start).is_multiple_of(step))
+    Ok((start, end, step))
 }
 
-fn parse_cron_number(value: &str, min: u32, max: u32) -> Result<u32> {
-    let number = value.parse::<u32>().map_err(|_| CronError::InvalidValue {
-        field: "schedule_expr",
-        value: value.to_string(),
-        reason: "cron field value must be numeric",
-    })?;
+fn parse_cron_atom(value: &str, kind: CronFieldKind) -> Result<u32> {
+    let lowered = value.to_ascii_lowercase();
+    let number = match kind {
+        CronFieldKind::Month => match lowered.as_str() {
+            "jan" => Some(1),
+            "feb" => Some(2),
+            "mar" => Some(3),
+            "apr" => Some(4),
+            "may" => Some(5),
+            "jun" => Some(6),
+            "jul" => Some(7),
+            "aug" => Some(8),
+            "sep" => Some(9),
+            "oct" => Some(10),
+            "nov" => Some(11),
+            "dec" => Some(12),
+            _ => None,
+        },
+        CronFieldKind::DayOfWeek => match lowered.as_str() {
+            "sun" => Some(0),
+            "mon" => Some(1),
+            "tue" => Some(2),
+            "wed" => Some(3),
+            "thu" => Some(4),
+            "fri" => Some(5),
+            "sat" => Some(6),
+            _ => None,
+        },
+        _ => None,
+    };
+    let number = if let Some(number) = number {
+        number
+    } else {
+        value.parse::<u32>().map_err(|_| CronError::InvalidValue {
+            field: "schedule_expr",
+            value: value.to_string(),
+            reason: "cron field value must be numeric or a supported name",
+        })?
+    };
+    let (min, max) = kind.range();
     if number < min || number > max {
         return Err(CronError::InvalidValue {
             field: "schedule_expr",
@@ -655,6 +747,38 @@ fn parse_cron_number(value: &str, min: u32, max: u32) -> Result<u32> {
         });
     }
     Ok(number)
+}
+
+fn cron_field_is_any(field: &str) -> bool {
+    field == "*" || field == "*/1"
+}
+
+fn utc_minute_fields(unix_seconds: u64) -> UtcMinuteFields {
+    let minute = ((unix_seconds / 60) % 60) as u32;
+    let hour = ((unix_seconds / 3600) % 24) as u32;
+    let days = (unix_seconds / 86_400) as i64;
+    let (_, month, day_of_month) = civil_from_unix_days(days);
+    UtcMinuteFields {
+        minute,
+        hour,
+        day_of_month,
+        month,
+        weekday_sunday_zero: ((days + 4).rem_euclid(7)) as u32,
+    }
+}
+
+fn civil_from_unix_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 fn timestamp() -> String {
@@ -687,9 +811,12 @@ mod tests {
         for value in ["hourly", "daily 09:00", "weekly mon 10:30", "0 9 * * *"] {
             validate_schedule_expr(value).unwrap();
         }
+        validate_schedule_expr("0 0 1 jan thu").unwrap();
 
         assert!(validate_schedule_expr("daily 99:00").is_err());
         assert!(validate_schedule_expr("weekly monday 10:00").is_err());
+        assert!(validate_schedule_expr("61 * * * *").is_err());
+        assert!(validate_schedule_expr("0 0 32 * *").is_err());
     }
 
     #[test]
@@ -856,6 +983,61 @@ mod tests {
         assert_eq!(due[0].job.id, job.id);
         assert_eq!(due[0].scheduled_for, "unix:34200");
         assert!(not_due.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn due_jobs_match_full_cron_fields() {
+        let root = temp_root("due-full-cron");
+        let store = AglStore::open_at(&root).unwrap();
+        let repo = CronRepository::new(&store);
+        let jan_first = repo
+            .add_job(CronJobDraft::new(
+                "Jan first",
+                CronTargetKind::Builtin,
+                "store-status",
+                "0 0 1 jan *",
+            ))
+            .unwrap();
+        let thursday = repo
+            .add_job(CronJobDraft::new(
+                "Thursday",
+                CronTargetKind::Builtin,
+                "store-status",
+                "0 0 * * thu",
+            ))
+            .unwrap();
+        let dom_or_dow = repo
+            .add_job(CronJobDraft::new(
+                "Dom or dow",
+                CronTargetKind::Builtin,
+                "store-status",
+                "0 0 2 * thu",
+            ))
+            .unwrap();
+        repo.add_job(CronJobDraft::new(
+            "February",
+            CronTargetKind::Builtin,
+            "store-status",
+            "0 0 * feb *",
+        ))
+        .unwrap();
+
+        let due = repo.due_jobs(0).unwrap();
+        let mut due_ids = due
+            .iter()
+            .map(|due| due.job.id.as_str())
+            .collect::<Vec<_>>();
+        due_ids.sort();
+        let mut expected = vec![
+            jan_first.id.as_str(),
+            thursday.id.as_str(),
+            dom_or_dow.id.as_str(),
+        ];
+        expected.sort();
+
+        assert_eq!(due_ids, expected);
 
         std::fs::remove_dir_all(root).unwrap();
     }
