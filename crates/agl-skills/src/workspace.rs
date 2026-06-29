@@ -626,11 +626,11 @@ fn mark_duplicate_skills(skills: &mut [WorkspaceSkillStatus]) {
         *counts.entry(name.clone()).or_default() += 1;
     }
     for skill in skills {
-        if let Some(name) = &skill.name {
-            if counts.get(name).copied().unwrap_or_default() > 1 {
-                skill.valid = false;
-                skill.errors.push(format!("duplicate_skill_name: {name}"));
-            }
+        if let Some(name) = &skill.name
+            && counts.get(name).copied().unwrap_or_default() > 1
+        {
+            skill.valid = false;
+            skill.errors.push(format!("duplicate_skill_name: {name}"));
         }
     }
 }
@@ -698,10 +698,10 @@ fn append_lock_diagnostics(
         .map(|skill| skill.name.as_str())
         .collect::<BTreeSet<_>>();
     for skill in skills.iter().filter(|skill| skill.valid) {
-        if let Some(name) = &skill.name {
-            if !locked_skills.contains(name.as_str()) {
-                errors.push(format!("skills_lock_entry_missing: {name}"));
-            }
+        if let Some(name) = &skill.name
+            && !locked_skills.contains(name.as_str())
+        {
+            errors.push(format!("skills_lock_entry_missing: {name}"));
         }
     }
 }

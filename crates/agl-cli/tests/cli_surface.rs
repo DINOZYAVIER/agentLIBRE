@@ -542,6 +542,16 @@ fn skill_inspect_runtime_succeeds_for_builtin_skill() {
 }
 
 #[test]
+fn skill_inspect_runtime_succeeds_for_expanded_repo_builtin_skill() {
+    let output = run_agl(&["skill", "inspect", "repo-review", "--runtime"]);
+
+    assert_success(&output);
+    assert_empty_stderr(&output);
+    assert_contains(&stdout(&output), "skill name=repo-review");
+    assert_contains(&stdout(&output), "usable=true");
+}
+
+#[test]
 fn skill_inspect_runtime_rejects_untrusted_workspace_skill() {
     let repo = TempRepo::new("skill-inspect-runtime");
     let home = TempHome::new("skill-inspect-runtime");
