@@ -237,6 +237,7 @@ dependencies = [
 name = "agl-notes"
 version = "1.0.0-alpha.7"
 dependencies = [
+ "agl-memory",
  "agl-store",
  "rusqlite",
  "serde",
@@ -319,6 +320,8 @@ dependencies = [
 name = "agl-tools"
 version = "1.0.0-alpha.7"
 dependencies = [
+ "agl-notes",
+ "agl-store",
  "anyhow",
  "serde",
  "serde_json",

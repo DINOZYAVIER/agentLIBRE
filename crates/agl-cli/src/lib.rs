@@ -306,7 +306,7 @@ fn run_notes(command: NotesCommand, runtime: &AgentLibreRuntimeConfig) -> Result
         NotesCommand::Update(options) => run_notes_update(options, &notes),
         NotesCommand::Delete(options) => run_notes_delete(options, &notes),
         NotesCommand::Link(options) => run_notes_link(options, &notes),
-        NotesCommand::Remember(options) => run_notes_remember(options, &notes, &store),
+        NotesCommand::Remember(options) => run_notes_remember(options, &notes),
     }
 }
 
@@ -651,44 +651,26 @@ fn run_notes_link(options: NotesLinkOptions, notes: &NoteRepository<'_>) -> Resu
     Ok(())
 }
 
-fn run_notes_remember(
-    options: NotesRememberOptions,
-    notes: &NoteRepository<'_>,
-    store: &AglStore,
-) -> Result<()> {
-    let note = notes
-        .get(&options.id)
-        .context("failed to read note")?
-        .ok_or_else(|| anyhow::anyhow!("note not found: {}", options.id))?;
-    let memory = MemoryRepository::new(store);
+fn run_notes_remember(options: NotesRememberOptions, notes: &NoteRepository<'_>) -> Result<()> {
     let scope = memory_scope(options.scope, options.scope_key)?;
-    let mut draft = MemoryDraft::new(scope, memory_kind(options.kind), &note.title, &note.body);
-    draft.source_ref = Some(format!("note:{}", note.id));
-    let entry = memory
-        .add(draft)
+    let promotion = notes
+        .remember(&options.id, scope, memory_kind(options.kind))
         .context("failed to promote note into memory")?;
-    let link = notes
-        .link(
-            &note.id,
-            &format!("memory:{}", entry.id),
-            Some("remembered".to_string()),
-        )
-        .context("failed to link note to memory")?;
 
     if options.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "note": note,
-                "memory": entry,
-                "link": link,
+                "note": promotion.note,
+                "memory": promotion.memory,
+                "link": promotion.link,
             }))?
         );
     } else {
         println!("note.remembered=true");
-        print_note_summary(&note);
-        print_memory_entry_summary(&entry);
-        print_note_link(&link);
+        print_note_summary(&promotion.note);
+        print_memory_entry_summary(&promotion.memory);
+        print_note_link(&promotion.link);
     }
     Ok(())
 }
