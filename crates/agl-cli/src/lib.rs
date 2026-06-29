@@ -9,6 +9,7 @@ use agl_chat::{
     chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
+use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind};
 use agl_daemon::{DaemonOptions, DaemonServer, default_socket_path};
 use agl_loop::{TurnOutput, run_turn};
 use agl_memory::{
@@ -41,14 +42,16 @@ mod chat;
 mod config;
 
 use args::{
-    CliCommand, DaemonStatusOptions, MemoryAddOptions, MemoryCommand, MemoryDeleteOptions,
-    MemoryKindArg, MemoryListOptions, MemoryScopeArg, MemorySearchOptions, MemoryShowOptions,
-    NotesAddOptions, NotesCommand, NotesDeleteOptions, NotesLinkOptions, NotesListOptions,
-    NotesRememberOptions, NotesSearchOptions, NotesShowOptions, NotesUpdateOptions, RepoCommand,
-    RepoHooksOptions, RepoInitOptions, RepoStatusOptions, RunOptions, ServeOptions, SkillCommand,
-    SkillInspectOptions, SkillListOptions, SkillLockOptions, SkillRevokeOptions,
-    SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion,
-    print_usage,
+    CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
+    CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
+    CronTargetArg, CronTargetKindArg, DaemonStatusOptions, MemoryAddOptions, MemoryCommand,
+    MemoryDeleteOptions, MemoryKindArg, MemoryListOptions, MemoryScopeArg, MemorySearchOptions,
+    MemoryShowOptions, NotesAddOptions, NotesCommand, NotesDeleteOptions, NotesLinkOptions,
+    NotesListOptions, NotesRememberOptions, NotesSearchOptions, NotesShowOptions,
+    NotesUpdateOptions, RepoCommand, RepoHooksOptions, RepoInitOptions, RepoStatusOptions,
+    RunOptions, ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions,
+    SkillLockOptions, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
+    SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -132,6 +135,7 @@ fn runtime_for_command_paths(
     if matches!(
         command,
         CliCommand::Config(_)
+            | CliCommand::Cron(_)
             | CliCommand::Repo(_)
             | CliCommand::Skill(_)
             | CliCommand::Memory(_)
@@ -155,6 +159,7 @@ fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
         CliCommand::Serve(_)
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
+        | CliCommand::Cron(_)
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
         | CliCommand::DaemonStatus(_)
@@ -174,6 +179,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
             Ok(())
         }
         CliCommand::Config(command) => run_config(command, runtime),
+        CliCommand::Cron(command) => run_cron(command, runtime),
         CliCommand::Memory(command) => run_memory(command, runtime),
         CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),
@@ -182,6 +188,23 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
+    }
+}
+
+fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "cron", "starting command");
+    let store = AglStore::open_default(&runtime.paths).context("failed to open cron store")?;
+    let cron = CronRepository::new(&store);
+
+    match command {
+        CronCommand::Add(options) => run_cron_add(options, &cron, runtime),
+        CronCommand::List(options) => run_cron_list(options, &cron),
+        CronCommand::Show(options) => run_cron_show(options, &cron),
+        CronCommand::Enable(options) => run_cron_enable(options, &cron),
+        CronCommand::Disable(options) => run_cron_disable(options, &cron),
+        CronCommand::Run(options) => run_cron_run(options, &cron, &store, runtime),
+        CronCommand::History(options) => run_cron_history(options, &cron),
+        CronCommand::Delete(options) => run_cron_delete(options, &cron),
     }
 }
 
@@ -221,6 +244,212 @@ fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::Init(options) => run_repo_init(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
+    }
+}
+
+fn run_cron_add(
+    options: CronAddOptions,
+    cron: &CronRepository<'_>,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    validate_cron_target(&options.target, runtime)?;
+    let mut draft = CronJobDraft::new(
+        options.name,
+        cron_target_kind(options.target.kind),
+        options.target.target_ref,
+        options.schedule,
+    );
+    draft.enabled = options.enabled;
+    if let Some(timezone) = options.timezone {
+        draft.timezone = timezone;
+    }
+    draft.notify_ref = options.notify_ref;
+    let job = cron.add_job(draft).context("failed to add cron job")?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+    } else {
+        print_cron_job_summary(&job);
+    }
+    Ok(())
+}
+
+fn run_cron_list(options: CronListOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let jobs = cron
+        .list_jobs(options.include_deleted)
+        .context("failed to list cron jobs")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&jobs)?);
+    } else {
+        print_cron_jobs(&jobs);
+    }
+    Ok(())
+}
+
+fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let job = cron
+        .job(&options.id)
+        .context("failed to read cron job")?
+        .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+    } else {
+        print_cron_job_detail(&job);
+    }
+    Ok(())
+}
+
+fn run_cron_enable(options: CronEnableOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let job = cron
+        .set_enabled(&options.id, true)
+        .context("failed to enable cron job")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+    } else {
+        print_cron_job_summary(&job);
+    }
+    Ok(())
+}
+
+fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let job = cron
+        .set_enabled(&options.id, false)
+        .context("failed to disable cron job")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+    } else {
+        print_cron_job_summary(&job);
+    }
+    Ok(())
+}
+
+fn run_cron_run(
+    options: CronRunOptions,
+    cron: &CronRepository<'_>,
+    store: &AglStore,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    let _ = options.now;
+    let job = cron
+        .job(&options.id)
+        .context("failed to read cron job")?
+        .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
+    validate_stored_cron_target(&job, runtime)?;
+    let result_ref = run_builtin_cron_target(&job, store)?;
+    let (run, outcome) = cron
+        .record_manual_run(&job.id, Some(&result_ref))
+        .context("failed to record cron run")?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "job": job,
+                "run": run,
+                "idempotency": format!("{outcome:?}"),
+            }))?
+        );
+    } else {
+        print_cron_run(&run);
+        println!("cron_run.{}.idempotency={outcome:?}", run.id);
+    }
+    Ok(())
+}
+
+fn run_cron_history(options: CronHistoryOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let runs = cron
+        .history(&options.id)
+        .context("failed to read cron run history")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&runs)?);
+    } else {
+        print_cron_runs(&runs);
+    }
+    Ok(())
+}
+
+fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Result<()> {
+    let job = cron
+        .delete_job(&options.id)
+        .context("failed to delete cron job")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+    } else {
+        println!("cron.deleted=true");
+        print_cron_job_summary(&job);
+    }
+    Ok(())
+}
+
+fn validate_cron_target(target: &CronTargetArg, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    match target.kind {
+        CronTargetKindArg::Builtin => validate_builtin_cron_target(&target.target_ref),
+        CronTargetKindArg::Skill => validate_trusted_cron_skill(&target.target_ref, runtime),
+    }
+}
+
+fn validate_stored_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    match job.target_kind {
+        CronTargetKind::Builtin => validate_builtin_cron_target(&job.target_ref),
+        CronTargetKind::Skill => validate_trusted_cron_skill(&job.target_ref, runtime),
+    }
+}
+
+fn validate_builtin_cron_target(target_ref: &str) -> Result<()> {
+    match target_ref {
+        "store-status" => Ok(()),
+        _ => bail!(
+            "unknown builtin cron target: {target_ref}; supported builtin targets: store-status"
+        ),
+    }
+}
+
+fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    let workspace = workspace_skill_report_with_trust(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        skill_trust_store_path(runtime),
+    )?;
+    let matches = workspace
+        .skills
+        .iter()
+        .filter(|skill| skill.name.as_deref() == Some(name))
+        .collect::<Vec<_>>();
+    if matches.iter().any(|skill| skill.usable) {
+        return Ok(());
+    }
+    if matches.is_empty() {
+        bail!("cron skill target not found: {name}");
+    }
+    bail!("cron skill target is not runtime usable: {name}");
+}
+
+fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
+    if job.target_kind != CronTargetKind::Builtin {
+        bail!(
+            "cron --now execution is currently implemented for builtin targets only; target={}:{}",
+            job.target_kind.as_str(),
+            job.target_ref
+        );
+    }
+    match job.target_ref.as_str() {
+        "store-status" => {
+            let health = store.health().context("failed to check store health")?;
+            Ok(format!(
+                "builtin:store-status:schema:{}",
+                health.migration_version
+            ))
+        }
+        _ => bail!(
+            "unknown builtin cron target: {}; supported builtin targets: store-status",
+            job.target_ref
+        ),
+    }
+}
+
+fn cron_target_kind(kind: CronTargetKindArg) -> CronTargetKind {
+    match kind {
+        CronTargetKindArg::Skill => CronTargetKind::Skill,
+        CronTargetKindArg::Builtin => CronTargetKind::Builtin,
     }
 }
 
@@ -1078,6 +1307,66 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     }
     for error in &skill.errors {
         println!("skill.{name}.error={error}");
+    }
+}
+
+fn print_cron_jobs(jobs: &[CronJob]) {
+    for job in jobs {
+        print_cron_job_summary(job);
+    }
+}
+
+fn print_cron_job_summary(job: &CronJob) {
+    println!(
+        "cron id={} name={} enabled={} target={}:{} schedule={} timezone={} deleted={}",
+        job.id,
+        job.name,
+        job.enabled,
+        job.target_kind.as_str(),
+        job.target_ref,
+        job.schedule_expr,
+        job.timezone,
+        job.deleted_at.is_some()
+    );
+}
+
+fn print_cron_job_detail(job: &CronJob) {
+    print_cron_job_summary(job);
+    println!("cron.{}.created_at={}", job.id, job.created_at);
+    println!("cron.{}.updated_at={}", job.id, job.updated_at);
+    if let Some(notify_ref) = &job.notify_ref {
+        println!("cron.{}.notify_ref={notify_ref}", job.id);
+    }
+    if let Some(deleted_at) = &job.deleted_at {
+        println!("cron.{}.deleted_at={deleted_at}", job.id);
+    }
+}
+
+fn print_cron_runs(runs: &[CronRun]) {
+    for run in runs {
+        print_cron_run(run);
+    }
+}
+
+fn print_cron_run(run: &CronRun) {
+    println!(
+        "cron_run id={} job_id={} status={} scheduled_for={}",
+        run.id,
+        run.job_id,
+        run.status.as_str(),
+        run.scheduled_for
+    );
+    if let Some(started_at) = &run.started_at {
+        println!("cron_run.{}.started_at={started_at}", run.id);
+    }
+    if let Some(finished_at) = &run.finished_at {
+        println!("cron_run.{}.finished_at={finished_at}", run.id);
+    }
+    if let Some(result_ref) = &run.result_ref {
+        println!("cron_run.{}.result_ref={result_ref}", run.id);
+    }
+    if let Some(error) = &run.error {
+        println!("cron_run.{}.error={error}", run.id);
     }
 }
 

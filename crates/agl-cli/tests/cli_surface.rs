@@ -23,6 +23,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
+    assert_contains(&stdout, "cron");
     assert_contains(&stdout, "memory");
     assert_contains(&stdout, "notes");
     assert_contains(&stdout, "install-hooks");
@@ -79,6 +80,15 @@ fn command_help_exits_successfully_for_public_commands() {
         &["skill", "verify", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
+        &["cron", "--help"][..],
+        &["cron", "add", "--help"][..],
+        &["cron", "list", "--help"][..],
+        &["cron", "show", "--help"][..],
+        &["cron", "enable", "--help"][..],
+        &["cron", "disable", "--help"][..],
+        &["cron", "run", "--help"][..],
+        &["cron", "history", "--help"][..],
+        &["cron", "delete", "--help"][..],
         &["memory", "--help"][..],
         &["memory", "add", "--help"][..],
         &["memory", "list", "--help"][..],
@@ -220,6 +230,94 @@ fn notes_commands_manage_notes_and_promote_memory() {
         !stdout(&hidden).contains(&id),
         "deleted note should be hidden by default"
     );
+}
+
+#[test]
+fn cron_commands_manage_builtin_jobs_and_run_history() {
+    let home = TempHome::new("cron-commands");
+    let home_arg = home.path_string();
+
+    let add = run_agl(&[
+        "--home",
+        &home_arg,
+        "cron",
+        "add",
+        "--name",
+        "Store status",
+        "--schedule",
+        "0 9 * * *",
+        "--builtin",
+        "store-status",
+        "--notify",
+        "matrix-room:!status",
+    ]);
+
+    assert_success(&add);
+    let add_stdout = stdout(&add);
+    assert_contains(&add_stdout, "cron id=");
+    assert_contains(&add_stdout, "target=builtin:store-status");
+    assert_contains(&add_stdout, "enabled=true");
+    let id = cron_id_from_output(&add_stdout);
+
+    let list = run_agl(&["--home", &home_arg, "cron", "list"]);
+    assert_success(&list);
+    assert_contains(&stdout(&list), &id);
+
+    let show = run_agl(&["--home", &home_arg, "cron", "show", &id]);
+    assert_success(&show);
+    assert_contains(&stdout(&show), "notify_ref=matrix-room:!status");
+
+    let disable = run_agl(&["--home", &home_arg, "cron", "disable", &id]);
+    assert_success(&disable);
+    assert_contains(&stdout(&disable), "enabled=false");
+
+    let enable = run_agl(&["--home", &home_arg, "cron", "enable", &id]);
+    assert_success(&enable);
+    assert_contains(&stdout(&enable), "enabled=true");
+
+    let run = run_agl(&["--home", &home_arg, "cron", "run", &id, "--now"]);
+    assert_success(&run);
+    let run_stdout = stdout(&run);
+    assert_contains(&run_stdout, "cron_run id=");
+    assert_contains(&run_stdout, "status=succeeded");
+    assert_contains(&run_stdout, "result_ref=builtin:store-status:schema:");
+
+    let history = run_agl(&["--home", &home_arg, "cron", "history", &id]);
+    assert_success(&history);
+    assert_contains(&stdout(&history), "status=succeeded");
+
+    let delete = run_agl(&["--home", &home_arg, "cron", "delete", &id]);
+    assert_success(&delete);
+    assert_contains(&stdout(&delete), "cron.deleted=true");
+
+    let hidden = run_agl(&["--home", &home_arg, "cron", "list"]);
+    assert_success(&hidden);
+    assert!(
+        !stdout(&hidden).contains(&id),
+        "deleted cron job should be hidden by default"
+    );
+}
+
+#[test]
+fn cron_add_rejects_invalid_schedule() {
+    let home = TempHome::new("cron-invalid-schedule");
+    let home_arg = home.path_string();
+
+    let output = run_agl(&[
+        "--home",
+        &home_arg,
+        "cron",
+        "add",
+        "--name",
+        "Bad schedule",
+        "--schedule",
+        "daily 99:99",
+        "--builtin",
+        "store-status",
+    ]);
+
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "invalid cron schedule_expr value");
 }
 
 #[test]
@@ -466,6 +564,7 @@ fn completion_bash_emits_agl_completion_function() {
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
+    assert_contains(&stdout, "cron");
     assert_contains(&stdout, "install-hooks");
 }
 
@@ -777,6 +876,14 @@ fn note_id_from_output(stdout: &str) -> String {
         .split_whitespace()
         .find_map(|part| part.strip_prefix("id="))
         .unwrap_or_else(|| panic!("note id missing from output:\n{stdout}"))
+        .to_string()
+}
+
+fn cron_id_from_output(stdout: &str) -> String {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("id="))
+        .unwrap_or_else(|| panic!("cron id missing from output:\n{stdout}"))
         .to_string()
 }
 

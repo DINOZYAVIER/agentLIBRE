@@ -20,6 +20,7 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Cron(CronCommand),
     Memory(MemoryCommand),
     Notes(NotesCommand),
     Repo(RepoCommand),
@@ -34,6 +35,18 @@ pub(crate) enum CliCommand {
 pub(crate) enum ConfigCommand {
     Paths,
     Init { force: bool },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CronCommand {
+    Add(CronAddOptions),
+    List(CronListOptions),
+    Show(CronShowOptions),
+    Enable(CronEnableOptions),
+    Disable(CronDisableOptions),
+    Run(CronRunOptions),
+    History(CronHistoryOptions),
+    Delete(CronDeleteOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,6 +252,72 @@ pub(crate) struct SkillRevokeOptions {
     pub(crate) json: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CronTargetKindArg {
+    Skill,
+    Builtin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronTargetArg {
+    pub(crate) kind: CronTargetKindArg,
+    pub(crate) target_ref: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronAddOptions {
+    pub(crate) name: String,
+    pub(crate) schedule: String,
+    pub(crate) target: CronTargetArg,
+    pub(crate) enabled: bool,
+    pub(crate) timezone: Option<String>,
+    pub(crate) notify_ref: Option<String>,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronListOptions {
+    pub(crate) include_deleted: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronShowOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronEnableOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronDisableOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronRunOptions {
+    pub(crate) id: String,
+    pub(crate) now: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronHistoryOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronDeleteOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
@@ -360,6 +439,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Manage local scheduled AgentLIBRE jobs.
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
     /// Manage local AgentLIBRE memory.
     Memory {
         #[command(subcommand)]
@@ -425,6 +509,26 @@ enum ConfigCommands {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CronCommands {
+    /// Add a scheduled job.
+    Add(CronAddArgs),
+    /// List scheduled jobs.
+    List(CronListArgs),
+    /// Show one scheduled job.
+    Show(CronShowArgs),
+    /// Enable a scheduled job.
+    Enable(CronEnableArgs),
+    /// Disable a scheduled job.
+    Disable(CronDisableArgs),
+    /// Run a scheduled job once.
+    Run(CronRunArgs),
+    /// Show run history for one scheduled job.
+    History(CronHistoryArgs),
+    /// Tombstone a scheduled job.
+    Delete(CronDeleteArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -534,6 +638,122 @@ struct RepoHooksArgs {
     /// Replace AgentLIBRE-managed hooks or overwrite conflicts.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronAddArgs {
+    /// Job name.
+    #[arg(long, value_name = "TEXT")]
+    name: String,
+
+    /// Schedule, such as hourly, daily HH:MM, weekly mon HH:MM, or a 5-field cron expression.
+    #[arg(long, value_name = "EXPR")]
+    schedule: String,
+
+    /// Trusted skill id to run.
+    #[arg(long, value_name = "ID", conflicts_with = "builtin")]
+    skill: Option<String>,
+
+    /// Builtin cron target id to run.
+    #[arg(long, value_name = "ID", conflicts_with = "skill")]
+    builtin: Option<String>,
+
+    /// Create the job disabled.
+    #[arg(long)]
+    disabled: bool,
+
+    /// Timezone label for human schedules.
+    #[arg(long, value_name = "TZ")]
+    timezone: Option<String>,
+
+    /// Optional notification reference, such as matrix-room:<room_id>.
+    #[arg(long, value_name = "REF")]
+    notify: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronListArgs {
+    /// Include tombstoned jobs.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronShowArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronEnableArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronDisableArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronRunArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Run the job immediately.
+    #[arg(long)]
+    now: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronHistoryArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronDeleteArgs {
+    /// Cron job id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -966,6 +1186,7 @@ impl Cli {
                 ConfigCommands::Paths => ConfigCommand::Paths,
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
+            Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
             Some(Commands::Init(args)) => {
@@ -1032,6 +1253,93 @@ fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
     RepoHooksOptions {
         dry_run: args.dry_run,
         force: args.force,
+    }
+}
+
+fn cron_command(command: CronCommands) -> Result<CronCommand> {
+    Ok(match command {
+        CronCommands::Add(args) => CronCommand::Add(CronAddOptions {
+            name: args.name,
+            schedule: args.schedule,
+            target: cron_target(args.skill, args.builtin)?,
+            enabled: !args.disabled,
+            timezone: args.timezone,
+            notify_ref: args.notify,
+            json: args.json,
+        }),
+        CronCommands::List(args) => CronCommand::List(CronListOptions {
+            include_deleted: args.include_deleted,
+            json: args.json,
+        }),
+        CronCommands::Show(args) => {
+            validate_prompt(&args.id)?;
+            CronCommand::Show(CronShowOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        CronCommands::Enable(args) => {
+            validate_prompt(&args.id)?;
+            CronCommand::Enable(CronEnableOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        CronCommands::Disable(args) => {
+            validate_prompt(&args.id)?;
+            CronCommand::Disable(CronDisableOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        CronCommands::Run(args) => {
+            validate_prompt(&args.id)?;
+            if !args.now {
+                bail!("agl cron run requires --now until daemon scheduling is enabled");
+            }
+            CronCommand::Run(CronRunOptions {
+                id: args.id,
+                now: args.now,
+                json: args.json,
+            })
+        }
+        CronCommands::History(args) => {
+            validate_prompt(&args.id)?;
+            CronCommand::History(CronHistoryOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        CronCommands::Delete(args) => {
+            validate_prompt(&args.id)?;
+            CronCommand::Delete(CronDeleteOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+    })
+}
+
+fn cron_target(skill: Option<String>, builtin: Option<String>) -> Result<CronTargetArg> {
+    match (skill, builtin) {
+        (Some(skill), None) => {
+            if let Err(err) = SkillId::new(skill.clone()) {
+                bail!("--skill is invalid: {err}");
+            }
+            Ok(CronTargetArg {
+                kind: CronTargetKindArg::Skill,
+                target_ref: skill,
+            })
+        }
+        (None, Some(builtin)) => {
+            validate_prompt(&builtin)?;
+            Ok(CronTargetArg {
+                kind: CronTargetKindArg::Builtin,
+                target_ref: builtin,
+            })
+        }
+        (None, None) => bail!("exactly one of --skill or --builtin is required"),
+        (Some(_), Some(_)) => bail!("--skill and --builtin cannot be used together"),
     }
 }
 
@@ -1366,6 +1674,11 @@ enum PublicCompletionCommands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Manage local scheduled AgentLIBRE jobs.
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
     },
     /// Manage local AgentLIBRE memory.
     Memory {
@@ -1805,6 +2118,106 @@ mod tests {
                 label: Some("spec".to_string()),
                 json: false,
             }))
+        );
+    }
+
+    #[test]
+    fn parse_cron_commands() {
+        assert_eq!(
+            parse_command([
+                "agl",
+                "cron",
+                "add",
+                "--name",
+                "Store status",
+                "--schedule",
+                "0 9 * * *",
+                "--builtin",
+                "store-status",
+                "--notify",
+                "matrix-room:!room",
+                "--json",
+            ]),
+            CliCommand::Cron(CronCommand::Add(CronAddOptions {
+                name: "Store status".to_string(),
+                schedule: "0 9 * * *".to_string(),
+                target: CronTargetArg {
+                    kind: CronTargetKindArg::Builtin,
+                    target_ref: "store-status".to_string(),
+                },
+                enabled: true,
+                timezone: None,
+                notify_ref: Some("matrix-room:!room".to_string()),
+                json: true,
+            }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl",
+                "cron",
+                "add",
+                "--name",
+                "Repo review",
+                "--schedule",
+                "daily 09:00",
+                "--skill",
+                "repo-review",
+                "--disabled",
+                "--timezone",
+                "local",
+            ]),
+            CliCommand::Cron(CronCommand::Add(CronAddOptions {
+                name: "Repo review".to_string(),
+                schedule: "daily 09:00".to_string(),
+                target: CronTargetArg {
+                    kind: CronTargetKindArg::Skill,
+                    target_ref: "repo-review".to_string(),
+                },
+                enabled: false,
+                timezone: Some("local".to_string()),
+                notify_ref: None,
+                json: false,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "cron", "run", "cron_1", "--now"]),
+            CliCommand::Cron(CronCommand::Run(CronRunOptions {
+                id: "cron_1".to_string(),
+                now: true,
+                json: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_cron_rejects_missing_target_and_run_without_now() {
+        let missing_target = parse_cli([
+            "agl".to_string(),
+            "cron".to_string(),
+            "add".to_string(),
+            "--name".to_string(),
+            "Store status".to_string(),
+            "--schedule".to_string(),
+            "hourly".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            missing_target
+                .to_string()
+                .contains("exactly one of --skill or --builtin is required")
+        );
+
+        let missing_now = parse_cli([
+            "agl".to_string(),
+            "cron".to_string(),
+            "run".to_string(),
+            "cron_1".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            missing_now
+                .to_string()
+                .contains("agl cron run requires --now")
         );
     }
 
