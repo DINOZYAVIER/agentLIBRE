@@ -75,6 +75,8 @@ impl ChatLoopHost {
         let tool_runtime = core_tool_runtime(&core_tools, self.session.store_root())?;
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
+        self.session
+            .set_runtime_capability_workspace_root(self.core_tools.root())?;
         Ok(())
     }
 }
