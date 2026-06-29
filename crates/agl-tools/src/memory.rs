@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId,
+    ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
 };
 
 pub const PROVIDER_ID: &str = "memory-tools";
@@ -75,15 +75,15 @@ pub fn declaration() -> ToolProviderDeclaration {
         env!("CARGO_PKG_VERSION"),
     )
     .expect("builtin memory provider declaration is valid")
-    .with_tool(ToolDeclaration {
-        id: ToolId::new(MEMORY_SUGGEST_TOOL_ID).expect("builtin memory tool id is valid"),
-        description: "Create a pending local memory suggestion for explicit approval.".to_string(),
-        capability: ToolCapability::Write,
-        required_arguments: ["scope", "kind", "title", "body", "source_ref"]
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-    })
+    .with_tool(
+        ToolDeclaration::new(
+            ToolId::new(MEMORY_SUGGEST_TOOL_ID).expect("builtin memory tool id is valid"),
+            "Create a pending local memory suggestion for explicit approval.",
+            ToolCapability::Write,
+            ["scope", "kind", "title", "body", "source_ref"],
+        )
+        .with_state_effects([ToolStateEffect::StoreMemorySuggestions]),
+    )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {

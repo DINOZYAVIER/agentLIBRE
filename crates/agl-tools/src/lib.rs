@@ -19,8 +19,8 @@ pub use notes::{
     NOTES_UPDATE_TOOL_ID, NotesTools,
 };
 pub use provider::{
-    HookDeclaration, ToolCapability, ToolDeclaration, ToolProviderDeclaration,
-    ToolProviderDeclarationError, ToolProviderSource, ToolProviderTrust,
+    HookDeclaration, ToolCapability, ToolDeclaration, ToolOperationKind, ToolProviderDeclaration,
+    ToolProviderDeclarationError, ToolProviderSource, ToolProviderTrust, ToolStateEffect,
 };
 pub use registry::{ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime};
 pub use tool::{ToolHandler, ToolInput, ToolOutput};

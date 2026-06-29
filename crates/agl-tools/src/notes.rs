@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId,
+    ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
 };
 
 pub const PROVIDER_ID: &str = "notes-tools";
@@ -207,14 +207,18 @@ fn tool(
     capability: ToolCapability,
     required_arguments: &[&str],
 ) -> ToolDeclaration {
-    ToolDeclaration {
-        id: ToolId::new(id).expect("builtin notes tool id is valid"),
-        description: description.into(),
+    let declaration = ToolDeclaration::new(
+        ToolId::new(id).expect("builtin notes tool id is valid"),
+        description,
         capability,
-        required_arguments: required_arguments
-            .iter()
-            .map(|argument| argument.to_string())
-            .collect(),
+        required_arguments.iter().copied(),
+    );
+    match id {
+        NOTES_ADD_TOOL_ID | NOTES_UPDATE_TOOL_ID => {
+            declaration.with_state_effects([ToolStateEffect::StoreNotes])
+        }
+        NOTES_LINK_TOOL_ID => declaration.with_state_effects([ToolStateEffect::StoreNoteLinks]),
+        _ => declaration,
     }
 }
 
