@@ -70,6 +70,10 @@ pub(crate) enum MemoryCommand {
     Search(MemorySearchOptions),
     Show(MemoryShowOptions),
     Delete(MemoryDeleteOptions),
+    Suggest(MemorySuggestOptions),
+    ListSuggestions(MemoryListSuggestionsOptions),
+    Approve(MemoryApproveOptions),
+    Reject(MemoryRejectOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +165,49 @@ pub(crate) struct MemoryShowOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MemoryDeleteOptions {
     pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum MemorySuggestionStatusArg {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemorySuggestOptions {
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) kind: MemoryKindArg,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) source_ref: String,
+    pub(crate) confidence: u8,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryListSuggestionsOptions {
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) status: Option<MemorySuggestionStatusArg>,
+    pub(crate) all_scopes: bool,
+    pub(crate) limit: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryApproveOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryRejectOptions {
+    pub(crate) id: String,
+    pub(crate) reason: Option<String>,
     pub(crate) json: bool,
 }
 
@@ -596,6 +643,14 @@ enum MemoryCommands {
     Show(MemoryShowArgs),
     /// Tombstone one memory entry.
     Delete(MemoryDeleteArgs),
+    /// Create a pending memory suggestion.
+    Suggest(MemorySuggestArgs),
+    /// List memory suggestions.
+    ListSuggestions(MemoryListSuggestionsArgs),
+    /// Approve a pending memory suggestion.
+    Approve(MemoryApproveArgs),
+    /// Reject a pending memory suggestion.
+    Reject(MemoryRejectArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -937,6 +992,84 @@ struct MemoryDeleteArgs {
     /// Memory entry id.
     #[arg(value_name = "ID")]
     id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemorySuggestArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Suggested memory kind.
+    #[arg(long, value_enum, default_value_t = MemoryKindArg::Fact)]
+    kind: MemoryKindArg,
+
+    /// Suggested memory title.
+    #[arg(long, value_name = "TEXT")]
+    title: String,
+
+    /// Suggested memory body.
+    #[arg(long, value_name = "TEXT")]
+    body: String,
+
+    /// Required source reference.
+    #[arg(long, value_name = "REF")]
+    source_ref: String,
+
+    /// Confidence from 0 to 100.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    confidence: u8,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryListSuggestionsArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Suggestion status to list. Defaults to pending.
+    #[arg(long, value_enum)]
+    status: Option<MemorySuggestionStatusArg>,
+
+    /// List suggestions across every scope.
+    #[arg(long)]
+    all_scopes: bool,
+
+    /// Maximum suggestions to print.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    limit: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryApproveArgs {
+    /// Memory suggestion id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryRejectArgs {
+    /// Memory suggestion id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Optional rejection reason.
+    #[arg(long, value_name = "TEXT")]
+    reason: Option<String>,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1476,6 +1609,47 @@ fn memory_command(command: MemoryCommands) -> Result<MemoryCommand> {
             validate_prompt(&args.id)?;
             MemoryCommand::Delete(MemoryDeleteOptions {
                 id: args.id,
+                json: args.json,
+            })
+        }
+        MemoryCommands::Suggest(args) => {
+            validate_prompt(&args.source_ref)?;
+            MemoryCommand::Suggest(MemorySuggestOptions {
+                scope: args.scope.scope,
+                scope_key: args.scope.scope_key,
+                kind: args.kind,
+                title: args.title,
+                body: args.body,
+                source_ref: args.source_ref,
+                confidence: validate_confidence(args.confidence)?,
+                json: args.json,
+            })
+        }
+        MemoryCommands::ListSuggestions(args) => {
+            MemoryCommand::ListSuggestions(MemoryListSuggestionsOptions {
+                scope: args.scope.scope,
+                scope_key: args.scope.scope_key,
+                status: args.status,
+                all_scopes: args.all_scopes,
+                limit: validate_limit(args.limit, "--limit")?,
+                json: args.json,
+            })
+        }
+        MemoryCommands::Approve(args) => {
+            validate_prompt(&args.id)?;
+            MemoryCommand::Approve(MemoryApproveOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        MemoryCommands::Reject(args) => {
+            validate_prompt(&args.id)?;
+            if let Some(reason) = &args.reason {
+                validate_prompt(reason)?;
+            }
+            MemoryCommand::Reject(MemoryRejectOptions {
+                id: args.id,
+                reason: args.reason,
                 json: args.json,
             })
         }

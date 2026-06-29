@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -138,6 +138,32 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             );
             CREATE INDEX cron_runs_job_idx
                 ON cron_runs(job_id, scheduled_for);
+        "#,
+    },
+    StoreMigration {
+        version: 6,
+        name: "006_memory_suggestions",
+        sql: r#"
+            CREATE TABLE memory_suggestions (
+                id TEXT PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                confidence INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolution_ref TEXT,
+                resolution_note TEXT
+            );
+            CREATE INDEX memory_suggestions_status_idx
+                ON memory_suggestions(status, updated_at);
+            CREATE INDEX memory_suggestions_scope_idx
+                ON memory_suggestions(scope_kind, scope_key, status);
         "#,
     },
 ];
@@ -656,8 +682,12 @@ impl AglStore {
     fn domain_counts(&self, domain: StoreDomain) -> Result<(u64, u64)> {
         match domain {
             StoreDomain::Memory => Ok((
-                self.query_count("SELECT COUNT(*) FROM memory_entries")?,
-                self.query_count("SELECT COUNT(*) FROM memory_entries WHERE deleted_at IS NULL")?,
+                self.query_count("SELECT COUNT(*) FROM memory_entries")?
+                    + self.query_count("SELECT COUNT(*) FROM memory_suggestions")?,
+                self.query_count("SELECT COUNT(*) FROM memory_entries WHERE deleted_at IS NULL")?
+                    + self.query_count(
+                        "SELECT COUNT(*) FROM memory_suggestions WHERE status = 'pending'",
+                    )?,
             )),
             StoreDomain::Notes => Ok((
                 self.query_count("SELECT COUNT(*) FROM notes")?,
@@ -704,7 +734,41 @@ impl AglStore {
                 "deleted_at": row.get::<_, Option<String>>(10)?,
             }))
         })?;
-        write_jsonl_rows(&mut writer, rows)
+        let mut count = write_jsonl_rows(&mut writer, rows)?;
+
+        let suggestions_sql = if include_deleted {
+            "SELECT id, scope_kind, scope_key, kind, title, body, source_ref, confidence, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+             FROM memory_suggestions
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, scope_kind, scope_key, kind, title, body, source_ref, confidence, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+             FROM memory_suggestions
+             WHERE status = 'pending'
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut suggestions_stmt = self.conn.prepare(suggestions_sql)?;
+        let suggestions = suggestions_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Memory.as_str(),
+                "record_type": "memory_suggestion",
+                "id": row.get::<_, String>(0)?,
+                "scope_kind": row.get::<_, String>(1)?,
+                "scope_key": row.get::<_, String>(2)?,
+                "kind": row.get::<_, String>(3)?,
+                "title": row.get::<_, String>(4)?,
+                "body": row.get::<_, String>(5)?,
+                "source_ref": row.get::<_, String>(6)?,
+                "confidence": row.get::<_, i64>(7)?,
+                "status": row.get::<_, String>(8)?,
+                "created_at": row.get::<_, String>(9)?,
+                "updated_at": row.get::<_, String>(10)?,
+                "resolved_at": row.get::<_, Option<String>>(11)?,
+                "resolution_ref": row.get::<_, Option<String>>(12)?,
+                "resolution_note": row.get::<_, Option<String>>(13)?,
+            }))
+        })?;
+        count += write_jsonl_rows(&mut writer, suggestions)?;
+        Ok(count)
     }
 
     fn export_notes_jsonl<W: Write>(&self, include_deleted: bool, mut writer: W) -> Result<usize> {
@@ -1129,6 +1193,54 @@ mod tests {
         assert!(!active.contains("mem_deleted"));
         assert_eq!(all_count, 2);
         assert!(all.contains("\"id\":\"mem_deleted\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_memory_jsonl_includes_pending_suggestions() {
+        let root = temp_root("export-memory-suggestions");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_suggestions
+                 (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
+                 VALUES ('suggest_pending', 'user', 'default', 'decision', 'Pending', 'Body', 'chat:1', 95, 'pending', 'unix:1', 'unix:1', NULL, NULL, NULL),
+                        ('suggest_rejected', 'user', 'default', 'fact', 'Rejected', 'Body', 'chat:2', 90, 'rejected', 'unix:1', 'unix:2', 'unix:2', NULL, 'not durable')",
+                [],
+            )
+            .unwrap();
+        let mut active = Vec::new();
+        let mut all = Vec::new();
+
+        let active_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Memory,
+                    include_deleted: false,
+                },
+                &mut active,
+            )
+            .unwrap();
+        let all_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Memory,
+                    include_deleted: true,
+                },
+                &mut all,
+            )
+            .unwrap();
+
+        let active = String::from_utf8(active).unwrap();
+        let all = String::from_utf8(all).unwrap();
+        assert_eq!(active_count, 1);
+        assert!(active.contains("\"record_type\":\"memory_suggestion\""));
+        assert!(active.contains("\"id\":\"suggest_pending\""));
+        assert!(!active.contains("suggest_rejected"));
+        assert_eq!(all_count, 2);
+        assert!(all.contains("\"id\":\"suggest_rejected\""));
 
         std::fs::remove_dir_all(root).unwrap();
     }
