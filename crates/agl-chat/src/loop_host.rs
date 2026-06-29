@@ -166,6 +166,9 @@ fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Re
         .register_provider(agl_tools::fs::declaration())
         .context("failed to register core filesystem tool provider")?;
     runtime
+        .register_provider(agl_tools::memory::declaration())
+        .context("failed to register builtin memory tool provider")?;
+    runtime
         .register_provider(agl_tools::notes::declaration())
         .context("failed to register builtin notes tool provider")?;
     for tool_id in [
@@ -181,6 +184,13 @@ fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Re
             })?;
     }
     let notes_tools = agl_tools::NotesTools::new(store_root);
+    let memory_tools = agl_tools::MemoryTools::new(store_root);
+    runtime
+        .register_handler(
+            ToolId::new(agl_tools::MEMORY_SUGGEST_TOOL_ID)?,
+            memory_tools,
+        )
+        .context("failed to register builtin memory tool handler memory.suggest")?;
     for tool_id in [
         agl_tools::NOTES_ADD_TOOL_ID,
         agl_tools::NOTES_SEARCH_TOOL_ID,

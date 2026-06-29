@@ -26,6 +26,9 @@ pub struct SkillContextEvidence {
     pub tree_sha256: String,
     pub required_hooks: Vec<String>,
     pub allowed_tools: Vec<String>,
+    pub memory_read_scopes: Vec<String>,
+    pub notes_read: bool,
+    pub notes_write: bool,
     pub included_references: Vec<SkillContextReferenceEvidence>,
     pub context_budget_tokens: u32,
     pub budget_bytes: usize,
@@ -127,6 +130,15 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
             .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
+        memory_read_scopes: harness
+            .permissions
+            .memory
+            .read
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
+        notes_read: harness.permissions.notes.read,
+        notes_write: harness.permissions.notes.write,
         included_references: harness
             .references
             .iter()

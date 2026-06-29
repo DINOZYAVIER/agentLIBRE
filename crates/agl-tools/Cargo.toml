@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-memory.workspace = true
 agl-notes.workspace = true
 agl-store.workspace = true
 anyhow.workspace = true

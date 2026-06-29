@@ -56,6 +56,9 @@ pub struct WorkspaceSkillStatus {
     pub version: Option<u64>,
     pub source: Option<String>,
     pub pack: Option<String>,
+    pub memory_read_scopes: Vec<String>,
+    pub notes_read: bool,
+    pub notes_write: bool,
     pub valid: bool,
     pub usable: bool,
     pub shadowed_by_builtin: bool,
@@ -586,6 +589,15 @@ fn status_from_harness(path: PathBuf, harness: SkillHarness) -> WorkspaceSkillSt
         version: Some(harness.version),
         source: Some(harness.source.as_str().to_string()),
         pack: Some(harness.pack.clone()),
+        memory_read_scopes: harness
+            .permissions
+            .memory
+            .read
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect(),
+        notes_read: harness.permissions.notes.read,
+        notes_write: harness.permissions.notes.write,
         valid: true,
         usable: false,
         shadowed_by_builtin: false,
@@ -610,6 +622,9 @@ fn invalid_skill_status(
         version: None,
         source: None,
         pack: None,
+        memory_read_scopes: Vec::new(),
+        notes_read: false,
+        notes_write: false,
         valid: false,
         usable: false,
         shadowed_by_builtin: false,
