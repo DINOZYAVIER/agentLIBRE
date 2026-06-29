@@ -98,10 +98,12 @@ dependencies = [
  "agl-client",
  "agl-daemon",
  "agl-loop",
+ "agl-memory",
  "agl-protocol",
  "agl-repo",
  "agl-runtime",
  "agl-skills",
+ "agl-store",
  "agl-tools",
  "anyhow",
  "clap",
@@ -205,6 +207,15 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agl-memory"
+version = "1.0.0-alpha.7"
+dependencies = [
+ "agl-store",
+ "rusqlite",
+ "serde",
 ]
 
 [[package]]

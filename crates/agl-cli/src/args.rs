@@ -20,6 +20,7 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Memory(MemoryCommand),
     Repo(RepoCommand),
     Skill(SkillCommand),
     DaemonStatus(DaemonStatusOptions),
@@ -39,6 +40,15 @@ pub(crate) enum RepoCommand {
     Init(RepoInitOptions),
     Status(RepoStatusOptions),
     InstallHooks(RepoHooksOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryCommand {
+    Add(MemoryAddOptions),
+    List(MemoryListOptions),
+    Search(MemorySearchOptions),
+    Show(MemoryShowOptions),
+    Delete(MemoryDeleteOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +84,49 @@ pub(crate) struct RepoHooksOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SkillListOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryAddOptions {
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) kind: MemoryKindArg,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) source_ref: Option<String>,
+    pub(crate) confidence: u8,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryListOptions {
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) include_deleted: bool,
+    pub(crate) limit: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemorySearchOptions {
+    pub(crate) query: String,
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) include_deleted: bool,
+    pub(crate) limit: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryShowOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryDeleteOptions {
+    pub(crate) id: String,
     pub(crate) json: bool,
 }
 
@@ -153,6 +206,25 @@ pub(crate) enum ToolAccessMode {
     Write,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum MemoryScopeArg {
+    User,
+    Repo,
+    MatrixRoom,
+    MatrixUser,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum MemoryKindArg {
+    Fact,
+    Preference,
+    Summary,
+    Decision,
+    WorkingNote,
+}
+
 impl ToolAccessMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -212,6 +284,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Manage local AgentLIBRE memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
@@ -281,6 +358,20 @@ enum RepoCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum MemoryCommands {
+    /// Add an explicit memory entry.
+    Add(MemoryAddArgs),
+    /// List memory entries in one scope.
+    List(MemoryListArgs),
+    /// Search memory entries in one scope.
+    Search(MemorySearchArgs),
+    /// Show one memory entry.
+    Show(MemoryShowArgs),
+    /// Tombstone one memory entry.
+    Delete(MemoryDeleteArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum SkillCommands {
     /// List builtin and workspace skills.
     List(SkillListArgs),
@@ -347,6 +438,109 @@ struct RepoHooksArgs {
 
 #[derive(Debug, Args)]
 struct SkillListArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryScopeArgs {
+    /// Memory scope.
+    #[arg(long, value_enum, default_value_t = MemoryScopeArg::User)]
+    scope: MemoryScopeArg,
+
+    /// Scope key. Required for repo, matrix-room, and matrix-user scopes.
+    #[arg(long, value_name = "KEY")]
+    scope_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct MemoryAddArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Memory kind.
+    #[arg(long, value_enum, default_value_t = MemoryKindArg::Fact)]
+    kind: MemoryKindArg,
+
+    /// Memory title.
+    #[arg(long, value_name = "TEXT")]
+    title: String,
+
+    /// Memory body.
+    #[arg(long, value_name = "TEXT")]
+    body: String,
+
+    /// Optional source reference.
+    #[arg(long, value_name = "REF")]
+    source_ref: Option<String>,
+
+    /// Confidence from 0 to 100.
+    #[arg(long, value_name = "N", default_value_t = 100)]
+    confidence: u8,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryListArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Include tombstoned entries.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Maximum entries to print.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    limit: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemorySearchArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Include tombstoned entries.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Maximum entries to print.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    limit: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Query text.
+    #[arg(value_name = "QUERY")]
+    query: String,
+}
+
+#[derive(Debug, Args)]
+struct MemoryShowArgs {
+    /// Memory entry id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct MemoryDeleteArgs {
+    /// Memory entry id.
+    #[arg(value_name = "ID")]
+    id: String,
+
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -541,6 +735,7 @@ impl Cli {
                 ConfigCommands::Paths => ConfigCommand::Paths,
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
+            Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Init(args)) => {
                 CliCommand::Repo(RepoCommand::Init(repo_init_options(args)))
             }
@@ -606,6 +801,53 @@ fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
         dry_run: args.dry_run,
         force: args.force,
     }
+}
+
+fn memory_command(command: MemoryCommands) -> Result<MemoryCommand> {
+    Ok(match command {
+        MemoryCommands::Add(args) => MemoryCommand::Add(MemoryAddOptions {
+            scope: args.scope.scope,
+            scope_key: args.scope.scope_key,
+            kind: args.kind,
+            title: args.title,
+            body: args.body,
+            source_ref: args.source_ref,
+            confidence: validate_confidence(args.confidence)?,
+            json: args.json,
+        }),
+        MemoryCommands::List(args) => MemoryCommand::List(MemoryListOptions {
+            scope: args.scope.scope,
+            scope_key: args.scope.scope_key,
+            include_deleted: args.include_deleted,
+            limit: validate_limit(args.limit, "--limit")?,
+            json: args.json,
+        }),
+        MemoryCommands::Search(args) => {
+            validate_prompt(&args.query)?;
+            MemoryCommand::Search(MemorySearchOptions {
+                query: args.query,
+                scope: args.scope.scope,
+                scope_key: args.scope.scope_key,
+                include_deleted: args.include_deleted,
+                limit: validate_limit(args.limit, "--limit")?,
+                json: args.json,
+            })
+        }
+        MemoryCommands::Show(args) => {
+            validate_prompt(&args.id)?;
+            MemoryCommand::Show(MemoryShowOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        MemoryCommands::Delete(args) => {
+            validate_prompt(&args.id)?;
+            MemoryCommand::Delete(MemoryDeleteOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+    })
 }
 
 fn skill_command(command: SkillCommands) -> SkillCommand {
@@ -720,6 +962,20 @@ fn validate_max_output_tokens(value: u32) -> Result<u32> {
     Ok(value)
 }
 
+fn validate_limit(value: usize, flag: &str) -> Result<usize> {
+    if value == 0 {
+        bail!("{flag} must be greater than zero");
+    }
+    Ok(value)
+}
+
+fn validate_confidence(value: u8) -> Result<u8> {
+    if value > 100 {
+        bail!("--confidence must be between 0 and 100");
+    }
+    Ok(value)
+}
+
 fn validate_skill_ids(values: Vec<String>) -> Result<Vec<String>> {
     let mut seen = std::collections::BTreeSet::new();
     for value in &values {
@@ -808,6 +1064,11 @@ enum PublicCompletionCommands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Manage local AgentLIBRE memory.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
@@ -1105,6 +1366,80 @@ mod tests {
                 name: "repo-change".to_string(),
                 json: true,
             }))
+        );
+    }
+
+    #[test]
+    fn parse_memory_commands() {
+        assert_eq!(
+            parse_command([
+                "agl",
+                "memory",
+                "add",
+                "--scope",
+                "repo",
+                "--scope-key",
+                "/tmp/repo",
+                "--kind",
+                "decision",
+                "--title",
+                "Trust",
+                "--body",
+                "Use local approval.",
+                "--source-ref",
+                "manual",
+                "--confidence",
+                "90",
+                "--json",
+            ]),
+            CliCommand::Memory(MemoryCommand::Add(MemoryAddOptions {
+                scope: MemoryScopeArg::Repo,
+                scope_key: Some("/tmp/repo".to_string()),
+                kind: MemoryKindArg::Decision,
+                title: "Trust".to_string(),
+                body: "Use local approval.".to_string(),
+                source_ref: Some("manual".to_string()),
+                confidence: 90,
+                json: true,
+            }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl", "memory", "search", "--scope", "user", "--limit", "10", "approval",
+            ]),
+            CliCommand::Memory(MemoryCommand::Search(MemorySearchOptions {
+                query: "approval".to_string(),
+                scope: MemoryScopeArg::User,
+                scope_key: None,
+                include_deleted: false,
+                limit: 10,
+                json: false,
+            }))
+        );
+        assert_eq!(
+            parse_command(["agl", "memory", "delete", "mem_1"]),
+            CliCommand::Memory(MemoryCommand::Delete(MemoryDeleteOptions {
+                id: "mem_1".to_string(),
+                json: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_memory_rejects_zero_limit() {
+        let error = parse_cli([
+            "agl".to_string(),
+            "memory".to_string(),
+            "list".to_string(),
+            "--limit".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--limit must be greater than zero")
         );
     }
 
