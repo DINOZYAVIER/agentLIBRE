@@ -17,6 +17,7 @@ const MANAGED_HOOK_MARKER: &str = "agentLIBRE managed hook";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoInitOptions {
     pub profile: String,
+    pub profile_file: Option<PathBuf>,
     pub dry_run: bool,
     pub force: bool,
 }
@@ -25,6 +26,7 @@ impl Default for RepoInitOptions {
     fn default() -> Self {
         Self {
             profile: DEFAULT_PROFILE.to_string(),
+            profile_file: None,
             dry_run: false,
             force: false,
         }
@@ -69,6 +71,7 @@ pub enum RepoInitAction {
     WouldOverwriteFile,
     OverwroteFile,
     DeclaredSubmodule,
+    DeclaredGitComponent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -172,6 +175,14 @@ pub struct WorkspaceManifest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WorkspaceProfile {
+    pub version: u32,
+    pub name: String,
+    pub components: BTreeMap<String, WorkspaceComponent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceComponent {
     pub path: PathBuf,
     pub kind: ComponentKind,
@@ -201,13 +212,11 @@ pub fn init_repo_workspace(
     start: impl AsRef<Path>,
     options: &RepoInitOptions,
 ) -> Result<RepoInitReport> {
-    if options.profile != DEFAULT_PROFILE {
-        bail!("unsupported repo workflow profile: {}", options.profile);
-    }
-
     let workspace_root = resolve_repo_root(start)?;
     let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
     let mut changes = Vec::new();
+
+    let manifest = init_manifest(options)?;
 
     create_dir_change(
         &workspace_root,
@@ -216,22 +225,28 @@ pub fn init_repo_workspace(
         &mut changes,
     )?;
 
-    let manifest = default_manifest();
     write_manifest_change(&manifest_path, &manifest, options, &mut changes)?;
 
-    for path in [".agl/tasks", ".agl/reviews", ".agl/state"] {
-        create_dir_change(
-            &workspace_root,
-            Path::new(path),
-            options.dry_run,
-            &mut changes,
-        )?;
+    for component in manifest.components.values() {
+        match component.kind {
+            ComponentKind::Local | ComponentKind::Generated | ComponentKind::Ignored => {
+                create_dir_change(
+                    &workspace_root,
+                    &component.path,
+                    options.dry_run,
+                    &mut changes,
+                )?;
+            }
+            ComponentKind::Submodule => changes.push(RepoInitChange {
+                path: component.path.clone(),
+                action: RepoInitAction::DeclaredSubmodule,
+            }),
+            ComponentKind::Git => changes.push(RepoInitChange {
+                path: component.path.clone(),
+                action: RepoInitAction::DeclaredGitComponent,
+            }),
+        }
     }
-
-    changes.push(RepoInitChange {
-        path: PathBuf::from(".agl/skills"),
-        action: RepoInitAction::DeclaredSubmodule,
-    });
 
     Ok(RepoInitReport {
         workspace_root,
@@ -244,6 +259,16 @@ pub fn init_repo_workspace(
             "agl skill verify".to_string(),
         ],
     })
+}
+
+pub fn read_workspace_profile(path: impl AsRef<Path>) -> Result<WorkspaceProfile> {
+    let path = path.as_ref();
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let profile: WorkspaceProfile =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_profile(&profile)?;
+    Ok(profile)
 }
 
 pub fn status_repo_workspace(
@@ -285,10 +310,10 @@ pub fn status_repo_workspace(
 
     let mut components = Vec::new();
     for (name, component) in manifest.components.iter() {
-        if let Some(requested) = &options.component {
-            if requested != name {
-                continue;
-            }
+        if let Some(requested) = &options.component
+            && requested != name
+        {
+            continue;
         }
         components.push(component_status(&workspace_root, name, component));
     }
@@ -385,6 +410,29 @@ pub fn install_repo_hooks(
         hooks,
         errors,
     })
+}
+
+fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
+    if let Some(profile_file) = &options.profile_file {
+        let profile = read_workspace_profile(profile_file)?;
+        if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
+            bail!(
+                "profile file name {} does not match requested profile {}",
+                profile.name,
+                options.profile
+            );
+        }
+        return Ok(WorkspaceManifest {
+            version: profile.version,
+            profile: profile.name,
+            components: profile.components,
+        });
+    }
+
+    if options.profile != DEFAULT_PROFILE {
+        bail!("unsupported repo workflow profile: {}", options.profile);
+    }
+    Ok(default_manifest())
 }
 
 fn default_manifest() -> WorkspaceManifest {
@@ -559,8 +607,8 @@ fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
             manifest.version
         ));
     }
-    if manifest.profile != DEFAULT_PROFILE {
-        errors.push(format!("unsupported_profile: {}", manifest.profile));
+    if manifest.profile.trim().is_empty() {
+        errors.push("profile_empty".to_string());
     }
     let mut paths = BTreeMap::<PathBuf, String>::new();
     for (name, component) in &manifest.components {
@@ -574,6 +622,31 @@ fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
             ));
         }
     }
+}
+
+fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
+    if profile.version != 1 {
+        bail!("unsupported workspace profile version: {}", profile.version);
+    }
+    if profile.name.trim().is_empty() {
+        bail!("workspace profile name cannot be blank");
+    }
+    if profile.components.is_empty() {
+        bail!("workspace profile must define at least one component");
+    }
+    let mut errors = Vec::new();
+    validate_manifest(
+        &WorkspaceManifest {
+            version: profile.version,
+            profile: profile.name.clone(),
+            components: profile.components.clone(),
+        },
+        &mut errors,
+    );
+    if !errors.is_empty() {
+        bail!("workspace profile is invalid: {}", errors.join(", "));
+    }
+    Ok(())
 }
 
 fn validate_component_path(path: &Path) -> Result<()> {
@@ -708,10 +781,10 @@ fn fill_git_status(
         Ok(output) => {
             let actual = output.trim().to_string();
             if !actual.is_empty() {
-                if let Some(expected) = &component.url {
-                    if expected != &actual {
-                        status.errors.push("remote_mismatch".to_string());
-                    }
+                if let Some(expected) = &component.url
+                    && expected != &actual
+                {
+                    status.errors.push("remote_mismatch".to_string());
                 }
                 status.actual_url = Some(actual);
             }
@@ -726,10 +799,10 @@ fn fill_git_status(
     match git_output(&absolute_path, ["rev-parse", "HEAD"]) {
         Ok(output) => {
             let actual = output.trim().to_string();
-            if let Some(expected) = &component.commit {
-                if expected != &actual {
-                    status.errors.push("commit_mismatch".to_string());
-                }
+            if let Some(expected) = &component.commit
+                && expected != &actual
+            {
+                status.errors.push("commit_mismatch".to_string());
             }
             status.actual_commit = Some(actual);
         }
@@ -739,10 +812,10 @@ fn fill_git_status(
     match git_output(&absolute_path, ["rev-parse", "HEAD^{tree}"]) {
         Ok(output) => {
             let actual = output.trim().to_string();
-            if let Some(expected) = &component.tree {
-                if expected != &actual {
-                    status.errors.push("tree_mismatch".to_string());
-                }
+            if let Some(expected) = &component.tree
+                && expected != &actual
+            {
+                status.errors.push("tree_mismatch".to_string());
             }
             status.actual_tree = Some(actual);
         }
@@ -1007,6 +1080,107 @@ mod tests {
                 .warnings
                 .contains(&"component.skills.missing".to_string())
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn init_can_apply_local_workspace_profile_file() {
+        let root = temp_root("profile-file");
+        let profile_path = root.join("portable-profile.toml");
+        fs::write(
+            &profile_path,
+            r#"
+version = 1
+name = "portable-repo-workflow"
+
+[components.skills]
+path = ".agl/skills"
+kind = "submodule"
+url = "git@example.com:agentlibre/agl-skills.git"
+rev = "v0.2.0"
+lock = ".agl/skills.lock"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "git"
+url = "git@example.com:agentlibre/tasks.git"
+rev = "main"
+
+[components.reviews]
+path = ".agl/reviews"
+kind = "submodule"
+url = "git@example.com:agentlibre/reviews.git"
+rev = "main"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+        )
+        .unwrap();
+
+        let report = init_repo_workspace(
+            &root,
+            &RepoInitOptions {
+                profile: DEFAULT_PROFILE.to_string(),
+                profile_file: Some(profile_path),
+                dry_run: false,
+                force: false,
+            },
+        )
+        .unwrap();
+        let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+
+        assert_eq!(manifest.profile, "portable-repo-workflow");
+        assert_eq!(manifest.components["tasks"].kind, ComponentKind::Git);
+        assert_eq!(
+            manifest.components["reviews"].kind,
+            ComponentKind::Submodule
+        );
+        assert!(root.join(".agl/state").is_dir());
+        assert!(!root.join(".agl/tasks").exists());
+        assert!(report.changes.iter().any(|change| {
+            change.path == PathBuf::from(".agl/tasks")
+                && change.action == RepoInitAction::DeclaredGitComponent
+        }));
+        assert!(report.changes.iter().any(|change| {
+            change.path == PathBuf::from(".agl/reviews")
+                && change.action == RepoInitAction::DeclaredSubmodule
+        }));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_file_name_must_match_requested_non_default_profile() {
+        let root = temp_root("profile-name-mismatch");
+        let profile_path = root.join("profile.toml");
+        fs::write(
+            &profile_path,
+            r#"
+version = 1
+name = "actual-profile"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+        )
+        .unwrap();
+
+        let err = init_repo_workspace(
+            &root,
+            &RepoInitOptions {
+                profile: "requested-profile".to_string(),
+                profile_file: Some(profile_path),
+                dry_run: false,
+                force: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not match requested profile"));
 
         fs::remove_dir_all(root).unwrap();
     }
