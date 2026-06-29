@@ -10,7 +10,7 @@ use agl_chat::{
     chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
-use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind};
+use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
 use agl_daemon::{DaemonOptions, DaemonServer, default_socket_path};
 use agl_loop::{TurnOutput, run_turn};
 use agl_memory::{
@@ -355,6 +355,8 @@ fn run_cron_add(
         draft.timezone = timezone;
     }
     draft.notify_ref = options.notify_ref;
+    draft.prompt = options.prompt;
+    draft.input = options.input;
     let job = cron.add_job(draft).context("failed to add cron job")?;
 
     if options.json {
@@ -426,9 +428,13 @@ fn run_cron_run(
         .context("failed to read cron job")?
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
     validate_stored_cron_target(&job, runtime)?;
-    let result_ref = run_builtin_cron_target(&job, store)?;
+    let execution = run_cron_target(&job, store, runtime);
+    let (status, result_ref, error) = match execution {
+        Ok(result_ref) => (CronRunStatus::Succeeded, Some(result_ref), None),
+        Err(err) => (CronRunStatus::Failed, None, Some(format!("{err:#}"))),
+    };
     let (run, outcome) = cron
-        .record_manual_run(&job.id, Some(&result_ref))
+        .record_manual_run_result(&job.id, status, result_ref.as_deref(), error.as_deref())
         .context("failed to record cron run")?;
 
     if options.json {
@@ -514,14 +520,18 @@ fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) ->
     bail!("cron skill target is not runtime usable: {name}");
 }
 
-fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
-    if job.target_kind != CronTargetKind::Builtin {
-        bail!(
-            "cron --now execution is currently implemented for builtin targets only; target={}:{}",
-            job.target_kind.as_str(),
-            job.target_ref
-        );
+fn run_cron_target(
+    job: &CronJob,
+    store: &AglStore,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<String> {
+    match job.target_kind {
+        CronTargetKind::Builtin => run_builtin_cron_target(job, store),
+        CronTargetKind::Skill => run_skill_cron_target(job, runtime),
     }
+}
+
+fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
     match job.target_ref.as_str() {
         "store-status" => {
             let health = store.health().context("failed to check store health")?;
@@ -534,6 +544,52 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
             "unknown builtin cron target: {}; supported builtin targets: store-status",
             job.target_ref
         ),
+    }
+}
+
+fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
+    let prompt = cron_skill_prompt(job)?;
+    let inference = InferenceOptions {
+        skills: vec![job.target_ref.clone()],
+        tool_mode: ChatToolAccessMode::Write,
+        ..InferenceOptions::default()
+    };
+    let mut service = ChatService::open(
+        ChatOptions {
+            inference,
+            workspace_root: None,
+            session_id: None,
+            no_history: false,
+            new_session: true,
+        },
+        runtime,
+    )
+    .context("failed to open cron skill chat session")?;
+    let summary = service.summary();
+    let output = service
+        .run_user_turn(&prompt)
+        .context("failed to run cron skill turn")?;
+    service
+        .finish_eof_if_needed()
+        .context("failed to finish cron skill session")?;
+    match output.status {
+        ChatTurnStatus::Answered { .. } => Ok(format!(
+            "skill:{}:session:{}:run:{}",
+            job.target_ref, summary.session_id, summary.run_id
+        )),
+        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
+    }
+}
+
+fn cron_skill_prompt(job: &CronJob) -> Result<String> {
+    let prompt = job
+        .prompt
+        .as_deref()
+        .context("skill cron job missing prompt")?;
+    if let Some(input) = job.input.as_deref() {
+        Ok(format!("{prompt}\n\nCron input:\n{input}"))
+    } else {
+        Ok(prompt.to_string())
     }
 }
 
@@ -1568,6 +1624,12 @@ fn print_cron_job_detail(job: &CronJob) {
     println!("cron.{}.updated_at={}", job.id, job.updated_at);
     if let Some(notify_ref) = &job.notify_ref {
         println!("cron.{}.notify_ref={notify_ref}", job.id);
+    }
+    if let Some(prompt) = &job.prompt {
+        println!("cron.{}.prompt={prompt}", job.id);
+    }
+    if let Some(input) = &job.input {
+        println!("cron.{}.input={input}", job.id);
     }
     if let Some(deleted_at) = &job.deleted_at {
         println!("cron.{}.deleted_at={deleted_at}", job.id);

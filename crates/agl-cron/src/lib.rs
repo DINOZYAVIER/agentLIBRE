@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub type Result<T> = std::result::Result<T, CronError>;
 
-const DEFAULT_TIMEZONE: &str = "local";
+const DEFAULT_TIMEZONE: &str = "UTC";
 const IDEMPOTENCY_NAMESPACE: &str = "cron.run";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +38,11 @@ struct UtcMinuteFields {
     day_of_month: u32,
     month: u32,
     weekday_sunday_zero: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TimezoneOffset {
+    seconds: i32,
 }
 
 #[derive(Debug)]
@@ -158,6 +163,8 @@ pub struct CronJob {
     pub schedule_expr: String,
     pub timezone: String,
     pub notify_ref: Option<String>,
+    pub prompt: Option<String>,
+    pub input: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
@@ -172,6 +179,8 @@ pub struct CronJobDraft {
     pub schedule_expr: String,
     pub timezone: String,
     pub notify_ref: Option<String>,
+    pub prompt: Option<String>,
+    pub input: Option<String>,
 }
 
 impl CronJobDraft {
@@ -189,6 +198,8 @@ impl CronJobDraft {
             schedule_expr: schedule_expr.into(),
             timezone: DEFAULT_TIMEZONE.to_string(),
             notify_ref: None,
+            prompt: None,
+            input: None,
         }
     }
 }
@@ -233,8 +244,8 @@ impl<'a> CronRepository<'a> {
         let now = timestamp();
         self.store.connection().execute(
             "INSERT INTO cron_jobs
-             (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)",
+             (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, NULL)",
             params![
                 id,
                 draft.name,
@@ -244,6 +255,8 @@ impl<'a> CronRepository<'a> {
                 draft.schedule_expr,
                 draft.timezone,
                 draft.notify_ref,
+                draft.prompt,
+                draft.input,
                 now
             ],
         )?;
@@ -254,14 +267,14 @@ impl<'a> CronRepository<'a> {
     pub fn list_jobs(&self, include_deleted: bool) -> Result<Vec<CronJob>> {
         if include_deleted {
             self.query_jobs(
-                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
                  FROM cron_jobs
                  ORDER BY updated_at DESC, id DESC",
                 [],
             )
         } else {
             self.query_jobs(
-                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
                  FROM cron_jobs
                  WHERE deleted_at IS NULL
                  ORDER BY updated_at DESC, id DESC",
@@ -275,7 +288,7 @@ impl<'a> CronRepository<'a> {
         self.store
             .connection()
             .query_row(
-                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+                "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
                  FROM cron_jobs
                  WHERE id = ?1",
                 params![id],
@@ -316,18 +329,22 @@ impl<'a> CronRepository<'a> {
         job_id: &str,
         result_ref: Option<&str>,
     ) -> Result<(CronRun, IdempotencyOutcome)> {
+        self.record_manual_run_result(job_id, CronRunStatus::Succeeded, result_ref, None)
+    }
+
+    pub fn record_manual_run_result(
+        &self,
+        job_id: &str,
+        status: CronRunStatus,
+        result_ref: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(CronRun, IdempotencyOutcome)> {
         let job = self.job(job_id)?.ok_or_else(|| CronError::NotFound {
             id: job_id.to_string(),
         })?;
         validate_runnable_job(&job)?;
         let scheduled_for = timestamp();
-        self.record_run_for(
-            job_id,
-            &scheduled_for,
-            CronRunStatus::Succeeded,
-            result_ref,
-            None,
-        )
+        self.record_run_for(job_id, &scheduled_for, status, result_ref, error)
     }
 
     pub fn record_run_for(
@@ -448,7 +465,7 @@ impl<'a> CronRepository<'a> {
         let scheduled_for = minute_timestamp(unix_seconds);
         let mut due = Vec::new();
         for job in self.list_jobs(false)? {
-            if job.enabled && schedule_matches(&job.schedule_expr, unix_seconds)? {
+            if job.enabled && schedule_matches(&job.schedule_expr, unix_seconds, &job.timezone)? {
                 due.push(CronDueJob {
                     job,
                     scheduled_for: scheduled_for.clone(),
@@ -514,6 +531,20 @@ fn validate_draft(draft: &CronJobDraft) -> Result<()> {
     validate_non_blank("target_ref", &draft.target_ref)?;
     validate_schedule_expr(&draft.schedule_expr)?;
     validate_non_blank("timezone", &draft.timezone)?;
+    parse_timezone(&draft.timezone)?;
+    if let Some(prompt) = &draft.prompt {
+        validate_non_blank("prompt", prompt)?;
+    }
+    if let Some(input) = &draft.input {
+        validate_non_blank("input", input)?;
+    }
+    if draft.target_kind == CronTargetKind::Skill && draft.prompt.is_none() {
+        return Err(CronError::InvalidValue {
+            field: "prompt",
+            value: String::new(),
+            reason: "skill cron jobs require a stored prompt",
+        });
+    }
     if let Some(notify_ref) = &draft.notify_ref {
         validate_non_blank("notify_ref", notify_ref)?;
     }
@@ -537,12 +568,14 @@ fn idempotency_key(job_id: &str, scheduled_for: &str) -> String {
 
 fn idempotency_fingerprint(job: &CronJob) -> String {
     format!(
-        "target:{}:{} schedule:{} timezone:{} notify:{:?}",
+        "target:{}:{} schedule:{} timezone:{} notify:{:?} prompt:{:?} input:{:?}",
         job.target_kind.as_str(),
         job.target_ref,
         job.schedule_expr,
         job.timezone,
-        job.notify_ref
+        job.notify_ref,
+        job.prompt,
+        job.input
     )
 }
 
@@ -558,9 +591,11 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CronJob>> {
             schedule_expr: row.get(5)?,
             timezone: row.get(6)?,
             notify_ref: row.get(7)?,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
-            deleted_at: row.get(10)?,
+            prompt: row.get(8)?,
+            input: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+            deleted_at: row.get(12)?,
         })
     })())
 }
@@ -621,9 +656,10 @@ fn cron_field_valid(field: &str, kind: CronFieldKind) -> bool {
             .all(|part| cron_field_part_bounds(part, kind).is_ok())
 }
 
-fn schedule_matches(expr: &str, unix_seconds: u64) -> Result<bool> {
+fn schedule_matches(expr: &str, unix_seconds: u64, timezone: &str) -> Result<bool> {
     let expr = expr.trim();
-    let fields = utc_minute_fields(unix_seconds);
+    let timezone = parse_timezone(timezone)?;
+    let fields = local_minute_fields(unix_seconds, timezone);
 
     if expr == "hourly" {
         return Ok(fields.minute == 0);
@@ -811,10 +847,68 @@ fn cron_field_is_any(field: &str) -> bool {
     field == "*" || field == "*/1"
 }
 
-fn utc_minute_fields(unix_seconds: u64) -> UtcMinuteFields {
-    let minute = ((unix_seconds / 60) % 60) as u32;
-    let hour = ((unix_seconds / 3600) % 24) as u32;
-    let days = (unix_seconds / 86_400) as i64;
+fn parse_timezone(value: &str) -> Result<TimezoneOffset> {
+    let value = value.trim();
+    validate_non_blank("timezone", value)?;
+    if matches!(value, "UTC" | "Z") {
+        return Ok(TimezoneOffset { seconds: 0 });
+    }
+    let offset = value
+        .strip_prefix("UTC")
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(value);
+    let Some(sign) = offset.chars().next() else {
+        unreachable!("non-empty timezone offset checked above");
+    };
+    if sign != '+' && sign != '-' {
+        return Err(CronError::InvalidValue {
+            field: "timezone",
+            value: value.to_string(),
+            reason: "expected UTC, Z, or fixed offset such as +02:00 or UTC-07:00",
+        });
+    }
+    let body = &offset[1..];
+    let Some((hours, minutes)) = body.split_once(':') else {
+        return Err(CronError::InvalidValue {
+            field: "timezone",
+            value: value.to_string(),
+            reason: "fixed offset must use HH:MM",
+        });
+    };
+    let hours = hours.parse::<i32>().map_err(|_| CronError::InvalidValue {
+        field: "timezone",
+        value: value.to_string(),
+        reason: "fixed offset hour must be numeric",
+    })?;
+    let minutes = minutes
+        .parse::<i32>()
+        .map_err(|_| CronError::InvalidValue {
+            field: "timezone",
+            value: value.to_string(),
+            reason: "fixed offset minute must be numeric",
+        })?;
+    if hours > 23 || minutes > 59 {
+        return Err(CronError::InvalidValue {
+            field: "timezone",
+            value: value.to_string(),
+            reason: "fixed offset is out of range",
+        });
+    }
+    let seconds = hours * 3600 + minutes * 60;
+    Ok(TimezoneOffset {
+        seconds: if sign == '-' { -seconds } else { seconds },
+    })
+}
+
+fn local_minute_fields(unix_seconds: u64, timezone: TimezoneOffset) -> UtcMinuteFields {
+    let local_seconds = unix_seconds as i64 + timezone.seconds as i64;
+    minute_fields(local_seconds)
+}
+
+fn minute_fields(unix_seconds: i64) -> UtcMinuteFields {
+    let minute = unix_seconds.div_euclid(60).rem_euclid(60) as u32;
+    let hour = unix_seconds.div_euclid(3600).rem_euclid(24) as u32;
+    let days = unix_seconds.div_euclid(86_400);
     let (_, month, day_of_month) = civil_from_unix_days(days);
     UtcMinuteFields {
         minute,
@@ -878,19 +972,30 @@ mod tests {
     }
 
     #[test]
+    fn validates_utc_and_fixed_offset_timezones() {
+        for value in ["UTC", "Z", "+02:00", "-07:00", "UTC+05:30"] {
+            parse_timezone(value).unwrap();
+        }
+
+        assert!(parse_timezone("local").is_err());
+        assert!(parse_timezone("America/Edmonton").is_err());
+        assert!(parse_timezone("+24:00").is_err());
+    }
+
+    #[test]
     fn adds_lists_and_toggles_jobs() {
         let root = temp_root("jobs");
         let store = AglStore::open_at(&root).unwrap();
         let repo = CronRepository::new(&store);
 
-        let job = repo
-            .add_job(CronJobDraft::new(
-                "Daily review",
-                CronTargetKind::Skill,
-                "repo-review",
-                "daily 09:00",
-            ))
-            .unwrap();
+        let mut draft = CronJobDraft::new(
+            "Daily review",
+            CronTargetKind::Skill,
+            "repo-review",
+            "daily 09:00",
+        );
+        draft.prompt = Some("Review repository changes.".to_string());
+        let job = repo.add_job(draft).unwrap();
         let disabled = repo.set_enabled(&job.id, false).unwrap();
         let jobs = repo.list_jobs(false).unwrap();
 
@@ -1040,6 +1145,30 @@ mod tests {
 
         assert_eq!(due[0].job.id, job.id);
         assert_eq!(due[0].scheduled_for, "unix:34200");
+        assert!(not_due.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn due_jobs_match_fixed_timezone_offsets() {
+        let root = temp_root("due-offset");
+        let store = AglStore::open_at(&root).unwrap();
+        let repo = CronRepository::new(&store);
+        let mut draft = CronJobDraft::new(
+            "Offset daily",
+            CronTargetKind::Builtin,
+            "store-status",
+            "daily 09:00",
+        );
+        draft.timezone = "+02:00".to_string();
+        let job = repo.add_job(draft).unwrap();
+
+        let due = repo.due_jobs(7 * 3600).unwrap();
+        let not_due = repo.due_jobs(9 * 3600).unwrap();
+
+        assert_eq!(due[0].job.id, job.id);
+        assert_eq!(due[0].scheduled_for, "unix:25200");
         assert!(not_due.is_empty());
 
         std::fs::remove_dir_all(root).unwrap();

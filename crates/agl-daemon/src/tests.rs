@@ -180,6 +180,7 @@ fn cron_tick_records_due_run_and_notifies_once() {
     assert_eq!(executor.executions, 1);
     assert_eq!(notifier.notifications.len(), 1);
     assert_eq!(notifier.notifications[0].notify_ref, "matrix-room:!room");
+    assert_eq!(notifier.notifications[0].run_id, first.recorded_runs[0].id);
 
     std::fs::remove_dir_all(root).unwrap();
 }
