@@ -1,4 +1,5 @@
 use std::env;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
@@ -34,7 +35,7 @@ use agl_skills::{
     WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
     trust_workspace_skill, workspace_skill_report, workspace_skill_report_with_trust,
 };
-use agl_store::AglStore;
+use agl_store::{AglStore, StoreDomain, StoreExportOptions as AglStoreExportOptions, StoreStatus};
 use anyhow::{Context, Result, bail};
 
 mod args;
@@ -51,7 +52,8 @@ use args::{
     NotesUpdateOptions, RepoCommand, RepoHooksOptions, RepoInitOptions, RepoStatusOptions,
     RunOptions, ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions,
     SkillLockOptions, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
-    SkillVerifyOptions, parse_cli, print_completion, print_usage,
+    SkillVerifyOptions, StoreCommand, StoreDomainArg, StoreExportCliOptions, StoreStatusOptions,
+    parse_cli, print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -136,6 +138,7 @@ fn runtime_for_command_paths(
         command,
         CliCommand::Config(_)
             | CliCommand::Cron(_)
+            | CliCommand::Store(_)
             | CliCommand::Repo(_)
             | CliCommand::Skill(_)
             | CliCommand::Memory(_)
@@ -160,6 +163,7 @@ fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
         | CliCommand::Cron(_)
+        | CliCommand::Store(_)
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
         | CliCommand::DaemonStatus(_)
@@ -180,6 +184,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         }
         CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Cron(command) => run_cron(command, runtime),
+        CliCommand::Store(command) => run_store(command, runtime),
         CliCommand::Memory(command) => run_memory(command, runtime),
         CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),
@@ -189,6 +194,86 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
     }
+}
+
+fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "store", "starting command");
+    let store = AglStore::open_default(&runtime.paths).context("failed to open store")?;
+
+    match command {
+        StoreCommand::Status(options) => run_store_status(options, &store),
+        StoreCommand::Export(options) => run_store_export(options, &store),
+    }
+}
+
+fn run_store_status(options: StoreStatusOptions, store: &AglStore) -> Result<()> {
+    let status = store.status().context("failed to read store status")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        print_store_status(&status);
+    }
+    Ok(())
+}
+
+fn run_store_export(options: StoreExportCliOptions, store: &AglStore) -> Result<()> {
+    let domain = store_domain(options.domain);
+    if let Some(parent) = options
+        .out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create store export directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .create_new(!options.force)
+        .truncate(options.force)
+        .open(&options.out)
+        .with_context(|| {
+            if options.force {
+                format!("failed to open store export path {}", options.out.display())
+            } else {
+                format!(
+                    "failed to create store export path {}; pass --force to overwrite",
+                    options.out.display()
+                )
+            }
+        })?;
+    let records = store
+        .export_domain_jsonl(
+            &AglStoreExportOptions {
+                domain,
+                include_deleted: options.include_deleted,
+            },
+            file,
+        )
+        .context("failed to export store domain")?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "domain": domain.as_str(),
+                "path": options.out,
+                "records": records,
+                "include_deleted": options.include_deleted,
+            }))?
+        );
+    } else {
+        println!("store.exported=true");
+        println!("store.export.domain={}", domain.as_str());
+        println!("store.export.path={}", options.out.display());
+        println!("store.export.records={records}");
+        println!("store.export.include_deleted={}", options.include_deleted);
+    }
+    Ok(())
 }
 
 fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
@@ -450,6 +535,14 @@ fn cron_target_kind(kind: CronTargetKindArg) -> CronTargetKind {
     match kind {
         CronTargetKindArg::Skill => CronTargetKind::Skill,
         CronTargetKindArg::Builtin => CronTargetKind::Builtin,
+    }
+}
+
+fn store_domain(domain: StoreDomainArg) -> StoreDomain {
+    match domain {
+        StoreDomainArg::Memory => StoreDomain::Memory,
+        StoreDomainArg::Notes => StoreDomain::Notes,
+        StoreDomainArg::Cron => StoreDomain::Cron,
     }
 }
 
@@ -1307,6 +1400,20 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     }
     for error in &skill.errors {
         println!("skill.{name}.error={error}");
+    }
+}
+
+fn print_store_status(status: &StoreStatus) {
+    println!("store.path={}", status.database_path.display());
+    println!("store.schema_version={}", status.schema_version);
+    for domain in &status.domains {
+        println!(
+            "store.domain.{}={} total_rows={} active_rows={}",
+            domain.domain.as_str(),
+            domain.status.as_str(),
+            domain.total_rows,
+            domain.active_rows
+        );
     }
 }
 
