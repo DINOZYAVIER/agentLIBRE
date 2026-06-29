@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP: usize = 1500;
+pub const DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP: usize = 1800;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCapability {
@@ -277,6 +277,10 @@ fn render_context(
         }
         content.push_str(".\n");
     }
+    if options.tool_mode == "read-only" {
+        content.push_str("Read-only mode: do not offer to schedule, run, send, lock, trust, revoke, or write; explain the CLI/daemon path instead.\n");
+    }
+    content.push_str("Boundary: capability IDs are not tool names. Do not call cron, matrix, skills, repo, store, memory, notes, or daemon unless that exact name appears in agentlibre_tool_context.\n");
     content.push_str(
         "Policy: capabilities are not permissions; call only model_tools/tool_context.\n",
     );
@@ -350,6 +354,21 @@ mod tests {
             rendered
                 .content
                 .contains("capabilities are not permissions")
+        );
+        assert!(
+            rendered
+                .content
+                .contains("capability IDs are not tool names")
+        );
+        assert!(
+            rendered
+                .content
+                .contains("Do not call cron, matrix, skills")
+        );
+        assert!(
+            rendered
+                .content
+                .contains("Read-only mode: do not offer to schedule")
         );
         assert!(
             rendered

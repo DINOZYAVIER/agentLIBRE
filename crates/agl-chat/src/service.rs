@@ -5,7 +5,7 @@ use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{
     AgentLibreMessageId, AgentLibreSessionId, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
 };
-use agl_turn::{StopReason, TurnHookBatch, TurnMessage, VisibleTool};
+use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail};
 
 use crate::{
@@ -277,8 +277,12 @@ impl ChatService {
                 )?;
                 ChatTurnStatus::Answered { answer: content }
             }
-            TurnOutput::Stopped { reason } => {
-                let content = stopped_turn_context_message(reason).to_string();
+            TurnOutput::Stopped { reason, detail } => {
+                let content = stopped_turn_context_message(
+                    reason,
+                    detail.as_ref(),
+                    self.loop_host.session().turn_visible_tools(),
+                );
                 turn_messages.push(TurnMessage::Assistant { content });
                 record_completed_turn_messages(
                     &mut self.chat_history,
@@ -416,21 +420,49 @@ fn record_completed_turn_messages(
     Ok(())
 }
 
-pub fn stopped_turn_context_message(reason: StopReason) -> &'static str {
-    match reason {
-        StopReason::ToolJsonUnrepairable => {
-            "The previous turn stopped because the model produced malformed tool JSON. No tool was executed."
-        }
-        StopReason::ToolLimitReached => {
-            "The previous turn stopped because tool use is not available in this CLI session. No tool was executed."
-        }
-        StopReason::HiddenTool => {
-            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed."
-        }
-        StopReason::InvalidToolArguments => {
-            "The previous turn stopped because the requested tool arguments were invalid. No tool was executed."
-        }
+pub fn stopped_turn_context_message(
+    reason: StopReason,
+    detail: Option<&StopDetail>,
+    available_tools: &[VisibleTool],
+) -> String {
+    let available = render_available_tool_names(available_tools);
+    match (reason, detail) {
+        (StopReason::ToolJsonUnrepairable, _) => format!(
+            "The previous turn stopped because the model produced malformed tool JSON. No tool was executed. Available tools in this session: {available}."
+        ),
+        (StopReason::ToolLimitReached, Some(StopDetail::ToolLimitReached { limit })) => format!(
+            "The previous turn stopped because the tool-call limit was reached ({limit}). No tool was executed. Available tools in this session: {available}."
+        ),
+        (StopReason::ToolLimitReached, _) => format!(
+            "The previous turn stopped because tool use is not available in this CLI session. No tool was executed. Available tools in this session: {available}."
+        ),
+        (StopReason::HiddenTool, Some(StopDetail::HiddenTool { name })) => format!(
+            "The previous turn stopped because the model requested unavailable tool `{name}`. No tool was executed. Available tools in this session: {available}. Recovery: do not call `{name}` again unless it appears in `<agentlibre_tool_context>`; answer with the CLI/daemon path or ask for a write-capable/tool-enabled session instead."
+        ),
+        (StopReason::HiddenTool, _) => format!(
+            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed. Available tools in this session: {available}. Recovery: do not repeat hidden tool calls; answer with the CLI/daemon path or ask for a tool-enabled session instead."
+        ),
+        (
+            StopReason::InvalidToolArguments,
+            Some(StopDetail::InvalidToolArguments { name, message }),
+        ) => format!(
+            "The previous turn stopped because tool `{name}` received invalid arguments: {message}. No tool was executed. Available tools in this session: {available}."
+        ),
+        (StopReason::InvalidToolArguments, _) => format!(
+            "The previous turn stopped because the requested tool arguments were invalid. No tool was executed. Available tools in this session: {available}."
+        ),
     }
+}
+
+fn render_available_tool_names(tools: &[VisibleTool]) -> String {
+    if tools.is_empty() {
+        return "none".to_string();
+    }
+    tools
+        .iter()
+        .map(|tool| format!("`{}`", tool.name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn chat_workspace_root(input: &str, current_root: &Path) -> PathBuf {
@@ -657,16 +689,43 @@ mod tests {
 
     #[test]
     fn stopped_turn_context_message_explains_no_tool_execution() {
+        let visible_tools = vec![
+            VisibleTool::new("fs.list"),
+            VisibleTool::new("fs.read"),
+            VisibleTool::new("fs.search"),
+        ];
         for reason in [
             StopReason::ToolJsonUnrepairable,
             StopReason::ToolLimitReached,
-            StopReason::HiddenTool,
             StopReason::InvalidToolArguments,
         ] {
-            let message = stopped_turn_context_message(reason);
+            let message = stopped_turn_context_message(reason, None, &visible_tools);
 
             assert!(message.contains("previous turn stopped"));
             assert!(message.contains("No tool was executed."));
+            assert!(message.contains("`fs.list`, `fs.read`, `fs.search`"));
         }
+    }
+
+    #[test]
+    fn hidden_tool_stop_message_names_rejected_tool_and_recovery() {
+        let visible_tools = vec![
+            VisibleTool::new("fs.list"),
+            VisibleTool::new("fs.read"),
+            VisibleTool::new("fs.search"),
+        ];
+        let message = stopped_turn_context_message(
+            StopReason::HiddenTool,
+            Some(&StopDetail::HiddenTool {
+                name: "matrix".to_string(),
+            }),
+            &visible_tools,
+        );
+
+        assert!(message.contains("unavailable tool `matrix`"));
+        assert!(message.contains("No tool was executed."));
+        assert!(message.contains("`fs.list`, `fs.read`, `fs.search`"));
+        assert!(message.contains("do not call `matrix` again"));
+        assert!(message.contains("CLI/daemon path"));
     }
 }

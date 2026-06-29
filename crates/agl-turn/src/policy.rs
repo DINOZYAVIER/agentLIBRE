@@ -1,7 +1,7 @@
 use agl_actions::ToolCall;
 use serde_json::Value;
 
-use crate::{StopReason, ToolDispatchRequest, TurnState, VisibleTool};
+use crate::{StopDetail, StopReason, ToolDispatchRequest, TurnState, VisibleTool};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolCallDecision {
@@ -22,6 +22,19 @@ impl ToolCallStop {
             ToolCallStop::ToolLimitReached { .. } => StopReason::ToolLimitReached,
             ToolCallStop::HiddenTool { .. } => StopReason::HiddenTool,
             ToolCallStop::InvalidArguments { .. } => StopReason::InvalidToolArguments,
+        }
+    }
+
+    pub fn detail(&self) -> StopDetail {
+        match self {
+            ToolCallStop::ToolLimitReached { limit } => {
+                StopDetail::ToolLimitReached { limit: *limit }
+            }
+            ToolCallStop::HiddenTool { name } => StopDetail::HiddenTool { name: name.clone() },
+            ToolCallStop::InvalidArguments { name, message } => StopDetail::InvalidToolArguments {
+                name: name.clone(),
+                message: message.clone(),
+            },
         }
     }
 }
