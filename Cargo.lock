@@ -148,9 +148,11 @@ name = "agl-daemon"
 version = "1.0.0-alpha.7"
 dependencies = [
  "agl-chat",
+ "agl-cron",
  "agl-protocol",
  "agl-runtime",
  "agl-session",
+ "agl-store",
  "anyhow",
  "serde_json",
  "tracing",
