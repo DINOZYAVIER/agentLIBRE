@@ -1,5 +1,5 @@
-use agl_cron::{CronJob, CronRepository, CronRun, CronRunStatus};
-use agl_store::{AglStore, IdempotencyOutcome};
+use agl_cron::{CronJob, CronRepository, CronRun, CronRunAdmission, CronRunStatus};
+use agl_store::AglStore;
 use anyhow::{Context, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,9 +78,22 @@ pub fn run_cron_tick(
     };
 
     for due in due_jobs {
+        let admission = repo
+            .begin_run_for(&due.job, &due.scheduled_for)
+            .context("failed to admit cron scheduler run")?;
+        match admission {
+            CronRunAdmission::Replayed(run, _) => {
+                report.recorded_runs.push(run);
+                continue;
+            }
+            CronRunAdmission::Pending(_) => {
+                continue;
+            }
+            CronRunAdmission::Inserted(_) => {}
+        }
         let execution = executor.execute(&due.job);
-        let (run, outcome) = repo
-            .record_run_for(
+        let run = repo
+            .record_admitted_run(
                 &due.job.id,
                 &due.scheduled_for,
                 execution.status,
@@ -88,9 +101,7 @@ pub fn run_cron_tick(
                 execution.error.as_deref(),
             )
             .context("failed to record cron scheduler run")?;
-        if let Some(notify_ref) = &due.job.notify_ref
-            && matches!(outcome, IdempotencyOutcome::Inserted(_))
-        {
+        if let Some(notify_ref) = &due.job.notify_ref {
             notifier
                 .notify(CronNotification {
                     notify_ref: notify_ref.clone(),
