@@ -8,7 +8,10 @@ use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, Inferen
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_oven::render_model_request;
-use agl_runtime::AgentLibreRuntimeConfig;
+use agl_runtime::{
+    AgentLibreRuntimeConfig, RenderedRuntimeCapabilityContext, RuntimeCapabilityRenderOptions,
+    render_runtime_capability_context,
+};
 use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
@@ -27,10 +30,13 @@ pub struct InferenceSession {
     backend: LlamaCppBackend,
     model_config: ModelConfig,
     system_prompt: Option<String>,
+    runtime_capability_context: Option<String>,
+    runtime_capability_evidence: Option<agl_runtime::RuntimeCapabilityContextEvidence>,
     memory_context: Option<String>,
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
+    tool_mode: ToolAccessMode,
     store_root: PathBuf,
     run_id: InferenceRunId,
     config_path: PathBuf,
@@ -87,6 +93,11 @@ impl InferenceSession {
             &workspace_root,
             &trust_store_path,
         )?;
+        let runtime_capabilities = build_runtime_capability_context(
+            &workspace_root,
+            tool_mode,
+            &skill_context.visible_tools,
+        );
         let memory_context = resolve_memory_context(MemoryContextRequest {
             enabled: options.memory,
             config_skills: &config.prompt.skills,
@@ -104,10 +115,13 @@ impl InferenceSession {
             backend,
             model_config,
             system_prompt,
+            runtime_capability_context: Some(runtime_capabilities.content),
+            runtime_capability_evidence: Some(runtime_capabilities.evidence),
             memory_context,
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
+            tool_mode,
             store_root,
             run_id,
             config_path,
@@ -170,11 +184,15 @@ impl InferenceSession {
     }
 
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
+        if let Some(evidence) = &self.runtime_capability_evidence {
+            write_runtime_capability_context_evidence(&self.artifact_root, &self.run_id, evidence)?;
+        }
         let request = build_inference_request(
             self.run_id.clone(),
             request,
             &self.model_config,
             self.system_prompt.as_deref(),
+            self.runtime_capability_context.as_deref(),
             self.memory_context.as_deref(),
             self.skill_context.as_deref(),
         )?;
@@ -183,6 +201,17 @@ impl InferenceSession {
 
     pub fn clear_context(&mut self) {
         self.backend.clear_context();
+    }
+
+    pub fn set_runtime_capability_workspace_root(
+        &mut self,
+        workspace_root: &std::path::Path,
+    ) -> Result<()> {
+        let runtime_capabilities =
+            build_runtime_capability_context(workspace_root, self.tool_mode, &self.visible_tools);
+        self.runtime_capability_context = Some(runtime_capabilities.content);
+        self.runtime_capability_evidence = Some(runtime_capabilities.evidence);
+        Ok(())
     }
 }
 
@@ -197,6 +226,7 @@ fn build_inference_request(
     request: ModelRequest,
     model_config: &ModelConfig,
     system_prompt: Option<&str>,
+    runtime_capability_context: Option<&str>,
     memory_context: Option<&str>,
     skill_context: Option<&str>,
 ) -> Result<InferenceRequest> {
@@ -206,6 +236,11 @@ fn build_inference_request(
             + usize::from(
                 system_prompt
                     .map(|prompt| !prompt.trim().is_empty())
+                    .unwrap_or(false),
+            )
+            + usize::from(
+                runtime_capability_context
+                    .map(|context| !context.trim().is_empty())
                     .unwrap_or(false),
             )
             + usize::from(
@@ -222,6 +257,13 @@ fn build_inference_request(
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
         request_messages.push(TurnMessage::System {
             content: system_prompt.to_string(),
+        });
+    }
+    if let Some(runtime_capability_context) =
+        runtime_capability_context.filter(|context| !context.trim().is_empty())
+    {
+        request_messages.push(TurnMessage::System {
+            content: runtime_capability_context.to_string(),
         });
     }
     if let Some(memory_context) = memory_context.filter(|context| !context.trim().is_empty()) {
@@ -256,6 +298,24 @@ fn build_inference_request(
         run_id,
         attempt_id: InferenceAttemptId::new(format!("attempt-{request_index:04}"))?,
         rendered,
+    })
+}
+
+fn build_runtime_capability_context(
+    workspace_root: &std::path::Path,
+    tool_mode: ToolAccessMode,
+    visible_tools: &[VisibleTool],
+) -> RenderedRuntimeCapabilityContext {
+    let available_model_tools = visible_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    render_runtime_capability_context(RuntimeCapabilityRenderOptions {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_root: Some(workspace_root),
+        tool_mode: tool_mode.as_str(),
+        available_model_tools: &available_model_tools,
+        char_cap: agl_runtime::DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP,
     })
 }
 
@@ -603,6 +663,41 @@ fn write_memory_context_evidence(
         .with_context(|| format!("failed to write memory context evidence {}", path.display()))
 }
 
+fn write_runtime_capability_context_evidence(
+    artifact_root: &std::path::Path,
+    run_id: &InferenceRunId,
+    evidence: &agl_runtime::RuntimeCapabilityContextEvidence,
+) -> Result<()> {
+    let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
+        .run_dir(run_id)
+        .join("runtime-capabilities.json");
+    let parent = path.parent().with_context(|| {
+        format!(
+            "runtime capability evidence path has no parent: {}",
+            path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create runtime capability evidence directory {}",
+            parent.display()
+        )
+    })?;
+    let mut bytes = serde_json::to_vec_pretty(evidence).with_context(|| {
+        format!(
+            "failed to serialize runtime capability evidence {}",
+            path.display()
+        )
+    })?;
+    bytes.push(b'\n');
+    std::fs::write(&path, bytes).with_context(|| {
+        format!(
+            "failed to write runtime capability evidence {}",
+            path.display()
+        )
+    })
+}
+
 pub fn default_run_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -636,6 +731,7 @@ mod tests {
                 visible_tools: Vec::new(),
             },
             &config,
+            None,
             None,
             None,
             None,
@@ -676,6 +772,7 @@ mod tests {
             Some("demo system"),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -713,6 +810,7 @@ mod tests {
             &config,
             Some("system"),
             None,
+            None,
             Some("skill context"),
         )
         .unwrap();
@@ -743,6 +841,7 @@ mod tests {
             },
             &config,
             Some("system"),
+            None,
             Some("memory context"),
             Some("skill context"),
         )
@@ -753,6 +852,81 @@ mod tests {
         assert_eq!(request.rendered.messages[1].content, "memory context");
         assert_eq!(request.rendered.messages[2].content, "skill context");
         assert_eq!(request.rendered.messages[3].content, "hello");
+    }
+
+    #[test]
+    fn build_request_injects_runtime_capabilities_before_tools() {
+        let run_id = InferenceRunId::new("manual-test").unwrap();
+        let config = ModelConfig {
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+        };
+        let runtime_context = build_runtime_capability_context(
+            std::path::Path::new("/repo"),
+            ToolAccessMode::ReadOnly,
+            &[
+                VisibleTool::new("fs.list"),
+                VisibleTool::new("fs.read"),
+                VisibleTool::new("fs.search"),
+            ],
+        );
+
+        let request = build_inference_request(
+            run_id,
+            ModelRequest {
+                turn_id: "manual-test".to_string(),
+                request_index: 0,
+                messages: vec![TurnMessage::User {
+                    content: "can you run cron jobs?".to_string(),
+                }],
+                visible_tools: vec![
+                    VisibleTool::new("fs.list"),
+                    VisibleTool::new("fs.read"),
+                    VisibleTool::new("fs.search"),
+                ],
+            },
+            &config,
+            Some("system"),
+            Some(&runtime_context.content),
+            Some("memory context"),
+            Some("skill context"),
+        )
+        .unwrap();
+
+        assert_eq!(request.rendered.messages.len(), 6);
+        assert_eq!(request.rendered.messages[0].content, "system");
+        assert!(
+            request.rendered.messages[1]
+                .content
+                .contains("<agentlibre_runtime_capabilities>")
+        );
+        assert!(request.rendered.messages[1].content.contains("- cron:"));
+        assert!(
+            request.rendered.messages[1]
+                .content
+                .contains("tool_mode: read-only")
+        );
+        assert!(
+            request.rendered.messages[1]
+                .content
+                .contains("read-only: list, show, history, preflight")
+        );
+        assert!(
+            request.rendered.messages[1]
+                .content
+                .contains("write: add, delete, run, tick")
+        );
+        assert_eq!(request.rendered.messages[2].content, "memory context");
+        assert_eq!(request.rendered.messages[3].content, "skill context");
+        assert!(
+            request.rendered.messages[4]
+                .content
+                .contains("<agentlibre_tool_context>")
+        );
+        assert_eq!(
+            request.rendered.messages[5].content,
+            "can you run cron jobs?"
+        );
     }
 
     #[test]
@@ -779,6 +953,7 @@ mod tests {
             },
             &config,
             Some("system"),
+            None,
             None,
             Some("skill context"),
         )
