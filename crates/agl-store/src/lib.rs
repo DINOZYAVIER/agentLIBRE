@@ -300,6 +300,7 @@ pub struct StoreStatus {
     pub database_path: PathBuf,
     pub schema_version: u32,
     pub domains: Vec<StoreDomainHealth>,
+    pub idempotency: StoreIdempotencyHealth,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -308,6 +309,20 @@ pub struct StoreDomainHealth {
     pub status: StoreDomainStatus,
     pub total_rows: u64,
     pub active_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreIdempotencyHealth {
+    pub in_progress: u64,
+    pub stale_in_progress: Vec<StoreStaleIdempotencyRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreStaleIdempotencyRecord {
+    pub namespace: String,
+    pub key: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -534,6 +549,7 @@ impl AglStore {
                 .into_iter()
                 .map(|domain| self.domain_health(domain))
                 .collect::<Result<Vec<_>>>()?,
+            idempotency: self.idempotency_health()?,
         })
     }
 
@@ -545,6 +561,38 @@ impl AglStore {
             total_rows,
             active_rows,
         })
+    }
+
+    pub fn idempotency_health(&self) -> Result<StoreIdempotencyHealth> {
+        let stale_in_progress = self.stale_in_progress_idempotency_records()?;
+        Ok(StoreIdempotencyHealth {
+            in_progress: stale_in_progress.len() as u64,
+            stale_in_progress,
+        })
+    }
+
+    pub fn stale_in_progress_idempotency_records(
+        &self,
+    ) -> Result<Vec<StoreStaleIdempotencyRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT namespace, key, created_at, updated_at
+             FROM idempotency_keys
+             WHERE status = 'in_progress'
+             ORDER BY updated_at ASC, namespace ASC, key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoreStaleIdempotencyRecord {
+                namespace: row.get(0)?,
+                key: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
     }
 
     pub fn export_domain_jsonl<W: Write>(
@@ -1426,6 +1474,35 @@ mod tests {
             assert_eq!(domain.total_rows, 2, "domain={}", domain.domain.as_str());
             assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
         }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn status_reports_in_progress_idempotency_without_recovering_it() {
+        let root = temp_root("stale-idempotency");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO idempotency_keys
+                 (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
+                 VALUES ('cron.run', 'job-1:unix:60', 'sha256:abc', 'in_progress', NULL, 'unix:1', 'unix:2')",
+                [],
+            )
+            .unwrap();
+
+        let status = store.status().unwrap();
+        let record = store
+            .idempotency_record("cron.run", "job-1:unix:60")
+            .unwrap()
+            .expect("idempotency record should remain present");
+
+        assert_eq!(status.idempotency.in_progress, 1);
+        assert_eq!(status.idempotency.stale_in_progress.len(), 1);
+        assert_eq!(status.idempotency.stale_in_progress[0].key, "job-1:unix:60");
+        assert_eq!(record.status, IdempotencyStatus::InProgress);
+        assert!(record.result_ref.is_none());
 
         std::fs::remove_dir_all(root).unwrap();
     }

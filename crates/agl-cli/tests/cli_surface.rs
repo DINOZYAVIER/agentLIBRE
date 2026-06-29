@@ -386,6 +386,18 @@ fn cron_add_rejects_invalid_schedule() {
 fn store_commands_report_status_and_export_jsonl() {
     let home = TempHome::new("store-commands");
     let home_arg = home.path_string();
+    let matrix_store = home.path().join("data/matrix-bridge/store");
+    fs::create_dir_all(&matrix_store).unwrap_or_else(|err| {
+        panic!(
+            "failed to create fake Matrix store {}: {err}",
+            matrix_store.display()
+        )
+    });
+    fs::write(
+        matrix_store.join("session.json"),
+        r#"{"access_token":"SECRET_MATRIX_TOKEN","store_path":"/tmp/matrix-crypto"}"#,
+    )
+    .unwrap_or_else(|err| panic!("failed to write fake Matrix session: {err}"));
 
     let add = run_agl(&[
         "--home",
@@ -408,6 +420,8 @@ fn store_commands_report_status_and_export_jsonl() {
     assert_contains(&status_stdout, "active_rows=1");
     assert_contains(&status_stdout, "store.domain.notes=ok");
     assert_contains(&status_stdout, "store.domain.cron=ok");
+    assert_contains(&status_stdout, "store.idempotency.in_progress=0");
+    assert_contains(&status_stdout, "store.idempotency.stale_in_progress=0");
 
     let out_path = home.path().join("memory-export.jsonl");
     let out_arg = out_path.display().to_string();
@@ -421,6 +435,14 @@ fn store_commands_report_status_and_export_jsonl() {
         .unwrap_or_else(|err| panic!("failed to read export {}: {err}", out_path.display()));
     assert_contains(&exported, "\"domain\":\"memory\"");
     assert_contains(&exported, "\"title\":\"Export me\"");
+    assert!(
+        !exported.contains("SECRET_MATRIX_TOKEN"),
+        "store export must not read Matrix crypto/session files:\n{exported}"
+    );
+    assert!(
+        !exported.contains("/tmp/matrix-crypto"),
+        "store export must not include Matrix crypto paths:\n{exported}"
+    );
 
     let overwrite = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
@@ -432,6 +454,25 @@ fn store_commands_report_status_and_export_jsonl() {
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg, "--force",
     ]);
     assert_success(&forced);
+
+    let matrix_out = home.path().join("matrix-export.jsonl");
+    let matrix_out_arg = matrix_out.display().to_string();
+    let matrix_export = run_agl(&[
+        "--home",
+        &home_arg,
+        "store",
+        "export",
+        "--domain",
+        "matrix",
+        "--out",
+        &matrix_out_arg,
+    ]);
+    assert_failure(&matrix_export);
+    assert_contains(&stderr(&matrix_export), "invalid value 'matrix'");
+    assert!(
+        !matrix_out.exists(),
+        "unknown domain must not create export file"
+    );
 }
 
 #[test]
