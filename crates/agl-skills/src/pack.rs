@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::{SkillHarness, SkillSource, builtin_registry};
+use crate::{SkillHarness, SkillSource};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,12 +45,6 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
     let manifest = read_pack_manifest(root)?;
     validate_manifest_shape(&manifest)?;
 
-    let builtin_names = builtin_registry()?
-        .skills()
-        .iter()
-        .map(|skill| skill.harness.name.clone())
-        .collect::<BTreeSet<_>>();
-
     let mut seen = BTreeSet::new();
     let mut skills = Vec::with_capacity(manifest.skills.len());
     for entry in &manifest.skills {
@@ -58,9 +52,6 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
             .with_context(|| format!("invalid skill path for {}", entry.name))?;
         if !seen.insert(entry.name.clone()) {
             bail!("duplicate skill in pack manifest: {}", entry.name);
-        }
-        if builtin_names.contains(&entry.name) {
-            bail!("workspace pack skill shadows builtin skill: {}", entry.name);
         }
 
         let harness =
