@@ -31,7 +31,7 @@ use agl_runtime::{
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
 use agl_skills::{
-    SkillLockOptions as AglSkillLockOptions, SkillLockReport,
+    SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
     SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillReport,
     WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
     trust_workspace_skill, workspace_skill_report, workspace_skill_report_with_trust,
@@ -966,6 +966,7 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                     "description": skill.harness.description,
                     "trust": format!("{:?}", skill.trust),
                     "usable": skill.permits_context_injection(),
+                    "permissions": skill.harness.permissions,
                 })
             })
             .collect::<Vec<_>>();
@@ -985,6 +986,10 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                 skill.harness.pack,
                 skill.trust,
                 skill.permits_context_injection()
+            );
+            print_skill_permissions(
+                &format!("skill.{}", skill.harness.name),
+                &skill.harness.permissions,
             );
         }
         for skill in &workspace.skills {
@@ -1043,6 +1048,7 @@ fn run_skill_inspect(
                     "version": skill.harness.version,
                     "trust": format!("{:?}", skill.trust),
                     "usable": skill.permits_context_injection(),
+                    "permissions": skill.harness.permissions,
                 })
             })
             .collect::<Vec<_>>();
@@ -1066,6 +1072,10 @@ fn run_skill_inspect(
                 skill.permits_context_injection()
             );
             println!("description={}", skill.harness.description);
+            print_skill_permissions(
+                &format!("skill.{}", skill.harness.name),
+                &skill.harness.permissions,
+            );
         }
         for skill in workspace_skills {
             print_workspace_skill_status(skill);
@@ -1478,11 +1488,43 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     if let Some(description) = &skill.description {
         println!("skill.{name}.description={description}");
     }
+    if !skill.memory_read_scopes.is_empty() {
+        println!(
+            "skill.{name}.permissions.memory.read={}",
+            skill.memory_read_scopes.join(",")
+        );
+    }
+    if skill.notes_read || skill.notes_write {
+        println!("skill.{name}.permissions.notes.read={}", skill.notes_read);
+        println!("skill.{name}.permissions.notes.write={}", skill.notes_write);
+    }
     for warning in &skill.warnings {
         println!("skill.{name}.warning={warning}");
     }
     for error in &skill.errors {
         println!("skill.{name}.error={error}");
+    }
+}
+
+fn print_skill_permissions(prefix: &str, permissions: &SkillPermissions) {
+    let memory_scopes = permissions
+        .memory
+        .read
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect::<Vec<_>>();
+    if !memory_scopes.is_empty() {
+        println!(
+            "{prefix}.permissions.memory.read={}",
+            memory_scopes.join(",")
+        );
+    }
+    if permissions.notes.read || permissions.notes.write {
+        println!("{prefix}.permissions.notes.read={}", permissions.notes.read);
+        println!(
+            "{prefix}.permissions.notes.write={}",
+            permissions.notes.write
+        );
     }
 }
 

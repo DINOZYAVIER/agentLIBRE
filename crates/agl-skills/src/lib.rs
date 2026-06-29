@@ -9,7 +9,8 @@ pub use context::{
     SkillContextReferenceEvidence, build_verified_context_bundle,
 };
 pub use manifest::{
-    SkillHarness, SkillManifestError, SkillReference, SkillReferencePolicy, SkillSource,
+    MemoryPermissionScope, SkillHarness, SkillManifestError, SkillMemoryPermissions,
+    SkillNotesPermissions, SkillPermissions, SkillReference, SkillReferencePolicy, SkillSource,
 };
 pub use pack::{
     SkillPackEntry, SkillPackManifest, SkillPackSubmodule, ValidatedSkillPack, validate_skill_pack,

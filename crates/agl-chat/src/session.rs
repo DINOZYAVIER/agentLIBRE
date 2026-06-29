@@ -345,10 +345,18 @@ fn ensure_memory_context_allowed_for_skills(
         .context("failed to load skill registry for memory context")?;
     for skill_id in selected_skills {
         let skill = skill_registry.resolve_for_context_injection(&skill_id)?;
-        ensure!(
-            skill.harness.source == SkillSource::Builtin,
-            "memory context for workspace skill `{skill_id}` requires explicit memory permissions"
-        );
+        if skill.harness.source == SkillSource::Workspace {
+            ensure!(
+                skill
+                    .harness
+                    .permissions
+                    .memory
+                    .read
+                    .iter()
+                    .any(|scope| scope.as_str() == "user"),
+                "memory context for workspace skill `{skill_id}` requires permissions.memory.read to include user"
+            );
+        }
     }
     Ok(())
 }
@@ -391,6 +399,8 @@ fn resolve_skill_context(
         .context("failed to register builtin core guard provider")?;
     agl_tools::fs::register(&mut tool_catalog)
         .context("failed to register builtin core tool provider")?;
+    agl_tools::memory::register(&mut tool_catalog)
+        .context("failed to register builtin memory tool provider")?;
     agl_tools::notes::register(&mut tool_catalog)
         .context("failed to register builtin notes tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {

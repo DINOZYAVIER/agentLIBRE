@@ -50,6 +50,7 @@ pub struct SkillHarness {
     pub pack: String,
     pub required_hooks: Vec<HookId>,
     pub allowed_tools: Vec<ToolId>,
+    pub permissions: SkillPermissions,
     pub context_budget_tokens: u32,
     pub reference_policy: SkillReferencePolicy,
     pub references: Vec<SkillReference>,
@@ -109,6 +110,61 @@ impl SkillHarness {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillPermissions {
+    #[serde(default)]
+    pub memory: SkillMemoryPermissions,
+    #[serde(default)]
+    pub notes: SkillNotesPermissions,
+}
+
+impl SkillPermissions {
+    pub fn memory_read_scopes(&self) -> Vec<&'static str> {
+        self.memory
+            .read
+            .iter()
+            .map(|scope| scope.as_str())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillMemoryPermissions {
+    #[serde(default)]
+    pub read: Vec<MemoryPermissionScope>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryPermissionScope {
+    User,
+    Repo,
+    MatrixRoom,
+    MatrixUser,
+}
+
+impl MemoryPermissionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Repo => "repo",
+            Self::MatrixRoom => "matrix_room",
+            Self::MatrixUser => "matrix_user",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillNotesPermissions {
+    #[serde(default)]
+    pub read: bool,
+    #[serde(default)]
+    pub write: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSkillManifest {
@@ -119,6 +175,8 @@ struct RawSkillManifest {
     pack: String,
     required_hooks: Vec<HookId>,
     allowed_tools: Vec<ToolId>,
+    #[serde(default)]
+    permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
     guarantees: Vec<String>,
@@ -310,6 +368,7 @@ fn parse_skill_text(
         pack: expected_pack.to_string(),
         required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
         allowed_tools: sort_unique_ids(raw.allowed_tools, "allowed_tools")?,
+        permissions: normalize_permissions(raw.permissions)?,
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
@@ -359,6 +418,7 @@ fn parse_workspace_text(
         pack: raw.pack,
         required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
         allowed_tools: sort_unique_ids(raw.allowed_tools, "allowed_tools")?,
+        permissions: normalize_permissions(raw.permissions)?,
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
@@ -430,6 +490,21 @@ fn normalize_references(
         validate_reference_path(path)?;
     }
     Ok(SkillReferencePolicy { include })
+}
+
+fn normalize_permissions(
+    mut permissions: SkillPermissions,
+) -> Result<SkillPermissions, SkillManifestError> {
+    permissions.memory.read.sort();
+    reject_duplicate_values(
+        permissions
+            .memory
+            .read
+            .iter()
+            .map(|scope| scope.as_str().to_string()),
+        "permissions.memory.read",
+    )?;
+    Ok(permissions)
 }
 
 fn resolve_references(
@@ -753,6 +828,79 @@ Body.
             SkillManifestError::DuplicateValue {
                 field: "references.include",
                 value: "references/a.md".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn frontmatter_parses_permissions() {
+        let skill = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools: []
+permissions:
+  memory:
+    read:
+      - repo
+      - user
+  notes:
+    read: true
+    write: false
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(skill.permissions.memory_read_scopes(), vec!["user", "repo"]);
+        assert!(skill.permissions.notes.read);
+        assert!(!skill.permissions.notes.write);
+    }
+
+    #[test]
+    fn frontmatter_rejects_duplicate_permission_scopes() {
+        let err = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools: []
+permissions:
+  memory:
+    read:
+      - user
+      - user
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillManifestError::DuplicateValue {
+                field: "permissions.memory.read",
+                value: "user".to_string(),
             }
         );
     }
