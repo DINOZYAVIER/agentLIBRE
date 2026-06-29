@@ -98,6 +98,7 @@ pub(crate) enum SkillCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RepoInitOptions {
     pub(crate) profile: String,
+    pub(crate) profile_file: Option<PathBuf>,
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
 }
@@ -646,6 +647,10 @@ struct RepoInitArgs {
     /// Repo workflow profile to initialize.
     #[arg(long, default_value = "repo-workflow")]
     profile: String,
+
+    /// Local workspace profile manifest to apply.
+    #[arg(long, value_name = "PATH")]
+    profile_file: Option<PathBuf>,
 
     /// Print planned changes without writing files.
     #[arg(long)]
@@ -1309,6 +1314,7 @@ impl Cli {
 fn repo_init_options(args: RepoInitArgs) -> RepoInitOptions {
     RepoInitOptions {
         profile: args.profile,
+        profile_file: args.profile_file,
         dry_run: args.dry_run,
         force: args.force,
     }
@@ -1971,6 +1977,7 @@ mod tests {
             command,
             CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
                 profile: "repo-workflow".to_string(),
+                profile_file: None,
                 dry_run: true,
                 force: false,
             }))
@@ -1979,12 +1986,20 @@ mod tests {
 
     #[test]
     fn parse_repo_init_hidden_alias() {
-        let command = parse_command(["agl", "repo", "init", "--force"]);
+        let command = parse_command([
+            "agl",
+            "repo",
+            "init",
+            "--force",
+            "--profile-file",
+            "profiles/custom.toml",
+        ]);
 
         assert_eq!(
             command,
             CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
                 profile: "repo-workflow".to_string(),
+                profile_file: Some(PathBuf::from("profiles/custom.toml")),
                 dry_run: false,
                 force: true,
             }))

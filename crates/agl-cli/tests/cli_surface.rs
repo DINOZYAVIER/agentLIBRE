@@ -454,6 +454,51 @@ fn init_and_repo_init_dry_run_are_equivalent() {
 }
 
 #[test]
+fn init_accepts_local_workspace_profile_file() {
+    let repo = TempRepo::new("init-profile-file");
+    let profile_path = repo.path().join("profile.toml");
+    fs::write(
+        &profile_path,
+        r#"
+version = 1
+name = "portable-repo-workflow"
+
+[components.skills]
+path = ".agl/skills"
+kind = "submodule"
+url = "git@example.com:agentlibre/agl-skills.git"
+rev = "v0.2.0"
+lock = ".agl/skills.lock"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "git"
+url = "git@example.com:agentlibre/tasks.git"
+rev = "main"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+    )
+    .unwrap_or_else(|err| panic!("failed to write profile {}: {err}", profile_path.display()));
+    let profile_arg = profile_path.display().to_string();
+
+    let output = run_agl_in(
+        repo.path(),
+        &["init", "--profile-file", &profile_arg, "--dry-run"],
+    );
+
+    assert_success(&output);
+    let stdout = stdout(&output);
+    assert_contains(
+        &stdout,
+        "change path=.agl/tasks action=declared_git_component",
+    );
+    assert_contains(&stdout, "change path=.agl/skills action=declared_submodule");
+}
+
+#[test]
 fn init_then_status_reports_missing_skills_submodule_warning() {
     let repo = TempRepo::new("status-after-init");
     let init = run_agl_in(repo.path(), &["init"]);

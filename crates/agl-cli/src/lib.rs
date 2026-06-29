@@ -817,6 +817,7 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
         std::env::current_dir().context("failed to resolve current directory")?,
         &AglRepoInitOptions {
             profile: options.profile,
+            profile_file: options.profile_file,
             dry_run: options.dry_run,
             force: options.force,
         },
@@ -1654,6 +1655,7 @@ fn repo_init_action(action: RepoInitAction) -> &'static str {
         RepoInitAction::WouldOverwriteFile => "would_overwrite_file",
         RepoInitAction::OverwroteFile => "overwrote_file",
         RepoInitAction::DeclaredSubmodule => "declared_submodule",
+        RepoInitAction::DeclaredGitComponent => "declared_git_component",
     }
 }
 
