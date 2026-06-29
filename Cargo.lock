@@ -320,6 +320,7 @@ dependencies = [
 name = "agl-tools"
 version = "1.0.0-alpha.7"
 dependencies = [
+ "agl-memory",
  "agl-notes",
  "agl-store",
  "anyhow",

@@ -10,6 +10,7 @@ required_hooks:
 allowed_tools:
   - fs.read
   - fs.search
+  - memory.suggest
 context_budget_tokens: 1536
 references:
   include: []
@@ -19,11 +20,13 @@ guarantees:
   - memory candidates must not include secrets or private local state
 ---
 
-Use this skill to propose durable memory entries.
+Use this skill to create pending durable memory suggestions through
+`memory.suggest`.
 
-Do not write memory automatically. Produce explicit candidates that a user or
-trusted tool can approve first. Keep each candidate small, stable, and scoped:
-user, repo, Matrix room, or Matrix user.
+Do not approve memory automatically. Each `memory.suggest` call creates a
+pending suggestion that a user or trusted operator must later approve or reject.
+Keep each candidate small, stable, and scoped: user, repo, Matrix room, or
+Matrix user.
 
 Prefer decisions, preferences, and durable facts over raw transcript snippets.
 Do not promote credentials, tokens, private paths, or ephemeral debugging noise.
