@@ -28,7 +28,7 @@ impl ChatLoopHost {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
-        let tool_runtime = core_tool_runtime(&core_tools)?;
+        let tool_runtime = core_tool_runtime(&core_tools, session.store_root())?;
         Ok(Self {
             session,
             event_sink,
@@ -72,7 +72,7 @@ impl ChatLoopHost {
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
-        let tool_runtime = core_tool_runtime(&core_tools)?;
+        let tool_runtime = core_tool_runtime(&core_tools, self.session.store_root())?;
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
         Ok(())
@@ -160,11 +160,14 @@ fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
     }
 }
 
-fn core_tool_runtime(core_tools: &agl_tools::CoreTools) -> Result<ToolRuntime> {
+fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Result<ToolRuntime> {
     let mut runtime = ToolRuntime::new();
     runtime
         .register_provider(agl_tools::fs::declaration())
         .context("failed to register core filesystem tool provider")?;
+    runtime
+        .register_provider(agl_tools::notes::declaration())
+        .context("failed to register builtin notes tool provider")?;
     for tool_id in [
         agl_tools::FS_READ_TOOL_ID,
         agl_tools::FS_LIST_TOOL_ID,
@@ -176,6 +179,18 @@ fn core_tool_runtime(core_tools: &agl_tools::CoreTools) -> Result<ToolRuntime> {
             .with_context(|| {
                 format!("failed to register core filesystem tool handler {tool_id}")
             })?;
+    }
+    let notes_tools = agl_tools::NotesTools::new(store_root);
+    for tool_id in [
+        agl_tools::NOTES_ADD_TOOL_ID,
+        agl_tools::NOTES_SEARCH_TOOL_ID,
+        agl_tools::NOTES_SHOW_TOOL_ID,
+        agl_tools::NOTES_UPDATE_TOOL_ID,
+        agl_tools::NOTES_LINK_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, notes_tools.clone())
+            .with_context(|| format!("failed to register builtin notes tool handler {tool_id}"))?;
     }
     Ok(runtime)
 }

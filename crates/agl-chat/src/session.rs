@@ -12,7 +12,7 @@ use agl_runtime::AgentLibreRuntimeConfig;
 use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
-use agl_store::AglStore;
+use agl_store::{AglStore, default_store_root};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -31,6 +31,7 @@ pub struct InferenceSession {
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
+    store_root: PathBuf,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -49,6 +50,7 @@ impl InferenceSession {
                 .clone()
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
+        let store_root = default_store_root(&runtime.paths);
 
         tracing::info!(
             target: "agentlibre::app",
@@ -106,6 +108,7 @@ impl InferenceSession {
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
+            store_root,
             run_id,
             config_path,
             artifact_root,
@@ -160,6 +163,10 @@ impl InferenceSession {
 
     pub fn turn_visible_tools(&self) -> &[VisibleTool] {
         &self.visible_tools
+    }
+
+    pub fn store_root(&self) -> &std::path::Path {
+        &self.store_root
     }
 
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
@@ -384,6 +391,8 @@ fn resolve_skill_context(
         .context("failed to register builtin core guard provider")?;
     agl_tools::fs::register(&mut tool_catalog)
         .context("failed to register builtin core tool provider")?;
+    agl_tools::notes::register(&mut tool_catalog)
+        .context("failed to register builtin notes tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {
