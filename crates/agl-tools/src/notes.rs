@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
 };
 
 pub const PROVIDER_ID: &str = "notes-tools";
@@ -17,6 +17,8 @@ pub const NOTES_SEARCH_TOOL_ID: &str = "notes.search";
 pub const NOTES_SHOW_TOOL_ID: &str = "notes.show";
 pub const NOTES_UPDATE_TOOL_ID: &str = "notes.update";
 pub const NOTES_LINK_TOOL_ID: &str = "notes.link";
+pub const NOTES_DELETE_TOOL_ID: &str = "notes.delete";
+pub const NOTES_REMEMBER_TOOL_ID: &str = "notes.remember";
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 const MAX_SEARCH_LIMIT: usize = 50;
@@ -40,6 +42,8 @@ impl NotesTools {
             NOTES_SHOW_TOOL_ID => self.show(arguments),
             NOTES_UPDATE_TOOL_ID => self.update(arguments),
             NOTES_LINK_TOOL_ID => self.link(arguments),
+            NOTES_DELETE_TOOL_ID => self.delete(arguments),
+            NOTES_REMEMBER_TOOL_ID => self.remember(arguments),
             _ => anyhow::bail!("unknown notes tool `{name}`"),
         }
     }
@@ -145,6 +149,34 @@ impl NotesTools {
         ))
     }
 
+    fn delete(&self, arguments: Value) -> Result<String> {
+        let args = parse_args::<IdArgs>(NOTES_DELETE_TOOL_ID, arguments)?;
+        let store = self.open_store()?;
+        let notes = NoteRepository::new(&store);
+        let note = notes.delete(&args.id)?;
+        Ok(format!(
+            "tool=notes.delete\nnote_id={}\ndeleted={}\nstatus=deleted",
+            note.id,
+            note.deleted_at.is_some()
+        ))
+    }
+
+    fn remember(&self, arguments: Value) -> Result<String> {
+        let args = parse_args::<RememberArgs>(NOTES_REMEMBER_TOOL_ID, arguments)?;
+        let store = self.open_store()?;
+        let notes = NoteRepository::new(&store);
+        let scope = agl_memory::MemoryScope::new(
+            parse_memory_scope_kind(&args.scope)?,
+            args.scope_key.unwrap_or_else(|| "default".to_string()),
+        )?;
+        let kind = parse_memory_kind(&args.kind)?;
+        let promotion = notes.remember(&args.id, scope, kind)?;
+        Ok(format!(
+            "tool=notes.remember\nnote_id={}\nmemory_id={}\nlink_id={}\nstatus=remembered",
+            promotion.note.id, promotion.memory.id, promotion.link.id
+        ))
+    }
+
     fn open_store(&self) -> Result<AglStore> {
         AglStore::open_at(&self.store_root)
             .with_context(|| format!("failed to open notes store {}", self.store_root.display()))
@@ -195,6 +227,21 @@ pub fn declaration() -> ToolProviderDeclaration {
         ToolCapability::Write,
         &["id", "target_ref"],
     ))
+    .with_tool(tool(
+        NOTES_DELETE_TOOL_ID,
+        "Tombstone one local note.",
+        ToolCapability::Write,
+        &["id"],
+    ))
+    .with_tool(
+        tool(
+            NOTES_REMEMBER_TOOL_ID,
+            "Promote one note into durable memory and link the note to the memory entry.",
+            ToolCapability::Write,
+            &["id", "scope", "kind"],
+        )
+        .with_operation_kind(ToolOperationKind::Approve),
+    )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -217,8 +264,34 @@ fn tool(
         NOTES_ADD_TOOL_ID | NOTES_UPDATE_TOOL_ID => {
             declaration.with_state_effects([ToolStateEffect::StoreNotes])
         }
+        NOTES_DELETE_TOOL_ID => declaration.with_state_effects([ToolStateEffect::StoreNotes]),
         NOTES_LINK_TOOL_ID => declaration.with_state_effects([ToolStateEffect::StoreNoteLinks]),
+        NOTES_REMEMBER_TOOL_ID => declaration.with_state_effects([
+            ToolStateEffect::StoreMemoryEntries,
+            ToolStateEffect::StoreNoteLinks,
+        ]),
         _ => declaration,
+    }
+}
+
+fn parse_memory_scope_kind(scope: &str) -> Result<agl_memory::MemoryScopeKind> {
+    match scope {
+        "user" => Ok(agl_memory::MemoryScopeKind::User),
+        "repo" => Ok(agl_memory::MemoryScopeKind::Repo),
+        "matrix_room" => Ok(agl_memory::MemoryScopeKind::MatrixRoom),
+        "matrix_user" => Ok(agl_memory::MemoryScopeKind::MatrixUser),
+        _ => anyhow::bail!("unknown memory scope `{scope}`"),
+    }
+}
+
+fn parse_memory_kind(kind: &str) -> Result<agl_memory::MemoryKind> {
+    match kind {
+        "fact" => Ok(agl_memory::MemoryKind::Fact),
+        "preference" => Ok(agl_memory::MemoryKind::Preference),
+        "summary" => Ok(agl_memory::MemoryKind::Summary),
+        "decision" => Ok(agl_memory::MemoryKind::Decision),
+        "working_note" => Ok(agl_memory::MemoryKind::WorkingNote),
+        _ => anyhow::bail!("unknown memory kind `{kind}`"),
     }
 }
 
@@ -258,16 +331,26 @@ struct LinkArgs {
     label: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RememberArgs {
+    id: String,
+    scope: String,
+    scope_key: Option<String>,
+    kind: String,
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn notes_tools_add_search_show_and_link() {
-        let root = std::env::temp_dir().join(format!("agl-notes-tools-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("basic");
         let tools = NotesTools::new(&root);
 
         let add = tools
@@ -291,7 +374,47 @@ mod tests {
         assert!(search.contains("matches=1"));
         assert!(show.contains("Use pinned skills."));
 
-        std::fs::remove_dir_all(root).unwrap();
+        cleanup(root);
+    }
+
+    #[test]
+    fn notes_tools_delete_and_remember_notes() {
+        let root = temp_root("remember");
+        let tools = NotesTools::new(&root);
+
+        let add = tools
+            .dispatch(
+                NOTES_ADD_TOOL_ID,
+                json!({"title":"Memory boundary","body":"Promote notes only explicitly."}),
+            )
+            .unwrap();
+        let note_id = value_for(&add, "note_id=").unwrap();
+        let remember = tools
+            .dispatch(
+                NOTES_REMEMBER_TOOL_ID,
+                json!({
+                    "id": note_id,
+                    "scope": "user",
+                    "kind": "decision"
+                }),
+            )
+            .unwrap();
+
+        assert!(remember.contains("status=remembered"));
+        assert!(remember.contains("memory_id="));
+        assert!(remember.contains("link_id="));
+
+        let delete = tools
+            .dispatch(NOTES_DELETE_TOOL_ID, json!({"id": note_id}))
+            .unwrap();
+        let show = tools
+            .dispatch(NOTES_SHOW_TOOL_ID, json!({"id": note_id}))
+            .unwrap();
+
+        assert!(delete.contains("status=deleted"));
+        assert!(show.contains("deleted=true"));
+
+        cleanup(root);
     }
 
     #[test]
@@ -309,5 +432,27 @@ mod tests {
                 .tool(&ToolId::new(NOTES_ADD_TOOL_ID).unwrap())
                 .is_some()
         );
+    }
+
+    fn value_for(output: &str, prefix: &str) -> Option<String> {
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::to_string)
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "agl-notes-tools-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup(root: PathBuf) {
+        let _ = std::fs::remove_dir_all(root);
     }
 }

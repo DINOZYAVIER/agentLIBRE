@@ -11,6 +11,7 @@ required_hooks:
 allowed_tools:
   - fs.read
   - fs.search
+  - cron.preflight
 requestable_tools:
   - cron.add
   - matrix.outbox.enqueue

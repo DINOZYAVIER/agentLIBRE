@@ -461,14 +461,22 @@ fn resolve_skill_context(
     let mut tool_catalog = ToolCatalog::new();
     agl_tools::guards::register(&mut tool_catalog)
         .context("failed to register builtin core guard provider")?;
+    agl_tools::cron::register(&mut tool_catalog)
+        .context("failed to register builtin cron tool provider")?;
     agl_tools::fs::register(&mut tool_catalog)
         .context("failed to register builtin core tool provider")?;
+    agl_tools::matrix::register(&mut tool_catalog)
+        .context("failed to register builtin Matrix tool provider")?;
     agl_tools::memory::register(&mut tool_catalog)
         .context("failed to register builtin memory tool provider")?;
     agl_tools::notes::register(&mut tool_catalog)
         .context("failed to register builtin notes tool provider")?;
     agl_tools::permissions::register(&mut tool_catalog)
         .context("failed to register builtin permission tool provider")?;
+    agl_tools::repo::register(&mut tool_catalog)
+        .context("failed to register builtin repo tool provider")?;
+    agl_tools::store::register(&mut tool_catalog)
+        .context("failed to register builtin store tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {

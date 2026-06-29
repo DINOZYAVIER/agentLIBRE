@@ -11,6 +11,7 @@ allowed_tools:
   - fs.read
   - fs.list
   - fs.search
+  - repo.status
 context_budget_tokens: 1536
 references:
   include: []

@@ -263,9 +263,15 @@ impl ToolOperationKind {
 #[serde(rename_all = "snake_case")]
 pub enum ToolStateEffect {
     RepoFiles,
+    RepoWorkspace,
+    RepoHooks,
+    StoreMemoryEntries,
     StoreMemorySuggestions,
     StoreNotes,
     StoreNoteLinks,
+    StoreCron,
+    MatrixOutbox,
+    StoreIdempotency,
     StorePermissionRequests,
     StorePermissionGrants,
 }

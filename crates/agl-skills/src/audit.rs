@@ -333,10 +333,14 @@ fn read_audit() -> ToolLensAudit {
 fn builtin_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
     agl_tools::guards::register(&mut catalog).unwrap();
+    agl_tools::cron::register(&mut catalog).unwrap();
     agl_tools::fs::register(&mut catalog).unwrap();
+    agl_tools::matrix::register(&mut catalog).unwrap();
     agl_tools::memory::register(&mut catalog).unwrap();
     agl_tools::notes::register(&mut catalog).unwrap();
     agl_tools::permissions::register(&mut catalog).unwrap();
+    agl_tools::repo::register(&mut catalog).unwrap();
+    agl_tools::store::register(&mut catalog).unwrap();
     catalog
 }
 
