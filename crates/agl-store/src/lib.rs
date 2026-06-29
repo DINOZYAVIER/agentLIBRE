@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -164,6 +164,30 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ON memory_suggestions(status, updated_at);
             CREATE INDEX memory_suggestions_scope_idx
                 ON memory_suggestions(scope_kind, scope_key, status);
+        "#,
+    },
+    StoreMigration {
+        version: 7,
+        name: "007_cron_prompt_input_and_matrix_outbox",
+        sql: r#"
+            ALTER TABLE cron_jobs ADD COLUMN prompt TEXT;
+            ALTER TABLE cron_jobs ADD COLUMN input TEXT;
+            UPDATE cron_jobs SET timezone = 'UTC' WHERE timezone = 'local';
+            CREATE TABLE matrix_notification_outbox (
+                id TEXT PRIMARY KEY,
+                notify_ref TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL UNIQUE,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'sent', 'failed')),
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT
+            );
+            CREATE INDEX matrix_notification_outbox_status_idx
+                ON matrix_notification_outbox(status, updated_at);
         "#,
     },
 ];
@@ -376,6 +400,79 @@ impl IdempotencyStatus {
 pub enum IdempotencyOutcome {
     Inserted(IdempotencyRecord),
     Replayed(IdempotencyRecord),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixNotificationOutboxStatus {
+    Queued,
+    Sent,
+    Failed,
+}
+
+impl MatrixNotificationOutboxStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "sent" => Ok(Self::Sent),
+            "failed" => Ok(Self::Failed),
+            _ => Err(StoreError::InvalidValue {
+                field: "matrix_notification_outbox.status",
+                value: value.to_string(),
+                reason: "invalid Matrix notification outbox status",
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MatrixNotificationOutboxItem {
+    pub id: String,
+    pub notify_ref: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub dedupe_key: String,
+    pub body: String,
+    pub status: MatrixNotificationOutboxStatus,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub delivered_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatrixNotificationOutboxDraft {
+    pub notify_ref: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub dedupe_key: String,
+    pub body: String,
+}
+
+impl MatrixNotificationOutboxDraft {
+    pub fn new(
+        notify_ref: impl Into<String>,
+        source_kind: impl Into<String>,
+        source_id: impl Into<String>,
+        dedupe_key: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            notify_ref: notify_ref.into(),
+            source_kind: source_kind.into(),
+            source_id: source_id.into(),
+            dedupe_key: dedupe_key.into(),
+            body: body.into(),
+        }
+    }
 }
 
 impl AglStore {
@@ -591,6 +688,125 @@ impl AglStore {
         .transpose()
     }
 
+    pub fn enqueue_matrix_notification(
+        &self,
+        draft: MatrixNotificationOutboxDraft,
+    ) -> Result<MatrixNotificationOutboxItem> {
+        validate_non_blank(&draft.notify_ref, "matrix_notification_outbox.notify_ref")?;
+        validate_non_blank(&draft.source_kind, "matrix_notification_outbox.source_kind")?;
+        validate_non_blank(&draft.source_id, "matrix_notification_outbox.source_id")?;
+        validate_non_blank(&draft.dedupe_key, "matrix_notification_outbox.dedupe_key")?;
+        validate_non_blank(&draft.body, "matrix_notification_outbox.body")?;
+
+        let id = store_id("matrix_outbox");
+        let now = timestamp();
+        self.conn.execute(
+            "INSERT INTO matrix_notification_outbox
+             (id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, ?7, ?7, NULL)
+             ON CONFLICT(dedupe_key) DO NOTHING",
+            params![
+                &id,
+                &draft.notify_ref,
+                &draft.source_kind,
+                &draft.source_id,
+                &draft.dedupe_key,
+                &draft.body,
+                &now
+            ],
+        )?;
+        self.matrix_notification_by_dedupe_key(&draft.dedupe_key)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("matrix notification outbox {}", draft.dedupe_key),
+            })
+    }
+
+    pub fn queued_matrix_notifications(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MatrixNotificationOutboxItem>> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at
+             FROM matrix_notification_outbox
+             WHERE status = 'queued'
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], matrix_notification_from_row)?;
+        let mut notifications = Vec::new();
+        for row in rows {
+            notifications.push(row??);
+        }
+        Ok(notifications)
+    }
+
+    pub fn mark_matrix_notification_sent(&self, id: &str) -> Result<MatrixNotificationOutboxItem> {
+        validate_non_blank(id, "matrix_notification_outbox.id")?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE matrix_notification_outbox
+             SET status = 'sent', error = NULL, updated_at = ?2, delivered_at = ?2
+             WHERE id = ?1",
+            params![id, now],
+        )?;
+        self.matrix_notification(id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("matrix notification outbox {id}"),
+            })
+    }
+
+    pub fn mark_matrix_notification_failed(
+        &self,
+        id: &str,
+        error: &str,
+    ) -> Result<MatrixNotificationOutboxItem> {
+        validate_non_blank(id, "matrix_notification_outbox.id")?;
+        validate_non_blank(error, "matrix_notification_outbox.error")?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE matrix_notification_outbox
+             SET status = 'failed', error = ?2, updated_at = ?3
+             WHERE id = ?1",
+            params![id, error, now],
+        )?;
+        self.matrix_notification(id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("matrix notification outbox {id}"),
+            })
+    }
+
+    pub fn matrix_notification(&self, id: &str) -> Result<Option<MatrixNotificationOutboxItem>> {
+        validate_non_blank(id, "matrix_notification_outbox.id")?;
+        self.conn
+            .query_row(
+                "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at
+                 FROM matrix_notification_outbox
+                 WHERE id = ?1",
+                params![id],
+                matrix_notification_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
+    pub fn matrix_notification_by_dedupe_key(
+        &self,
+        dedupe_key: &str,
+    ) -> Result<Option<MatrixNotificationOutboxItem>> {
+        validate_non_blank(dedupe_key, "matrix_notification_outbox.dedupe_key")?;
+        self.conn
+            .query_row(
+                "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at
+                 FROM matrix_notification_outbox
+                 WHERE dedupe_key = ?1",
+                params![dedupe_key],
+                matrix_notification_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
     fn migrate(&self) -> Result<()> {
         self.ensure_migration_table()?;
         let current_version = self.schema_version()?;
@@ -694,8 +910,13 @@ impl AglStore {
                 self.query_count("SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL")?,
             )),
             StoreDomain::Cron => Ok((
-                self.query_count("SELECT COUNT(*) FROM cron_jobs")?,
-                self.query_count("SELECT COUNT(*) FROM cron_jobs WHERE deleted_at IS NULL")?,
+                self.query_count("SELECT COUNT(*) FROM cron_jobs")?
+                    + self.query_count("SELECT COUNT(*) FROM cron_runs")?
+                    + self.query_count("SELECT COUNT(*) FROM matrix_notification_outbox")?,
+                self.query_count("SELECT COUNT(*) FROM cron_jobs WHERE deleted_at IS NULL")?
+                    + self.query_count(
+                        "SELECT COUNT(*) FROM matrix_notification_outbox WHERE status = 'queued'",
+                    )?,
             )),
         }
     }
@@ -826,11 +1047,11 @@ impl AglStore {
 
     fn export_cron_jsonl<W: Write>(&self, include_deleted: bool, mut writer: W) -> Result<usize> {
         let jobs_sql = if include_deleted {
-            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
              FROM cron_jobs
              ORDER BY updated_at ASC, id ASC"
         } else {
-            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
              FROM cron_jobs
              WHERE deleted_at IS NULL
              ORDER BY updated_at ASC, id ASC"
@@ -848,9 +1069,11 @@ impl AglStore {
                 "schedule_expr": row.get::<_, String>(5)?,
                 "timezone": row.get::<_, String>(6)?,
                 "notify_ref": row.get::<_, Option<String>>(7)?,
-                "created_at": row.get::<_, String>(8)?,
-                "updated_at": row.get::<_, String>(9)?,
-                "deleted_at": row.get::<_, Option<String>>(10)?,
+                "prompt": row.get::<_, Option<String>>(8)?,
+                "input": row.get::<_, Option<String>>(9)?,
+                "created_at": row.get::<_, String>(10)?,
+                "updated_at": row.get::<_, String>(11)?,
+                "deleted_at": row.get::<_, Option<String>>(12)?,
             }))
         })?;
         let mut count = write_jsonl_rows(&mut writer, jobs)?;
@@ -882,6 +1105,30 @@ impl AglStore {
             }))
         })?;
         count += write_jsonl_rows(&mut writer, runs)?;
+
+        let mut outbox_stmt = self.conn.prepare(
+            "SELECT id, notify_ref, source_kind, source_id, dedupe_key, body, status, error, created_at, updated_at, delivered_at
+             FROM matrix_notification_outbox
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let outbox = outbox_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Cron.as_str(),
+                "record_type": "matrix_notification_outbox",
+                "id": row.get::<_, String>(0)?,
+                "notify_ref": row.get::<_, String>(1)?,
+                "source_kind": row.get::<_, String>(2)?,
+                "source_id": row.get::<_, String>(3)?,
+                "dedupe_key": row.get::<_, String>(4)?,
+                "body": row.get::<_, String>(5)?,
+                "status": row.get::<_, String>(6)?,
+                "error": row.get::<_, Option<String>>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+                "updated_at": row.get::<_, String>(9)?,
+                "delivered_at": row.get::<_, Option<String>>(10)?,
+            }))
+        })?;
+        count += write_jsonl_rows(&mut writer, outbox)?;
         Ok(count)
     }
 }
@@ -919,6 +1166,10 @@ fn validate_database_file_name(file_name: &str) -> Result<()> {
 }
 
 fn validate_idempotency_part(value: &str, field: &'static str) -> Result<()> {
+    validate_non_blank(value, field)
+}
+
+fn validate_non_blank(value: &str, field: &'static str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(StoreError::InvalidValue {
             field,
@@ -932,6 +1183,27 @@ fn validate_idempotency_part(value: &str, field: &'static str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn matrix_notification_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<MatrixNotificationOutboxItem>> {
+    let status: String = row.get(6)?;
+    Ok((|| {
+        Ok(MatrixNotificationOutboxItem {
+            id: row.get(0)?,
+            notify_ref: row.get(1)?,
+            source_kind: row.get(2)?,
+            source_id: row.get(3)?,
+            dedupe_key: row.get(4)?,
+            body: row.get(5)?,
+            status: MatrixNotificationOutboxStatus::parse(&status)?,
+            error: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            delivered_at: row.get(10)?,
+        })
+    })())
 }
 
 fn validate_migration_sequence(versions: &[u32]) -> Result<()> {
@@ -951,6 +1223,14 @@ fn timestamp() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("unix:{seconds}")
+}
+
+fn store_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{prefix}_{}_{}", std::process::id(), nanos)
 }
 
 fn write_jsonl_rows<W, I>(writer: &mut W, rows: I) -> Result<usize>
@@ -1133,8 +1413,8 @@ mod tests {
             .execute(
                 "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
-                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:1', NULL),
-                        ('cron_deleted', 'Deleted', 0, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:2', 'unix:3')",
+                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL),
+                        ('cron_deleted', 'Deleted', 0, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:2', 'unix:3')",
                 [],
             )
             .unwrap();
@@ -1272,7 +1552,7 @@ mod tests {
             .execute(
                 "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
-                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:1', NULL)",
+                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL)",
                 [],
             )
             .unwrap();
@@ -1315,6 +1595,58 @@ mod tests {
         assert_eq!(cron_count, 2);
         assert!(cron.contains("\"record_type\":\"cron_job\""));
         assert!(cron.contains("\"record_type\":\"cron_run\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
+        let root = temp_root("matrix-outbox");
+        let store = AglStore::open_at(&root).unwrap();
+
+        let first = store
+            .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+                "matrix-room:!room",
+                "cron",
+                "run_1",
+                "cron:run_1:matrix-room:!room",
+                "Cron job completed.",
+            ))
+            .unwrap();
+        let second = store
+            .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+                "matrix-room:!room",
+                "cron",
+                "run_1",
+                "cron:run_1:matrix-room:!room",
+                "Cron job completed.",
+            ))
+            .unwrap();
+        let queued = store.queued_matrix_notifications(10).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(queued, vec![first.clone()]);
+        assert_eq!(first.status, MatrixNotificationOutboxStatus::Queued);
+
+        let sent = store.mark_matrix_notification_sent(&first.id).unwrap();
+        assert_eq!(sent.status, MatrixNotificationOutboxStatus::Sent);
+        assert!(sent.delivered_at.is_some());
+        assert!(store.queued_matrix_notifications(10).unwrap().is_empty());
+
+        let mut cron = Vec::new();
+        let count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Cron,
+                    include_deleted: false,
+                },
+                &mut cron,
+            )
+            .unwrap();
+        let cron = String::from_utf8(cron).unwrap();
+        assert_eq!(count, 1);
+        assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
+        assert!(cron.contains("\"status\":\"sent\""));
 
         std::fs::remove_dir_all(root).unwrap();
     }

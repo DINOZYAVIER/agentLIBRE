@@ -30,6 +30,7 @@ impl CronExecution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronNotification {
     pub notify_ref: String,
+    pub run_id: String,
     pub job_id: String,
     pub job_name: String,
     pub scheduled_for: String,
@@ -105,6 +106,7 @@ pub fn run_cron_tick(
             notifier
                 .notify(CronNotification {
                     notify_ref: notify_ref.clone(),
+                    run_id: run.id.clone(),
                     job_id: due.job.id.clone(),
                     job_name: due.job.name.clone(),
                     scheduled_for: due.scheduled_for,

@@ -349,6 +349,8 @@ pub(crate) struct CronAddOptions {
     pub(crate) enabled: bool,
     pub(crate) timezone: Option<String>,
     pub(crate) notify_ref: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) input: Option<String>,
     pub(crate) json: bool,
 }
 
@@ -801,6 +803,14 @@ struct CronAddArgs {
     /// Optional notification reference, such as matrix-room:<room_id>.
     #[arg(long, value_name = "REF")]
     notify: Option<String>,
+
+    /// Stored prompt used when this cron job executes a skill.
+    #[arg(long, value_name = "TEXT")]
+    prompt: Option<String>,
+
+    /// Optional stored input appended to the cron prompt.
+    #[arg(long, value_name = "TEXT")]
+    input: Option<String>,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1483,15 +1493,29 @@ fn store_command(command: StoreCommands) -> StoreCommand {
 
 fn cron_command(command: CronCommands) -> Result<CronCommand> {
     Ok(match command {
-        CronCommands::Add(args) => CronCommand::Add(CronAddOptions {
-            name: args.name,
-            schedule: args.schedule,
-            target: cron_target(args.skill, args.builtin)?,
-            enabled: !args.disabled,
-            timezone: args.timezone,
-            notify_ref: args.notify,
-            json: args.json,
-        }),
+        CronCommands::Add(args) => {
+            if let Some(prompt) = &args.prompt {
+                validate_prompt(prompt)?;
+            }
+            if let Some(input) = &args.input {
+                validate_prompt(input)?;
+            }
+            let target = cron_target(args.skill, args.builtin)?;
+            if target.kind == CronTargetKindArg::Skill && args.prompt.is_none() {
+                bail!("--prompt is required when --skill is used");
+            }
+            CronCommand::Add(CronAddOptions {
+                name: args.name,
+                schedule: args.schedule,
+                target,
+                enabled: !args.disabled,
+                timezone: args.timezone,
+                notify_ref: args.notify,
+                prompt: args.prompt,
+                input: args.input,
+                json: args.json,
+            })
+        }
         CronCommands::List(args) => CronCommand::List(CronListOptions {
             include_deleted: args.include_deleted,
             json: args.json,
@@ -2428,6 +2452,8 @@ mod tests {
                 enabled: true,
                 timezone: None,
                 notify_ref: Some("matrix-room:!room".to_string()),
+                prompt: None,
+                input: None,
                 json: true,
             }))
         );
@@ -2442,9 +2468,13 @@ mod tests {
                 "daily 09:00",
                 "--skill",
                 "repo-review",
+                "--prompt",
+                "Review repository changes.",
+                "--input",
+                "{\"limit\":10}",
                 "--disabled",
                 "--timezone",
-                "local",
+                "UTC-07:00",
             ]),
             CliCommand::Cron(CronCommand::Add(CronAddOptions {
                 name: "Repo review".to_string(),
@@ -2454,8 +2484,10 @@ mod tests {
                     target_ref: "repo-review".to_string(),
                 },
                 enabled: false,
-                timezone: Some("local".to_string()),
+                timezone: Some("UTC-07:00".to_string()),
                 notify_ref: None,
+                prompt: Some("Review repository changes.".to_string()),
+                input: Some("{\"limit\":10}".to_string()),
                 json: false,
             }))
         );
@@ -2485,6 +2517,24 @@ mod tests {
             missing_target
                 .to_string()
                 .contains("exactly one of --skill or --builtin is required")
+        );
+
+        let missing_prompt = parse_cli([
+            "agl".to_string(),
+            "cron".to_string(),
+            "add".to_string(),
+            "--name".to_string(),
+            "Repo review".to_string(),
+            "--schedule".to_string(),
+            "hourly".to_string(),
+            "--skill".to_string(),
+            "repo-review".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            missing_prompt
+                .to_string()
+                .contains("--prompt is required when --skill is used")
         );
 
         let missing_now = parse_cli([
