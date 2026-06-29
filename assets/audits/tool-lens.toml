@@ -1,0 +1,507 @@
+version = 1
+
+[[tools]]
+id = "fs.read"
+provider = "core-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/fs"
+
+[[tools]]
+id = "fs.list"
+provider = "core-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/fs"
+
+[[tools]]
+id = "fs.search"
+provider = "core-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/fs"
+
+[[tools]]
+id = "fs.edit"
+provider = "core-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["repo_files"]
+visible_in_read_only = false
+policy_owner = "agl-tools/fs"
+
+[[tools]]
+id = "memory.suggest"
+provider = "memory-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_memory_suggestions"]
+visible_in_read_only = false
+policy_owner = "agl-tools/memory"
+
+[[tools]]
+id = "notes.add"
+provider = "notes-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_notes"]
+visible_in_read_only = false
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "notes.search"
+provider = "notes-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "notes.show"
+provider = "notes-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "notes.update"
+provider = "notes-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_notes"]
+visible_in_read_only = false
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "notes.link"
+provider = "notes-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_note_links"]
+visible_in_read_only = false
+policy_owner = "agl-tools/notes"
+
+[[missing_tools]]
+id = "memory.search"
+domain = "memory"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Read approved memories without exposing store internals."
+
+[[missing_tools]]
+id = "memory.list"
+domain = "memory"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "List durable memories by scope and kind."
+
+[[missing_tools]]
+id = "memory.approve"
+domain = "memory"
+operation_kind = "approve"
+target_task = "AGL-095c"
+reason = "Approve pending memory suggestions through a typed approval boundary."
+
+[[missing_tools]]
+id = "memory.reject"
+domain = "memory"
+operation_kind = "approve"
+target_task = "AGL-095c"
+reason = "Reject pending memory suggestions through a typed approval boundary."
+
+[[missing_tools]]
+id = "notes.delete"
+domain = "notes"
+operation_kind = "write"
+target_task = "AGL-095c"
+reason = "Tombstone notes through the same tool boundary as note creation."
+
+[[missing_tools]]
+id = "notes.remember"
+domain = "notes"
+operation_kind = "approve"
+target_task = "AGL-095c"
+reason = "Promote selected notes into memory suggestions explicitly."
+
+[[missing_tools]]
+id = "cron.list"
+domain = "cron"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect scheduled jobs without granting cron mutation."
+
+[[missing_tools]]
+id = "cron.show"
+domain = "cron"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect a single cron job without granting cron mutation."
+
+[[missing_tools]]
+id = "cron.history"
+domain = "cron"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect cron run history and failures."
+
+[[missing_tools]]
+id = "cron.add"
+domain = "cron"
+operation_kind = "write"
+target_task = "AGL-095b"
+reason = "Create scheduled jobs through an audited mutation boundary."
+
+[[missing_tools]]
+id = "cron.delete"
+domain = "cron"
+operation_kind = "write"
+target_task = "AGL-095b"
+reason = "Disable or remove scheduled jobs through an audited mutation boundary."
+
+[[missing_tools]]
+id = "cron.run"
+domain = "cron"
+operation_kind = "execute"
+target_task = "AGL-095b"
+reason = "Run a stored cron target without treating capability IDs as callable tools."
+
+[[missing_tools]]
+id = "cron.tick"
+domain = "cron"
+operation_kind = "execute"
+target_task = "AGL-095b"
+reason = "Expose daemon tick behavior for smoke and recovery without bypassing policy."
+
+[[missing_tools]]
+id = "repo.status"
+domain = "repo"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect workspace health through the same capability registry as chat."
+
+[[missing_tools]]
+id = "repo.init"
+domain = "repo"
+operation_kind = "admin"
+target_task = "AGL-095d"
+reason = "Initialize .agl workspace state through an auditable admin boundary."
+
+[[missing_tools]]
+id = "repo.install_hooks"
+domain = "repo"
+operation_kind = "admin"
+target_task = "AGL-095d"
+reason = "Install repository hooks without a separate mutation path."
+
+[[missing_tools]]
+id = "repo.import_profile"
+domain = "repo"
+operation_kind = "admin"
+target_task = "AGL-095d"
+reason = "Apply workspace profile manifests through a typed admin boundary."
+
+[[missing_tools]]
+id = "skill.list"
+domain = "skill"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "List builtin and workspace skills as a read tool."
+
+[[missing_tools]]
+id = "skill.inspect"
+domain = "skill"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect skill manifests and trust state as a read tool."
+
+[[missing_tools]]
+id = "skill.lock"
+domain = "skill"
+operation_kind = "admin"
+target_task = "AGL-095d"
+reason = "Pin workspace skill identity through a typed admin boundary."
+
+[[missing_tools]]
+id = "skill.trust"
+domain = "skill"
+operation_kind = "approve"
+target_task = "AGL-095d"
+reason = "Record local trust through an explicit approval tool."
+
+[[missing_tools]]
+id = "skill.revoke"
+domain = "skill"
+operation_kind = "approve"
+target_task = "AGL-095d"
+reason = "Revoke local trust through an explicit approval tool."
+
+[[missing_tools]]
+id = "store.status"
+domain = "store"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Report store health, migrations, and stale idempotency records."
+
+[[missing_tools]]
+id = "store.export"
+domain = "store"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Export known store domains with explicit secret policy."
+
+[[missing_tools]]
+id = "store.migrate"
+domain = "store"
+operation_kind = "admin"
+target_task = "AGL-095d"
+reason = "Run migrations through the same audited store boundary."
+
+[[missing_tools]]
+id = "matrix.outbox.status"
+domain = "matrix"
+operation_kind = "read"
+target_task = "AGL-095a"
+reason = "Inspect queued Matrix notifications without granting send."
+
+[[missing_tools]]
+id = "matrix.outbox.enqueue"
+domain = "matrix"
+operation_kind = "write"
+target_task = "AGL-095b"
+reason = "Queue Matrix notifications from cron and skills through local store state."
+
+[[missing_tools]]
+id = "matrix.outbox.deliver"
+domain = "matrix"
+operation_kind = "execute"
+target_task = "AGL-095b"
+reason = "Deliver queued Matrix notifications through daemon-owned execution."
+
+[[missing_tools]]
+id = "permissions.status"
+domain = "permissions"
+operation_kind = "read"
+target_task = "AGL-094"
+reason = "Explain current mode and granted tools without changing state."
+
+[[missing_tools]]
+id = "permissions.request"
+domain = "permissions"
+operation_kind = "approve"
+target_task = "AGL-094"
+reason = "Request write, execute, approve, or admin grants without hidden escalation."
+
+[[missing_tools]]
+id = "permissions.grant"
+domain = "permissions"
+operation_kind = "approve"
+target_task = "AGL-094"
+reason = "Record an approved grant through a visible permission tool."
+
+[[missing_tools]]
+id = "permissions.revoke"
+domain = "permissions"
+operation_kind = "approve"
+target_task = "AGL-094"
+reason = "Revoke a grant through a visible permission tool."
+
+[[skills]]
+id = "change"
+pack = "agl"
+classification = "filesystem_mutating"
+allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
+required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
+state_effects = ["repo_files"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["fs.edit can change repository files; keep repo_path, diff_scope, secret_scan, and verification hooks."]
+
+[[skills]]
+id = "commit"
+pack = "agl"
+classification = "read_only_planning"
+allowed_tools = ["fs.read", "fs.search"]
+required_hooks = ["commit_message.validate", "secret_scan.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "commit-hygiene"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.search"]
+required_hooks = ["commit_message.validate", "secret_scan.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "cron-planner"
+pack = "agl"
+classification = "read_only_planning"
+allowed_tools = ["fs.read", "fs.search"]
+required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["May propose cron jobs but must not execute or schedule until cron tools and permission grants exist."]
+
+[[skills]]
+id = "memory-capture"
+pack = "agl"
+classification = "memory_mutating_suggestion"
+allowed_tools = ["fs.read", "fs.search", "memory.suggest"]
+required_hooks = ["repo_path.validate", "secret_scan.validate"]
+state_effects = ["store_memory_suggestions"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["memory.suggest creates pending suggestions; approval remains outside this skill."]
+
+[[skills]]
+id = "notes-capture"
+pack = "agl"
+classification = "notes_mutating"
+allowed_tools = ["fs.read", "fs.search", "notes.add", "notes.search", "notes.show", "notes.link"]
+required_hooks = ["repo_path.validate", "secret_scan.validate"]
+state_effects = ["store_notes", "store_note_links"]
+memory_read_scopes = []
+notes_read = true
+notes_write = true
+risks = ["notes.add and notes.link mutate local store; note creation must be explicit."]
+
+[[skills]]
+id = "repo-review"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.list", "fs.search"]
+required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "repo-status"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.list", "fs.search"]
+required_hooks = ["repo_path.validate", "verification.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "review-pack"
+pack = "agl"
+classification = "filesystem_mutating"
+allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
+required_hooks = ["repo_path.validate", "review_pack.validate", "secret_scan.validate", "verification.validate"]
+state_effects = ["repo_files"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["fs.edit writes review artifacts; review_pack.validate must stay required."]
+
+[[skills]]
+id = "rust"
+pack = "agl"
+classification = "filesystem_mutating"
+allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
+required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
+state_effects = ["repo_files"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["fs.edit can change workspace code; keep focused verification."]
+
+[[skills]]
+id = "security-review"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.list", "fs.search"]
+required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "skill"
+pack = "agl"
+classification = "filesystem_mutating"
+allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
+required_hooks = ["repo_path.validate", "skill_manifest.validate", "secret_scan.validate"]
+state_effects = ["repo_files"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["fs.edit changes builtin skill assets; skill_manifest.validate must stay required."]
+
+[[skills]]
+id = "smoke-test"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.list", "fs.search"]
+required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "task-spec"
+pack = "agl"
+classification = "filesystem_mutating"
+allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
+required_hooks = ["repo_path.validate", "task_spec.validate"]
+state_effects = ["repo_files"]
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = ["fs.edit writes task specs; task_spec.validate must stay required."]
+
+[[skills]]
+id = "test-triage"
+pack = "agl"
+classification = "read_only_analysis"
+allowed_tools = ["fs.read", "fs.list", "fs.search"]
+required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []
+
+[[skills]]
+id = "tool-smoke"
+pack = "agl"
+classification = "read_only_smoke"
+allowed_tools = ["fs.read"]
+required_hooks = ["repo_path.validate"]
+state_effects = []
+memory_read_scopes = []
+notes_read = false
+notes_write = false
+risks = []

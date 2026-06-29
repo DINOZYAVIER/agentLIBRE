@@ -4,6 +4,9 @@ mod pack;
 mod registry;
 mod workspace;
 
+#[cfg(test)]
+mod audit;
+
 pub use context::{
     SkillContextBlock, SkillContextBundle, SkillContextError, SkillContextEvidence,
     SkillContextReferenceEvidence, build_verified_context_bundle,
