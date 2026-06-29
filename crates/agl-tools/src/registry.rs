@@ -241,7 +241,8 @@ mod tests {
 
     use crate::{
         HookDeclaration, HookEvent, HookId, ToolCapability, ToolDeclaration, ToolHandler, ToolId,
-        ToolInput, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolProviderTrust,
+        ToolInput, ToolOutput, ToolProviderDeclaration, ToolProviderDeclarationError,
+        ToolProviderId, ToolProviderTrust, ToolStateEffect,
     };
 
     use super::*;
@@ -261,12 +262,12 @@ mod tests {
             event: HookEvent::ModelResponse,
             required: true,
         })
-        .with_tool(ToolDeclaration {
-            id: tool_id.clone(),
-            description: "Read a file".to_string(),
-            capability: ToolCapability::Read,
-            required_arguments: vec!["path".to_string()],
-        });
+        .with_tool(ToolDeclaration::new(
+            tool_id.clone(),
+            "Read a file",
+            ToolCapability::Read,
+            ["path"],
+        ));
         let mut catalog = ToolCatalog::new();
 
         catalog.register(declaration).unwrap();
@@ -328,12 +329,12 @@ mod tests {
             ToolProviderTrust::TrustedRegistered,
         )
         .unwrap()
-        .with_tool(ToolDeclaration {
-            id: tool_id.clone(),
-            description: "Echo text".to_string(),
-            capability: ToolCapability::Read,
-            required_arguments: vec!["text".to_string()],
-        });
+        .with_tool(ToolDeclaration::new(
+            tool_id.clone(),
+            "Echo text",
+            ToolCapability::Read,
+            ["text"],
+        ));
         let mut runtime = ToolRuntime::new();
         runtime.register_provider(declaration).unwrap();
         runtime
@@ -360,12 +361,12 @@ mod tests {
             ToolProviderTrust::Unsupported,
         )
         .unwrap()
-        .with_tool(ToolDeclaration {
-            id: tool_id.clone(),
-            description: "Echo text".to_string(),
-            capability: ToolCapability::Read,
-            required_arguments: vec!["text".to_string()],
-        });
+        .with_tool(ToolDeclaration::new(
+            tool_id.clone(),
+            "Echo text",
+            ToolCapability::Read,
+            ["text"],
+        ));
         let mut runtime = ToolRuntime::new();
         runtime.register_provider(declaration).unwrap();
         runtime
@@ -380,6 +381,62 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("not trusted"));
+    }
+
+    #[test]
+    fn catalog_rejects_mutating_tool_without_state_effects() {
+        let tool_id = ToolId::new("example.write").unwrap();
+        let declaration = ToolProviderDeclaration::test_fixture(
+            ToolProviderId::new("example-provider").unwrap(),
+            "Example Provider",
+            "1",
+            ToolProviderTrust::TrustedRegistered,
+        )
+        .unwrap()
+        .with_tool(ToolDeclaration::new(
+            tool_id,
+            "Write state",
+            ToolCapability::Write,
+            ["value"],
+        ));
+        let mut catalog = ToolCatalog::new();
+
+        assert_eq!(
+            catalog.register(declaration).unwrap_err(),
+            ToolCatalogError::InvalidDeclaration(
+                ToolProviderDeclarationError::InvalidToolOperation {
+                    id: "example.write".to_string(),
+                    message: "state-mutating operations must declare state effects".to_string(),
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn catalog_rejects_read_tool_with_state_effects() {
+        let tool_id = ToolId::new("example.read").unwrap();
+        let declaration = ToolProviderDeclaration::test_fixture(
+            ToolProviderId::new("example-provider").unwrap(),
+            "Example Provider",
+            "1",
+            ToolProviderTrust::TrustedRegistered,
+        )
+        .unwrap()
+        .with_tool(
+            ToolDeclaration::new(tool_id, "Read state", ToolCapability::Read, ["value"])
+                .with_state_effects([ToolStateEffect::RepoFiles]),
+        );
+        let mut catalog = ToolCatalog::new();
+
+        assert_eq!(
+            catalog.register(declaration).unwrap_err(),
+            ToolCatalogError::InvalidDeclaration(
+                ToolProviderDeclarationError::InvalidToolOperation {
+                    id: "example.read".to_string(),
+                    message: "read operations must not declare state effects".to_string(),
+                },
+            )
+        );
     }
 
     struct EchoHandler;
