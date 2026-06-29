@@ -211,6 +211,13 @@ pub struct CronDueJob {
     pub scheduled_for: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CronRunAdmission {
+    Inserted(IdempotencyOutcome),
+    Replayed(CronRun, IdempotencyOutcome),
+    Pending(IdempotencyOutcome),
+}
+
 pub struct CronRepository<'a> {
     store: &'a AglStore,
 }
@@ -333,18 +340,53 @@ impl<'a> CronRepository<'a> {
     ) -> Result<(CronRun, IdempotencyOutcome)> {
         validate_non_blank("job_id", job_id)?;
         validate_non_blank("scheduled_for", scheduled_for)?;
-        let fingerprint = format!("status:{} result:{result_ref:?}", status.as_str());
-        let idempotency_key = format!("{job_id}:{scheduled_for}");
+        let job = self.job(job_id)?.ok_or_else(|| CronError::NotFound {
+            id: job_id.to_string(),
+        })?;
+        match self.begin_run_for(&job, scheduled_for)? {
+            CronRunAdmission::Inserted(outcome) => {
+                let run =
+                    self.record_admitted_run(job_id, scheduled_for, status, result_ref, error)?;
+                Ok((run, outcome))
+            }
+            CronRunAdmission::Replayed(run, outcome) => Ok((run, outcome)),
+            CronRunAdmission::Pending(_) => Err(CronError::InvalidValue {
+                field: "idempotency",
+                value: format!("{job_id}:{scheduled_for}"),
+                reason: "cron run is already admitted but has no recorded result",
+            }),
+        }
+    }
+
+    pub fn begin_run_for(&self, job: &CronJob, scheduled_for: &str) -> Result<CronRunAdmission> {
+        validate_runnable_job(job)?;
+        validate_non_blank("scheduled_for", scheduled_for)?;
+        let idempotency_key = idempotency_key(&job.id, scheduled_for);
+        let fingerprint = idempotency_fingerprint(job);
         let outcome =
             self.store
                 .begin_idempotency(IDEMPOTENCY_NAMESPACE, &idempotency_key, &fingerprint)?;
-        if let IdempotencyOutcome::Replayed(record) = &outcome
-            && let Some(result_ref) = &record.result_ref
-            && let Some(run) = self.run(result_ref)?
-        {
-            return Ok((run, outcome));
+        if let IdempotencyOutcome::Replayed(record) = &outcome {
+            if let Some(result_ref) = &record.result_ref
+                && let Some(run) = self.run(result_ref)?
+            {
+                return Ok(CronRunAdmission::Replayed(run, outcome));
+            }
+            return Ok(CronRunAdmission::Pending(outcome));
         }
+        Ok(CronRunAdmission::Inserted(outcome))
+    }
 
+    pub fn record_admitted_run(
+        &self,
+        job_id: &str,
+        scheduled_for: &str,
+        status: CronRunStatus,
+        result_ref: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<CronRun> {
+        validate_non_blank("job_id", job_id)?;
+        validate_non_blank("scheduled_for", scheduled_for)?;
         let id = cron_id("cron_run");
         let now = timestamp();
         self.store.connection().execute(
@@ -364,6 +406,7 @@ impl<'a> CronRepository<'a> {
         let run = self
             .run(&id)?
             .ok_or_else(|| CronError::NotFound { id: id.clone() })?;
+        let idempotency_key = idempotency_key(job_id, scheduled_for);
         match status {
             CronRunStatus::Succeeded => {
                 self.store.complete_idempotency(
@@ -382,7 +425,7 @@ impl<'a> CronRepository<'a> {
             }
             CronRunStatus::Queued | CronRunStatus::Running => {}
         }
-        Ok((run, outcome))
+        Ok(run)
     }
 
     pub fn history(&self, job_id: &str) -> Result<Vec<CronRun>> {
@@ -486,6 +529,21 @@ fn validate_runnable_job(job: &CronJob) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn idempotency_key(job_id: &str, scheduled_for: &str) -> String {
+    format!("{job_id}:{scheduled_for}")
+}
+
+fn idempotency_fingerprint(job: &CronJob) -> String {
+    format!(
+        "target:{}:{} schedule:{} timezone:{} notify:{:?}",
+        job.target_kind.as_str(),
+        job.target_ref,
+        job.schedule_expr,
+        job.timezone,
+        job.notify_ref
+    )
 }
 
 fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CronJob>> {

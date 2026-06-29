@@ -164,7 +164,7 @@ fn cron_tick_records_due_run_and_notifies_once() {
     );
     draft.notify_ref = Some("matrix-room:!room".to_string());
     let job = repo.add_job(draft).unwrap();
-    let mut executor = FakeCronExecutor;
+    let mut executor = FakeCronExecutor::default();
     let mut notifier = FakeCronNotifier::default();
 
     let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
@@ -177,16 +177,21 @@ fn cron_tick_records_due_run_and_notifies_once() {
     assert_eq!(first.notifications, 1);
     assert_eq!(second.recorded_runs[0].id, first.recorded_runs[0].id);
     assert_eq!(second.notifications, 0);
+    assert_eq!(executor.executions, 1);
     assert_eq!(notifier.notifications.len(), 1);
     assert_eq!(notifier.notifications[0].notify_ref, "matrix-room:!room");
 
     std::fs::remove_dir_all(root).unwrap();
 }
 
-struct FakeCronExecutor;
+#[derive(Default)]
+struct FakeCronExecutor {
+    executions: usize,
+}
 
 impl CronTargetExecutor for FakeCronExecutor {
     fn execute(&mut self, job: &CronJob) -> CronExecution {
+        self.executions += 1;
         CronExecution::succeeded(format!("fake:{}", job.target_ref))
     }
 }
