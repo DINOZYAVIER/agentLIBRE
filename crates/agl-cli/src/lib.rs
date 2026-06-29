@@ -807,6 +807,7 @@ fn store_domain(domain: StoreDomainArg) -> StoreDomain {
         StoreDomainArg::Memory => StoreDomain::Memory,
         StoreDomainArg::Notes => StoreDomain::Notes,
         StoreDomainArg::Cron => StoreDomain::Cron,
+        StoreDomainArg::Permissions => StoreDomain::Permissions,
     }
 }
 
@@ -1572,6 +1573,9 @@ fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
     match mode {
         args::ToolAccessMode::ReadOnly => ChatToolAccessMode::ReadOnly,
         args::ToolAccessMode::Write => ChatToolAccessMode::Write,
+        args::ToolAccessMode::Execute => ChatToolAccessMode::Execute,
+        args::ToolAccessMode::Approve => ChatToolAccessMode::Approve,
+        args::ToolAccessMode::Admin => ChatToolAccessMode::Admin,
     }
 }
 

@@ -426,6 +426,14 @@ pub fn stopped_turn_context_message(
     available_tools: &[VisibleTool],
 ) -> String {
     let available = render_available_tool_names(available_tools);
+    let permission_recovery = if available_tools
+        .iter()
+        .any(|tool| tool.name == "permissions.request")
+    {
+        "request exact tool access with `permissions.request`, or answer with the CLI/daemon path"
+    } else {
+        "answer with the CLI/daemon path or ask for a write-capable/tool-enabled session"
+    };
     match (reason, detail) {
         (StopReason::ToolJsonUnrepairable, _) => format!(
             "The previous turn stopped because the model produced malformed tool JSON. No tool was executed. Available tools in this session: {available}."
@@ -437,10 +445,10 @@ pub fn stopped_turn_context_message(
             "The previous turn stopped because tool use is not available in this CLI session. No tool was executed. Available tools in this session: {available}."
         ),
         (StopReason::HiddenTool, Some(StopDetail::HiddenTool { name })) => format!(
-            "The previous turn stopped because the model requested unavailable tool `{name}`. No tool was executed. Available tools in this session: {available}. Recovery: do not call `{name}` again unless it appears in `<agentlibre_tool_context>`; answer with the CLI/daemon path or ask for a write-capable/tool-enabled session instead."
+            "The previous turn stopped because the model requested unavailable tool `{name}`. No tool was executed. Available tools in this session: {available}. Recovery: do not call `{name}` again unless it appears in `<agentlibre_tool_context>`; {permission_recovery} instead."
         ),
         (StopReason::HiddenTool, _) => format!(
-            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed. Available tools in this session: {available}. Recovery: do not repeat hidden tool calls; answer with the CLI/daemon path or ask for a tool-enabled session instead."
+            "The previous turn stopped because the requested tool is not available in this CLI session. No tool was executed. Available tools in this session: {available}. Recovery: do not repeat hidden tool calls; {permission_recovery} instead."
         ),
         (
             StopReason::InvalidToolArguments,
@@ -727,5 +735,26 @@ mod tests {
         assert!(message.contains("`fs.list`, `fs.read`, `fs.search`"));
         assert!(message.contains("do not call `matrix` again"));
         assert!(message.contains("CLI/daemon path"));
+    }
+
+    #[test]
+    fn hidden_tool_stop_message_mentions_permission_request_when_visible() {
+        let visible_tools = vec![
+            VisibleTool::new("fs.list"),
+            VisibleTool::new("permissions.request"),
+            VisibleTool::new("permissions.status"),
+        ];
+        let message = stopped_turn_context_message(
+            StopReason::HiddenTool,
+            Some(&StopDetail::HiddenTool {
+                name: "matrix.outbox.enqueue".to_string(),
+            }),
+            &visible_tools,
+        );
+
+        assert!(message.contains("unavailable tool `matrix.outbox.enqueue`"));
+        assert!(message.contains("`permissions.request`"));
+        assert!(message.contains("request exact tool access"));
+        assert!(message.contains("do not call `matrix.outbox.enqueue` again"));
     }
 }

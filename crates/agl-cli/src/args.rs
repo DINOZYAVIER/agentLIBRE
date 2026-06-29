@@ -322,6 +322,7 @@ pub(crate) enum StoreDomainArg {
     Memory,
     Notes,
     Cron,
+    Permissions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -454,6 +455,9 @@ pub(crate) struct DaemonStatusOptions {
 pub(crate) enum ToolAccessMode {
     ReadOnly,
     Write,
+    Execute,
+    Approve,
+    Admin,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -480,6 +484,9 @@ impl ToolAccessMode {
         match self {
             Self::ReadOnly => "read-only",
             Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Approve => "approve",
+            Self::Admin => "admin",
         }
     }
 }

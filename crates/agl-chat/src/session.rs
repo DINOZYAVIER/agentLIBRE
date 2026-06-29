@@ -16,7 +16,7 @@ use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
 use agl_store::{AglStore, default_store_root};
-use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId};
+use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -177,6 +177,10 @@ impl InferenceSession {
 
     pub fn turn_visible_tools(&self) -> &[VisibleTool] {
         &self.visible_tools
+    }
+
+    pub fn tool_mode(&self) -> ToolAccessMode {
+        self.tool_mode
     }
 
     pub fn store_root(&self) -> &std::path::Path {
@@ -463,6 +467,8 @@ fn resolve_skill_context(
         .context("failed to register builtin memory tool provider")?;
     agl_tools::notes::register(&mut tool_catalog)
         .context("failed to register builtin notes tool provider")?;
+    agl_tools::permissions::register(&mut tool_catalog)
+        .context("failed to register builtin permission tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {
@@ -548,7 +554,7 @@ fn selected_skill_visible_tools(
             let declaration = tool_catalog
                 .executable_tool(&tool_id)
                 .with_context(|| format!("selected skill requires missing tool `{tool_id}`"))?;
-            if !tool_mode_allows_capability(tool_mode, declaration.capability) {
+            if !tool_mode_allows_declaration(tool_mode, declaration) {
                 return Ok(None);
             }
             let mut visible =
@@ -572,6 +578,10 @@ fn core_tool_ids() -> Result<BTreeSet<ToolId>> {
         agl_tools::FS_LIST_TOOL_ID,
         agl_tools::FS_SEARCH_TOOL_ID,
         agl_tools::FS_EDIT_TOOL_ID,
+        agl_tools::PERMISSIONS_STATUS_TOOL_ID,
+        agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
+        agl_tools::PERMISSIONS_GRANT_TOOL_ID,
+        agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
     ]
     .into_iter()
     .map(ToolId::new)
@@ -579,11 +589,15 @@ fn core_tool_ids() -> Result<BTreeSet<ToolId>> {
     .context("builtin core tool id is invalid")
 }
 
-fn tool_mode_allows_capability(mode: ToolAccessMode, capability: ToolCapability) -> bool {
-    match mode {
-        ToolAccessMode::ReadOnly => capability.is_visible_in_read_only(),
-        ToolAccessMode::Write => true,
+fn tool_mode_allows_declaration(
+    mode: ToolAccessMode,
+    declaration: &agl_tools::ToolDeclaration,
+) -> bool {
+    if declaration.visible_in_read_only {
+        return true;
     }
+    mode.operation_ceiling()
+        .is_some_and(|ceiling| ceiling.permits(declaration.operation_kind))
 }
 
 fn write_skill_context_evidence(
@@ -982,6 +996,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let batches = selected_skill_hook_batches(
             &skill_registry,
@@ -1009,6 +1024,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1023,7 +1039,14 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+            vec![
+                "fs.edit",
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ]
         );
         assert_eq!(
             tools[0].required_arguments,
@@ -1038,6 +1061,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1052,7 +1076,13 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.list", "fs.read", "fs.search"]
+            vec![
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ]
         );
     }
 
@@ -1062,6 +1092,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1076,7 +1107,48 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+            vec![
+                "fs.edit",
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ]
+        );
+    }
+
+    #[test]
+    fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let mut extension_registry = ToolCatalog::new();
+        agl_tools::guards::register(&mut extension_registry).unwrap();
+        agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
+
+        let tools = selected_skill_visible_tools(
+            &skill_registry,
+            &extension_registry,
+            &[],
+            ToolAccessMode::Approve,
+        )
+        .unwrap();
+
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "fs.edit",
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.grant",
+                "permissions.request",
+                "permissions.revoke",
+                "permissions.status",
+            ]
         );
     }
 
@@ -1086,6 +1158,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1100,7 +1173,13 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.list", "fs.read", "fs.search"]
+            vec![
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ]
         );
     }
 
@@ -1110,6 +1189,7 @@ mod tests {
         let mut extension_registry = ToolCatalog::new();
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
+        agl_tools::permissions::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1124,7 +1204,13 @@ mod tests {
                 .iter()
                 .map(|tool| tool.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.list", "fs.read", "fs.search"]
+            vec![
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ]
         );
     }
 

@@ -147,6 +147,7 @@ pub struct ToolDeclaration {
     pub capability: ToolCapability,
     pub operation_kind: ToolOperationKind,
     pub state_effects: Vec<ToolStateEffect>,
+    pub visible_in_read_only: bool,
     pub required_arguments: Vec<String>,
 }
 
@@ -163,6 +164,7 @@ impl ToolDeclaration {
             operation_kind: capability.default_operation_kind(),
             capability,
             state_effects: Vec::new(),
+            visible_in_read_only: capability.is_visible_in_read_only(),
             required_arguments: required_arguments.into_iter().map(Into::into).collect(),
         }
     }
@@ -177,6 +179,11 @@ impl ToolDeclaration {
         state_effects: impl IntoIterator<Item = ToolStateEffect>,
     ) -> Self {
         self.state_effects = state_effects.into_iter().collect();
+        self
+    }
+
+    pub fn visible_in_read_only(mut self, visible: bool) -> Self {
+        self.visible_in_read_only = visible;
         self
     }
 }
@@ -215,6 +222,41 @@ impl ToolOperationKind {
     pub fn is_state_mutating(self) -> bool {
         !matches!(self, Self::Read)
     }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Read => 0,
+            Self::Write => 1,
+            Self::Execute => 2,
+            Self::Approve => 3,
+            Self::Admin => 4,
+        }
+    }
+
+    pub fn permits(self, requested: Self) -> bool {
+        self.rank() >= requested.rank()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Approve => "approve",
+            Self::Admin => "admin",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "execute" => Some(Self::Execute),
+            "approve" => Some(Self::Approve),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -224,6 +266,8 @@ pub enum ToolStateEffect {
     StoreMemorySuggestions,
     StoreNotes,
     StoreNoteLinks,
+    StorePermissionRequests,
+    StorePermissionGrants,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
