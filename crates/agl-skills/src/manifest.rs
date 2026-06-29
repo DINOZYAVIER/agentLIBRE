@@ -646,6 +646,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_builtin_repo_review_skill() {
+        let skill = SkillHarness::parse_builtin(builtin_skill("repo-review").unwrap()).unwrap();
+
+        assert_eq!(skill.id.as_str(), "repo-review");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.pack, "agl");
+        assert!(
+            skill
+                .required_hooks
+                .iter()
+                .any(|hook| hook.as_str() == "diff_scope.validate")
+        );
+        assert!(
+            skill
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.as_str() == "fs.search")
+        );
+        assert!(skill.body.contains("review-first repository work"));
+    }
+
+    #[test]
     fn frontmatter_rejects_unknown_fields() {
         let err = parse_fixture(
             r#"---
