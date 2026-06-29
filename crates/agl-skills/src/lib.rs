@@ -9,11 +9,13 @@ mod audit;
 
 pub use context::{
     SkillContextBlock, SkillContextBundle, SkillContextError, SkillContextEvidence,
-    SkillContextReferenceEvidence, build_verified_context_bundle,
+    SkillContextReferenceEvidence, SkillPermissionRequestTemplateEvidence,
+    build_verified_context_bundle,
 };
 pub use manifest::{
     MemoryPermissionScope, SkillHarness, SkillManifestError, SkillMemoryPermissions,
-    SkillNotesPermissions, SkillPermissions, SkillReference, SkillReferencePolicy, SkillSource,
+    SkillNotesPermissions, SkillPermissionRequestTemplate, SkillPermissions, SkillReference,
+    SkillReferencePolicy, SkillSource,
 };
 pub use pack::{
     SkillPackEntry, SkillPackManifest, SkillPackSubmodule, ValidatedSkillPack, validate_skill_pack,

@@ -68,6 +68,8 @@ pub struct SkillRegistry {
     pack_index: BTreeMap<String, Vec<usize>>,
     hook_index: BTreeMap<HookId, Vec<usize>>,
     tool_index: BTreeMap<ToolId, Vec<usize>>,
+    requestable_tool_index: BTreeMap<ToolId, Vec<usize>>,
+    denied_tool_index: BTreeMap<ToolId, Vec<usize>>,
 }
 
 pub fn builtin_registry() -> Result<SkillRegistry, SkillRegistryError> {
@@ -108,6 +110,18 @@ impl SkillRegistry {
         for tool in &skill.harness.allowed_tools {
             self.tool_index.entry(tool.clone()).or_default().push(index);
         }
+        for tool in &skill.harness.requestable_tools {
+            self.requestable_tool_index
+                .entry(tool.clone())
+                .or_default()
+                .push(index);
+        }
+        for tool in &skill.harness.denied_tools {
+            self.denied_tool_index
+                .entry(tool.clone())
+                .or_default()
+                .push(index);
+        }
         self.skill_index.insert(skill_id, index);
         self.skills.push(skill);
         Ok(())
@@ -139,6 +153,22 @@ impl SkillRegistry {
 
     pub fn allowing_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
         self.tool_index
+            .get(tool_id)
+            .into_iter()
+            .flat_map(|indices| indices.iter())
+            .map(|index| &self.skills[*index])
+    }
+
+    pub fn requesting_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+        self.requestable_tool_index
+            .get(tool_id)
+            .into_iter()
+            .flat_map(|indices| indices.iter())
+            .map(|index| &self.skills[*index])
+    }
+
+    pub fn denying_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+        self.denied_tool_index
             .get(tool_id)
             .into_iter()
             .flat_map(|indices| indices.iter())
@@ -356,6 +386,35 @@ mod tests {
                 "test-triage",
                 "tool-smoke",
             ]
+        );
+    }
+
+    #[test]
+    fn registry_indexes_requestable_and_denied_tools_separately() {
+        let registry = SkillRegistry::from_builtin_assets().unwrap();
+        let cron_add = ToolId::new("cron.add").unwrap();
+        let matrix_deliver = ToolId::new("matrix.outbox.deliver").unwrap();
+
+        assert!(
+            registry
+                .allowing_tool(&cron_add)
+                .map(|skill| skill.harness.id.as_str())
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+        assert_eq!(
+            registry
+                .requesting_tool(&cron_add)
+                .map(|skill| skill.harness.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cron-planner"]
+        );
+        assert_eq!(
+            registry
+                .denying_tool(&matrix_deliver)
+                .map(|skill| skill.harness.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cron-planner"]
         );
     }
 

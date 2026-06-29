@@ -39,6 +39,9 @@ Use the agentLIBRE manifest fields:
 - `pack`
 - `required_hooks`
 - `allowed_tools`
+- `requestable_tools`
+- `denied_tools`
+- `permission_request_templates`
 - `context_budget_tokens`
 - `references.include`
 - `guarantees`
