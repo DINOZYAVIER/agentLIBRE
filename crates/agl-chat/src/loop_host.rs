@@ -31,6 +31,7 @@ impl ChatLoopHost {
         let mut tool_runtime = core_tool_runtime(
             &core_tools,
             session.store_root(),
+            workspace_root.as_ref(),
             permission_runtime_status(&session),
         )?;
         tool_runtime.set_allowed_tools(visible_tool_ids(session.turn_visible_tools())?);
@@ -80,6 +81,7 @@ impl ChatLoopHost {
         let mut tool_runtime = core_tool_runtime(
             &core_tools,
             self.session.store_root(),
+            workspace_root.as_ref(),
             permission_runtime_status(&self.session),
         )?;
         tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
@@ -175,12 +177,19 @@ fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
 fn core_tool_runtime(
     core_tools: &agl_tools::CoreTools,
     store_root: &Path,
+    workspace_root: &Path,
     permission_status: agl_tools::PermissionRuntimeStatus,
 ) -> Result<ToolRuntime> {
     let mut runtime = ToolRuntime::new();
     runtime
+        .register_provider(agl_tools::cron::declaration())
+        .context("failed to register builtin cron tool provider")?;
+    runtime
         .register_provider(agl_tools::fs::declaration())
         .context("failed to register core filesystem tool provider")?;
+    runtime
+        .register_provider(agl_tools::matrix::declaration())
+        .context("failed to register builtin Matrix tool provider")?;
     runtime
         .register_provider(agl_tools::memory::declaration())
         .context("failed to register builtin memory tool provider")?;
@@ -190,6 +199,12 @@ fn core_tool_runtime(
     runtime
         .register_provider(agl_tools::permissions::declaration())
         .context("failed to register builtin permission tool provider")?;
+    runtime
+        .register_provider(agl_tools::repo::declaration())
+        .context("failed to register builtin repo tool provider")?;
+    runtime
+        .register_provider(agl_tools::store::declaration())
+        .context("failed to register builtin store tool provider")?;
     for tool_id in [
         agl_tools::FS_READ_TOOL_ID,
         agl_tools::FS_LIST_TOOL_ID,
@@ -202,20 +217,55 @@ fn core_tool_runtime(
                 format!("failed to register core filesystem tool handler {tool_id}")
             })?;
     }
-    let notes_tools = agl_tools::NotesTools::new(store_root);
+    let cron_tools = agl_tools::CronTools::new(store_root);
+    for tool_id in [
+        agl_tools::CRON_LIST_TOOL_ID,
+        agl_tools::CRON_SHOW_TOOL_ID,
+        agl_tools::CRON_HISTORY_TOOL_ID,
+        agl_tools::CRON_PREFLIGHT_TOOL_ID,
+        agl_tools::CRON_ADD_TOOL_ID,
+        agl_tools::CRON_UPDATE_TOOL_ID,
+        agl_tools::CRON_DELETE_TOOL_ID,
+        agl_tools::CRON_ENABLE_TOOL_ID,
+        agl_tools::CRON_DISABLE_TOOL_ID,
+        agl_tools::CRON_RUN_TOOL_ID,
+        agl_tools::CRON_TICK_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, cron_tools.clone())
+            .with_context(|| format!("failed to register builtin cron tool handler {tool_id}"))?;
+    }
+    let matrix_tools = agl_tools::MatrixTools::new(store_root);
+    for tool_id in [
+        agl_tools::MATRIX_OUTBOX_STATUS_TOOL_ID,
+        agl_tools::MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, matrix_tools.clone())
+            .with_context(|| format!("failed to register builtin Matrix tool handler {tool_id}"))?;
+    }
     let memory_tools = agl_tools::MemoryTools::new(store_root);
-    runtime
-        .register_handler(
-            ToolId::new(agl_tools::MEMORY_SUGGEST_TOOL_ID)?,
-            memory_tools,
-        )
-        .context("failed to register builtin memory tool handler memory.suggest")?;
+    for tool_id in [
+        agl_tools::MEMORY_SEARCH_TOOL_ID,
+        agl_tools::MEMORY_LIST_TOOL_ID,
+        agl_tools::MEMORY_SUGGEST_TOOL_ID,
+        agl_tools::MEMORY_ADD_TOOL_ID,
+        agl_tools::MEMORY_APPROVE_TOOL_ID,
+        agl_tools::MEMORY_REJECT_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, memory_tools.clone())
+            .with_context(|| format!("failed to register builtin memory tool handler {tool_id}"))?;
+    }
+    let notes_tools = agl_tools::NotesTools::new(store_root);
     for tool_id in [
         agl_tools::NOTES_ADD_TOOL_ID,
         agl_tools::NOTES_SEARCH_TOOL_ID,
         agl_tools::NOTES_SHOW_TOOL_ID,
         agl_tools::NOTES_UPDATE_TOOL_ID,
         agl_tools::NOTES_LINK_TOOL_ID,
+        agl_tools::NOTES_DELETE_TOOL_ID,
+        agl_tools::NOTES_REMEMBER_TOOL_ID,
     ] {
         runtime
             .register_handler(ToolId::new(tool_id)?, notes_tools.clone())
@@ -234,6 +284,27 @@ fn core_tool_runtime(
             .with_context(|| {
                 format!("failed to register builtin permission tool handler {tool_id}")
             })?;
+    }
+    let repo_tools = agl_tools::RepoTools::new(workspace_root);
+    for tool_id in [
+        agl_tools::REPO_STATUS_TOOL_ID,
+        agl_tools::REPO_EXPORT_PROFILE_TOOL_ID,
+        agl_tools::REPO_HOOKS_STATUS_TOOL_ID,
+        agl_tools::REPO_INIT_TOOL_ID,
+        agl_tools::REPO_INSTALL_HOOKS_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, repo_tools.clone())
+            .with_context(|| format!("failed to register builtin repo tool handler {tool_id}"))?;
+    }
+    let store_tools = agl_tools::StoreTools::new(store_root);
+    for tool_id in [
+        agl_tools::STORE_STATUS_TOOL_ID,
+        agl_tools::STORE_EXPORT_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, store_tools.clone())
+            .with_context(|| format!("failed to register builtin store tool handler {tool_id}"))?;
     }
     Ok(runtime)
 }

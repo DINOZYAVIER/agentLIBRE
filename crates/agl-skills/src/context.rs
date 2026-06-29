@@ -249,9 +249,15 @@ fn render_tools(tools: &[ToolId]) -> String {
 fn state_effect_as_str(effect: agl_tools::ToolStateEffect) -> &'static str {
     match effect {
         agl_tools::ToolStateEffect::RepoFiles => "repo_files",
+        agl_tools::ToolStateEffect::RepoWorkspace => "repo_workspace",
+        agl_tools::ToolStateEffect::RepoHooks => "repo_hooks",
+        agl_tools::ToolStateEffect::StoreMemoryEntries => "store_memory_entries",
         agl_tools::ToolStateEffect::StoreMemorySuggestions => "store_memory_suggestions",
         agl_tools::ToolStateEffect::StoreNotes => "store_notes",
         agl_tools::ToolStateEffect::StoreNoteLinks => "store_note_links",
+        agl_tools::ToolStateEffect::StoreCron => "store_cron",
+        agl_tools::ToolStateEffect::MatrixOutbox => "matrix_outbox",
+        agl_tools::ToolStateEffect::StoreIdempotency => "store_idempotency",
         agl_tools::ToolStateEffect::StorePermissionRequests => "store_permission_requests",
         agl_tools::ToolStateEffect::StorePermissionGrants => "store_permission_grants",
     }
@@ -323,7 +329,9 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut tool_catalog = ToolCatalog::new();
         agl_tools::guards::register(&mut tool_catalog).unwrap();
+        agl_tools::cron::register(&mut tool_catalog).unwrap();
         agl_tools::fs::register(&mut tool_catalog).unwrap();
+        agl_tools::matrix::register(&mut tool_catalog).unwrap();
 
         let bundle = build_verified_context_bundle(
             &registry,
@@ -335,7 +343,7 @@ mod tests {
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: fs.read, fs.search")
+                .contains("directly_callable_tools: cron.preflight, fs.read, fs.search")
         );
         assert!(
             bundle
@@ -350,7 +358,7 @@ mod tests {
         assert!(bundle.content.contains("id: schedule-matrix-cron"));
         assert_eq!(
             bundle.evidence[0].allowed_tools,
-            vec!["fs.read", "fs.search"]
+            vec!["cron.preflight", "fs.read", "fs.search"]
         );
         assert_eq!(
             bundle.evidence[0].requestable_tools,

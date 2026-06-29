@@ -183,6 +183,19 @@ pub struct CronJobDraft {
     pub input: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CronJobUpdate {
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub target_kind: Option<CronTargetKind>,
+    pub target_ref: Option<String>,
+    pub schedule_expr: Option<String>,
+    pub timezone: Option<String>,
+    pub notify_ref: Option<Option<String>>,
+    pub prompt: Option<Option<String>>,
+    pub input: Option<Option<String>>,
+}
+
 impl CronJobDraft {
     pub fn new(
         name: impl Into<String>,
@@ -236,6 +249,54 @@ pub struct CronRepository<'a> {
 impl<'a> CronRepository<'a> {
     pub fn new(store: &'a AglStore) -> Self {
         Self { store }
+    }
+
+    pub fn update_job(&self, id: &str, update: CronJobUpdate) -> Result<CronJob> {
+        validate_non_blank("id", id)?;
+        let current = self
+            .job(id)?
+            .ok_or_else(|| CronError::NotFound { id: id.to_string() })?;
+        if current.deleted_at.is_some() {
+            return Err(CronError::InvalidValue {
+                field: "id",
+                value: id.to_string(),
+                reason: "cannot update deleted job",
+            });
+        }
+        let draft = CronJobDraft {
+            name: update.name.unwrap_or(current.name),
+            enabled: update.enabled.unwrap_or(current.enabled),
+            target_kind: update.target_kind.unwrap_or(current.target_kind),
+            target_ref: update.target_ref.unwrap_or(current.target_ref),
+            schedule_expr: update.schedule_expr.unwrap_or(current.schedule_expr),
+            timezone: update.timezone.unwrap_or(current.timezone),
+            notify_ref: update.notify_ref.unwrap_or(current.notify_ref),
+            prompt: update.prompt.unwrap_or(current.prompt),
+            input: update.input.unwrap_or(current.input),
+        };
+        validate_draft(&draft)?;
+        let now = timestamp();
+        self.store.connection().execute(
+            "UPDATE cron_jobs
+             SET name = ?2, enabled = ?3, target_kind = ?4, target_ref = ?5, schedule_expr = ?6,
+                 timezone = ?7, notify_ref = ?8, prompt = ?9, input = ?10, updated_at = ?11
+             WHERE id = ?1",
+            params![
+                id,
+                draft.name,
+                draft.enabled,
+                draft.target_kind.as_str(),
+                draft.target_ref,
+                draft.schedule_expr,
+                draft.timezone,
+                draft.notify_ref,
+                draft.prompt,
+                draft.input,
+                now
+            ],
+        )?;
+        self.job(id)?
+            .ok_or_else(|| CronError::NotFound { id: id.to_string() })
     }
 
     pub fn add_job(&self, draft: CronJobDraft) -> Result<CronJob> {
@@ -524,6 +585,10 @@ pub fn validate_schedule_expr(value: &str) -> Result<()> {
         value: value.to_string(),
         reason: "expected hourly, daily HH:MM, weekly <weekday> HH:MM, or 5-field cron expression",
     })
+}
+
+pub fn validate_job_draft(draft: &CronJobDraft) -> Result<()> {
+    validate_draft(draft)
 }
 
 fn validate_draft(draft: &CronJobDraft) -> Result<()> {
