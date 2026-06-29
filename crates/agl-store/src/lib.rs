@@ -6,7 +6,7 @@ use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -52,6 +52,29 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             SELECT namespace, key, fingerprint, status, result_ref, created_at, updated_at
             FROM idempotency_keys_v1;
             DROP TABLE idempotency_keys_v1;
+        "#,
+    },
+    StoreMigration {
+        version: 3,
+        name: "003_memory_entries",
+        sql: r#"
+            CREATE TABLE memory_entries (
+                id TEXT PRIMARY KEY,
+                scope_kind TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                source_ref TEXT,
+                confidence INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX memory_entries_scope_idx
+                ON memory_entries(scope_kind, scope_key, deleted_at);
+            CREATE VIRTUAL TABLE memory_entries_fts
+                USING fts5(id UNINDEXED, title, body);
         "#,
     },
 ];
@@ -216,6 +239,10 @@ impl AglStore {
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.conn
     }
 
     pub fn health(&self) -> Result<StoreHealth> {

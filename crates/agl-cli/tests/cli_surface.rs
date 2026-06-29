@@ -23,6 +23,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
+    assert_contains(&stdout, "memory");
     assert_contains(&stdout, "install-hooks");
     assert!(
         !stdout.contains("Compatibility"),
@@ -77,6 +78,12 @@ fn command_help_exits_successfully_for_public_commands() {
         &["skill", "verify", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
+        &["memory", "--help"][..],
+        &["memory", "add", "--help"][..],
+        &["memory", "list", "--help"][..],
+        &["memory", "search", "--help"][..],
+        &["memory", "show", "--help"][..],
+        &["memory", "delete", "--help"][..],
     ] {
         let output = run_agl(args);
 
@@ -84,6 +91,61 @@ fn command_help_exits_successfully_for_public_commands() {
         assert_empty_stderr(&output);
         assert_contains(&stdout(&output), "Usage: agl");
     }
+}
+
+#[test]
+fn memory_commands_manage_explicit_user_memory() {
+    let home = TempHome::new("memory-commands");
+    let home_arg = home.path_string();
+
+    let add = run_agl(&[
+        "--home",
+        &home_arg,
+        "memory",
+        "add",
+        "--kind",
+        "preference",
+        "--title",
+        "Commit style",
+        "--body",
+        "Use imperative subjects.",
+    ]);
+
+    assert_success(&add);
+    let add_stdout = stdout(&add);
+    assert_contains(&add_stdout, "memory id=");
+    assert_contains(&add_stdout, "scope=user");
+    assert_contains(&add_stdout, "kind=preference");
+    let id = memory_id_from_output(&add_stdout);
+
+    let list = run_agl(&["--home", &home_arg, "memory", "list"]);
+    assert_success(&list);
+    assert_contains(&stdout(&list), &id);
+
+    let search = run_agl(&["--home", &home_arg, "memory", "search", "imperative"]);
+    assert_success(&search);
+    assert_contains(&stdout(&search), &id);
+
+    let show = run_agl(&["--home", &home_arg, "memory", "show", &id]);
+    assert_success(&show);
+    assert_contains(&stdout(&show), "memory.");
+    assert_contains(&stdout(&show), "Use imperative subjects.");
+
+    let delete = run_agl(&["--home", &home_arg, "memory", "delete", &id]);
+    assert_success(&delete);
+    assert_contains(&stdout(&delete), "memory.deleted=true");
+
+    let hidden = run_agl(&["--home", &home_arg, "memory", "list"]);
+    assert_success(&hidden);
+    assert!(
+        !stdout(&hidden).contains(&id),
+        "deleted memory should be hidden by default"
+    );
+
+    let include_deleted = run_agl(&["--home", &home_arg, "memory", "list", "--include-deleted"]);
+    assert_success(&include_deleted);
+    assert_contains(&stdout(&include_deleted), &id);
+    assert_contains(&stdout(&include_deleted), "deleted=true");
 }
 
 #[test]
@@ -626,6 +688,14 @@ fn version_from_stdout<'a>(binary: &str, stdout: &'a str) -> &'a str {
     parts
         .next()
         .unwrap_or_else(|| panic!("missing version in output: {stdout}"))
+}
+
+fn memory_id_from_output(stdout: &str) -> String {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("id="))
+        .unwrap_or_else(|| panic!("memory id missing from output:\n{stdout}"))
+        .to_string()
 }
 
 struct TempHome {
