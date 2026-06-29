@@ -1596,6 +1596,29 @@ fn print_store_status(status: &StoreStatus) {
             domain.active_rows
         );
     }
+    println!(
+        "store.idempotency.in_progress={}",
+        status.idempotency.in_progress
+    );
+    println!(
+        "store.idempotency.stale_in_progress={}",
+        status.idempotency.stale_in_progress.len()
+    );
+    for (index, record) in status.idempotency.stale_in_progress.iter().enumerate() {
+        println!(
+            "store.idempotency.stale.{index}.namespace={}",
+            record.namespace
+        );
+        println!("store.idempotency.stale.{index}.key={}", record.key);
+        println!(
+            "store.idempotency.stale.{index}.created_at={}",
+            record.created_at
+        );
+        println!(
+            "store.idempotency.stale.{index}.updated_at={}",
+            record.updated_at
+        );
+    }
 }
 
 fn print_cron_jobs(jobs: &[CronJob]) {
