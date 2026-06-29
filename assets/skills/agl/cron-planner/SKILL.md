@@ -11,6 +11,19 @@ required_hooks:
 allowed_tools:
   - fs.read
   - fs.search
+requestable_tools:
+  - cron.add
+  - matrix.outbox.enqueue
+denied_tools:
+  - matrix.outbox.deliver
+permission_request_templates:
+  - id: schedule-matrix-cron
+    tools:
+      - cron.add
+      - matrix.outbox.enqueue
+    max_operation_kind: write
+    default_duration: one_turn
+    reason_template: Schedule a recurring Matrix notification.
 context_budget_tokens: 1536
 references:
   include: []

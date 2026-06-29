@@ -14,6 +14,10 @@ allowed_tools:
   - notes.search
   - notes.show
   - notes.link
+denied_tools:
+  - notes.delete
+  - notes.remember
+  - notes.update
 permissions:
   notes:
     read: true

@@ -56,6 +56,10 @@ pub struct WorkspaceSkillStatus {
     pub version: Option<u64>,
     pub source: Option<String>,
     pub pack: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub requestable_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
+    pub permission_request_templates: Vec<String>,
     pub memory_read_scopes: Vec<String>,
     pub notes_read: bool,
     pub notes_write: bool,
@@ -63,6 +67,7 @@ pub struct WorkspaceSkillStatus {
     pub usable: bool,
     pub shadowed_by_builtin: bool,
     pub overrides_builtin: bool,
+    pub broadens_builtin_routing: bool,
     pub trust_state: SkillTrustState,
     #[serde(skip_serializing)]
     pub harness: Option<SkillHarness>,
@@ -227,6 +232,9 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         }
         if skill.shadowed_by_builtin {
             skill.warnings.push("shadowed_by_builtin".to_string());
+        }
+        if skill.broadens_builtin_routing {
+            skill.warnings.push("broadens_builtin_routing".to_string());
         }
         if !skill.errors.is_empty() {
             errors.extend(skill_error_keys(skill));
@@ -607,6 +615,26 @@ fn status_from_harness(path: PathBuf, harness: SkillHarness) -> WorkspaceSkillSt
         version: Some(harness.version),
         source: Some(harness.source.as_str().to_string()),
         pack: Some(harness.pack.clone()),
+        allowed_tools: harness
+            .allowed_tools
+            .iter()
+            .map(|tool| tool.as_str().to_string())
+            .collect(),
+        requestable_tools: harness
+            .requestable_tools
+            .iter()
+            .map(|tool| tool.as_str().to_string())
+            .collect(),
+        denied_tools: harness
+            .denied_tools
+            .iter()
+            .map(|tool| tool.as_str().to_string())
+            .collect(),
+        permission_request_templates: harness
+            .permission_request_templates
+            .iter()
+            .map(|template| template.id.clone())
+            .collect(),
         memory_read_scopes: harness
             .permissions
             .memory
@@ -620,6 +648,7 @@ fn status_from_harness(path: PathBuf, harness: SkillHarness) -> WorkspaceSkillSt
         usable: false,
         shadowed_by_builtin: false,
         overrides_builtin: false,
+        broadens_builtin_routing: false,
         trust_state: SkillTrustState::Unknown,
         harness: Some(harness),
         warnings: Vec::new(),
@@ -641,6 +670,10 @@ fn invalid_skill_status(
         version: None,
         source: None,
         pack: None,
+        allowed_tools: Vec::new(),
+        requestable_tools: Vec::new(),
+        denied_tools: Vec::new(),
+        permission_request_templates: Vec::new(),
         memory_read_scopes: Vec::new(),
         notes_read: false,
         notes_write: false,
@@ -648,6 +681,7 @@ fn invalid_skill_status(
         usable: false,
         shadowed_by_builtin: false,
         overrides_builtin: false,
+        broadens_builtin_routing: false,
         trust_state: SkillTrustState::Invalid,
         harness: None,
         warnings: Vec::new(),
@@ -671,21 +705,44 @@ fn mark_duplicate_skills(skills: &mut [WorkspaceSkillStatus]) {
 }
 
 fn mark_builtin_shadows(skills: &mut [WorkspaceSkillStatus]) -> Result<()> {
-    let builtin_names = builtin_registry()?
+    let builtins = builtin_registry()?;
+    let builtin_by_name = builtins
         .skills()
         .iter()
-        .map(|skill| skill.harness.name.clone())
-        .collect::<BTreeSet<_>>();
+        .map(|skill| (skill.harness.name.clone(), skill.harness.clone()))
+        .collect::<BTreeMap<_, _>>();
     for skill in skills {
-        if skill
-            .name
-            .as_ref()
-            .is_some_and(|name| builtin_names.contains(name))
-        {
-            skill.shadowed_by_builtin = true;
+        let Some(name) = &skill.name else {
+            continue;
+        };
+        let Some(builtin) = builtin_by_name.get(name) else {
+            continue;
+        };
+        skill.shadowed_by_builtin = true;
+        if let Some(workspace) = &skill.harness {
+            skill.broadens_builtin_routing = routing_broadens_builtin(workspace, builtin);
         }
     }
     Ok(())
+}
+
+fn routing_broadens_builtin(workspace: &SkillHarness, builtin: &SkillHarness) -> bool {
+    has_extra_tools(&workspace.allowed_tools, &builtin.allowed_tools)
+        || has_extra_tools(
+            &workspace.requestable_tools,
+            &builtin
+                .allowed_tools
+                .iter()
+                .chain(builtin.requestable_tools.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        || has_extra_tools(&builtin.denied_tools, &workspace.denied_tools)
+}
+
+fn has_extra_tools(left: &[agl_tools::ToolId], right: &[agl_tools::ToolId]) -> bool {
+    let right = right.iter().collect::<BTreeSet<_>>();
+    left.iter().any(|tool| !right.contains(tool))
 }
 
 fn append_lock_diagnostics(
@@ -994,6 +1051,8 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
         .context("failed to register builtin memory tool provider")?;
     agl_tools::notes::register(&mut catalog)
         .context("failed to register builtin notes tool provider")?;
+    agl_tools::permissions::register(&mut catalog)
+        .context("failed to register builtin permission tool provider")?;
     for hook in &harness.required_hooks {
         if catalog.hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);
@@ -1157,7 +1216,7 @@ mod tests {
         init_git_repo(&root);
         init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
         let skill_dir = root.join(".agl/skills/agl/repo-change");
-        write_workspace_skill(&skill_dir, "repo-change");
+        write_workspace_skill(&skill_dir, "repo-change", &[]);
 
         let report = workspace_skill_report(&root).unwrap();
 
@@ -1213,7 +1272,11 @@ Body.
         let root = temp_root("lock-refuses");
         init_git_repo(&root);
         init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
-        write_workspace_skill(&root.join(".agl/skills/agl/repo-change"), "repo-change");
+        write_workspace_skill(
+            &root.join(".agl/skills/agl/repo-change"),
+            "repo-change",
+            &[],
+        );
 
         let report = lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
 
@@ -1396,6 +1459,47 @@ Body.
         fs::remove_dir_all(source).unwrap();
     }
 
+    #[test]
+    fn same_name_workspace_skill_reports_routing_broadening() {
+        let (root, source) = clean_skills_submodule_fixture_with_allowed_tools(
+            "same-name-broad-routing",
+            "repo-review",
+            &["fs.edit"],
+        );
+        lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+        let trust_store = root.join("state/skill-trust.toml");
+
+        let pending = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
+        assert!(pending.skills[0].shadowed_by_builtin);
+        assert!(pending.skills[0].broadens_builtin_routing);
+        assert!(
+            pending.skills[0]
+                .warnings
+                .contains(&"broadens_builtin_routing".to_string())
+        );
+        assert!(!pending.skills[0].usable);
+
+        let approval = trust_workspace_skill(
+            &root,
+            &trust_store,
+            "repo-review",
+            &SkillTrustOptions {
+                approve: true,
+                agentlibre_version: "test-version".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(!approval.has_errors());
+
+        let trusted = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
+        assert!(trusted.skills[0].overrides_builtin);
+        assert!(trusted.skills[0].broadens_builtin_routing);
+        assert!(trusted.skills[0].usable);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source).unwrap();
+    }
+
     fn clean_skills_submodule_fixture(label: &str) -> (PathBuf, PathBuf) {
         clean_skills_submodule_fixture_with_skill(label, "repo-change")
     }
@@ -1404,9 +1508,21 @@ Body.
         label: &str,
         skill_name: &str,
     ) -> (PathBuf, PathBuf) {
+        clean_skills_submodule_fixture_with_allowed_tools(label, skill_name, &[])
+    }
+
+    fn clean_skills_submodule_fixture_with_allowed_tools(
+        label: &str,
+        skill_name: &str,
+        allowed_tools: &[&str],
+    ) -> (PathBuf, PathBuf) {
         let source = temp_root(&format!("{label}-skills-source"));
         init_git_repo(&source);
-        write_workspace_skill(&source.join("agl").join(skill_name), skill_name);
+        write_workspace_skill(
+            &source.join("agl").join(skill_name),
+            skill_name,
+            allowed_tools,
+        );
         git_run(&source, ["add", "."]);
         git_run(
             &source,
@@ -1481,8 +1597,9 @@ Body.
         );
     }
 
-    fn write_workspace_skill(skill_dir: &Path, name: &str) {
+    fn write_workspace_skill(skill_dir: &Path, name: &str, allowed_tools: &[&str]) {
         fs::create_dir_all(skill_dir).unwrap();
+        let allowed_tools = render_yaml_string_list(allowed_tools);
         fs::write(
             skill_dir.join("SKILL.md"),
             format!(
@@ -1494,7 +1611,8 @@ source: workspace
 pack: agl
 required_hooks:
   - repo_path.validate
-allowed_tools: []
+allowed_tools:
+{allowed_tools}
 context_budget_tokens: 256
 references:
   include: []
@@ -1506,5 +1624,17 @@ Body.
             ),
         )
         .unwrap();
+    }
+
+    fn render_yaml_string_list(values: &[&str]) -> String {
+        if values.is_empty() {
+            "  []".to_string()
+        } else {
+            values
+                .iter()
+                .map(|value| format!("  - {value}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     }
 }
