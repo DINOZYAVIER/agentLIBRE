@@ -2,6 +2,7 @@ pub mod fs;
 pub mod guards;
 mod hook;
 mod ids;
+pub mod notes;
 mod provider;
 mod registry;
 mod tool;
@@ -11,6 +12,10 @@ pub use hook::{
     HookBatchRequest, HookBatchResult, HookEvent, HookInput, HookMessage, HookResult, HookStatus,
 };
 pub use ids::{HookId, IdKind, SkillId, ToolId, ToolProviderId, ToolProviderIdError};
+pub use notes::{
+    NOTES_ADD_TOOL_ID, NOTES_LINK_TOOL_ID, NOTES_SEARCH_TOOL_ID, NOTES_SHOW_TOOL_ID,
+    NOTES_UPDATE_TOOL_ID, NotesTools,
+};
 pub use provider::{
     HookDeclaration, ToolCapability, ToolDeclaration, ToolProviderDeclaration,
     ToolProviderDeclarationError, ToolProviderSource, ToolProviderTrust,
