@@ -615,6 +615,7 @@ fn inference_options_from_serve_options(options: &ServeOptions) -> InferenceOpti
         max_output_tokens: options.max_output_tokens,
         tool_mode: chat_tool_mode(options.tool_mode),
         skills: options.skills.clone(),
+        memory: options.memory,
     }
 }
 
@@ -643,6 +644,7 @@ fn inference_options_from_run_options(options: &RunOptions) -> InferenceOptions 
         max_output_tokens: options.max_output_tokens,
         tool_mode: chat_tool_mode(options.tool_mode),
         skills: options.skills.clone(),
+        memory: options.memory,
     }
 }
 

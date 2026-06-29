@@ -25,6 +25,7 @@ pub struct InferenceOptions {
     pub max_output_tokens: u32,
     pub tool_mode: ToolAccessMode,
     pub skills: Vec<String>,
+    pub memory: bool,
 }
 
 impl Default for InferenceOptions {
@@ -37,6 +38,7 @@ impl Default for InferenceOptions {
             max_output_tokens: 256,
             tool_mode: ToolAccessMode::ReadOnly,
             skills: Vec::new(),
+            memory: false,
         }
     }
 }
