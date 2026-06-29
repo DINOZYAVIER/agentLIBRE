@@ -530,6 +530,32 @@ pub fn export_repo_profile(
     })
 }
 
+pub fn render_repo_profile(start: impl AsRef<Path>) -> Result<WorkspaceProfile> {
+    let workspace_root = resolve_repo_root(start)?;
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    let manifest = read_manifest(&manifest_path).with_context(|| {
+        format!(
+            "failed to read workspace manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let status = status_repo_workspace(
+        &workspace_root,
+        &RepoStatusOptions {
+            component: None,
+            strict: false,
+        },
+    )?;
+    let profile = profile_from_workspace_manifest(&manifest, &status);
+    validate_profile(&profile)?;
+    Ok(profile)
+}
+
+pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
+    let profile = render_repo_profile(start)?;
+    toml::to_string_pretty(&profile).context("failed to render workspace profile")
+}
+
 fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
     if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;

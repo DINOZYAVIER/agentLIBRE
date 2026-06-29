@@ -46,6 +46,51 @@ visible_in_read_only = false
 policy_owner = "agl-tools/memory"
 
 [[tools]]
+id = "memory.search"
+provider = "memory-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/memory"
+
+[[tools]]
+id = "memory.list"
+provider = "memory-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/memory"
+
+[[tools]]
+id = "memory.add"
+provider = "memory-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_memory_entries"]
+visible_in_read_only = false
+policy_owner = "agl-tools/memory"
+
+[[tools]]
+id = "memory.approve"
+provider = "memory-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_memory_suggestions", "store_memory_entries"]
+visible_in_read_only = false
+policy_owner = "agl-tools/memory"
+
+[[tools]]
+id = "memory.reject"
+provider = "memory-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_memory_suggestions"]
+visible_in_read_only = false
+policy_owner = "agl-tools/memory"
+
+[[tools]]
 id = "notes.add"
 provider = "notes-tools"
 capability = "write"
@@ -91,6 +136,204 @@ visible_in_read_only = false
 policy_owner = "agl-tools/notes"
 
 [[tools]]
+id = "notes.delete"
+provider = "notes-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_notes"]
+visible_in_read_only = false
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "notes.remember"
+provider = "notes-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_memory_entries", "store_note_links"]
+visible_in_read_only = false
+policy_owner = "agl-tools/notes"
+
+[[tools]]
+id = "cron.list"
+provider = "cron-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.show"
+provider = "cron-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.history"
+provider = "cron-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.preflight"
+provider = "cron-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.add"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.update"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.delete"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.enable"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.disable"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.run"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "execute"
+state_effects = ["store_cron"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "cron.tick"
+provider = "cron-tools"
+capability = "write"
+operation_kind = "execute"
+state_effects = ["store_cron", "matrix_outbox"]
+visible_in_read_only = false
+policy_owner = "agl-tools/cron"
+
+[[tools]]
+id = "matrix.outbox.status"
+provider = "matrix-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/matrix"
+
+[[tools]]
+id = "matrix.outbox.enqueue"
+provider = "matrix-tools"
+capability = "write"
+operation_kind = "write"
+state_effects = ["matrix_outbox"]
+visible_in_read_only = false
+policy_owner = "agl-tools/matrix"
+
+[[tools]]
+id = "store.status"
+provider = "store-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/store"
+
+[[tools]]
+id = "store.export"
+provider = "store-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/store"
+
+[[tools]]
+id = "repo.status"
+provider = "repo-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/repo"
+
+[[tools]]
+id = "repo.export_profile"
+provider = "repo-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/repo"
+
+[[tools]]
+id = "repo.hooks.status"
+provider = "repo-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/repo"
+
+[[tools]]
+id = "repo.init"
+provider = "repo-tools"
+capability = "write"
+operation_kind = "admin"
+state_effects = ["repo_workspace"]
+visible_in_read_only = false
+policy_owner = "agl-tools/repo"
+
+[[tools]]
+id = "repo.install_hooks"
+provider = "repo-tools"
+capability = "write"
+operation_kind = "admin"
+state_effects = ["repo_hooks"]
+visible_in_read_only = false
+policy_owner = "agl-tools/repo"
+
+[[tools]]
 id = "permissions.status"
 provider = "permission-tools"
 capability = "read"
@@ -125,118 +368,6 @@ operation_kind = "approve"
 state_effects = ["store_permission_grants"]
 visible_in_read_only = false
 policy_owner = "agl-tools/permissions"
-
-[[missing_tools]]
-id = "memory.search"
-domain = "memory"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Read approved memories without exposing store internals."
-
-[[missing_tools]]
-id = "memory.list"
-domain = "memory"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "List durable memories by scope and kind."
-
-[[missing_tools]]
-id = "memory.approve"
-domain = "memory"
-operation_kind = "approve"
-target_task = "AGL-095c"
-reason = "Approve pending memory suggestions through a typed approval boundary."
-
-[[missing_tools]]
-id = "memory.reject"
-domain = "memory"
-operation_kind = "approve"
-target_task = "AGL-095c"
-reason = "Reject pending memory suggestions through a typed approval boundary."
-
-[[missing_tools]]
-id = "notes.delete"
-domain = "notes"
-operation_kind = "write"
-target_task = "AGL-095c"
-reason = "Tombstone notes through the same tool boundary as note creation."
-
-[[missing_tools]]
-id = "notes.remember"
-domain = "notes"
-operation_kind = "approve"
-target_task = "AGL-095c"
-reason = "Promote selected notes into memory suggestions explicitly."
-
-[[missing_tools]]
-id = "cron.list"
-domain = "cron"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect scheduled jobs without granting cron mutation."
-
-[[missing_tools]]
-id = "cron.show"
-domain = "cron"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect a single cron job without granting cron mutation."
-
-[[missing_tools]]
-id = "cron.history"
-domain = "cron"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect cron run history and failures."
-
-[[missing_tools]]
-id = "cron.add"
-domain = "cron"
-operation_kind = "write"
-target_task = "AGL-095b"
-reason = "Create scheduled jobs through an audited mutation boundary."
-
-[[missing_tools]]
-id = "cron.delete"
-domain = "cron"
-operation_kind = "write"
-target_task = "AGL-095b"
-reason = "Disable or remove scheduled jobs through an audited mutation boundary."
-
-[[missing_tools]]
-id = "cron.run"
-domain = "cron"
-operation_kind = "execute"
-target_task = "AGL-095b"
-reason = "Run a stored cron target without treating capability IDs as callable tools."
-
-[[missing_tools]]
-id = "cron.tick"
-domain = "cron"
-operation_kind = "execute"
-target_task = "AGL-095b"
-reason = "Expose daemon tick behavior for smoke and recovery without bypassing policy."
-
-[[missing_tools]]
-id = "repo.status"
-domain = "repo"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect workspace health through the same capability registry as chat."
-
-[[missing_tools]]
-id = "repo.init"
-domain = "repo"
-operation_kind = "admin"
-target_task = "AGL-095d"
-reason = "Initialize .agl workspace state through an auditable admin boundary."
-
-[[missing_tools]]
-id = "repo.install_hooks"
-domain = "repo"
-operation_kind = "admin"
-target_task = "AGL-095d"
-reason = "Install repository hooks without a separate mutation path."
 
 [[missing_tools]]
 id = "repo.import_profile"
@@ -281,39 +412,11 @@ target_task = "AGL-095d"
 reason = "Revoke local trust through an explicit approval tool."
 
 [[missing_tools]]
-id = "store.status"
-domain = "store"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Report store health, migrations, and stale idempotency records."
-
-[[missing_tools]]
-id = "store.export"
-domain = "store"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Export known store domains with explicit secret policy."
-
-[[missing_tools]]
 id = "store.migrate"
 domain = "store"
 operation_kind = "admin"
 target_task = "AGL-095d"
 reason = "Run migrations through the same audited store boundary."
-
-[[missing_tools]]
-id = "matrix.outbox.status"
-domain = "matrix"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect queued Matrix notifications without granting send."
-
-[[missing_tools]]
-id = "matrix.outbox.enqueue"
-domain = "matrix"
-operation_kind = "write"
-target_task = "AGL-095b"
-reason = "Queue Matrix notifications from cron and skills through local store state."
 
 [[missing_tools]]
 id = "matrix.outbox.deliver"
@@ -371,7 +474,7 @@ risks = []
 id = "cron-planner"
 pack = "agl"
 classification = "read_only_planning"
-allowed_tools = ["fs.read", "fs.search"]
+allowed_tools = ["cron.preflight", "fs.read", "fs.search"]
 requestable_tools = ["cron.add", "matrix.outbox.enqueue"]
 denied_tools = ["matrix.outbox.deliver"]
 permission_request_templates = [
@@ -433,7 +536,7 @@ risks = []
 id = "repo-status"
 pack = "agl"
 classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search"]
+allowed_tools = ["fs.read", "fs.list", "fs.search", "repo.status"]
 requestable_tools = []
 denied_tools = []
 permission_request_templates = []

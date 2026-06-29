@@ -1046,13 +1046,21 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
     let mut catalog = agl_tools::ToolCatalog::new();
     agl_tools::guards::register(&mut catalog)
         .context("failed to register builtin guard provider")?;
+    agl_tools::cron::register(&mut catalog)
+        .context("failed to register builtin cron tool provider")?;
     agl_tools::fs::register(&mut catalog).context("failed to register builtin tool provider")?;
+    agl_tools::matrix::register(&mut catalog)
+        .context("failed to register builtin Matrix tool provider")?;
     agl_tools::memory::register(&mut catalog)
         .context("failed to register builtin memory tool provider")?;
     agl_tools::notes::register(&mut catalog)
         .context("failed to register builtin notes tool provider")?;
     agl_tools::permissions::register(&mut catalog)
         .context("failed to register builtin permission tool provider")?;
+    agl_tools::repo::register(&mut catalog)
+        .context("failed to register builtin repo tool provider")?;
+    agl_tools::store::register(&mut catalog)
+        .context("failed to register builtin store tool provider")?;
     for hook in &harness.required_hooks {
         if catalog.hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);

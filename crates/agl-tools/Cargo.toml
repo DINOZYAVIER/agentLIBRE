@@ -6,8 +6,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-cron.workspace = true
 agl-memory.workspace = true
 agl-notes.workspace = true
+agl-repo.workspace = true
 agl-store.workspace = true
 anyhow.workspace = true
 serde.workspace = true
