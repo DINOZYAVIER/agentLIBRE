@@ -21,10 +21,11 @@ use agl_memory::{
 use agl_notes::{Note, NoteDraft, NoteLink, NoteRepository, NoteSearchQuery, NoteUpdate};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::{
-    ComponentStatus, HookInstallReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
+    ComponentStatus, HookInstallReport, RepoExportProfileOptions as AglRepoExportProfileOptions,
+    RepoExportProfileReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
     RepoInitOptions as AglRepoInitOptions, RepoInitReport,
-    RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport, init_repo_workspace,
-    install_repo_hooks, status_repo_workspace,
+    RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport, export_repo_profile,
+    init_repo_workspace, install_repo_hooks, status_repo_workspace,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
@@ -51,11 +52,12 @@ use args::{
     MemoryListSuggestionsOptions, MemoryRejectOptions, MemoryScopeArg, MemorySearchOptions,
     MemoryShowOptions, MemorySuggestOptions, MemorySuggestionStatusArg, NotesAddOptions,
     NotesCommand, NotesDeleteOptions, NotesLinkOptions, NotesListOptions, NotesRememberOptions,
-    NotesSearchOptions, NotesShowOptions, NotesUpdateOptions, RepoCommand, RepoHooksOptions,
-    RepoInitOptions, RepoStatusOptions, RunOptions, ServeOptions, SkillCommand,
-    SkillInspectOptions, SkillListOptions, SkillLockOptions, SkillRevokeOptions,
-    SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, StoreCommand, StoreDomainArg,
-    StoreExportCliOptions, StoreStatusOptions, parse_cli, print_completion, print_usage,
+    NotesSearchOptions, NotesShowOptions, NotesUpdateOptions, RepoCommand,
+    RepoExportProfileOptions, RepoHooksOptions, RepoInitOptions, RepoStatusOptions, RunOptions,
+    ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions, SkillLockOptions,
+    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, StoreCommand,
+    StoreDomainArg, StoreExportCliOptions, StoreStatusOptions, parse_cli, print_completion,
+    print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -335,6 +337,7 @@ fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::Init(options) => run_repo_init(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
+        RepoCommand::ExportProfile(options) => run_repo_export_profile(options),
     }
 }
 
@@ -1002,6 +1005,23 @@ fn run_install_hooks(options: RepoHooksOptions) -> Result<()> {
     Ok(())
 }
 
+fn run_repo_export_profile(options: RepoExportProfileOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo export-profile", "starting command");
+    let report = export_repo_profile(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglRepoExportProfileOptions {
+            out: options.out,
+            force: options.force,
+        },
+    )?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_repo_export_profile_report(&report);
+    }
+    Ok(())
+}
+
 fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "skill list", "starting command");
     let registry = builtin_registry()?;
@@ -1428,6 +1448,41 @@ fn print_repo_status_report(report: &RepoStatusReport) {
     }
     for next_step in &report.next_steps {
         println!("next_step={next_step}");
+    }
+}
+
+fn print_repo_export_profile_report(report: &RepoExportProfileReport) {
+    println!("profile.exported={}", report.wrote);
+    println!("profile.path={}", report.profile_path.display());
+    println!("profile.name={}", report.profile.name);
+    println!("profile.version={}", report.profile.version);
+    println!(
+        "profile.policy.hooks.managed={}",
+        report.profile.policy.hooks.managed
+    );
+    println!(
+        "profile.policy.trust.import_local_trust={}",
+        report.profile.policy.trust.import_local_trust
+    );
+    if let Some(skill_pack) = &report.profile.skill_pack {
+        println!("profile.skill_pack.component={}", skill_pack.component);
+        println!("profile.skill_pack.path={}", skill_pack.path.display());
+        if let Some(url) = &skill_pack.url {
+            println!("profile.skill_pack.url={url}");
+        }
+        if let Some(rev) = &skill_pack.rev {
+            println!("profile.skill_pack.rev={rev}");
+        }
+        if let Some(commit) = &skill_pack.commit {
+            println!("profile.skill_pack.commit={commit}");
+        }
+        if let Some(tree) = &skill_pack.tree {
+            println!("profile.skill_pack.tree={tree}");
+        }
+        println!(
+            "profile.skill_pack.same_ids_when_pinned={}",
+            skill_pack.same_ids_when_pinned
+        );
     }
 }
 
