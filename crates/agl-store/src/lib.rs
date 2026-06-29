@@ -6,7 +6,55 @@ use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreMigration {
+    pub version: u32,
+    pub name: &'static str,
+    pub sql: &'static str,
+}
+
+pub const STORE_MIGRATIONS: &[StoreMigration] = &[
+    StoreMigration {
+        version: 1,
+        name: "001_foundation",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+                result_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+        "#,
+    },
+    StoreMigration {
+        version: 2,
+        name: "002_idempotency_skipped_status",
+        sql: r#"
+            ALTER TABLE idempotency_keys RENAME TO idempotency_keys_v1;
+            CREATE TABLE idempotency_keys (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed', 'skipped')),
+                result_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+            INSERT INTO idempotency_keys
+                (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
+            SELECT namespace, key, fingerprint, status, result_ref, created_at, updated_at
+            FROM idempotency_keys_v1;
+            DROP TABLE idempotency_keys_v1;
+        "#,
+    },
+];
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
@@ -26,6 +74,10 @@ pub enum StoreError {
     },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
+    UnsupportedSchemaVersion {
+        found: u32,
+        supported: u32,
+    },
     IdempotencyConflict {
         namespace: String,
         key: String,
@@ -50,6 +102,10 @@ impl fmt::Display for StoreError {
             Self::NotFound { resource } => write!(f, "{resource} not found"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Sqlite(err) => write!(f, "{err}"),
+            Self::UnsupportedSchemaVersion { found, supported } => write!(
+                f,
+                "unsupported store schema version {found}; this build supports up to {supported}"
+            ),
             Self::IdempotencyConflict {
                 namespace,
                 key,
@@ -105,6 +161,7 @@ pub enum IdempotencyStatus {
     InProgress,
     Completed,
     Failed,
+    Skipped,
 }
 
 impl IdempotencyStatus {
@@ -113,6 +170,7 @@ impl IdempotencyStatus {
             Self::InProgress => "in_progress",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Skipped => "skipped",
         }
     }
 
@@ -121,6 +179,7 @@ impl IdempotencyStatus {
             "in_progress" => Ok(Self::InProgress),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "skipped" => Ok(Self::Skipped),
             _ => Err(StoreError::InvalidValue {
                 field: "status",
                 value: value.to_string(),
@@ -213,6 +272,34 @@ impl AglStore {
         key: &str,
         result_ref: Option<&str>,
     ) -> Result<IdempotencyRecord> {
+        self.finish_idempotency(namespace, key, IdempotencyStatus::Completed, result_ref)
+    }
+
+    pub fn fail_idempotency(
+        &self,
+        namespace: &str,
+        key: &str,
+        result_ref: Option<&str>,
+    ) -> Result<IdempotencyRecord> {
+        self.finish_idempotency(namespace, key, IdempotencyStatus::Failed, result_ref)
+    }
+
+    pub fn skip_idempotency(
+        &self,
+        namespace: &str,
+        key: &str,
+        result_ref: Option<&str>,
+    ) -> Result<IdempotencyRecord> {
+        self.finish_idempotency(namespace, key, IdempotencyStatus::Skipped, result_ref)
+    }
+
+    fn finish_idempotency(
+        &self,
+        namespace: &str,
+        key: &str,
+        status: IdempotencyStatus,
+        result_ref: Option<&str>,
+    ) -> Result<IdempotencyRecord> {
         validate_idempotency_part(namespace, "namespace")?;
         validate_idempotency_part(key, "key")?;
         let now = timestamp();
@@ -220,13 +307,7 @@ impl AglStore {
             "UPDATE idempotency_keys
              SET status = ?3, result_ref = ?4, updated_at = ?5
              WHERE namespace = ?1 AND key = ?2",
-            params![
-                namespace,
-                key,
-                IdempotencyStatus::Completed.as_str(),
-                result_ref,
-                now
-            ],
+            params![namespace, key, status.as_str(), result_ref, now],
         )?;
         self.idempotency_record(namespace, key)?
             .ok_or_else(|| StoreError::NotFound {
@@ -274,29 +355,81 @@ impl AglStore {
     }
 
     fn migrate(&self) -> Result<()> {
+        self.ensure_migration_table()?;
+        let current_version = self.schema_version()?;
+        if current_version > CURRENT_SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedSchemaVersion {
+                found: current_version,
+                supported: CURRENT_SCHEMA_VERSION,
+            });
+        }
+        for version in self.applied_migration_versions()? {
+            if version > CURRENT_SCHEMA_VERSION {
+                return Err(StoreError::UnsupportedSchemaVersion {
+                    found: version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+        }
+        for migration in STORE_MIGRATIONS {
+            if !self.migration_applied(migration.version)? {
+                self.apply_migration(migration)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_migration_table(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
-            BEGIN;
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS idempotency_keys (
-                namespace TEXT NOT NULL,
-                key TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
-                result_ref TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (namespace, key)
-            );
-            INSERT OR IGNORE INTO schema_migrations(version, applied_at)
-            VALUES (1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
-            PRAGMA user_version = 1;
-            COMMIT;
             "#,
         )?;
+        Ok(())
+    }
+
+    fn applied_migration_versions(&self) -> Result<Vec<u32>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+        let rows = stmt.query_map([], |row| row.get::<_, u32>(0))?;
+        let mut versions = Vec::new();
+        for row in rows {
+            versions.push(row?);
+        }
+        Ok(versions)
+    }
+
+    fn migration_applied(&self, version: u32) -> Result<bool> {
+        let applied = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                params![version],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(applied)
+    }
+
+    fn apply_migration(&self, migration: &StoreMigration) -> Result<()> {
+        let batch = format!(
+            r#"
+            BEGIN;
+            {sql}
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES ({version}, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+            PRAGMA user_version = {version};
+            COMMIT;
+            "#,
+            sql = migration.sql,
+            version = migration.version
+        );
+        self.conn.execute_batch(&batch)?;
         Ok(())
     }
 
@@ -397,6 +530,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn current_schema_version_matches_last_migration() {
+        assert_eq!(
+            STORE_MIGRATIONS.last().map(|migration| migration.version),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+        for window in STORE_MIGRATIONS.windows(2) {
+            assert!(
+                window[0].version < window[1].version,
+                "store migrations must be ordered"
+            );
+        }
+    }
+
+    #[test]
     fn opens_default_store_and_reports_health() {
         let root = temp_root("health");
         let paths = AgentLibrePaths::from_agl_home(&root);
@@ -417,13 +564,109 @@ mod tests {
     fn migrations_are_repeatable() {
         let root = temp_root("repeatable");
         let first = AglStore::open_at(&root).unwrap();
-        assert_eq!(first.health().unwrap().migration_version, 1);
+        assert_eq!(
+            first.health().unwrap().migration_version,
+            CURRENT_SCHEMA_VERSION
+        );
         drop(first);
 
         let second = AglStore::open_at(&root).unwrap();
-        assert_eq!(second.health().unwrap().migration_version, 1);
+        assert_eq!(
+            second.health().unwrap().migration_version,
+            CURRENT_SCHEMA_VERSION
+        );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_v1_database_migrates_to_current() {
+        let root = temp_root("migrate-v1");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE idempotency_keys (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+                result_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES (1, 'unix:1');
+            INSERT INTO idempotency_keys
+                (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
+            VALUES ('cron.run', 'job-001:unix:1', 'sha256:abc', 'completed', 'run-001', 'unix:1', 'unix:1');
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = AglStore::open_at(&root).unwrap();
+        assert_eq!(
+            store.health().unwrap().migration_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let record = store
+            .idempotency_record("cron.run", "job-001:unix:1")
+            .unwrap()
+            .expect("v1 idempotency record should migrate");
+        assert_eq!(record.status, IdempotencyStatus::Completed);
+        assert_eq!(record.result_ref.as_deref(), Some("run-001"));
+
+        let skipped = store
+            .begin_idempotency("cron.run", "job-002:unix:1", "sha256:def")
+            .unwrap();
+        assert!(matches!(skipped, IdempotencyOutcome::Inserted(_)));
+        let skipped = store
+            .skip_idempotency("cron.run", "job-002:unix:1", Some("no-op"))
+            .unwrap();
+        assert_eq!(skipped.status, IdempotencyStatus::Skipped);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected() {
+        let root = temp_root("future-version");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES (999, 'unix:1');
+            PRAGMA user_version = 999;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = AglStore::open_at(&root).unwrap_err();
+
+        assert!(matches!(
+            err,
+            StoreError::UnsupportedSchemaVersion {
+                found: 999,
+                supported: CURRENT_SCHEMA_VERSION
+            }
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -475,6 +718,46 @@ mod tests {
 
         assert_eq!(record.status, IdempotencyStatus::Completed);
         assert_eq!(record.result_ref.as_deref(), Some("session/turn-001"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fail_idempotency_records_failed_status() {
+        let root = temp_root("idempotency-failed");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+            .unwrap();
+
+        let record = store
+            .fail_idempotency("cron.run", "job-001:unix:1", Some("error-001"))
+            .unwrap();
+        let replay = store
+            .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+            .unwrap();
+
+        assert_eq!(record.status, IdempotencyStatus::Failed);
+        assert_eq!(record.result_ref.as_deref(), Some("error-001"));
+        assert!(matches!(replay, IdempotencyOutcome::Replayed(_)));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skip_idempotency_records_skipped_status() {
+        let root = temp_root("idempotency-skipped");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
+            .unwrap();
+
+        let record = store
+            .skip_idempotency("cron.run", "job-001:unix:1", Some("not-due"))
+            .unwrap();
+
+        assert_eq!(record.status, IdempotencyStatus::Skipped);
+        assert_eq!(record.result_ref.as_deref(), Some("not-due"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
