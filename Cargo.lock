@@ -309,6 +309,8 @@ version = "1.0.0-alpha.7"
 dependencies = [
  "agl-runtime",
  "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

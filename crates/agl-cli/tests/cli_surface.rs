@@ -24,6 +24,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
+    assert_contains(&stdout, "store");
     assert_contains(&stdout, "memory");
     assert_contains(&stdout, "notes");
     assert_contains(&stdout, "install-hooks");
@@ -89,6 +90,9 @@ fn command_help_exits_successfully_for_public_commands() {
         &["cron", "run", "--help"][..],
         &["cron", "history", "--help"][..],
         &["cron", "delete", "--help"][..],
+        &["store", "--help"][..],
+        &["store", "status", "--help"][..],
+        &["store", "export", "--help"][..],
         &["memory", "--help"][..],
         &["memory", "add", "--help"][..],
         &["memory", "list", "--help"][..],
@@ -318,6 +322,58 @@ fn cron_add_rejects_invalid_schedule() {
 
     assert_failure(&output);
     assert_contains(&stderr(&output), "invalid cron schedule_expr value");
+}
+
+#[test]
+fn store_commands_report_status_and_export_jsonl() {
+    let home = TempHome::new("store-commands");
+    let home_arg = home.path_string();
+
+    let add = run_agl(&[
+        "--home",
+        &home_arg,
+        "memory",
+        "add",
+        "--title",
+        "Export me",
+        "--body",
+        "Store export smoke.",
+    ]);
+    assert_success(&add);
+
+    let status = run_agl(&["--home", &home_arg, "store", "status"]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert_contains(&status_stdout, "store.path=");
+    assert_contains(&status_stdout, "store.schema_version=");
+    assert_contains(&status_stdout, "store.domain.memory=ok");
+    assert_contains(&status_stdout, "active_rows=1");
+    assert_contains(&status_stdout, "store.domain.notes=ok");
+    assert_contains(&status_stdout, "store.domain.cron=ok");
+
+    let out_path = home.path().join("memory-export.jsonl");
+    let out_arg = out_path.display().to_string();
+    let export = run_agl(&[
+        "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
+    ]);
+    assert_success(&export);
+    assert_contains(&stdout(&export), "store.exported=true");
+    assert_contains(&stdout(&export), "store.export.records=1");
+    let exported = fs::read_to_string(&out_path)
+        .unwrap_or_else(|err| panic!("failed to read export {}: {err}", out_path.display()));
+    assert_contains(&exported, "\"domain\":\"memory\"");
+    assert_contains(&exported, "\"title\":\"Export me\"");
+
+    let overwrite = run_agl(&[
+        "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
+    ]);
+    assert_failure(&overwrite);
+    assert_contains(&stderr(&overwrite), "pass --force to overwrite");
+
+    let forced = run_agl(&[
+        "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg, "--force",
+    ]);
+    assert_success(&forced);
 }
 
 #[test]
@@ -565,6 +621,7 @@ fn completion_bash_emits_agl_completion_function() {
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
+    assert_contains(&stdout, "store");
     assert_contains(&stdout, "install-hooks");
 }
 

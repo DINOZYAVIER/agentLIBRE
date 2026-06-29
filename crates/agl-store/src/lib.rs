@@ -1,9 +1,12 @@
 use std::fmt;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
 pub const CURRENT_SCHEMA_VERSION: u32 = 5;
@@ -157,6 +160,7 @@ pub enum StoreError {
     },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
+    Json(serde_json::Error),
     UnsupportedSchemaVersion {
         found: u32,
         supported: u32,
@@ -185,6 +189,7 @@ impl fmt::Display for StoreError {
             Self::NotFound { resource } => write!(f, "{resource} not found"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Sqlite(err) => write!(f, "{err}"),
+            Self::Json(err) => write!(f, "{err}"),
             Self::UnsupportedSchemaVersion { found, supported } => write!(
                 f,
                 "unsupported store schema version {found}; this build supports up to {supported}"
@@ -216,6 +221,12 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
+impl From<serde_json::Error> for StoreError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
+    }
+}
+
 #[derive(Debug)]
 pub struct AglStore {
     conn: Connection,
@@ -226,6 +237,63 @@ pub struct AglStore {
 pub struct StoreHealth {
     pub database_path: PathBuf,
     pub migration_version: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreStatus {
+    pub database_path: PathBuf,
+    pub schema_version: u32,
+    pub domains: Vec<StoreDomainHealth>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreDomainHealth {
+    pub domain: StoreDomain,
+    pub status: StoreDomainStatus,
+    pub total_rows: u64,
+    pub active_rows: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreDomain {
+    Memory,
+    Notes,
+    Cron,
+}
+
+impl StoreDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Notes => "notes",
+            Self::Cron => "cron",
+        }
+    }
+
+    pub fn all() -> [Self; 3] {
+        [Self::Memory, Self::Notes, Self::Cron]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreDomainStatus {
+    Ok,
+}
+
+impl StoreDomainStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreExportOptions {
+    pub domain: StoreDomain,
+    pub include_deleted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -310,6 +378,39 @@ impl AglStore {
             database_path: self.database_path.clone(),
             migration_version: self.schema_version()?,
         })
+    }
+
+    pub fn status(&self) -> Result<StoreStatus> {
+        Ok(StoreStatus {
+            database_path: self.database_path.clone(),
+            schema_version: self.schema_version()?,
+            domains: StoreDomain::all()
+                .into_iter()
+                .map(|domain| self.domain_health(domain))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+
+    pub fn domain_health(&self, domain: StoreDomain) -> Result<StoreDomainHealth> {
+        let (total_rows, active_rows) = self.domain_counts(domain)?;
+        Ok(StoreDomainHealth {
+            domain,
+            status: StoreDomainStatus::Ok,
+            total_rows,
+            active_rows,
+        })
+    }
+
+    pub fn export_domain_jsonl<W: Write>(
+        &self,
+        options: &StoreExportOptions,
+        writer: W,
+    ) -> Result<usize> {
+        match options.domain {
+            StoreDomain::Memory => self.export_memory_jsonl(options.include_deleted, writer),
+            StoreDomain::Notes => self.export_notes_jsonl(options.include_deleted, writer),
+            StoreDomain::Cron => self.export_cron_jsonl(options.include_deleted, writer),
+        }
     }
 
     pub fn begin_idempotency(
@@ -526,6 +627,174 @@ impl AglStore {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
         Ok(version)
     }
+
+    fn domain_counts(&self, domain: StoreDomain) -> Result<(u64, u64)> {
+        match domain {
+            StoreDomain::Memory => Ok((
+                self.query_count("SELECT COUNT(*) FROM memory_entries")?,
+                self.query_count("SELECT COUNT(*) FROM memory_entries WHERE deleted_at IS NULL")?,
+            )),
+            StoreDomain::Notes => Ok((
+                self.query_count("SELECT COUNT(*) FROM notes")?,
+                self.query_count("SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL")?,
+            )),
+            StoreDomain::Cron => Ok((
+                self.query_count("SELECT COUNT(*) FROM cron_jobs")?,
+                self.query_count("SELECT COUNT(*) FROM cron_jobs WHERE deleted_at IS NULL")?,
+            )),
+        }
+    }
+
+    fn query_count(&self, sql: &str) -> Result<u64> {
+        let count = self.conn.query_row(sql, [], |row| row.get::<_, i64>(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    fn export_memory_jsonl<W: Write>(&self, include_deleted: bool, mut writer: W) -> Result<usize> {
+        let sql = if include_deleted {
+            "SELECT id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at
+             FROM memory_entries
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at
+             FROM memory_entries
+             WHERE deleted_at IS NULL
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Memory.as_str(),
+                "record_type": "memory_entry",
+                "id": row.get::<_, String>(0)?,
+                "scope_kind": row.get::<_, String>(1)?,
+                "scope_key": row.get::<_, String>(2)?,
+                "kind": row.get::<_, String>(3)?,
+                "title": row.get::<_, String>(4)?,
+                "body": row.get::<_, String>(5)?,
+                "source_ref": row.get::<_, Option<String>>(6)?,
+                "confidence": row.get::<_, i64>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+                "updated_at": row.get::<_, String>(9)?,
+                "deleted_at": row.get::<_, Option<String>>(10)?,
+            }))
+        })?;
+        write_jsonl_rows(&mut writer, rows)
+    }
+
+    fn export_notes_jsonl<W: Write>(&self, include_deleted: bool, mut writer: W) -> Result<usize> {
+        let notes_sql = if include_deleted {
+            "SELECT id, title, body, created_at, updated_at, deleted_at
+             FROM notes
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, title, body, created_at, updated_at, deleted_at
+             FROM notes
+             WHERE deleted_at IS NULL
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut notes_stmt = self.conn.prepare(notes_sql)?;
+        let notes = notes_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Notes.as_str(),
+                "record_type": "note",
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "body": row.get::<_, String>(2)?,
+                "created_at": row.get::<_, String>(3)?,
+                "updated_at": row.get::<_, String>(4)?,
+                "deleted_at": row.get::<_, Option<String>>(5)?,
+            }))
+        })?;
+        let mut count = write_jsonl_rows(&mut writer, notes)?;
+
+        let links_sql = if include_deleted {
+            "SELECT id, note_id, target_ref, label, created_at
+             FROM note_links
+             ORDER BY created_at ASC, id ASC"
+        } else {
+            "SELECT l.id, l.note_id, l.target_ref, l.label, l.created_at
+             FROM note_links l
+             JOIN notes n ON n.id = l.note_id
+             WHERE n.deleted_at IS NULL
+             ORDER BY l.created_at ASC, l.id ASC"
+        };
+        let mut links_stmt = self.conn.prepare(links_sql)?;
+        let links = links_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Notes.as_str(),
+                "record_type": "note_link",
+                "id": row.get::<_, String>(0)?,
+                "note_id": row.get::<_, String>(1)?,
+                "target_ref": row.get::<_, String>(2)?,
+                "label": row.get::<_, Option<String>>(3)?,
+                "created_at": row.get::<_, String>(4)?,
+            }))
+        })?;
+        count += write_jsonl_rows(&mut writer, links)?;
+        Ok(count)
+    }
+
+    fn export_cron_jsonl<W: Write>(&self, include_deleted: bool, mut writer: W) -> Result<usize> {
+        let jobs_sql = if include_deleted {
+            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+             FROM cron_jobs
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at
+             FROM cron_jobs
+             WHERE deleted_at IS NULL
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut jobs_stmt = self.conn.prepare(jobs_sql)?;
+        let jobs = jobs_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Cron.as_str(),
+                "record_type": "cron_job",
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "enabled": row.get::<_, bool>(2)?,
+                "target_kind": row.get::<_, String>(3)?,
+                "target_ref": row.get::<_, String>(4)?,
+                "schedule_expr": row.get::<_, String>(5)?,
+                "timezone": row.get::<_, String>(6)?,
+                "notify_ref": row.get::<_, Option<String>>(7)?,
+                "created_at": row.get::<_, String>(8)?,
+                "updated_at": row.get::<_, String>(9)?,
+                "deleted_at": row.get::<_, Option<String>>(10)?,
+            }))
+        })?;
+        let mut count = write_jsonl_rows(&mut writer, jobs)?;
+
+        let runs_sql = if include_deleted {
+            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error
+             FROM cron_runs
+             ORDER BY scheduled_for ASC, id ASC"
+        } else {
+            "SELECT r.id, r.job_id, r.scheduled_for, r.started_at, r.finished_at, r.status, r.result_ref, r.error
+             FROM cron_runs r
+             JOIN cron_jobs j ON j.id = r.job_id
+             WHERE j.deleted_at IS NULL
+             ORDER BY r.scheduled_for ASC, r.id ASC"
+        };
+        let mut runs_stmt = self.conn.prepare(runs_sql)?;
+        let runs = runs_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Cron.as_str(),
+                "record_type": "cron_run",
+                "id": row.get::<_, String>(0)?,
+                "job_id": row.get::<_, String>(1)?,
+                "scheduled_for": row.get::<_, String>(2)?,
+                "started_at": row.get::<_, Option<String>>(3)?,
+                "finished_at": row.get::<_, Option<String>>(4)?,
+                "status": row.get::<_, String>(5)?,
+                "result_ref": row.get::<_, Option<String>>(6)?,
+                "error": row.get::<_, Option<String>>(7)?,
+            }))
+        })?;
+        count += write_jsonl_rows(&mut writer, runs)?;
+        Ok(count)
+    }
 }
 
 pub fn default_store_root(paths: &AgentLibrePaths) -> PathBuf {
@@ -584,6 +853,21 @@ fn timestamp() -> String {
     format!("unix:{seconds}")
 }
 
+fn write_jsonl_rows<W, I>(writer: &mut W, rows: I) -> Result<usize>
+where
+    W: Write,
+    I: IntoIterator<Item = rusqlite::Result<serde_json::Value>>,
+{
+    let mut count = 0;
+    for row in rows {
+        let value = row?;
+        serde_json::to_writer(&mut *writer, &value)?;
+        writer.write_all(b"\n")?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 #[cfg(unix)]
 fn ensure_private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -637,14 +921,185 @@ mod tests {
 
         let store = AglStore::open_default(&paths).unwrap();
         let health = store.health().unwrap();
+        let status = store.status().unwrap();
 
         assert_eq!(health.migration_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(
             health.database_path,
             root.join("data/store/agentlibre.sqlite3")
         );
+        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(status.domains.len(), StoreDomain::all().len());
+        assert!(status.domains.iter().all(|domain| domain.total_rows == 0));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn store_status_counts_domain_rows() {
+        let root = temp_root("domain-status");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_entries
+                 (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
+                 VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
+                        ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO notes
+                 (id, title, body, created_at, updated_at, deleted_at)
+                 VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL),
+                        ('note_deleted', 'Deleted', 'Body', 'unix:1', 'unix:2', 'unix:3')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO cron_jobs
+                 (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
+                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:1', NULL),
+                        ('cron_deleted', 'Deleted', 0, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:2', 'unix:3')",
+                [],
+            )
+            .unwrap();
+
+        let status = store.status().unwrap();
+
+        for domain in status.domains {
+            assert_eq!(domain.status, StoreDomainStatus::Ok);
+            assert_eq!(domain.total_rows, 2, "domain={}", domain.domain.as_str());
+            assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_memory_jsonl_respects_tombstones() {
+        let root = temp_root("export-memory");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_entries
+                 (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
+                 VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
+                        ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
+                [],
+            )
+            .unwrap();
+        let mut active = Vec::new();
+        let mut all = Vec::new();
+
+        let active_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Memory,
+                    include_deleted: false,
+                },
+                &mut active,
+            )
+            .unwrap();
+        let all_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Memory,
+                    include_deleted: true,
+                },
+                &mut all,
+            )
+            .unwrap();
+
+        let active = String::from_utf8(active).unwrap();
+        let all = String::from_utf8(all).unwrap();
+        assert_eq!(active_count, 1);
+        assert!(active.contains("\"id\":\"mem_active\""));
+        assert!(!active.contains("mem_deleted"));
+        assert_eq!(all_count, 2);
+        assert!(all.contains("\"id\":\"mem_deleted\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_notes_and_cron_include_related_rows() {
+        let root = temp_root("export-related");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO notes
+                 (id, title, body, created_at, updated_at, deleted_at)
+                 VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL)",
+                [],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO note_links
+                 (id, note_id, target_ref, label, created_at)
+                 VALUES ('link_1', 'note_active', 'memory:mem_1', 'remembered', 'unix:2')",
+                [],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO cron_jobs
+                 (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
+                 VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'local', NULL, 'unix:1', 'unix:1', NULL)",
+                [],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO cron_runs
+                 (id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error)
+                 VALUES ('run_1', 'cron_active', 'unix:2', 'unix:2', 'unix:2', 'succeeded', 'builtin:store-status', NULL)",
+                [],
+            )
+            .unwrap();
+        let mut notes = Vec::new();
+        let mut cron = Vec::new();
+
+        let notes_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Notes,
+                    include_deleted: false,
+                },
+                &mut notes,
+            )
+            .unwrap();
+        let cron_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Cron,
+                    include_deleted: false,
+                },
+                &mut cron,
+            )
+            .unwrap();
+
+        let notes = String::from_utf8(notes).unwrap();
+        let cron = String::from_utf8(cron).unwrap();
+        assert_eq!(notes_count, 2);
+        assert!(notes.contains("\"record_type\":\"note\""));
+        assert!(notes.contains("\"record_type\":\"note_link\""));
+        assert_eq!(cron_count, 2);
+        assert!(cron.contains("\"record_type\":\"cron_job\""));
+        assert!(cron.contains("\"record_type\":\"cron_run\""));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
