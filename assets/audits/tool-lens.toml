@@ -90,6 +90,42 @@ state_effects = ["store_note_links"]
 visible_in_read_only = false
 policy_owner = "agl-tools/notes"
 
+[[tools]]
+id = "permissions.status"
+provider = "permission-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-tools/permissions"
+
+[[tools]]
+id = "permissions.request"
+provider = "permission-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_permission_requests"]
+visible_in_read_only = true
+policy_owner = "agl-tools/permissions"
+
+[[tools]]
+id = "permissions.grant"
+provider = "permission-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_permission_grants"]
+visible_in_read_only = false
+policy_owner = "agl-tools/permissions"
+
+[[tools]]
+id = "permissions.revoke"
+provider = "permission-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["store_permission_grants"]
+visible_in_read_only = false
+policy_owner = "agl-tools/permissions"
+
 [[missing_tools]]
 id = "memory.search"
 domain = "memory"
@@ -285,34 +321,6 @@ domain = "matrix"
 operation_kind = "execute"
 target_task = "AGL-095b"
 reason = "Deliver queued Matrix notifications through daemon-owned execution."
-
-[[missing_tools]]
-id = "permissions.status"
-domain = "permissions"
-operation_kind = "read"
-target_task = "AGL-094"
-reason = "Explain current mode and granted tools without changing state."
-
-[[missing_tools]]
-id = "permissions.request"
-domain = "permissions"
-operation_kind = "approve"
-target_task = "AGL-094"
-reason = "Request write, execute, approve, or admin grants without hidden escalation."
-
-[[missing_tools]]
-id = "permissions.grant"
-domain = "permissions"
-operation_kind = "approve"
-target_task = "AGL-094"
-reason = "Record an approved grant through a visible permission tool."
-
-[[missing_tools]]
-id = "permissions.revoke"
-domain = "permissions"
-operation_kind = "approve"
-target_task = "AGL-094"
-reason = "Revoke a grant through a visible permission tool."
 
 [[skills]]
 id = "change"

@@ -4,6 +4,7 @@ mod hook;
 mod ids;
 pub mod memory;
 pub mod notes;
+pub mod permissions;
 mod provider;
 mod registry;
 mod tool;
@@ -17,6 +18,10 @@ pub use memory::{MEMORY_SUGGEST_TOOL_ID, MemoryTools};
 pub use notes::{
     NOTES_ADD_TOOL_ID, NOTES_LINK_TOOL_ID, NOTES_SEARCH_TOOL_ID, NOTES_SHOW_TOOL_ID,
     NOTES_UPDATE_TOOL_ID, NotesTools,
+};
+pub use permissions::{
+    PERMISSIONS_GRANT_TOOL_ID, PERMISSIONS_REQUEST_TOOL_ID, PERMISSIONS_REVOKE_TOOL_ID,
+    PERMISSIONS_STATUS_TOOL_ID, PermissionRuntimeStatus, PermissionTools,
 };
 pub use provider::{
     HookDeclaration, ToolCapability, ToolDeclaration, ToolOperationKind, ToolProviderDeclaration,

@@ -84,8 +84,7 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
             assert_eq!(expected.operation_kind, tool.operation_kind, "{}", tool.id);
             assert_eq!(expected.state_effects, tool.state_effects, "{}", tool.id);
             assert_eq!(
-                expected.visible_in_read_only,
-                tool.capability.is_visible_in_read_only(),
+                expected.visible_in_read_only, tool.visible_in_read_only,
                 "{}",
                 tool.id
             );
@@ -251,6 +250,7 @@ fn builtin_tool_catalog() -> ToolCatalog {
     agl_tools::fs::register(&mut catalog).unwrap();
     agl_tools::memory::register(&mut catalog).unwrap();
     agl_tools::notes::register(&mut catalog).unwrap();
+    agl_tools::permissions::register(&mut catalog).unwrap();
     catalog
 }
 

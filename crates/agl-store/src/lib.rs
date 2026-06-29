@@ -4,12 +4,12 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_runtime::AgentLibrePaths;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -190,6 +190,51 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ON matrix_notification_outbox(status, updated_at);
         "#,
     },
+    StoreMigration {
+        version: 8,
+        name: "008_permission_requests_and_grants",
+        sql: r#"
+            CREATE TABLE permission_requests (
+                id TEXT PRIMARY KEY,
+                requested_tools_json TEXT NOT NULL,
+                max_operation_kind TEXT NOT NULL,
+                state_effects_json TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                requester_ref TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'granted', 'denied', 'revoked')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                resolved_at TEXT,
+                resolution_ref TEXT,
+                resolution_note TEXT
+            );
+            CREATE INDEX permission_requests_status_idx
+                ON permission_requests(status, updated_at);
+
+            CREATE TABLE permission_grants (
+                id TEXT PRIMARY KEY,
+                request_id TEXT,
+                tool_id TEXT NOT NULL,
+                max_operation_kind TEXT NOT NULL,
+                state_effects_json TEXT NOT NULL,
+                scope_json TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                granted_by_ref TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'expired')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                revoked_at TEXT,
+                revoke_ref TEXT,
+                FOREIGN KEY(request_id) REFERENCES permission_requests(id)
+            );
+            CREATE INDEX permission_grants_status_idx
+                ON permission_grants(status, updated_at);
+            CREATE INDEX permission_grants_tool_idx
+                ON permission_grants(tool_id, status);
+        "#,
+    },
 ];
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -331,6 +376,7 @@ pub enum StoreDomain {
     Memory,
     Notes,
     Cron,
+    Permissions,
 }
 
 impl StoreDomain {
@@ -339,11 +385,12 @@ impl StoreDomain {
             Self::Memory => "memory",
             Self::Notes => "notes",
             Self::Cron => "cron",
+            Self::Permissions => "permissions",
         }
     }
 
-    pub fn all() -> [Self; 3] {
-        [Self::Memory, Self::Notes, Self::Cron]
+    pub fn all() -> [Self; 4] {
+        [Self::Memory, Self::Notes, Self::Cron, Self::Permissions]
     }
 }
 
@@ -490,6 +537,128 @@ impl MatrixNotificationOutboxDraft {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRequestStatus {
+    Pending,
+    Granted,
+    Denied,
+    Revoked,
+}
+
+impl PermissionRequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "granted" => Ok(Self::Granted),
+            "denied" => Ok(Self::Denied),
+            "revoked" => Ok(Self::Revoked),
+            _ => Err(StoreError::InvalidValue {
+                field: "permission_requests.status",
+                value: value.to_string(),
+                reason: "invalid permission request status",
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionGrantStatus {
+    Active,
+    Revoked,
+    Expired,
+}
+
+impl PermissionGrantStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Expired => "expired",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "revoked" => Ok(Self::Revoked),
+            "expired" => Ok(Self::Expired),
+            _ => Err(StoreError::InvalidValue {
+                field: "permission_grants.status",
+                value: value.to_string(),
+                reason: "invalid permission grant status",
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionRequestDraft {
+    pub requested_tools: Vec<String>,
+    pub max_operation_kind: String,
+    pub state_effects: Vec<String>,
+    pub scope: serde_json::Value,
+    pub duration: String,
+    pub reason: String,
+    pub requester_ref: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PermissionRequestRecord {
+    pub id: String,
+    pub requested_tools: Vec<String>,
+    pub max_operation_kind: String,
+    pub state_effects: Vec<String>,
+    pub scope: serde_json::Value,
+    pub duration: String,
+    pub reason: String,
+    pub requester_ref: String,
+    pub status: PermissionRequestStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+    pub resolution_ref: Option<String>,
+    pub resolution_note: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionGrantDraft {
+    pub request_id: Option<String>,
+    pub tool_id: String,
+    pub max_operation_kind: String,
+    pub state_effects: Vec<String>,
+    pub scope: serde_json::Value,
+    pub duration: String,
+    pub granted_by_ref: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PermissionGrantRecord {
+    pub id: String,
+    pub request_id: Option<String>,
+    pub tool_id: String,
+    pub max_operation_kind: String,
+    pub state_effects: Vec<String>,
+    pub scope: serde_json::Value,
+    pub duration: String,
+    pub granted_by_ref: String,
+    pub status: PermissionGrantStatus,
+    pub created_at: String,
+    pub updated_at: String,
+    pub revoked_at: Option<String>,
+    pub revoke_ref: Option<String>,
+}
+
 impl AglStore {
     pub fn open_default(paths: &AgentLibrePaths) -> Result<Self> {
         Self::open_at(default_store_root(paths))
@@ -604,6 +773,9 @@ impl AglStore {
             StoreDomain::Memory => self.export_memory_jsonl(options.include_deleted, writer),
             StoreDomain::Notes => self.export_notes_jsonl(options.include_deleted, writer),
             StoreDomain::Cron => self.export_cron_jsonl(options.include_deleted, writer),
+            StoreDomain::Permissions => {
+                self.export_permissions_jsonl(options.include_deleted, writer)
+            }
         }
     }
 
@@ -855,6 +1027,265 @@ impl AglStore {
             .transpose()
     }
 
+    pub fn create_permission_request(
+        &self,
+        draft: PermissionRequestDraft,
+    ) -> Result<PermissionRequestRecord> {
+        validate_non_empty_list(
+            &draft.requested_tools,
+            "permission_requests.requested_tools",
+        )?;
+        validate_non_blank(
+            &draft.max_operation_kind,
+            "permission_requests.max_operation_kind",
+        )?;
+        validate_non_blank(&draft.duration, "permission_requests.duration")?;
+        validate_non_blank(&draft.reason, "permission_requests.reason")?;
+        validate_non_blank(&draft.requester_ref, "permission_requests.requester_ref")?;
+
+        let id = store_id("permission_request");
+        let now = timestamp();
+        let requested_tools_json = serde_json::to_string(&draft.requested_tools)?;
+        let state_effects_json = serde_json::to_string(&draft.state_effects)?;
+        let scope_json = serde_json::to_string(&draft.scope)?;
+        self.conn.execute(
+            "INSERT INTO permission_requests
+             (id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?9, NULL, NULL, NULL)",
+            params![
+                &id,
+                &requested_tools_json,
+                &draft.max_operation_kind,
+                &state_effects_json,
+                &scope_json,
+                &draft.duration,
+                &draft.reason,
+                &draft.requester_ref,
+                &now
+            ],
+        )?;
+        self.permission_request(&id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission request {id}"),
+            })
+    }
+
+    pub fn permission_request(&self, id: &str) -> Result<Option<PermissionRequestRecord>> {
+        validate_non_blank(id, "permission_requests.id")?;
+        self.conn
+            .query_row(
+                "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+                 FROM permission_requests
+                 WHERE id = ?1",
+                params![id],
+                permission_request_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
+    pub fn pending_permission_requests(&self) -> Result<Vec<PermissionRequestRecord>> {
+        self.permission_requests_by_status(PermissionRequestStatus::Pending)
+    }
+
+    pub fn permission_requests_by_status(
+        &self,
+        status: PermissionRequestStatus,
+    ) -> Result<Vec<PermissionRequestRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+             FROM permission_requests
+             WHERE status = ?1
+             ORDER BY updated_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![status.as_str()], permission_request_from_row)?;
+        let mut requests = Vec::new();
+        for row in rows {
+            requests.push(row??);
+        }
+        Ok(requests)
+    }
+
+    pub fn create_permission_grant(
+        &self,
+        draft: PermissionGrantDraft,
+    ) -> Result<PermissionGrantRecord> {
+        validate_non_blank(&draft.tool_id, "permission_grants.tool_id")?;
+        validate_non_blank(
+            &draft.max_operation_kind,
+            "permission_grants.max_operation_kind",
+        )?;
+        validate_non_blank(&draft.duration, "permission_grants.duration")?;
+        validate_non_blank(&draft.granted_by_ref, "permission_grants.granted_by_ref")?;
+        if let Some(request_id) = &draft.request_id {
+            validate_non_blank(request_id, "permission_grants.request_id")?;
+        }
+
+        let id = store_id("permission_grant");
+        let now = timestamp();
+        let state_effects_json = serde_json::to_string(&draft.state_effects)?;
+        let scope_json = serde_json::to_string(&draft.scope)?;
+        self.conn.execute(
+            "INSERT INTO permission_grants
+             (id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?9, NULL, NULL)",
+            params![
+                &id,
+                &draft.request_id,
+                &draft.tool_id,
+                &draft.max_operation_kind,
+                &state_effects_json,
+                &scope_json,
+                &draft.duration,
+                &draft.granted_by_ref,
+                &now
+            ],
+        )?;
+        self.permission_grant(&id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission grant {id}"),
+            })
+    }
+
+    pub fn grant_permission_request(
+        &self,
+        request_id: &str,
+        granted_by_ref: &str,
+        resolution_ref: Option<&str>,
+    ) -> Result<Vec<PermissionGrantRecord>> {
+        validate_non_blank(request_id, "permission_requests.id")?;
+        validate_non_blank(granted_by_ref, "permission_grants.granted_by_ref")?;
+        let request = self
+            .permission_request(request_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission request {request_id}"),
+            })?;
+        if request.status != PermissionRequestStatus::Pending {
+            return Err(StoreError::InvalidValue {
+                field: "permission_requests.status",
+                value: request.status.as_str().to_string(),
+                reason: "permission request is not pending",
+            });
+        }
+
+        let mut grants = Vec::with_capacity(request.requested_tools.len());
+        for tool_id in &request.requested_tools {
+            grants.push(self.create_permission_grant(PermissionGrantDraft {
+                request_id: Some(request.id.clone()),
+                tool_id: tool_id.clone(),
+                max_operation_kind: request.max_operation_kind.clone(),
+                state_effects: request.state_effects.clone(),
+                scope: request.scope.clone(),
+                duration: request.duration.clone(),
+                granted_by_ref: granted_by_ref.to_string(),
+            })?);
+        }
+        self.resolve_permission_request(
+            request_id,
+            PermissionRequestStatus::Granted,
+            resolution_ref,
+            None,
+        )?;
+        Ok(grants)
+    }
+
+    pub fn deny_permission_request(
+        &self,
+        request_id: &str,
+        resolution_ref: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<PermissionRequestRecord> {
+        self.resolve_permission_request(
+            request_id,
+            PermissionRequestStatus::Denied,
+            resolution_ref,
+            note,
+        )
+    }
+
+    pub fn revoke_permission_request(
+        &self,
+        request_id: &str,
+        resolution_ref: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<PermissionRequestRecord> {
+        self.resolve_permission_request(
+            request_id,
+            PermissionRequestStatus::Revoked,
+            resolution_ref,
+            note,
+        )
+    }
+
+    fn resolve_permission_request(
+        &self,
+        request_id: &str,
+        status: PermissionRequestStatus,
+        resolution_ref: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<PermissionRequestRecord> {
+        validate_non_blank(request_id, "permission_requests.id")?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE permission_requests
+             SET status = ?2, updated_at = ?3, resolved_at = ?3, resolution_ref = ?4, resolution_note = ?5
+             WHERE id = ?1",
+            params![request_id, status.as_str(), now, resolution_ref, note],
+        )?;
+        self.permission_request(request_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission request {request_id}"),
+            })
+    }
+
+    pub fn permission_grant(&self, id: &str) -> Result<Option<PermissionGrantRecord>> {
+        validate_non_blank(id, "permission_grants.id")?;
+        self.conn
+            .query_row(
+                "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+                 FROM permission_grants
+                 WHERE id = ?1",
+                params![id],
+                permission_grant_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
+    pub fn active_permission_grants(&self) -> Result<Vec<PermissionGrantRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+             FROM permission_grants
+             WHERE status = 'active'
+             ORDER BY updated_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], permission_grant_from_row)?;
+        let mut grants = Vec::new();
+        for row in rows {
+            grants.push(row??);
+        }
+        Ok(grants)
+    }
+
+    pub fn revoke_permission_grant(
+        &self,
+        grant_id: &str,
+        revoke_ref: Option<&str>,
+    ) -> Result<PermissionGrantRecord> {
+        validate_non_blank(grant_id, "permission_grants.id")?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE permission_grants
+             SET status = 'revoked', updated_at = ?2, revoked_at = ?2, revoke_ref = ?3
+             WHERE id = ?1",
+            params![grant_id, now, revoke_ref],
+        )?;
+        self.permission_grant(grant_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission grant {grant_id}"),
+            })
+    }
+
     fn migrate(&self) -> Result<()> {
         self.ensure_migration_table()?;
         let current_version = self.schema_version()?;
@@ -965,6 +1396,15 @@ impl AglStore {
                     + self.query_count(
                         "SELECT COUNT(*) FROM matrix_notification_outbox WHERE status = 'queued'",
                     )?,
+            )),
+            StoreDomain::Permissions => Ok((
+                self.query_count("SELECT COUNT(*) FROM permission_requests")?
+                    + self.query_count("SELECT COUNT(*) FROM permission_grants")?,
+                self.query_count(
+                    "SELECT COUNT(*) FROM permission_requests WHERE status = 'pending'",
+                )? + self.query_count(
+                    "SELECT COUNT(*) FROM permission_grants WHERE status = 'active'",
+                )?,
             )),
         }
     }
@@ -1179,6 +1619,78 @@ impl AglStore {
         count += write_jsonl_rows(&mut writer, outbox)?;
         Ok(count)
     }
+
+    fn export_permissions_jsonl<W: Write>(
+        &self,
+        include_deleted: bool,
+        mut writer: W,
+    ) -> Result<usize> {
+        let request_sql = if include_deleted {
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+             FROM permission_requests
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+             FROM permission_requests
+             WHERE status = 'pending'
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut request_stmt = self.conn.prepare(request_sql)?;
+        let requests = request_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Permissions.as_str(),
+                "record_type": "permission_request",
+                "id": row.get::<_, String>(0)?,
+                "requested_tools": parse_json_cell::<Vec<String>>(row.get::<_, String>(1)?)?,
+                "max_operation_kind": row.get::<_, String>(2)?,
+                "state_effects": parse_json_cell::<Vec<String>>(row.get::<_, String>(3)?)?,
+                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(4)?)?,
+                "duration": row.get::<_, String>(5)?,
+                "reason": row.get::<_, String>(6)?,
+                "requester_ref": row.get::<_, String>(7)?,
+                "status": row.get::<_, String>(8)?,
+                "created_at": row.get::<_, String>(9)?,
+                "updated_at": row.get::<_, String>(10)?,
+                "resolved_at": row.get::<_, Option<String>>(11)?,
+                "resolution_ref": row.get::<_, Option<String>>(12)?,
+                "resolution_note": row.get::<_, Option<String>>(13)?,
+            }))
+        })?;
+        let mut count = write_jsonl_rows(&mut writer, requests)?;
+
+        let grant_sql = if include_deleted {
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+             FROM permission_grants
+             ORDER BY updated_at ASC, id ASC"
+        } else {
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+             FROM permission_grants
+             WHERE status = 'active'
+             ORDER BY updated_at ASC, id ASC"
+        };
+        let mut grant_stmt = self.conn.prepare(grant_sql)?;
+        let grants = grant_stmt.query_map([], |row| {
+            Ok(json!({
+                "domain": StoreDomain::Permissions.as_str(),
+                "record_type": "permission_grant",
+                "id": row.get::<_, String>(0)?,
+                "request_id": row.get::<_, Option<String>>(1)?,
+                "tool_id": row.get::<_, String>(2)?,
+                "max_operation_kind": row.get::<_, String>(3)?,
+                "state_effects": parse_json_cell::<Vec<String>>(row.get::<_, String>(4)?)?,
+                "scope": parse_json_cell::<serde_json::Value>(row.get::<_, String>(5)?)?,
+                "duration": row.get::<_, String>(6)?,
+                "granted_by_ref": row.get::<_, String>(7)?,
+                "status": row.get::<_, String>(8)?,
+                "created_at": row.get::<_, String>(9)?,
+                "updated_at": row.get::<_, String>(10)?,
+                "revoked_at": row.get::<_, Option<String>>(11)?,
+                "revoke_ref": row.get::<_, Option<String>>(12)?,
+            }))
+        })?;
+        count += write_jsonl_rows(&mut writer, grants)?;
+        Ok(count)
+    }
 }
 
 pub fn default_store_root(paths: &AgentLibrePaths) -> PathBuf {
@@ -1217,6 +1729,20 @@ fn validate_idempotency_part(value: &str, field: &'static str) -> Result<()> {
     validate_non_blank(value, field)
 }
 
+fn validate_non_empty_list(values: &[String], field: &'static str) -> Result<()> {
+    if values.is_empty() {
+        return Err(StoreError::InvalidValue {
+            field,
+            value: "[]".to_string(),
+            reason: "list cannot be empty",
+        });
+    }
+    for value in values {
+        validate_non_blank(value, field)?;
+    }
+    Ok(())
+}
+
 fn validate_non_blank(value: &str, field: &'static str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(StoreError::InvalidValue {
@@ -1252,6 +1778,67 @@ fn matrix_notification_from_row(
             delivered_at: row.get(10)?,
         })
     })())
+}
+
+fn permission_request_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<PermissionRequestRecord>> {
+    let requested_tools_json: String = row.get(1)?;
+    let state_effects_json: String = row.get(3)?;
+    let scope_json: String = row.get(4)?;
+    let status: String = row.get(8)?;
+    Ok((|| {
+        Ok(PermissionRequestRecord {
+            id: row.get(0)?,
+            requested_tools: parse_json_store(&requested_tools_json)?,
+            max_operation_kind: row.get(2)?,
+            state_effects: parse_json_store(&state_effects_json)?,
+            scope: parse_json_store(&scope_json)?,
+            duration: row.get(5)?,
+            reason: row.get(6)?,
+            requester_ref: row.get(7)?,
+            status: PermissionRequestStatus::parse(&status)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            resolved_at: row.get(11)?,
+            resolution_ref: row.get(12)?,
+            resolution_note: row.get(13)?,
+        })
+    })())
+}
+
+fn permission_grant_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<PermissionGrantRecord>> {
+    let state_effects_json: String = row.get(4)?;
+    let scope_json: String = row.get(5)?;
+    let status: String = row.get(8)?;
+    Ok((|| {
+        Ok(PermissionGrantRecord {
+            id: row.get(0)?,
+            request_id: row.get(1)?,
+            tool_id: row.get(2)?,
+            max_operation_kind: row.get(3)?,
+            state_effects: parse_json_store(&state_effects_json)?,
+            scope: parse_json_store(&scope_json)?,
+            duration: row.get(6)?,
+            granted_by_ref: row.get(7)?,
+            status: PermissionGrantStatus::parse(&status)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            revoked_at: row.get(11)?,
+            revoke_ref: row.get(12)?,
+        })
+    })())
+}
+
+fn parse_json_store<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
+    serde_json::from_str(value).map_err(StoreError::from)
+}
+
+fn parse_json_cell<T: for<'de> Deserialize<'de>>(value: String) -> rusqlite::Result<T> {
+    serde_json::from_str(&value)
+        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(err)))
 }
 
 fn validate_migration_sequence(versions: &[u32]) -> Result<()> {
@@ -1471,8 +2058,13 @@ mod tests {
 
         for domain in status.domains {
             assert_eq!(domain.status, StoreDomainStatus::Ok);
-            assert_eq!(domain.total_rows, 2, "domain={}", domain.domain.as_str());
-            assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
+            if domain.domain == StoreDomain::Permissions {
+                assert_eq!(domain.total_rows, 0, "domain={}", domain.domain.as_str());
+                assert_eq!(domain.active_rows, 0, "domain={}", domain.domain.as_str());
+            } else {
+                assert_eq!(domain.total_rows, 2, "domain={}", domain.domain.as_str());
+                assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
+            }
         }
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1724,6 +2316,124 @@ mod tests {
         assert_eq!(count, 1);
         assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
         assert!(cron.contains("\"status\":\"sent\""));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permission_requests_grants_and_revokes_are_persisted() {
+        let root = temp_root("permission-requests");
+        let store = AglStore::open_at(&root).unwrap();
+
+        let request = store
+            .create_permission_request(PermissionRequestDraft {
+                requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
+                max_operation_kind: "write".to_string(),
+                state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
+                scope: json!({"repo": "/tmp/repo", "matrix_room": "!room:server"}),
+                duration: "one_turn".to_string(),
+                reason: "Schedule a daily Matrix greeting.".to_string(),
+                requester_ref: "chat:session-1:turn-1".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(request.status, PermissionRequestStatus::Pending);
+        assert_eq!(request.requested_tools.len(), 2);
+        assert_eq!(
+            store.pending_permission_requests().unwrap(),
+            vec![request.clone()]
+        );
+
+        let grants = store
+            .grant_permission_request(&request.id, "cli:operator", Some("chat:session-1:turn-2"))
+            .unwrap();
+        let resolved = store.permission_request(&request.id).unwrap().unwrap();
+        let active = store.active_permission_grants().unwrap();
+
+        assert_eq!(resolved.status, PermissionRequestStatus::Granted);
+        assert_eq!(
+            resolved.resolution_ref.as_deref(),
+            Some("chat:session-1:turn-2")
+        );
+        assert_eq!(grants.len(), 2);
+        assert_eq!(active.len(), 2);
+        assert!(
+            active
+                .iter()
+                .all(|grant| grant.status == PermissionGrantStatus::Active)
+        );
+        assert!(active.iter().all(|grant| grant.duration == "one_turn"));
+
+        let revoked = store
+            .revoke_permission_grant(&active[0].id, Some("chat:session-1:turn-3"))
+            .unwrap();
+        assert_eq!(revoked.status, PermissionGrantStatus::Revoked);
+        assert_eq!(revoked.revoke_ref.as_deref(), Some("chat:session-1:turn-3"));
+        assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+
+        let status = store.status().unwrap();
+        let permissions = status
+            .domains
+            .iter()
+            .find(|domain| domain.domain == StoreDomain::Permissions)
+            .unwrap();
+        assert_eq!(permissions.total_rows, 3);
+        assert_eq!(permissions.active_rows, 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permission_export_reports_pending_and_historical_records() {
+        let root = temp_root("permission-export");
+        let store = AglStore::open_at(&root).unwrap();
+        let request = store
+            .create_permission_request(PermissionRequestDraft {
+                requested_tools: vec!["notes.add".to_string()],
+                max_operation_kind: "write".to_string(),
+                state_effects: vec!["store_notes".to_string()],
+                scope: json!({"repo": "/tmp/repo"}),
+                duration: "one_turn".to_string(),
+                reason: "Create one explicit note.".to_string(),
+                requester_ref: "chat:turn-1".to_string(),
+            })
+            .unwrap();
+        let grants = store
+            .grant_permission_request(&request.id, "cli:operator", Some("chat:turn-2"))
+            .unwrap();
+        store
+            .revoke_permission_grant(&grants[0].id, Some("chat:turn-3"))
+            .unwrap();
+
+        let mut active = Vec::new();
+        let active_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Permissions,
+                    include_deleted: false,
+                },
+                &mut active,
+            )
+            .unwrap();
+        let mut all = Vec::new();
+        let all_count = store
+            .export_domain_jsonl(
+                &StoreExportOptions {
+                    domain: StoreDomain::Permissions,
+                    include_deleted: true,
+                },
+                &mut all,
+            )
+            .unwrap();
+
+        let active = String::from_utf8(active).unwrap();
+        let all = String::from_utf8(all).unwrap();
+        assert_eq!(active_count, 0);
+        assert_eq!(all_count, 2);
+        assert!(active.is_empty());
+        assert!(all.contains("\"record_type\":\"permission_request\""));
+        assert!(all.contains("\"record_type\":\"permission_grant\""));
+        assert!(all.contains("\"status\":\"revoked\""));
 
         std::fs::remove_dir_all(root).unwrap();
     }

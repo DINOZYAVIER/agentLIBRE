@@ -3,7 +3,7 @@ use std::path::Path;
 use agl_events::{AgentEvent, RuntimeEventWriter};
 use agl_loop::{
     AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
-    TurnMessage, TurnTransitionRecord,
+    TurnMessage, TurnTransitionRecord, VisibleTool,
 };
 use agl_tools::{
     HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus, ToolId,
@@ -28,7 +28,12 @@ impl ChatLoopHost {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
-        let tool_runtime = core_tool_runtime(&core_tools, session.store_root())?;
+        let mut tool_runtime = core_tool_runtime(
+            &core_tools,
+            session.store_root(),
+            permission_runtime_status(&session),
+        )?;
+        tool_runtime.set_allowed_tools(visible_tool_ids(session.turn_visible_tools())?);
         Ok(Self {
             session,
             event_sink,
@@ -72,7 +77,12 @@ impl ChatLoopHost {
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
-        let tool_runtime = core_tool_runtime(&core_tools, self.session.store_root())?;
+        let mut tool_runtime = core_tool_runtime(
+            &core_tools,
+            self.session.store_root(),
+            permission_runtime_status(&self.session),
+        )?;
+        tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
         self.session
@@ -162,7 +172,11 @@ fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
     }
 }
 
-fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Result<ToolRuntime> {
+fn core_tool_runtime(
+    core_tools: &agl_tools::CoreTools,
+    store_root: &Path,
+    permission_status: agl_tools::PermissionRuntimeStatus,
+) -> Result<ToolRuntime> {
     let mut runtime = ToolRuntime::new();
     runtime
         .register_provider(agl_tools::fs::declaration())
@@ -173,6 +187,9 @@ fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Re
     runtime
         .register_provider(agl_tools::notes::declaration())
         .context("failed to register builtin notes tool provider")?;
+    runtime
+        .register_provider(agl_tools::permissions::declaration())
+        .context("failed to register builtin permission tool provider")?;
     for tool_id in [
         agl_tools::FS_READ_TOOL_ID,
         agl_tools::FS_LIST_TOOL_ID,
@@ -204,5 +221,43 @@ fn core_tool_runtime(core_tools: &agl_tools::CoreTools, store_root: &Path) -> Re
             .register_handler(ToolId::new(tool_id)?, notes_tools.clone())
             .with_context(|| format!("failed to register builtin notes tool handler {tool_id}"))?;
     }
+    let permission_tools =
+        agl_tools::PermissionTools::new(store_root).with_runtime_status(permission_status);
+    for tool_id in [
+        agl_tools::PERMISSIONS_STATUS_TOOL_ID,
+        agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
+        agl_tools::PERMISSIONS_GRANT_TOOL_ID,
+        agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, permission_tools.clone())
+            .with_context(|| {
+                format!("failed to register builtin permission tool handler {tool_id}")
+            })?;
+    }
     Ok(runtime)
+}
+
+fn permission_runtime_status(
+    session: &crate::InferenceSession,
+) -> agl_tools::PermissionRuntimeStatus {
+    agl_tools::PermissionRuntimeStatus {
+        current_mode: session.tool_mode().as_str().to_string(),
+        visible_tools: session
+            .turn_visible_tools()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect(),
+        dynamic_grants: false,
+    }
+}
+
+fn visible_tool_ids(visible_tools: &[VisibleTool]) -> Result<Vec<ToolId>> {
+    visible_tools
+        .iter()
+        .map(|tool| {
+            ToolId::new(tool.name.clone())
+                .with_context(|| format!("visible tool id is invalid: {}", tool.name))
+        })
+        .collect()
 }
