@@ -319,7 +319,7 @@ pub fn lock_workspace_skills(
     let valid_skills = report
         .skills
         .iter()
-        .filter(|skill| skill.valid && !skill.shadowed_by_builtin)
+        .filter(|skill| skill.valid)
         .collect::<Vec<_>>();
     if valid_skills.is_empty() {
         errors.push("no_valid_workspace_skills".to_string());
@@ -834,9 +834,6 @@ fn classify_trust_state(
     if !skill.valid {
         return SkillTrustState::Invalid;
     }
-    if skill.shadowed_by_builtin {
-        return SkillTrustState::Unsupported;
-    }
     if report
         .errors
         .iter()
@@ -908,9 +905,6 @@ fn find_trust_target<'a>(
             if !skill.valid {
                 errors.push("skill_invalid".to_string());
             }
-            if skill.shadowed_by_builtin {
-                errors.push("skill_shadowed_by_builtin".to_string());
-            }
             Some(*skill)
         }
         [] => {
@@ -967,6 +961,10 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
     agl_tools::guards::register(&mut catalog)
         .context("failed to register builtin guard provider")?;
     agl_tools::fs::register(&mut catalog).context("failed to register builtin tool provider")?;
+    agl_tools::memory::register(&mut catalog)
+        .context("failed to register builtin memory tool provider")?;
+    agl_tools::notes::register(&mut catalog)
+        .context("failed to register builtin notes tool provider")?;
     for hook in &harness.required_hooks {
         if catalog.hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);
@@ -1335,10 +1333,50 @@ Body.
         fs::remove_dir_all(source).unwrap();
     }
 
+    #[test]
+    fn pinned_same_name_workspace_skill_can_be_trusted_but_not_used() {
+        let (root, source) = clean_skills_submodule_fixture_with_skill("same-name", "repo-review");
+        lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+        let trust_store = root.join("state/skill-trust.toml");
+
+        let approval = trust_workspace_skill(
+            &root,
+            &trust_store,
+            "repo-review",
+            &SkillTrustOptions {
+                approve: true,
+                agentlibre_version: "test-version".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(!approval.has_errors());
+
+        let trusted = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
+        assert!(trusted.skills[0].shadowed_by_builtin);
+        assert_eq!(trusted.skills[0].trust_state, SkillTrustState::TrustedLocal);
+        assert!(!trusted.skills[0].usable);
+
+        let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
+        let skill = registry
+            .get(&agl_tools::SkillId::new("repo-review").unwrap())
+            .expect("builtin repo-review should remain registered");
+        assert_eq!(skill.harness.source, SkillSource::Builtin);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(source).unwrap();
+    }
+
     fn clean_skills_submodule_fixture(label: &str) -> (PathBuf, PathBuf) {
+        clean_skills_submodule_fixture_with_skill(label, "repo-change")
+    }
+
+    fn clean_skills_submodule_fixture_with_skill(
+        label: &str,
+        skill_name: &str,
+    ) -> (PathBuf, PathBuf) {
         let source = temp_root(&format!("{label}-skills-source"));
         init_git_repo(&source);
-        write_workspace_skill(&source.join("agl/repo-change"), "repo-change");
+        write_workspace_skill(&source.join("agl").join(skill_name), skill_name);
         git_run(&source, ["add", "."]);
         git_run(
             &source,
