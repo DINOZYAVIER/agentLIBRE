@@ -99,6 +99,10 @@ fn command_help_exits_successfully_for_public_commands() {
         &["memory", "search", "--help"][..],
         &["memory", "show", "--help"][..],
         &["memory", "delete", "--help"][..],
+        &["memory", "suggest", "--help"][..],
+        &["memory", "list-suggestions", "--help"][..],
+        &["memory", "approve", "--help"][..],
+        &["memory", "reject", "--help"][..],
         &["notes", "--help"][..],
         &["notes", "add", "--help"][..],
         &["notes", "list", "--help"][..],
@@ -170,6 +174,60 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_success(&include_deleted);
     assert_contains(&stdout(&include_deleted), &id);
     assert_contains(&stdout(&include_deleted), "deleted=true");
+}
+
+#[test]
+fn memory_suggestion_commands_require_approval() {
+    let home = TempHome::new("memory-suggestion-commands");
+    let home_arg = home.path_string();
+
+    let suggest = run_agl(&[
+        "--home",
+        &home_arg,
+        "memory",
+        "suggest",
+        "--kind",
+        "decision",
+        "--title",
+        "Memory policy",
+        "--body",
+        "Use pending suggestions before durable writes.",
+        "--source-ref",
+        "chat:turn-1",
+    ]);
+
+    assert_success(&suggest);
+    let suggest_stdout = stdout(&suggest);
+    assert_contains(&suggest_stdout, "memory_suggestion id=");
+    assert_contains(&suggest_stdout, "status=pending");
+    let suggestion_id = memory_suggestion_id_from_output(&suggest_stdout);
+
+    let empty_memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
+    assert_success(&empty_memory);
+    assert!(
+        !stdout(&empty_memory).contains("memory id="),
+        "pending suggestion should not be durable memory yet"
+    );
+
+    let list = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
+    assert_success(&list);
+    assert_contains(&stdout(&list), &suggestion_id);
+
+    let approve = run_agl(&["--home", &home_arg, "memory", "approve", &suggestion_id]);
+    assert_success(&approve);
+    assert_contains(&stdout(&approve), "memory_suggestion.approved=true");
+    assert_contains(&stdout(&approve), "memory id=");
+
+    let memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
+    assert_success(&memory);
+    assert_contains(&stdout(&memory), "kind=decision");
+
+    let pending = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
+    assert_success(&pending);
+    assert!(
+        !stdout(&pending).contains(&suggestion_id),
+        "approved suggestion should leave the pending list"
+    );
 }
 
 #[test]
@@ -980,6 +1038,14 @@ fn memory_id_from_output(stdout: &str) -> String {
         .split_whitespace()
         .find_map(|part| part.strip_prefix("id="))
         .unwrap_or_else(|| panic!("memory id missing from output:\n{stdout}"))
+        .to_string()
+}
+
+fn memory_suggestion_id_from_output(stdout: &str) -> String {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("id="))
+        .unwrap_or_else(|| panic!("memory suggestion id missing from output:\n{stdout}"))
         .to_string()
 }
 
