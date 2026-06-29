@@ -1,6 +1,9 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_memory::{
+    MemoryDraft, MemoryEntry, MemoryError, MemoryKind, MemoryRepository, MemoryScope,
+};
 use agl_store::{AglStore, StoreError};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ pub enum NotesError {
         id: String,
     },
     Store(StoreError),
+    Memory(MemoryError),
     Sqlite(rusqlite::Error),
 }
 
@@ -31,6 +35,7 @@ impl fmt::Display for NotesError {
             } => write!(f, "invalid note {field} value {value:?}: {reason}"),
             Self::NotFound { id } => write!(f, "note not found: {id}"),
             Self::Store(err) => write!(f, "{err}"),
+            Self::Memory(err) => write!(f, "{err}"),
             Self::Sqlite(err) => write!(f, "{err}"),
         }
     }
@@ -41,6 +46,12 @@ impl std::error::Error for NotesError {}
 impl From<StoreError> for NotesError {
     fn from(err: StoreError) -> Self {
         Self::Store(err)
+    }
+}
+
+impl From<MemoryError> for NotesError {
+    fn from(err: MemoryError) -> Self {
+        Self::Memory(err)
     }
 }
 
@@ -88,6 +99,13 @@ pub struct NoteLink {
     pub target_ref: String,
     pub label: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NoteMemoryPromotion {
+    pub note: Note,
+    pub memory: MemoryEntry,
+    pub link: NoteLink,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,17 +207,7 @@ impl<'a> NoteRepository<'a> {
 
     pub fn get(&self, id: &str) -> Result<Option<Note>> {
         validate_non_blank("id", id)?;
-        self.store
-            .connection()
-            .query_row(
-                "SELECT id, title, body, created_at, updated_at, deleted_at
-                 FROM notes
-                 WHERE id = ?1",
-                params![id],
-                note_from_row,
-            )
-            .optional()
-            .map_err(NotesError::from)
+        note_by_id(self.store.connection(), id)
     }
 
     pub fn update(&self, id: &str, update: NoteUpdate) -> Result<Note> {
@@ -220,6 +228,13 @@ impl<'a> NoteRepository<'a> {
         let current = self
             .get(id)?
             .ok_or_else(|| NotesError::NotFound { id: id.to_string() })?;
+        if current.deleted_at.is_some() {
+            return Err(NotesError::InvalidValue {
+                field: "id",
+                value: id.to_string(),
+                reason: "cannot update a deleted note",
+            });
+        }
         let title = update.title.unwrap_or(current.title);
         let body = update.body.unwrap_or(current.body);
         let now = timestamp();
@@ -262,16 +277,38 @@ impl<'a> NoteRepository<'a> {
                 reason: "cannot link a deleted note",
             });
         }
-        let id = link_id();
-        let now = timestamp();
-        self.store.connection().execute(
-            "INSERT INTO note_links
-             (id, note_id, target_ref, label, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, note_id, target_ref, label, now],
+        insert_link(self.store.connection(), note_id, target_ref, label)
+    }
+
+    pub fn remember(
+        &self,
+        note_id: &str,
+        scope: MemoryScope,
+        kind: MemoryKind,
+    ) -> Result<NoteMemoryPromotion> {
+        validate_non_blank("note_id", note_id)?;
+        let tx = self.store.connection().unchecked_transaction()?;
+        let note = note_by_id(&tx, note_id)?.ok_or_else(|| NotesError::NotFound {
+            id: note_id.to_string(),
+        })?;
+        if note.deleted_at.is_some() {
+            return Err(NotesError::InvalidValue {
+                field: "note_id",
+                value: note_id.to_string(),
+                reason: "cannot promote a deleted note",
+            });
+        }
+        let mut draft = MemoryDraft::new(scope, kind, note.title.clone(), note.body.clone());
+        draft.source_ref = Some(format!("note:{}", note.id));
+        let memory = MemoryRepository::insert_on_connection(&tx, draft)?;
+        let link = insert_link(
+            &tx,
+            &note.id,
+            &format!("memory:{}", memory.id),
+            Some("remembered".to_string()),
         )?;
-        self.link_by_id(&id)?
-            .ok_or_else(|| NotesError::NotFound { id })
+        tx.commit()?;
+        Ok(NoteMemoryPromotion { note, memory, link })
     }
 
     pub fn links(&self, note_id: &str) -> Result<Vec<NoteLink>> {
@@ -290,20 +327,6 @@ impl<'a> NoteRepository<'a> {
         Ok(links)
     }
 
-    fn link_by_id(&self, id: &str) -> Result<Option<NoteLink>> {
-        self.store
-            .connection()
-            .query_row(
-                "SELECT id, note_id, target_ref, label, created_at
-                 FROM note_links
-                 WHERE id = ?1",
-                params![id],
-                note_link_from_row,
-            )
-            .optional()
-            .map_err(NotesError::from)
-    }
-
     fn query_notes<P>(&self, sql: &str, params: P) -> Result<Vec<Note>>
     where
         P: rusqlite::Params,
@@ -316,6 +339,47 @@ impl<'a> NoteRepository<'a> {
         }
         Ok(notes)
     }
+}
+
+fn note_by_id(conn: &rusqlite::Connection, id: &str) -> Result<Option<Note>> {
+    conn.query_row(
+        "SELECT id, title, body, created_at, updated_at, deleted_at
+         FROM notes
+         WHERE id = ?1",
+        params![id],
+        note_from_row,
+    )
+    .optional()
+    .map_err(NotesError::from)
+}
+
+fn insert_link(
+    conn: &rusqlite::Connection,
+    note_id: &str,
+    target_ref: &str,
+    label: Option<String>,
+) -> Result<NoteLink> {
+    let id = link_id();
+    let now = timestamp();
+    conn.execute(
+        "INSERT INTO note_links
+         (id, note_id, target_ref, label, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, note_id, target_ref, label, now],
+    )?;
+    link_by_id(conn, &id)?.ok_or_else(|| NotesError::NotFound { id })
+}
+
+fn link_by_id(conn: &rusqlite::Connection, id: &str) -> Result<Option<NoteLink>> {
+    conn.query_row(
+        "SELECT id, note_id, target_ref, label, created_at
+         FROM note_links
+         WHERE id = ?1",
+        params![id],
+        note_link_from_row,
+    )
+    .optional()
+    .map_err(NotesError::from)
 }
 
 fn note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
@@ -484,6 +548,72 @@ mod tests {
 
         assert_eq!(links, vec![link]);
         assert_eq!(links[0].target_ref, "memory:mem_001");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remember_promotes_note_and_links_memory_atomically() {
+        let root = temp_root("remember");
+        let store = AglStore::open_at(&root).unwrap();
+        let repo = NoteRepository::new(&store);
+        let note = repo
+            .add(NoteDraft::new("Decision", "Use git trust."))
+            .unwrap();
+
+        let promotion = repo
+            .remember(&note.id, MemoryScope::user(), MemoryKind::Decision)
+            .unwrap();
+        let links = repo.links(&note.id).unwrap();
+
+        assert_eq!(promotion.note, note);
+        assert_eq!(promotion.memory.title, "Decision");
+        assert_eq!(promotion.memory.body, "Use git trust.");
+        let expected_source = format!("note:{}", promotion.note.id);
+        assert_eq!(
+            promotion.memory.source_ref.as_deref(),
+            Some(expected_source.as_str())
+        );
+        assert_eq!(links, vec![promotion.link]);
+        assert_eq!(
+            links[0].target_ref,
+            format!("memory:{}", promotion.memory.id)
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleted_notes_cannot_be_updated_or_promoted() {
+        let root = temp_root("deleted-write");
+        let store = AglStore::open_at(&root).unwrap();
+        let repo = NoteRepository::new(&store);
+        let note = repo
+            .add(NoteDraft::new("Temporary", "Deleted body."))
+            .unwrap();
+        repo.delete(&note.id).unwrap();
+
+        let update_err = repo
+            .update(
+                &note.id,
+                NoteUpdate {
+                    title: Some("Changed".to_string()),
+                    body: None,
+                },
+            )
+            .unwrap_err();
+        let remember_err = repo
+            .remember(&note.id, MemoryScope::user(), MemoryKind::WorkingNote)
+            .unwrap_err();
+
+        assert!(matches!(
+            update_err,
+            NotesError::InvalidValue { reason, .. } if reason.contains("deleted note")
+        ));
+        assert!(matches!(
+            remember_err,
+            NotesError::InvalidValue { reason, .. } if reason.contains("deleted note")
+        ));
 
         std::fs::remove_dir_all(root).unwrap();
     }
