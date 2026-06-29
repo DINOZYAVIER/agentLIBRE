@@ -21,6 +21,7 @@ pub(crate) enum CliCommand {
     Completion { shell: Shell },
     Config(ConfigCommand),
     Cron(CronCommand),
+    Store(StoreCommand),
     Memory(MemoryCommand),
     Notes(NotesCommand),
     Repo(RepoCommand),
@@ -35,6 +36,12 @@ pub(crate) enum CliCommand {
 pub(crate) enum ConfigCommand {
     Paths,
     Init { force: bool },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum StoreCommand {
+    Status(StoreStatusOptions),
+    Export(StoreExportCliOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -252,6 +259,28 @@ pub(crate) struct SkillRevokeOptions {
     pub(crate) json: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum StoreDomainArg {
+    Memory,
+    Notes,
+    Cron,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreStatusOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreExportCliOptions {
+    pub(crate) domain: StoreDomainArg,
+    pub(crate) out: PathBuf,
+    pub(crate) include_deleted: bool,
+    pub(crate) force: bool,
+    pub(crate) json: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CronTargetKindArg {
     Skill,
@@ -439,6 +468,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Inspect and export the local AgentLIBRE store.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommands,
+    },
     /// Manage local scheduled AgentLIBRE jobs.
     Cron {
         #[command(subcommand)]
@@ -509,6 +543,14 @@ enum ConfigCommands {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreCommands {
+    /// Report local store health.
+    Status(StoreStatusArgs),
+    /// Export one store domain as JSONL.
+    Export(StoreExportArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -638,6 +680,36 @@ struct RepoHooksArgs {
     /// Replace AgentLIBRE-managed hooks or overwrite conflicts.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct StoreStatusArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct StoreExportArgs {
+    /// Domain to export.
+    #[arg(long, value_enum)]
+    domain: StoreDomainArg,
+
+    /// Destination JSONL path.
+    #[arg(long, value_name = "PATH")]
+    out: PathBuf,
+
+    /// Include tombstoned rows.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Overwrite an existing output file.
+    #[arg(long)]
+    force: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1186,6 +1258,7 @@ impl Cli {
                 ConfigCommands::Paths => ConfigCommand::Paths,
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
+            Some(Commands::Store { command }) => CliCommand::Store(store_command(command)),
             Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
@@ -1253,6 +1326,19 @@ fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
     RepoHooksOptions {
         dry_run: args.dry_run,
         force: args.force,
+    }
+}
+
+fn store_command(command: StoreCommands) -> StoreCommand {
+    match command {
+        StoreCommands::Status(args) => StoreCommand::Status(StoreStatusOptions { json: args.json }),
+        StoreCommands::Export(args) => StoreCommand::Export(StoreExportCliOptions {
+            domain: args.domain,
+            out: args.out,
+            include_deleted: args.include_deleted,
+            force: args.force,
+            json: args.json,
+        }),
     }
 }
 
@@ -1674,6 +1760,11 @@ enum PublicCompletionCommands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Inspect and export the local AgentLIBRE store.
+    Store {
+        #[command(subcommand)]
+        command: StoreCommands,
     },
     /// Manage local scheduled AgentLIBRE jobs.
     Cron {
@@ -2218,6 +2309,34 @@ mod tests {
             missing_now
                 .to_string()
                 .contains("agl cron run requires --now")
+        );
+    }
+
+    #[test]
+    fn parse_store_commands() {
+        assert_eq!(
+            parse_command(["agl", "store", "status", "--json"]),
+            CliCommand::Store(StoreCommand::Status(StoreStatusOptions { json: true }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl",
+                "store",
+                "export",
+                "--domain",
+                "memory",
+                "--out",
+                "memory.jsonl",
+                "--include-deleted",
+                "--force",
+            ]),
+            CliCommand::Store(StoreCommand::Export(StoreExportCliOptions {
+                domain: StoreDomainArg::Memory,
+                out: PathBuf::from("memory.jsonl"),
+                include_deleted: true,
+                force: true,
+                json: false,
+            }))
         );
     }
 
