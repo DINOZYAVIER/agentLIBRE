@@ -4,11 +4,13 @@ use agl_chat::InferenceOptions;
 use agl_runtime::AgentLibrePaths;
 
 pub const DEFAULT_SOCKET_FILE: &str = "agl.sock";
+pub const DEFAULT_CRON_INTERVAL_SECONDS: u64 = 60;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonOptions {
     pub socket_path: PathBuf,
     pub inference: InferenceOptions,
+    pub cron_interval_seconds: u64,
 }
 
 impl DaemonOptions {
@@ -16,6 +18,7 @@ impl DaemonOptions {
         Self {
             socket_path: default_socket_path(paths),
             inference,
+            cron_interval_seconds: DEFAULT_CRON_INTERVAL_SECONDS,
         }
     }
 }
