@@ -19,6 +19,7 @@ agl-protocol.workspace = true
 agl-tools.workspace = true
 agl-loop.workspace = true
 agl-memory.workspace = true
+agl-notes.workspace = true
 agl-repo.workspace = true
 agl-runtime.workspace = true
 agl-skills.workspace = true
