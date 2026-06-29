@@ -6,7 +6,7 @@ use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -101,6 +101,40 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             );
             CREATE INDEX note_links_note_idx
                 ON note_links(note_id, created_at);
+        "#,
+    },
+    StoreMigration {
+        version: 5,
+        name: "005_cron_jobs",
+        sql: r#"
+            CREATE TABLE cron_jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_ref TEXT NOT NULL,
+                schedule_expr TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                notify_ref TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE INDEX cron_jobs_enabled_idx
+                ON cron_jobs(enabled, deleted_at, updated_at);
+            CREATE TABLE cron_runs (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                scheduled_for TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                result_ref TEXT,
+                error TEXT,
+                FOREIGN KEY(job_id) REFERENCES cron_jobs(id)
+            );
+            CREATE INDEX cron_runs_job_idx
+                ON cron_runs(job_id, scheduled_for);
         "#,
     },
 ];

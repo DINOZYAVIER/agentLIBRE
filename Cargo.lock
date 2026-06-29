@@ -98,6 +98,7 @@ version = "1.0.0-alpha.7"
 dependencies = [
  "agl-chat",
  "agl-client",
+ "agl-cron",
  "agl-daemon",
  "agl-loop",
  "agl-memory",
@@ -131,6 +132,15 @@ dependencies = [
  "anyhow",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "agl-cron"
+version = "1.0.0-alpha.7"
+dependencies = [
+ "agl-store",
+ "rusqlite",
+ "serde",
 ]
 
 [[package]]
