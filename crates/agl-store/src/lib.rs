@@ -387,7 +387,7 @@ pub enum IdempotencyStatus {
 }
 
 impl IdempotencyStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::InProgress => "in_progress",
             Self::Completed => "completed",
