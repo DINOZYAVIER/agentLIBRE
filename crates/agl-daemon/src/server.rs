@@ -3,10 +3,11 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use agl_chat::{ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, ToolAccessMode};
 use agl_cron::{CronJob, CronTargetKind};
 use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, ProtocolError, ProtocolErrorCode};
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::AglStore;
+use agl_store::{AglStore, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
 
 use crate::{
@@ -44,7 +45,7 @@ impl DaemonServer {
             socket_path = %self.options.socket_path.display(),
             "daemon listening"
         );
-        let mut state = DaemonState::new(self.runtime, self.options.inference);
+        let mut state = DaemonState::new(self.runtime.clone(), self.options.inference.clone());
         let mut last_cron_tick = None;
         loop {
             let now = unix_now();
@@ -52,8 +53,11 @@ impl DaemonServer {
                 .is_none_or(|last| now.saturating_sub(last) >= self.options.cron_interval_seconds)
             {
                 last_cron_tick = Some(now);
-                let mut executor = DaemonCronExecutor;
-                let mut notifier = TracingCronNotifier;
+                let mut executor = DaemonCronExecutor {
+                    runtime: self.runtime.clone(),
+                    inference_defaults: self.options.inference.clone(),
+                };
+                let mut notifier = StoreCronNotifier { store: &store };
                 match run_cron_tick(&store, now, &mut executor, &mut notifier) {
                     Ok(report) if report.due_jobs > 0 => tracing::info!(
                         target: "agentlibre::daemon",
@@ -91,7 +95,10 @@ impl DaemonServer {
     }
 }
 
-struct DaemonCronExecutor;
+struct DaemonCronExecutor {
+    runtime: AgentLibreRuntimeConfig,
+    inference_defaults: InferenceOptions,
+}
 
 impl CronTargetExecutor for DaemonCronExecutor {
     fn execute(&mut self, job: &CronJob) -> CronExecution {
@@ -102,28 +109,45 @@ impl CronTargetExecutor for DaemonCronExecutor {
             (CronTargetKind::Builtin, target) => {
                 CronExecution::failed(format!("unknown builtin cron target: {target}"))
             }
-            (CronTargetKind::Skill, target) => CronExecution::failed(format!(
-                "daemon cron skill execution is not enabled yet: {target}"
-            )),
+            (CronTargetKind::Skill, _target) => {
+                match run_daemon_skill_cron(job, &self.runtime, &self.inference_defaults) {
+                    Ok(result_ref) => CronExecution::succeeded(result_ref),
+                    Err(err) => CronExecution::failed(format!("{err:#}")),
+                }
+            }
         }
     }
 }
 
-struct TracingCronNotifier;
+struct StoreCronNotifier<'a> {
+    store: &'a AglStore,
+}
 
-impl CronNotifier for TracingCronNotifier {
+impl CronNotifier for StoreCronNotifier<'_> {
     fn notify(&mut self, notification: CronNotification) -> Result<()> {
         if notification.notify_ref.starts_with("matrix-room:") {
+            let body = cron_notification_body(&notification);
+            let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
+            let item =
+                self.store
+                    .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+                        notification.notify_ref.clone(),
+                        "cron",
+                        notification.run_id.clone(),
+                        dedupe_key,
+                        body,
+                    ))?;
             tracing::info!(
                 target: "agentlibre::daemon",
                 notify_ref = %notification.notify_ref,
+                outbox_id = %item.id,
                 job_id = %notification.job_id,
                 job_name = %notification.job_name,
                 status = notification.status.as_str(),
                 scheduled_for = %notification.scheduled_for,
                 result_ref = notification.result_ref.as_deref(),
                 error = notification.error.as_deref(),
-                "cron Matrix notification queued at daemon boundary"
+                "cron Matrix notification queued in store outbox"
             );
         } else {
             tracing::warn!(
@@ -135,6 +159,71 @@ impl CronNotifier for TracingCronNotifier {
         }
         Ok(())
     }
+}
+
+fn run_daemon_skill_cron(
+    job: &CronJob,
+    runtime: &AgentLibreRuntimeConfig,
+    inference_defaults: &InferenceOptions,
+) -> Result<String> {
+    let prompt = cron_skill_prompt(job)?;
+    let mut inference = inference_defaults.clone();
+    inference.skills.push(job.target_ref.clone());
+    inference.tool_mode = ToolAccessMode::Write;
+    let mut service = ChatService::open(
+        ChatOptions {
+            inference,
+            workspace_root: None,
+            session_id: None,
+            no_history: false,
+            new_session: true,
+        },
+        runtime,
+    )
+    .context("failed to open daemon cron skill chat session")?;
+    let summary = service.summary();
+    let output = service
+        .run_user_turn(&prompt)
+        .context("failed to run daemon cron skill turn")?;
+    service
+        .finish_eof_if_needed()
+        .context("failed to finish daemon cron skill session")?;
+    match output.status {
+        ChatTurnStatus::Answered { .. } => Ok(format!(
+            "skill:{}:session:{}:run:{}",
+            job.target_ref, summary.session_id, summary.run_id
+        )),
+        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
+    }
+}
+
+fn cron_skill_prompt(job: &CronJob) -> Result<String> {
+    let prompt = job
+        .prompt
+        .as_deref()
+        .context("skill cron job missing prompt")?;
+    if let Some(input) = job.input.as_deref() {
+        Ok(format!("{prompt}\n\nCron input:\n{input}"))
+    } else {
+        Ok(prompt.to_string())
+    }
+}
+
+fn cron_notification_body(notification: &CronNotification) -> String {
+    let mut body = format!(
+        "Cron job `{}` ({}) {} for {}.",
+        notification.job_name,
+        notification.job_id,
+        notification.status.as_str(),
+        notification.scheduled_for
+    );
+    if let Some(result_ref) = &notification.result_ref {
+        body.push_str(&format!("\nresult_ref: {result_ref}"));
+    }
+    if let Some(error) = &notification.error {
+        body.push_str(&format!("\nerror: {error}"));
+    }
+    body
 }
 
 fn unix_now() -> u64 {
