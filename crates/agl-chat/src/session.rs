@@ -6,9 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use agl_config::{ModelConfig, ToolCallFormat, load_local_inference_config};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
+use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_oven::render_model_request;
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_skills::{SkillContextEvidence, build_verified_context_bundle, trusted_workspace_registry};
+use agl_skills::{
+    SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
+};
+use agl_store::AglStore;
 use agl_tools::{HookEvent, HookId, SkillId, ToolCapability, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -17,11 +21,13 @@ use crate::{InferenceOptions, ToolAccessMode};
 
 const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
+const MEMORY_CONTEXT_ENTRY_LIMIT: usize = 8;
 
 pub struct InferenceSession {
     backend: LlamaCppBackend,
     model_config: ModelConfig,
     system_prompt: Option<String>,
+    memory_context: Option<String>,
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
@@ -69,6 +75,7 @@ impl InferenceSession {
         let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let tool_mode = options.tool_mode;
+        let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
         let skill_context = resolve_skill_context(
             &config.prompt.skills,
             &options.skills,
@@ -76,8 +83,18 @@ impl InferenceSession {
             &artifact_root,
             &run_id,
             &workspace_root,
-            &runtime.paths.state_dir.join("skill-trust.toml"),
+            &trust_store_path,
         )?;
+        let memory_context = resolve_memory_context(MemoryContextRequest {
+            enabled: options.memory,
+            config_skills: &config.prompt.skills,
+            option_skills: &options.skills,
+            workspace_root: &workspace_root,
+            trust_store_path: &trust_store_path,
+            artifact_root: &artifact_root,
+            run_id: &run_id,
+            runtime,
+        })?;
         let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
 
@@ -85,6 +102,7 @@ impl InferenceSession {
             backend,
             model_config,
             system_prompt,
+            memory_context,
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
@@ -150,6 +168,7 @@ impl InferenceSession {
             request,
             &self.model_config,
             self.system_prompt.as_deref(),
+            self.memory_context.as_deref(),
             self.skill_context.as_deref(),
         )?;
         self.backend.generate(request)
@@ -171,6 +190,7 @@ fn build_inference_request(
     request: ModelRequest,
     model_config: &ModelConfig,
     system_prompt: Option<&str>,
+    memory_context: Option<&str>,
     skill_context: Option<&str>,
 ) -> Result<InferenceRequest> {
     let request_index = request.request_index;
@@ -182,6 +202,11 @@ fn build_inference_request(
                     .unwrap_or(false),
             )
             + usize::from(
+                memory_context
+                    .map(|context| !context.trim().is_empty())
+                    .unwrap_or(false),
+            )
+            + usize::from(
                 skill_context
                     .map(|context| !context.trim().is_empty())
                     .unwrap_or(false),
@@ -190,6 +215,11 @@ fn build_inference_request(
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
         request_messages.push(TurnMessage::System {
             content: system_prompt.to_string(),
+        });
+    }
+    if let Some(memory_context) = memory_context.filter(|context| !context.trim().is_empty()) {
+        request_messages.push(TurnMessage::System {
+            content: memory_context.to_string(),
         });
     }
     if let Some(skill_context) = skill_context.filter(|context| !context.trim().is_empty()) {
@@ -256,6 +286,85 @@ pub(crate) struct ResolvedSkillContext {
     context: Option<String>,
     hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
+}
+
+struct MemoryContextRequest<'a> {
+    enabled: bool,
+    config_skills: &'a [String],
+    option_skills: &'a [String],
+    workspace_root: &'a std::path::Path,
+    trust_store_path: &'a std::path::Path,
+    artifact_root: &'a std::path::Path,
+    run_id: &'a InferenceRunId,
+    runtime: &'a AgentLibreRuntimeConfig,
+}
+
+fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<String>> {
+    if !request.enabled {
+        return Ok(None);
+    }
+    ensure_memory_context_allowed_for_skills(
+        request.config_skills,
+        request.option_skills,
+        request.workspace_root,
+        request.trust_store_path,
+    )?;
+    let store =
+        AglStore::open_default(&request.runtime.paths).context("failed to open memory store")?;
+    let memory = MemoryRepository::new(&store);
+    let mut query = MemorySearchQuery::scoped(MemoryScope::user());
+    query.limit = MEMORY_CONTEXT_ENTRY_LIMIT;
+    let entries = memory
+        .list(&query)
+        .context("failed to load memory context")?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    write_memory_context_evidence(request.artifact_root, request.run_id, &entries)?;
+    Ok(Some(render_memory_context(&entries)))
+}
+
+fn ensure_memory_context_allowed_for_skills(
+    config_skills: &[String],
+    option_skills: &[String],
+    workspace_root: &std::path::Path,
+    trust_store_path: &std::path::Path,
+) -> Result<()> {
+    let selected_skills = selected_skill_ids(config_skills, option_skills)?;
+    if selected_skills.is_empty() {
+        return Ok(());
+    }
+    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
+        .context("failed to load skill registry for memory context")?;
+    for skill_id in selected_skills {
+        let skill = skill_registry.resolve_for_context_injection(&skill_id)?;
+        ensure!(
+            skill.harness.source == SkillSource::Builtin,
+            "memory context for workspace skill `{skill_id}` requires explicit memory permissions"
+        );
+    }
+    Ok(())
+}
+
+fn render_memory_context(entries: &[MemoryEntry]) -> String {
+    let mut content = String::new();
+    content.push_str("<agentlibre_memory>\n");
+    content.push_str(
+        "These are explicit local memories approved for this run. Use them only when relevant.\n",
+    );
+    for entry in entries {
+        content.push_str("- [");
+        content.push_str(entry.kind.as_str());
+        content.push('/');
+        content.push_str(entry.scope.kind.as_str());
+        content.push_str("] ");
+        content.push_str(entry.title.trim());
+        content.push_str(": ");
+        content.push_str(entry.body.trim());
+        content.push('\n');
+    }
+    content.push_str("</agentlibre_memory>\n");
+    content
 }
 
 fn resolve_skill_context(
@@ -429,6 +538,52 @@ fn write_skill_context_evidence(
         .with_context(|| format!("failed to write skill context evidence {}", path.display()))
 }
 
+fn write_memory_context_evidence(
+    artifact_root: &std::path::Path,
+    run_id: &InferenceRunId,
+    entries: &[MemoryEntry],
+) -> Result<()> {
+    let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
+        .run_dir(run_id)
+        .join("memory-context.json");
+    let parent = path.parent().with_context(|| {
+        format!(
+            "memory context evidence path has no parent: {}",
+            path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create memory context evidence directory {}",
+            parent.display()
+        )
+    })?;
+    let evidence = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.id,
+                "scope": entry.scope.kind.as_str(),
+                "scope_key": entry.scope.key,
+                "kind": entry.kind.as_str(),
+                "title": entry.title,
+                "body_bytes": entry.body.len(),
+                "source_ref": entry.source_ref,
+                "confidence": entry.confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut bytes = serde_json::to_vec_pretty(&evidence).with_context(|| {
+        format!(
+            "failed to serialize memory context evidence {}",
+            path.display()
+        )
+    })?;
+    bytes.push(b'\n');
+    std::fs::write(&path, bytes)
+        .with_context(|| format!("failed to write memory context evidence {}", path.display()))
+}
+
 pub fn default_run_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -462,6 +617,7 @@ mod tests {
                 visible_tools: Vec::new(),
             },
             &config,
+            None,
             None,
             None,
         )
@@ -500,6 +656,7 @@ mod tests {
             &config,
             Some("demo system"),
             None,
+            None,
         )
         .unwrap();
 
@@ -536,6 +693,7 @@ mod tests {
             },
             &config,
             Some("system"),
+            None,
             Some("skill context"),
         )
         .unwrap();
@@ -544,6 +702,38 @@ mod tests {
         assert_eq!(request.rendered.messages[0].content, "system");
         assert_eq!(request.rendered.messages[1].content, "skill context");
         assert_eq!(request.rendered.messages[2].content, "hello");
+    }
+
+    #[test]
+    fn build_request_prepends_memory_context_before_skill_context() {
+        let run_id = InferenceRunId::new("manual-test").unwrap();
+        let config = ModelConfig {
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+        };
+
+        let request = build_inference_request(
+            run_id,
+            ModelRequest {
+                turn_id: "manual-test".to_string(),
+                request_index: 0,
+                messages: vec![TurnMessage::User {
+                    content: "hello".to_string(),
+                }],
+                visible_tools: Vec::new(),
+            },
+            &config,
+            Some("system"),
+            Some("memory context"),
+            Some("skill context"),
+        )
+        .unwrap();
+
+        assert_eq!(request.rendered.messages.len(), 4);
+        assert_eq!(request.rendered.messages[0].content, "system");
+        assert_eq!(request.rendered.messages[1].content, "memory context");
+        assert_eq!(request.rendered.messages[2].content, "skill context");
+        assert_eq!(request.rendered.messages[3].content, "hello");
     }
 
     #[test]
@@ -570,6 +760,7 @@ mod tests {
             },
             &config,
             Some("system"),
+            None,
             Some("skill context"),
         )
         .unwrap();

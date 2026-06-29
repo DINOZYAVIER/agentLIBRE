@@ -179,6 +179,7 @@ pub(crate) struct RunOptions {
     pub(crate) max_output_tokens: u32,
     pub(crate) tool_mode: ToolAccessMode,
     pub(crate) skills: Vec<String>,
+    pub(crate) memory: bool,
     pub(crate) prompt: Option<String>,
 }
 
@@ -192,6 +193,7 @@ pub(crate) struct ServeOptions {
     pub(crate) max_output_tokens: u32,
     pub(crate) tool_mode: ToolAccessMode,
     pub(crate) skills: Vec<String>,
+    pub(crate) memory: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -247,6 +249,7 @@ impl Default for RunOptions {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             tool_mode: ToolAccessMode::ReadOnly,
             skills: Vec::new(),
+            memory: false,
             prompt: None,
         }
     }
@@ -645,6 +648,10 @@ struct CommonRunArgs {
     /// Builtin or trusted workspace skill id to inject for this turn/session.
     #[arg(long = "skill", value_name = "ID")]
     skills: Vec<String>,
+
+    /// Inject explicit user memory into the model context.
+    #[arg(long)]
+    memory: bool,
 }
 
 #[derive(Debug, Args)]
@@ -902,6 +909,7 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
         tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
+        memory: args.common.memory,
         prompt,
     };
     Ok(options)
@@ -931,6 +939,7 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
         tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
+        memory: args.common.memory,
         prompt: None,
     })
 }
@@ -945,6 +954,7 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
         max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
         tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
+        memory: args.common.memory,
     })
 }
 
@@ -1137,6 +1147,7 @@ mod tests {
                 max_output_tokens: 32,
                 tool_mode: ToolAccessMode::Write,
                 skills: vec!["task-spec".to_string()],
+                memory: false,
                 prompt: Some("hello".to_string()),
             })
         );
@@ -1201,6 +1212,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_run_command_with_memory_context() {
+        let command = parse_command(["agl", "run", "--memory", "--prompt", "hello"]);
+
+        assert_eq!(
+            command,
+            CliCommand::Infer(RunOptions {
+                memory: true,
+                prompt: Some("hello".to_string()),
+                ..RunOptions::default()
+            })
+        );
+    }
+
+    #[test]
     fn parse_serve_command_with_daemon_options() {
         let command = parse_command([
             "agl",
@@ -1232,6 +1257,7 @@ mod tests {
                 max_output_tokens: 33,
                 tool_mode: ToolAccessMode::Write,
                 skills: vec!["tool-smoke".to_string()],
+                memory: false,
             })
         );
     }
