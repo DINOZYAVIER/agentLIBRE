@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
     ChatLoopHost, ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, InferenceSession,
@@ -11,7 +13,10 @@ use agl_chat::{
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
-use agl_daemon::{DaemonOptions, DaemonServer, default_socket_path};
+use agl_daemon::{
+    CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
+    default_socket_path, run_cron_tick,
+};
 use agl_loop::{TurnOutput, run_turn};
 use agl_memory::{
     MemoryDraft, MemoryEntry, MemoryKind, MemoryRepository, MemoryScope, MemoryScopeKind,
@@ -37,7 +42,10 @@ use agl_skills::{
     WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
     trust_workspace_skill, workspace_skill_report, workspace_skill_report_with_trust,
 };
-use agl_store::{AglStore, StoreDomain, StoreExportOptions as AglStoreExportOptions, StoreStatus};
+use agl_store::{
+    AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft, StoreDomain,
+    StoreExportOptions as AglStoreExportOptions, StoreStatus,
+};
 use anyhow::{Context, Result, bail};
 
 mod args;
@@ -47,8 +55,8 @@ mod config;
 use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
-    CronTargetArg, CronTargetKindArg, DaemonStatusOptions, MemoryAddOptions, MemoryApproveOptions,
-    MemoryCommand, MemoryDeleteOptions, MemoryKindArg, MemoryListOptions,
+    CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, MemoryAddOptions,
+    MemoryApproveOptions, MemoryCommand, MemoryDeleteOptions, MemoryKindArg, MemoryListOptions,
     MemoryListSuggestionsOptions, MemoryRejectOptions, MemoryScopeArg, MemorySearchOptions,
     MemoryShowOptions, MemorySuggestOptions, MemorySuggestionStatusArg, NotesAddOptions,
     NotesCommand, NotesDeleteOptions, NotesLinkOptions, NotesListOptions, NotesRememberOptions,
@@ -259,6 +267,7 @@ fn run_store_export(options: StoreExportCliOptions, store: &AglStore) -> Result<
             file,
         )
         .context("failed to export store domain")?;
+    let record_types = record_type_counts(&options.out)?;
 
     if options.json {
         println!(
@@ -267,6 +276,7 @@ fn run_store_export(options: StoreExportCliOptions, store: &AglStore) -> Result<
                 "domain": domain.as_str(),
                 "path": options.out,
                 "records": records,
+                "record_types": record_types,
                 "include_deleted": options.include_deleted,
             }))?
         );
@@ -276,6 +286,9 @@ fn run_store_export(options: StoreExportCliOptions, store: &AglStore) -> Result<
         println!("store.export.path={}", options.out.display());
         println!("store.export.records={records}");
         println!("store.export.include_deleted={}", options.include_deleted);
+        for (record_type, count) in record_types {
+            println!("store.export.record_type.{record_type}={count}");
+        }
     }
     Ok(())
 }
@@ -292,6 +305,7 @@ fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<(
         CronCommand::Enable(options) => run_cron_enable(options, &cron),
         CronCommand::Disable(options) => run_cron_disable(options, &cron),
         CronCommand::Run(options) => run_cron_run(options, &cron, &store, runtime),
+        CronCommand::Tick(options) => run_cron_tick_command(options, &store, runtime),
         CronCommand::History(options) => run_cron_history(options, &cron),
         CronCommand::Delete(options) => run_cron_delete(options, &cron),
     }
@@ -430,8 +444,11 @@ fn run_cron_run(
         .job(&options.id)
         .context("failed to read cron job")?
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
+    if options.preflight {
+        return run_cron_preflight(&job, runtime, options.json);
+    }
     validate_stored_cron_target(&job, runtime)?;
-    let execution = run_cron_target(&job, store, runtime);
+    let execution = run_cron_target(&job, store, runtime, options.mock_skill_execution);
     let (status, result_ref, error) = match execution {
         Ok(result_ref) => (CronRunStatus::Succeeded, Some(result_ref), None),
         Err(err) => (CronRunStatus::Failed, None, Some(format!("{err:#}"))),
@@ -439,6 +456,7 @@ fn run_cron_run(
     let (run, outcome) = cron
         .record_manual_run_result(&job.id, status, result_ref.as_deref(), error.as_deref())
         .context("failed to record cron run")?;
+    let idempotency = idempotency_report(store, &outcome)?;
 
     if options.json {
         println!(
@@ -446,12 +464,93 @@ fn run_cron_run(
             serde_json::to_string_pretty(&serde_json::json!({
                 "job": job,
                 "run": run,
-                "idempotency": format!("{outcome:?}"),
+                "idempotency": idempotency,
             }))?
         );
     } else {
         print_cron_run(&run);
-        println!("cron_run.{}.idempotency={outcome:?}", run.id);
+        println!(
+            "cron_run.{}.idempotency.admission={}",
+            run.id,
+            idempotency["admission"].as_str().unwrap_or("unknown")
+        );
+        println!(
+            "cron_run.{}.idempotency.final_status={}",
+            run.id,
+            idempotency["final_status"].as_str().unwrap_or("unknown")
+        );
+    }
+    Ok(())
+}
+
+fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bool) -> Result<()> {
+    validate_stored_cron_target(job, runtime)?;
+    let prompt = if job.target_kind == CronTargetKind::Skill {
+        Some(cron_skill_prompt(job)?)
+    } else {
+        None
+    };
+    let inference_config_present = runtime.paths.default_local_inference_config().exists();
+    let report = serde_json::json!({
+        "ok": true,
+        "target_kind": job.target_kind.as_str(),
+        "target_ref": job.target_ref,
+        "prompt_ready": job.target_kind != CronTargetKind::Skill || prompt.is_some(),
+        "prompt_preview": prompt.as_deref().map(prompt_preview),
+        "inference_config_present": inference_config_present,
+        "records_run": false,
+    });
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "job": job,
+                "preflight": report,
+            }))?
+        );
+    } else {
+        println!("cron.preflight.ok=true");
+        println!(
+            "cron.preflight.target={}:{}",
+            job.target_kind.as_str(),
+            job.target_ref
+        );
+        println!("cron.preflight.records_run=false");
+        println!("cron.preflight.inference_config_present={inference_config_present}");
+    }
+    Ok(())
+}
+
+fn run_cron_tick_command(
+    options: CronTickOptions,
+    store: &AglStore,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    let unix_seconds = options.at.unwrap_or_else(unix_now);
+    let mut executor = CliCronExecutor {
+        store,
+        runtime,
+        mock_skill_execution: options.mock_skill_execution,
+    };
+    let mut notifier = CliStoreCronNotifier { store };
+    let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
+        .context("failed to run cron scheduler tick")?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "at": unix_seconds,
+                "due_jobs": report.due_jobs,
+                "recorded_runs": report.recorded_runs,
+                "notifications": report.notifications,
+            }))?
+        );
+    } else {
+        println!("cron.tick.at={unix_seconds}");
+        println!("cron.tick.due_jobs={}", report.due_jobs);
+        println!("cron.tick.recorded_runs={}", report.recorded_runs.len());
+        println!("cron.tick.notifications={}", report.notifications);
+        print_cron_runs(&report.recorded_runs);
     }
     Ok(())
 }
@@ -527,9 +626,11 @@ fn run_cron_target(
     job: &CronJob,
     store: &AglStore,
     runtime: &AgentLibreRuntimeConfig,
+    mock_skill_execution: bool,
 ) -> Result<String> {
     match job.target_kind {
         CronTargetKind::Builtin => run_builtin_cron_target(job, store),
+        CronTargetKind::Skill if mock_skill_execution => run_mock_skill_cron_target(job),
         CronTargetKind::Skill => run_skill_cron_target(job, runtime),
     }
 }
@@ -584,6 +685,11 @@ fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Re
     }
 }
 
+fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
+    let _prompt = cron_skill_prompt(job)?;
+    Ok(format!("skill:{}:mock", job.target_ref))
+}
+
 fn cron_skill_prompt(job: &CronJob) -> Result<String> {
     let prompt = job
         .prompt
@@ -594,6 +700,99 @@ fn cron_skill_prompt(job: &CronJob) -> Result<String> {
     } else {
         Ok(prompt.to_string())
     }
+}
+
+fn prompt_preview(prompt: &str) -> String {
+    const LIMIT: usize = 160;
+    if prompt.chars().count() <= LIMIT {
+        return prompt.to_string();
+    }
+    prompt.chars().take(LIMIT).collect()
+}
+
+fn idempotency_report(store: &AglStore, outcome: &IdempotencyOutcome) -> Result<serde_json::Value> {
+    let (admission, initial) = match outcome {
+        IdempotencyOutcome::Inserted(record) => ("inserted", record),
+        IdempotencyOutcome::Replayed(record) => ("replayed", record),
+    };
+    let final_record = store
+        .idempotency_record(&initial.namespace, &initial.key)
+        .context("failed to read final idempotency record")?
+        .unwrap_or_else(|| initial.clone());
+    Ok(serde_json::json!({
+        "admission": admission,
+        "namespace": initial.namespace,
+        "key": initial.key,
+        "fingerprint": initial.fingerprint,
+        "initial_status": initial.status.as_str(),
+        "final_status": final_record.status.as_str(),
+        "result_ref": final_record.result_ref,
+        "created_at": initial.created_at,
+        "updated_at": final_record.updated_at,
+    }))
+}
+
+struct CliCronExecutor<'a> {
+    store: &'a AglStore,
+    runtime: &'a AgentLibreRuntimeConfig,
+    mock_skill_execution: bool,
+}
+
+impl CronTargetExecutor for CliCronExecutor<'_> {
+    fn execute(&mut self, job: &CronJob) -> CronExecution {
+        match run_cron_target(job, self.store, self.runtime, self.mock_skill_execution) {
+            Ok(result_ref) => CronExecution::succeeded(result_ref),
+            Err(err) => CronExecution::failed(format!("{err:#}")),
+        }
+    }
+}
+
+struct CliStoreCronNotifier<'a> {
+    store: &'a AglStore,
+}
+
+impl CronNotifier for CliStoreCronNotifier<'_> {
+    fn notify(&mut self, notification: CronNotification) -> Result<()> {
+        if !notification.notify_ref.starts_with("matrix-room:") {
+            return Ok(());
+        }
+        let body = cron_notification_body(&notification);
+        let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
+        self.store
+            .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+                notification.notify_ref,
+                "cron",
+                notification.run_id,
+                dedupe_key,
+                body,
+            ))
+            .context("failed to enqueue Matrix notification")?;
+        Ok(())
+    }
+}
+
+fn cron_notification_body(notification: &CronNotification) -> String {
+    let mut body = format!(
+        "Cron job `{}` ({}) {} for {}.",
+        notification.job_name,
+        notification.job_id,
+        notification.status.as_str(),
+        notification.scheduled_for
+    );
+    if let Some(result_ref) = &notification.result_ref {
+        body.push_str(&format!("\nresult_ref: {result_ref}"));
+    }
+    if let Some(error) = &notification.error {
+        body.push_str(&format!("\nerror: {error}"));
+    }
+    body
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn cron_target_kind(kind: CronTargetKindArg) -> CronTargetKind {
@@ -609,6 +808,22 @@ fn store_domain(domain: StoreDomainArg) -> StoreDomain {
         StoreDomainArg::Notes => StoreDomain::Notes,
         StoreDomainArg::Cron => StoreDomain::Cron,
     }
+}
+
+fn record_type_counts(path: &std::path::Path) -> Result<BTreeMap<String, usize>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read store export {}", path.display()))?;
+    let mut counts = BTreeMap::new();
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value =
+            serde_json::from_str(line).context("failed to parse exported JSONL record")?;
+        let record_type = value
+            .get("record_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        *counts.entry(record_type.to_string()).or_insert(0) += 1;
+    }
+    Ok(counts)
 }
 
 fn run_notes_add(options: NotesAddOptions, notes: &NoteRepository<'_>) -> Result<()> {
@@ -1031,6 +1246,16 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
     )?;
 
     if options.json {
+        let workspace_overrides = workspace
+            .skills
+            .iter()
+            .filter_map(|skill| {
+                skill
+                    .overrides_builtin
+                    .then(|| skill.name.clone())
+                    .flatten()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         let builtins = registry
             .skills()
             .iter()
@@ -1042,6 +1267,7 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                     "description": skill.harness.description,
                     "trust": format!("{:?}", skill.trust),
                     "usable": skill.permits_context_injection(),
+                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
                     "permissions": skill.harness.permissions,
                 })
             })
@@ -1054,14 +1280,25 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
             }))?
         );
     } else {
+        let workspace_overrides = workspace
+            .skills
+            .iter()
+            .filter_map(|skill| {
+                skill
+                    .overrides_builtin
+                    .then(|| skill.name.clone())
+                    .flatten()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         for skill in registry.skills() {
             println!(
-                "skill name={} source={} pack={} trust={:?} usable={}",
+                "skill name={} source={} pack={} trust={:?} usable={} overridden_by_workspace={}",
                 skill.harness.name,
                 skill.harness.source.as_str(),
                 skill.harness.pack,
                 skill.trust,
-                skill.permits_context_injection()
+                skill.permits_context_injection(),
+                workspace_overrides.contains(&skill.harness.name)
             );
             print_skill_permissions(
                 &format!("skill.{}", skill.harness.name),
@@ -1113,6 +1350,11 @@ fn run_skill_inspect(
         || workspace_skills.iter().any(|skill| skill.usable);
 
     if options.json {
+        let workspace_overrides = workspace_skills
+            .iter()
+            .filter(|skill| skill.overrides_builtin)
+            .filter_map(|skill| skill.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
         let builtins = builtins
             .into_iter()
             .map(|skill| {
@@ -1124,6 +1366,7 @@ fn run_skill_inspect(
                     "version": skill.harness.version,
                     "trust": format!("{:?}", skill.trust),
                     "usable": skill.permits_context_injection(),
+                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
                     "permissions": skill.harness.permissions,
                 })
             })
@@ -1137,15 +1380,21 @@ fn run_skill_inspect(
             }))?
         );
     } else {
+        let workspace_overrides = workspace_skills
+            .iter()
+            .filter(|skill| skill.overrides_builtin)
+            .filter_map(|skill| skill.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
         for skill in builtins {
             println!(
-                "skill name={} source={} pack={} version={} trust={:?} usable={}",
+                "skill name={} source={} pack={} version={} trust={:?} usable={} overridden_by_workspace={}",
                 skill.harness.name,
                 skill.harness.source.as_str(),
                 skill.harness.pack,
                 skill.harness.version,
                 skill.trust,
-                skill.permits_context_injection()
+                skill.permits_context_injection(),
+                workspace_overrides.contains(&skill.harness.name)
             );
             println!("description={}", skill.harness.description);
             print_skill_permissions(
@@ -1576,12 +1825,13 @@ fn print_component_status(component: &ComponentStatus) {
 fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     let name = skill.name.as_deref().unwrap_or("<invalid>");
     println!(
-        "skill name={} path={} valid={} usable={} shadowed_by_builtin={} trust_state={:?}",
+        "skill name={} path={} valid={} usable={} shadowed_by_builtin={} overrides_builtin={} trust_state={:?}",
         name,
         skill.path.display(),
         skill.valid,
         skill.usable,
         skill.shadowed_by_builtin,
+        skill.overrides_builtin,
         skill.trust_state
     );
     if let Some(source_path) = &skill.source_path {
@@ -1825,6 +2075,9 @@ fn print_note_summary(note: &Note) {
 
 fn print_note_detail(note: &Note, links: &[NoteLink]) {
     print_note_summary(note);
+    if note.deleted_at.is_some() {
+        println!("note.{}.audit=tombstoned", note.id);
+    }
     println!("note.{}.created_at={}", note.id, note.created_at);
     println!("note.{}.updated_at={}", note.id, note.updated_at);
     if let Some(deleted_at) = &note.deleted_at {

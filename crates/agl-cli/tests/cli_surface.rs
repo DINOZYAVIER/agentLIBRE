@@ -174,6 +174,41 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_success(&include_deleted);
     assert_contains(&stdout(&include_deleted), &id);
     assert_contains(&stdout(&include_deleted), "deleted=true");
+
+    let keyed = run_agl(&[
+        "--home",
+        &home_arg,
+        "memory",
+        "add",
+        "--scope",
+        "user",
+        "--scope-key",
+        "profile-a",
+        "--title",
+        "Keyed user memory",
+        "--body",
+        "Only profile-a should see this.",
+    ]);
+    assert_success(&keyed);
+    let keyed_id = memory_id_from_output(&stdout(&keyed));
+    let default_user = run_agl(&["--home", &home_arg, "memory", "list", "--scope", "user"]);
+    assert_success(&default_user);
+    assert!(
+        !stdout(&default_user).contains(&keyed_id),
+        "explicit user scope keys must not mix with user/default"
+    );
+    let profile_user = run_agl(&[
+        "--home",
+        &home_arg,
+        "memory",
+        "list",
+        "--scope",
+        "user",
+        "--scope-key",
+        "profile-a",
+    ]);
+    assert_success(&profile_user);
+    assert_contains(&stdout(&profile_user), &keyed_id);
 }
 
 #[test]
@@ -282,9 +317,32 @@ fn notes_commands_manage_notes_and_promote_memory() {
     assert_contains(&stdout(&memory), "scope=user");
     assert_contains(&stdout(&memory), "kind=working_note");
 
+    let post_remember_update = run_agl(&[
+        "--home",
+        &home_arg,
+        "notes",
+        "update",
+        &id,
+        "--body",
+        "Changed after promotion.",
+    ]);
+    assert_success(&post_remember_update);
+    let snapshot_search = run_agl(&["--home", &home_arg, "memory", "search", "Changed"]);
+    assert_success(&snapshot_search);
+    assert_eq!(
+        stdout(&snapshot_search).trim(),
+        "",
+        "notes remember must snapshot memory instead of live-syncing later note updates"
+    );
+
     let delete = run_agl(&["--home", &home_arg, "notes", "delete", &id]);
     assert_success(&delete);
     assert_contains(&stdout(&delete), "note.deleted=true");
+
+    let audit_show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
+    assert_success(&audit_show);
+    assert_contains(&stdout(&audit_show), "audit=tombstoned");
+    assert_contains(&stdout(&audit_show), "Changed after promotion.");
 
     let hidden = run_agl(&["--home", &home_arg, "notes", "list"]);
     assert_success(&hidden);
@@ -343,10 +401,69 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_contains(&run_stdout, "cron_run id=");
     assert_contains(&run_stdout, "status=succeeded");
     assert_contains(&run_stdout, "result_ref=builtin:store-status:schema:");
+    assert_contains(&run_stdout, "idempotency.final_status=completed");
+
+    let run_json = run_agl(&["--home", &home_arg, "cron", "run", &id, "--now", "--json"]);
+    assert_success(&run_json);
+    let run_json_stdout = stdout(&run_json);
+    assert_contains(&run_json_stdout, "\"admission\":");
+    assert_contains(&run_json_stdout, "\"final_status\": \"completed\"");
+    assert!(
+        !run_json_stdout.contains("IdempotencyRecord"),
+        "cron JSON must not expose Rust debug formatting:\n{run_json_stdout}"
+    );
+
+    let preflight = run_agl(&[
+        "--home",
+        &home_arg,
+        "cron",
+        "run",
+        &id,
+        "--preflight",
+        "--json",
+    ]);
+    assert_success(&preflight);
+    assert_contains(&stdout(&preflight), "\"records_run\": false");
 
     let history = run_agl(&["--home", &home_arg, "cron", "history", &id]);
     assert_success(&history);
     assert_contains(&stdout(&history), "status=succeeded");
+
+    let tick = run_agl(&[
+        "--home", &home_arg, "cron", "tick", "--at", "32400", "--json",
+    ]);
+    assert_success(&tick);
+    let tick_stdout = stdout(&tick);
+    assert_contains(&tick_stdout, "\"due_jobs\": 1");
+    assert_contains(&tick_stdout, "\"notifications\": 1");
+
+    let cron_out_path = home.path().join("cron-export.jsonl");
+    let cron_out_arg = cron_out_path.display().to_string();
+    let cron_export = run_agl(&[
+        "--home",
+        &home_arg,
+        "store",
+        "export",
+        "--domain",
+        "cron",
+        "--out",
+        &cron_out_arg,
+    ]);
+    assert_success(&cron_export);
+    assert_contains(
+        &stdout(&cron_export),
+        "store.export.record_type.matrix_notification_outbox=1",
+    );
+    let cron_exported = fs::read_to_string(&cron_out_path).unwrap_or_else(|err| {
+        panic!(
+            "failed to read cron export {}: {err}",
+            cron_out_path.display()
+        )
+    });
+    assert_contains(
+        &cron_exported,
+        "\"record_type\":\"matrix_notification_outbox\"",
+    );
 
     let delete = run_agl(&["--home", &home_arg, "cron", "delete", &id]);
     assert_success(&delete);
@@ -431,6 +548,7 @@ fn store_commands_report_status_and_export_jsonl() {
     assert_success(&export);
     assert_contains(&stdout(&export), "store.exported=true");
     assert_contains(&stdout(&export), "store.export.records=1");
+    assert_contains(&stdout(&export), "store.export.record_type.memory_entry=1");
     let exported = fs::read_to_string(&out_path)
         .unwrap_or_else(|err| panic!("failed to read export {}: {err}", out_path.display()));
     assert_contains(&exported, "\"domain\":\"memory\"");

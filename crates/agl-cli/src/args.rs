@@ -52,6 +52,7 @@ pub(crate) enum CronCommand {
     Enable(CronEnableOptions),
     Disable(CronDisableOptions),
     Run(CronRunOptions),
+    Tick(CronTickOptions),
     History(CronHistoryOptions),
     Delete(CronDeleteOptions),
 }
@@ -390,6 +391,15 @@ pub(crate) struct CronDisableOptions {
 pub(crate) struct CronRunOptions {
     pub(crate) id: String,
     pub(crate) now: bool,
+    pub(crate) preflight: bool,
+    pub(crate) mock_skill_execution: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CronTickOptions {
+    pub(crate) at: Option<u64>,
+    pub(crate) mock_skill_execution: bool,
     pub(crate) json: bool,
 }
 
@@ -607,7 +617,7 @@ enum ConfigCommands {
 enum StoreCommands {
     /// Report local store health.
     Status(StoreStatusArgs),
-    /// Export one store domain as JSONL.
+    /// Export one store domain as JSONL records.
     Export(StoreExportArgs),
 }
 
@@ -625,6 +635,9 @@ enum CronCommands {
     Disable(CronDisableArgs),
     /// Run a scheduled job once.
     Run(CronRunArgs),
+    /// Run one scheduler tick.
+    #[command(hide = true)]
+    Tick(CronTickArgs),
     /// Show run history for one scheduled job.
     History(CronHistoryArgs),
     /// Tombstone a scheduled job.
@@ -778,7 +791,7 @@ struct StoreStatusArgs {
 
 #[derive(Debug, Args)]
 struct StoreExportArgs {
-    /// Domain to export.
+    /// Domain to export. Domains may include multiple record_type values.
     #[arg(long, value_enum)]
     domain: StoreDomainArg,
 
@@ -786,7 +799,7 @@ struct StoreExportArgs {
     #[arg(long, value_name = "PATH")]
     out: PathBuf,
 
-    /// Include tombstoned rows.
+    /// Include tombstoned records.
     #[arg(long)]
     include_deleted: bool,
 
@@ -896,6 +909,29 @@ struct CronRunArgs {
     #[arg(long)]
     now: bool,
 
+    /// Validate the job without recording or executing it.
+    #[arg(long, conflicts_with = "now")]
+    preflight: bool,
+
+    /// Use deterministic mock execution for skill targets.
+    #[arg(long, hide = true)]
+    mock_skill_execution: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct CronTickArgs {
+    /// Unix timestamp used for due-job calculation. Defaults to current time.
+    #[arg(long, value_name = "SECONDS")]
+    at: Option<u64>,
+
+    /// Use deterministic mock execution for skill targets.
+    #[arg(long, hide = true)]
+    mock_skill_execution: bool,
+
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -936,7 +972,7 @@ struct MemoryScopeArgs {
     #[arg(long, value_enum, default_value_t = MemoryScopeArg::User)]
     scope: MemoryScopeArg,
 
-    /// Scope key. Required for repo, matrix-room, and matrix-user scopes.
+    /// Scope key. Defaults to `default` for user scope; required for repo, matrix-room, and matrix-user scopes.
     #[arg(long, value_name = "KEY")]
     scope_key: Option<String>,
 }
@@ -1579,15 +1615,24 @@ fn cron_command(command: CronCommands) -> Result<CronCommand> {
         }
         CronCommands::Run(args) => {
             validate_prompt(&args.id)?;
-            if !args.now {
-                bail!("agl cron run requires --now until daemon scheduling is enabled");
+            if !args.now && !args.preflight {
+                bail!(
+                    "agl cron run requires --now or --preflight until daemon scheduling is enabled"
+                );
             }
             CronCommand::Run(CronRunOptions {
                 id: args.id,
                 now: args.now,
+                preflight: args.preflight,
+                mock_skill_execution: args.mock_skill_execution,
                 json: args.json,
             })
         }
+        CronCommands::Tick(args) => CronCommand::Tick(CronTickOptions {
+            at: args.at,
+            mock_skill_execution: args.mock_skill_execution,
+            json: args.json,
+        }),
         CronCommands::History(args) => {
             validate_prompt(&args.id)?;
             CronCommand::History(CronHistoryOptions {
@@ -2554,6 +2599,8 @@ mod tests {
             CliCommand::Cron(CronCommand::Run(CronRunOptions {
                 id: "cron_1".to_string(),
                 now: true,
+                preflight: false,
+                mock_skill_execution: false,
                 json: false,
             }))
         );
@@ -2605,7 +2652,34 @@ mod tests {
         assert!(
             missing_now
                 .to_string()
-                .contains("agl cron run requires --now")
+                .contains("agl cron run requires --now or --preflight")
+        );
+
+        assert_eq!(
+            parse_command(["agl", "cron", "run", "cron_1", "--preflight", "--json"]),
+            CliCommand::Cron(CronCommand::Run(CronRunOptions {
+                id: "cron_1".to_string(),
+                now: false,
+                preflight: true,
+                mock_skill_execution: false,
+                json: true,
+            }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl",
+                "cron",
+                "tick",
+                "--at",
+                "60",
+                "--mock-skill-execution",
+                "--json",
+            ]),
+            CliCommand::Cron(CronCommand::Tick(CronTickOptions {
+                at: Some(60),
+                mock_skill_execution: true,
+                json: true,
+            }))
         );
     }
 

@@ -62,6 +62,7 @@ pub struct WorkspaceSkillStatus {
     pub valid: bool,
     pub usable: bool,
     pub shadowed_by_builtin: bool,
+    pub overrides_builtin: bool,
     pub trust_state: SkillTrustState,
     #[serde(skip_serializing)]
     pub harness: Option<SkillHarness>,
@@ -283,12 +284,29 @@ pub fn trusted_workspace_registry(
     trust_store_path: impl AsRef<Path>,
 ) -> Result<SkillRegistry> {
     let report = workspace_skill_report_with_trust(start, trust_store_path)?;
-    let mut registry = builtin_registry()?;
-    for skill in report
+    let workspace_skills = report
         .skills
         .into_iter()
         .filter(|skill| skill.usable && skill.trust_state == SkillTrustState::TrustedLocal)
-    {
+        .collect::<Vec<_>>();
+    let override_names = workspace_skills
+        .iter()
+        .filter_map(|skill| {
+            skill
+                .overrides_builtin
+                .then(|| skill.name.clone())
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+    let builtins = builtin_registry()?;
+    let mut registry = SkillRegistry::new();
+    for skill in builtins.skills().iter() {
+        if override_names.contains(&skill.harness.name) {
+            continue;
+        }
+        registry.register(skill.clone())?;
+    }
+    for skill in workspace_skills {
         let Some(harness) = skill.harness else {
             continue;
         };
@@ -601,6 +619,7 @@ fn status_from_harness(path: PathBuf, harness: SkillHarness) -> WorkspaceSkillSt
         valid: true,
         usable: false,
         shadowed_by_builtin: false,
+        overrides_builtin: false,
         trust_state: SkillTrustState::Unknown,
         harness: Some(harness),
         warnings: Vec::new(),
@@ -628,6 +647,7 @@ fn invalid_skill_status(
         valid: false,
         usable: false,
         shadowed_by_builtin: false,
+        overrides_builtin: false,
         trust_state: SkillTrustState::Invalid,
         harness: None,
         warnings: Vec::new(),
@@ -819,10 +839,19 @@ fn write_trust_store(path: &Path, store: &SkillTrustStore) -> Result<()> {
 fn apply_trust_store(report: &mut WorkspaceSkillReport, store: &SkillTrustStore) {
     for index in 0..report.skills.len() {
         let state = classify_trust_state(report, &report.skills[index], store);
+        let overrides_builtin = state.permits_context_injection()
+            && report.skills[index].valid
+            && report.skills[index].shadowed_by_builtin;
         report.skills[index].trust_state = state;
+        report.skills[index].overrides_builtin = overrides_builtin;
         report.skills[index].usable = state.permits_context_injection()
             && report.skills[index].valid
-            && !report.skills[index].shadowed_by_builtin;
+            && (!report.skills[index].shadowed_by_builtin || overrides_builtin);
+        if overrides_builtin {
+            report.skills[index]
+                .warnings
+                .retain(|warning| warning != "shadowed_by_builtin");
+        }
     }
 }
 
@@ -1334,7 +1363,7 @@ Body.
     }
 
     #[test]
-    fn pinned_same_name_workspace_skill_can_be_trusted_but_not_used() {
+    fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
         let (root, source) = clean_skills_submodule_fixture_with_skill("same-name", "repo-review");
         lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
         let trust_store = root.join("state/skill-trust.toml");
@@ -1353,14 +1382,15 @@ Body.
 
         let trusted = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
         assert!(trusted.skills[0].shadowed_by_builtin);
+        assert!(trusted.skills[0].overrides_builtin);
         assert_eq!(trusted.skills[0].trust_state, SkillTrustState::TrustedLocal);
-        assert!(!trusted.skills[0].usable);
+        assert!(trusted.skills[0].usable);
 
         let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
         let skill = registry
             .get(&agl_tools::SkillId::new("repo-review").unwrap())
-            .expect("builtin repo-review should remain registered");
-        assert_eq!(skill.harness.source, SkillSource::Builtin);
+            .expect("trusted workspace repo-review should be registered");
+        assert_eq!(skill.harness.source, SkillSource::Workspace);
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(source).unwrap();
