@@ -598,6 +598,41 @@ kind = "ignored"
 }
 
 #[test]
+fn repo_export_profile_writes_portable_policy_manifest() {
+    let repo = TempRepo::new("export-profile");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+    fs::write(
+        repo.path().join(".agl/skill-trust.toml"),
+        "SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT",
+    )
+    .unwrap();
+    let out = repo.path().join("repo-workflow.toml");
+    let out_arg = out.display().to_string();
+
+    let export = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
+
+    assert_success(&export);
+    let stdout = stdout(&export);
+    assert_contains(&stdout, "profile.exported=true");
+    assert_contains(&stdout, "profile.policy.trust.import_local_trust=false");
+    assert_contains(&stdout, "profile.skill_pack.same_ids_when_pinned=true");
+
+    let content = fs::read_to_string(&out)
+        .unwrap_or_else(|err| panic!("failed to read profile export {}: {err}", out.display()));
+    assert_contains(&content, "[policy.hooks]");
+    assert_contains(&content, "[skill_pack]");
+    assert!(
+        !content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"),
+        "profile export must not include local trust:\n{content}"
+    );
+
+    let overwrite = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
+    assert_failure(&overwrite);
+    assert_contains(&stderr(&overwrite), "failed to create profile export");
+}
+
+#[test]
 fn init_then_status_reports_missing_skills_submodule_warning() {
     let repo = TempRepo::new("status-after-init");
     let init = run_agl_in(repo.path(), &["init"]);

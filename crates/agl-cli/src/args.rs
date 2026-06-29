@@ -61,6 +61,7 @@ pub(crate) enum RepoCommand {
     Init(RepoInitOptions),
     Status(RepoStatusOptions),
     InstallHooks(RepoHooksOptions),
+    ExportProfile(RepoExportProfileOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +119,13 @@ pub(crate) struct RepoStatusOptions {
 pub(crate) struct RepoHooksOptions {
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoExportProfileOptions {
+    pub(crate) out: PathBuf,
+    pub(crate) force: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -631,6 +639,8 @@ enum RepoCommands {
     Status(RepoStatusArgs),
     /// Install AgentLIBRE git hooks for this repository.
     InstallHooks(RepoHooksArgs),
+    /// Export a portable workspace profile manifest.
+    ExportProfile(RepoExportProfileArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -742,6 +752,21 @@ struct RepoHooksArgs {
     /// Replace AgentLIBRE-managed hooks or overwrite conflicts.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepoExportProfileArgs {
+    /// Destination workspace profile TOML path.
+    #[arg(long, value_name = "PATH")]
+    out: PathBuf,
+
+    /// Overwrite an existing output file.
+    #[arg(long)]
+    force: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1432,6 +1457,9 @@ impl Cli {
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
                 }
+                RepoCommands::ExportProfile(args) => {
+                    RepoCommand::ExportProfile(repo_export_profile_options(args))
+                }
             }),
             Some(Commands::Daemon { command }) => match command {
                 DaemonCommands::Status(args) => CliCommand::DaemonStatus(DaemonStatusOptions {
@@ -1475,6 +1503,14 @@ fn repo_hooks_options(args: RepoHooksArgs) -> RepoHooksOptions {
     RepoHooksOptions {
         dry_run: args.dry_run,
         force: args.force,
+    }
+}
+
+fn repo_export_profile_options(args: RepoExportProfileArgs) -> RepoExportProfileOptions {
+    RepoExportProfileOptions {
+        out: args.out,
+        force: args.force,
+        json: args.json,
     }
 }
 
@@ -2235,6 +2271,28 @@ mod tests {
                 json: true,
                 component: None,
                 strict: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_repo_export_profile_hidden_command() {
+        let command = parse_command([
+            "agl",
+            "repo",
+            "export-profile",
+            "--out",
+            "repo-workflow.toml",
+            "--force",
+            "--json",
+        ]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::ExportProfile(RepoExportProfileOptions {
+                out: PathBuf::from("repo-workflow.toml"),
+                force: true,
+                json: true,
             }))
         );
     }
