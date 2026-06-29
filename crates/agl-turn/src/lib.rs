@@ -17,7 +17,7 @@ pub use hook::{
     HookMessage, HookResult, HookResultSummary, HookStatus, TurnHookBatch,
 };
 pub use input::{TurnInput, VisibleTool};
-pub use output::{StopReason, TurnOutput};
+pub use output::{StopDetail, StopReason, TurnOutput};
 pub use state::TurnState;
 pub use tool::{ToolDispatchRequest, ToolDispatchResponse};
 pub use transcript::{ModelRequest, ModelResponse, TurnMessage};
