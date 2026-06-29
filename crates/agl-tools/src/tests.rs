@@ -52,3 +52,59 @@ fn declaration_rejects_duplicate_hooks() {
         }
     );
 }
+
+#[test]
+fn builtin_tools_declare_operation_kinds_and_state_effects() {
+    let mut catalog = ToolCatalog::new();
+    fs::register(&mut catalog).unwrap();
+    memory::register(&mut catalog).unwrap();
+    notes::register(&mut catalog).unwrap();
+
+    assert_tool_metadata(FS_READ_TOOL_ID, &catalog, ToolCapability::Read, &[]);
+    assert_tool_metadata(FS_LIST_TOOL_ID, &catalog, ToolCapability::Read, &[]);
+    assert_tool_metadata(FS_SEARCH_TOOL_ID, &catalog, ToolCapability::Read, &[]);
+    assert_tool_metadata(
+        FS_EDIT_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        &[ToolStateEffect::RepoFiles],
+    );
+    assert_tool_metadata(
+        MEMORY_SUGGEST_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        &[ToolStateEffect::StoreMemorySuggestions],
+    );
+    assert_tool_metadata(
+        NOTES_ADD_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        &[ToolStateEffect::StoreNotes],
+    );
+    assert_tool_metadata(NOTES_SEARCH_TOOL_ID, &catalog, ToolCapability::Read, &[]);
+    assert_tool_metadata(NOTES_SHOW_TOOL_ID, &catalog, ToolCapability::Read, &[]);
+    assert_tool_metadata(
+        NOTES_UPDATE_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        &[ToolStateEffect::StoreNotes],
+    );
+    assert_tool_metadata(
+        NOTES_LINK_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        &[ToolStateEffect::StoreNoteLinks],
+    );
+}
+
+fn assert_tool_metadata(
+    tool_id: &str,
+    catalog: &ToolCatalog,
+    capability: ToolCapability,
+    state_effects: &[ToolStateEffect],
+) {
+    let tool = catalog.tool(&ToolId::new(tool_id).unwrap()).unwrap();
+    assert_eq!(tool.capability, capability);
+    assert_eq!(tool.operation_kind, capability.default_operation_kind());
+    assert_eq!(tool.state_effects, state_effects);
+}

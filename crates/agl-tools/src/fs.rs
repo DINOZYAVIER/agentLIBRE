@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId,
+    ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -357,14 +357,16 @@ fn tool(
     capability: ToolCapability,
     required_arguments: &[&str],
 ) -> ToolDeclaration {
-    ToolDeclaration {
-        id: ToolId::new(id).expect("core tool id is valid"),
-        description: description.to_string(),
+    let declaration = ToolDeclaration::new(
+        ToolId::new(id).expect("core tool id is valid"),
+        description,
         capability,
-        required_arguments: required_arguments
-            .iter()
-            .map(|argument| (*argument).to_string())
-            .collect(),
+        required_arguments.iter().copied(),
+    );
+    if id == FS_EDIT_TOOL_ID {
+        declaration.with_state_effects([ToolStateEffect::RepoFiles])
+    } else {
+        declaration
     }
 }
 

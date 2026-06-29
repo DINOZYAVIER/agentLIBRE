@@ -92,6 +92,7 @@ impl ToolProviderDeclaration {
                 tool.required_arguments.iter().map(String::as_str),
                 "tool required argument",
             )?;
+            validate_tool_operation(tool)?;
         }
         Ok(())
     }
@@ -144,7 +145,40 @@ pub struct ToolDeclaration {
     pub id: ToolId,
     pub description: String,
     pub capability: ToolCapability,
+    pub operation_kind: ToolOperationKind,
+    pub state_effects: Vec<ToolStateEffect>,
     pub required_arguments: Vec<String>,
+}
+
+impl ToolDeclaration {
+    pub fn new(
+        id: ToolId,
+        description: impl Into<String>,
+        capability: ToolCapability,
+        required_arguments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            id,
+            description: description.into(),
+            operation_kind: capability.default_operation_kind(),
+            capability,
+            state_effects: Vec::new(),
+            required_arguments: required_arguments.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn with_operation_kind(mut self, operation_kind: ToolOperationKind) -> Self {
+        self.operation_kind = operation_kind;
+        self
+    }
+
+    pub fn with_state_effects(
+        mut self,
+        state_effects: impl IntoIterator<Item = ToolStateEffect>,
+    ) -> Self {
+        self.state_effects = state_effects.into_iter().collect();
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,12 +192,45 @@ impl ToolCapability {
     pub fn is_visible_in_read_only(self) -> bool {
         matches!(self, Self::Read)
     }
+
+    pub fn default_operation_kind(self) -> ToolOperationKind {
+        match self {
+            Self::Read => ToolOperationKind::Read,
+            Self::Write => ToolOperationKind::Write,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOperationKind {
+    Read,
+    Write,
+    Execute,
+    Approve,
+    Admin,
+}
+
+impl ToolOperationKind {
+    pub fn is_state_mutating(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStateEffect {
+    RepoFiles,
+    StoreMemorySuggestions,
+    StoreNotes,
+    StoreNoteLinks,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolProviderDeclarationError {
     BlankField { field: &'static str },
     DuplicateId { kind: &'static str, id: String },
+    InvalidToolOperation { id: String, message: String },
 }
 
 impl std::fmt::Display for ToolProviderDeclarationError {
@@ -171,6 +238,9 @@ impl std::fmt::Display for ToolProviderDeclarationError {
         match self {
             Self::BlankField { field } => write!(f, "{field} cannot be blank"),
             Self::DuplicateId { kind, id } => write!(f, "duplicate {kind} id `{id}`"),
+            Self::InvalidToolOperation { id, message } => {
+                write!(f, "tool `{id}` has invalid operation metadata: {message}")
+            }
         }
     }
 }
@@ -197,6 +267,38 @@ fn reject_duplicate_ids<'a>(
                 id: id.to_string(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_tool_operation(tool: &ToolDeclaration) -> Result<(), ToolProviderDeclarationError> {
+    match tool.capability {
+        ToolCapability::Read if tool.operation_kind != ToolOperationKind::Read => {
+            return Err(ToolProviderDeclarationError::InvalidToolOperation {
+                id: tool.id.as_str().to_string(),
+                message: "read capability must use read operation kind".to_string(),
+            });
+        }
+        ToolCapability::Write if tool.operation_kind == ToolOperationKind::Read => {
+            return Err(ToolProviderDeclarationError::InvalidToolOperation {
+                id: tool.id.as_str().to_string(),
+                message: "write capability cannot use read operation kind".to_string(),
+            });
+        }
+        _ => {}
+    }
+
+    if tool.operation_kind.is_state_mutating() && tool.state_effects.is_empty() {
+        return Err(ToolProviderDeclarationError::InvalidToolOperation {
+            id: tool.id.as_str().to_string(),
+            message: "state-mutating operations must declare state effects".to_string(),
+        });
+    }
+    if tool.operation_kind == ToolOperationKind::Read && !tool.state_effects.is_empty() {
+        return Err(ToolProviderDeclarationError::InvalidToolOperation {
+            id: tool.id.as_str().to_string(),
+            message: "read operations must not declare state effects".to_string(),
+        });
     }
     Ok(())
 }
