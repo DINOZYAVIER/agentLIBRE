@@ -5,7 +5,7 @@ use agl_events::AgentEvent;
 use agl_tools::{HookBatchRequest, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
-    HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,
+    HookBatchOutcome, HookBatchSummary, ModelRequest, StopDetail, StopReason, TurnFailureOperation,
     TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnState, TurnTerminalStatus,
     TurnTransition, TurnTransitionRecord,
 };
@@ -96,7 +96,7 @@ fn handle_tool_call<H: AgentLoopHost>(
         ToolCallDecision::Dispatch(dispatch_request) => dispatch_request,
         ToolCallDecision::Stop(stop) => {
             emit_tool_call_stop(host, state, &stop)?;
-            return stop_turn(host, state, stop.reason()).map(Some);
+            return stop_turn(host, state, stop.reason(), Some(stop.detail())).map(Some);
         }
     };
 
@@ -195,7 +195,7 @@ fn handle_malformed_tool_call<H: AgentLoopHost>(
                     message,
                 },
             )?;
-            stop_turn(host, state, StopReason::ToolJsonUnrepairable).map(Some)
+            stop_turn(host, state, StopReason::ToolJsonUnrepairable, None).map(Some)
         }
         None => {
             emit_repair_attempted(host, state, RepairStrategy::None)?;
@@ -207,7 +207,7 @@ fn handle_malformed_tool_call<H: AgentLoopHost>(
                     message: "no repair returned".to_string(),
                 },
             )?;
-            stop_turn(host, state, StopReason::ToolJsonUnrepairable).map(Some)
+            stop_turn(host, state, StopReason::ToolJsonUnrepairable, None).map(Some)
         }
     }
 }
@@ -477,6 +477,7 @@ fn stop_turn<H: AgentLoopHost>(
     host: &mut H,
     state: &mut TurnState,
     reason: StopReason,
+    detail: Option<StopDetail>,
 ) -> Result<TurnOutput> {
     apply_emit(
         host,
@@ -494,7 +495,7 @@ fn stop_turn<H: AgentLoopHost>(
         },
     )?;
     host.record_turn_messages(&state.messages)?;
-    Ok(TurnOutput::Stopped { reason })
+    Ok(TurnOutput::Stopped { reason, detail })
 }
 
 fn fail_turn<H: AgentLoopHost>(

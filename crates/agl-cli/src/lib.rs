@@ -2345,7 +2345,7 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
 fn print_turn_output(output: &TurnOutput) {
     match output {
         TurnOutput::Answered { answer } => println!("{}", assistant_text_for_terminal(answer)),
-        TurnOutput::Stopped { reason } => println!("stopped=true reason={}", reason.as_str()),
+        TurnOutput::Stopped { reason, .. } => println!("stopped=true reason={}", reason.as_str()),
     }
 }
 

@@ -577,7 +577,8 @@ fn stops_visibly_when_tool_json_cannot_be_repaired() {
     assert_eq!(
         output,
         TurnOutput::Stopped {
-            reason: StopReason::ToolJsonUnrepairable
+            reason: StopReason::ToolJsonUnrepairable,
+            detail: None
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);
@@ -609,7 +610,8 @@ fn stops_before_dispatch_when_tool_limit_is_reached() {
     assert_eq!(
         output,
         TurnOutput::Stopped {
-            reason: StopReason::ToolLimitReached
+            reason: StopReason::ToolLimitReached,
+            detail: Some(StopDetail::ToolLimitReached { limit: 0 })
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);
@@ -643,7 +645,10 @@ fn rejects_hidden_tool_before_dispatch() {
     assert_eq!(
         output,
         TurnOutput::Stopped {
-            reason: StopReason::HiddenTool
+            reason: StopReason::HiddenTool,
+            detail: Some(StopDetail::HiddenTool {
+                name: "write_file".to_string()
+            })
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);
@@ -677,7 +682,11 @@ fn validates_tool_args_before_dispatch() {
     assert_eq!(
         output,
         TurnOutput::Stopped {
-            reason: StopReason::InvalidToolArguments
+            reason: StopReason::InvalidToolArguments,
+            detail: Some(StopDetail::InvalidToolArguments {
+                name: "read_file".to_string(),
+                message: "missing required argument `path`".to_string()
+            })
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);

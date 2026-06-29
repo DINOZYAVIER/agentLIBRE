@@ -1,7 +1,12 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnOutput {
-    Answered { answer: String },
-    Stopped { reason: StopReason },
+    Answered {
+        answer: String,
+    },
+    Stopped {
+        reason: StopReason,
+        detail: Option<StopDetail>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,4 +26,11 @@ impl StopReason {
             Self::InvalidToolArguments => "invalid_tool_arguments",
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopDetail {
+    HiddenTool { name: String },
+    ToolLimitReached { limit: usize },
+    InvalidToolArguments { name: String, message: String },
 }
