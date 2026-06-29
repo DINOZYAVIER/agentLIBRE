@@ -225,29 +225,48 @@ impl<'a> MemoryRepository<'a> {
     }
 
     pub fn add(&self, draft: MemoryDraft) -> Result<MemoryEntry> {
+        let tx = self.store.connection().unchecked_transaction()?;
+        let entry = Self::insert_on_connection(&tx, draft)?;
+        tx.commit()?;
+        Ok(entry)
+    }
+
+    pub fn insert_on_connection(
+        conn: &rusqlite::Connection,
+        draft: MemoryDraft,
+    ) -> Result<MemoryEntry> {
         validate_draft(&draft)?;
-        let id = memory_id();
         let now = timestamp();
-        self.store.connection().execute(
+        let entry = MemoryEntry {
+            id: memory_id(),
+            scope: draft.scope,
+            kind: draft.kind,
+            title: draft.title,
+            body: draft.body,
+            source_ref: draft.source_ref,
+            confidence: draft.confidence,
+            created_at: now.clone(),
+            updated_at: now,
+            deleted_at: None,
+        };
+        conn.execute(
             "INSERT INTO memory_entries
              (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
             params![
-                id,
-                draft.scope.kind.as_str(),
-                draft.scope.key,
-                draft.kind.as_str(),
-                draft.title,
-                draft.body,
-                draft.source_ref,
-                draft.confidence,
-                now
+                entry.id,
+                entry.scope.kind.as_str(),
+                entry.scope.key,
+                entry.kind.as_str(),
+                entry.title,
+                entry.body,
+                entry.source_ref,
+                entry.confidence,
+                entry.created_at,
+                entry.updated_at
             ],
         )?;
-        let entry = self
-            .get(&id)?
-            .expect("inserted memory entry should be readable");
-        self.index_entry(&entry)?;
+        index_entry(conn, &entry)?;
         Ok(entry)
     }
 
@@ -325,26 +344,17 @@ impl<'a> MemoryRepository<'a> {
     pub fn delete(&self, id: &str) -> Result<MemoryEntry> {
         validate_non_blank("id", id)?;
         let now = timestamp();
-        self.store.connection().execute(
+        let tx = self.store.connection().unchecked_transaction()?;
+        tx.execute(
             "UPDATE memory_entries
              SET deleted_at = COALESCE(deleted_at, ?2), updated_at = ?2
              WHERE id = ?1",
             params![id, now],
         )?;
-        self.store
-            .connection()
-            .execute("DELETE FROM memory_entries_fts WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM memory_entries_fts WHERE id = ?1", params![id])?;
+        tx.commit()?;
         self.get(id)?
             .ok_or_else(|| MemoryError::NotFound { id: id.to_string() })
-    }
-
-    fn index_entry(&self, entry: &MemoryEntry) -> Result<()> {
-        self.store.connection().execute(
-            "INSERT INTO memory_entries_fts(id, title, body)
-             VALUES (?1, ?2, ?3)",
-            params![entry.id, entry.title, entry.body],
-        )?;
-        Ok(())
     }
 
     fn search_fts(&self, query: &MemorySearchQuery, text: &str) -> Result<Vec<MemoryEntry>> {
@@ -468,6 +478,14 @@ fn memory_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Mem
             deleted_at: row.get(10)?,
         })
     })())
+}
+
+fn index_entry(conn: &rusqlite::Connection, entry: &MemoryEntry) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memory_entries_fts(id, title, body) VALUES (?1, ?2, ?3)",
+        params![entry.id, entry.title, entry.body],
+    )?;
+    Ok(())
 }
 
 fn validate_draft(draft: &MemoryDraft) -> Result<()> {
