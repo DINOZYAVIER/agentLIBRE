@@ -21,6 +21,7 @@ pub(crate) enum CliCommand {
     Completion { shell: Shell },
     Config(ConfigCommand),
     Memory(MemoryCommand),
+    Notes(NotesCommand),
     Repo(RepoCommand),
     Skill(SkillCommand),
     DaemonStatus(DaemonStatusOptions),
@@ -49,6 +50,18 @@ pub(crate) enum MemoryCommand {
     Search(MemorySearchOptions),
     Show(MemoryShowOptions),
     Delete(MemoryDeleteOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NotesCommand {
+    Add(NotesAddOptions),
+    List(NotesListOptions),
+    Search(NotesSearchOptions),
+    Show(NotesShowOptions),
+    Update(NotesUpdateOptions),
+    Delete(NotesDeleteOptions),
+    Link(NotesLinkOptions),
+    Remember(NotesRememberOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,6 +140,65 @@ pub(crate) struct MemoryShowOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MemoryDeleteOptions {
     pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesAddOptions {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesListOptions {
+    pub(crate) include_deleted: bool,
+    pub(crate) limit: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesSearchOptions {
+    pub(crate) query: String,
+    pub(crate) include_deleted: bool,
+    pub(crate) limit: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesShowOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesUpdateOptions {
+    pub(crate) id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesDeleteOptions {
+    pub(crate) id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesLinkOptions {
+    pub(crate) id: String,
+    pub(crate) target_ref: String,
+    pub(crate) label: Option<String>,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NotesRememberOptions {
+    pub(crate) id: String,
+    pub(crate) scope: MemoryScopeArg,
+    pub(crate) scope_key: Option<String>,
+    pub(crate) kind: MemoryKindArg,
     pub(crate) json: bool,
 }
 
@@ -293,6 +365,11 @@ enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
+    /// Manage local AgentLIBRE notes.
+    Notes {
+        #[command(subcommand)]
+        command: NotesCommands,
+    },
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
     /// Retired internal command name.
@@ -372,6 +449,26 @@ enum MemoryCommands {
     Show(MemoryShowArgs),
     /// Tombstone one memory entry.
     Delete(MemoryDeleteArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum NotesCommands {
+    /// Add a note.
+    Add(NotesAddArgs),
+    /// List notes.
+    List(NotesListArgs),
+    /// Search notes.
+    Search(NotesSearchArgs),
+    /// Show one note.
+    Show(NotesShowArgs),
+    /// Update a note.
+    Update(NotesUpdateArgs),
+    /// Tombstone one note.
+    Delete(NotesDeleteArgs),
+    /// Link a note to another local reference.
+    Link(NotesLinkArgs),
+    /// Promote a note into memory.
+    Remember(NotesRememberArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -541,6 +638,133 @@ struct MemoryShowArgs {
 #[derive(Debug, Args)]
 struct MemoryDeleteArgs {
     /// Memory entry id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesAddArgs {
+    /// Note title.
+    #[arg(long, value_name = "TEXT")]
+    title: String,
+
+    /// Note body.
+    #[arg(long, value_name = "TEXT")]
+    body: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesListArgs {
+    /// Include tombstoned notes.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Maximum notes to print.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    limit: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesSearchArgs {
+    /// Include tombstoned notes.
+    #[arg(long)]
+    include_deleted: bool,
+
+    /// Maximum notes to print.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    limit: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Query text.
+    #[arg(value_name = "QUERY")]
+    query: String,
+}
+
+#[derive(Debug, Args)]
+struct NotesShowArgs {
+    /// Note id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesUpdateArgs {
+    /// Note id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// New note title.
+    #[arg(long, value_name = "TEXT")]
+    title: Option<String>,
+
+    /// New note body.
+    #[arg(long, value_name = "TEXT")]
+    body: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesDeleteArgs {
+    /// Note id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesLinkArgs {
+    /// Note id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Target reference, such as memory:<id> or task:<id>.
+    #[arg(long = "to", value_name = "REF")]
+    target_ref: String,
+
+    /// Link label.
+    #[arg(long, value_name = "TEXT")]
+    label: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct NotesRememberArgs {
+    #[command(flatten)]
+    scope: MemoryScopeArgs,
+
+    /// Memory kind for the promoted note.
+    #[arg(long, value_enum, default_value_t = MemoryKindArg::WorkingNote)]
+    kind: MemoryKindArg,
+
+    /// Note id.
     #[arg(value_name = "ID")]
     id: String,
 
@@ -743,6 +967,7 @@ impl Cli {
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
+            Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
             Some(Commands::Init(args)) => {
                 CliCommand::Repo(RepoCommand::Init(repo_init_options(args)))
             }
@@ -851,6 +1076,73 @@ fn memory_command(command: MemoryCommands) -> Result<MemoryCommand> {
             validate_prompt(&args.id)?;
             MemoryCommand::Delete(MemoryDeleteOptions {
                 id: args.id,
+                json: args.json,
+            })
+        }
+    })
+}
+
+fn notes_command(command: NotesCommands) -> Result<NotesCommand> {
+    Ok(match command {
+        NotesCommands::Add(args) => NotesCommand::Add(NotesAddOptions {
+            title: args.title,
+            body: args.body,
+            json: args.json,
+        }),
+        NotesCommands::List(args) => NotesCommand::List(NotesListOptions {
+            include_deleted: args.include_deleted,
+            limit: validate_limit(args.limit, "--limit")?,
+            json: args.json,
+        }),
+        NotesCommands::Search(args) => {
+            validate_prompt(&args.query)?;
+            NotesCommand::Search(NotesSearchOptions {
+                query: args.query,
+                include_deleted: args.include_deleted,
+                limit: validate_limit(args.limit, "--limit")?,
+                json: args.json,
+            })
+        }
+        NotesCommands::Show(args) => {
+            validate_prompt(&args.id)?;
+            NotesCommand::Show(NotesShowOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        NotesCommands::Update(args) => {
+            validate_prompt(&args.id)?;
+            NotesCommand::Update(NotesUpdateOptions {
+                id: args.id,
+                title: args.title,
+                body: args.body,
+                json: args.json,
+            })
+        }
+        NotesCommands::Delete(args) => {
+            validate_prompt(&args.id)?;
+            NotesCommand::Delete(NotesDeleteOptions {
+                id: args.id,
+                json: args.json,
+            })
+        }
+        NotesCommands::Link(args) => {
+            validate_prompt(&args.id)?;
+            validate_prompt(&args.target_ref)?;
+            NotesCommand::Link(NotesLinkOptions {
+                id: args.id,
+                target_ref: args.target_ref,
+                label: args.label,
+                json: args.json,
+            })
+        }
+        NotesCommands::Remember(args) => {
+            validate_prompt(&args.id)?;
+            NotesCommand::Remember(NotesRememberOptions {
+                id: args.id,
+                scope: args.scope.scope,
+                scope_key: args.scope.scope_key,
+                kind: args.kind,
                 json: args.json,
             })
         }
@@ -1079,6 +1371,11 @@ enum PublicCompletionCommands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
+    },
+    /// Manage local AgentLIBRE notes.
+    Notes {
+        #[command(subcommand)]
+        command: NotesCommands,
     },
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
@@ -1446,6 +1743,66 @@ mod tests {
             parse_command(["agl", "memory", "delete", "mem_1"]),
             CliCommand::Memory(MemoryCommand::Delete(MemoryDeleteOptions {
                 id: "mem_1".to_string(),
+                json: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_notes_commands() {
+        assert_eq!(
+            parse_command([
+                "agl",
+                "notes",
+                "add",
+                "--title",
+                "Workflow",
+                "--body",
+                "Use pinned skills.",
+                "--json",
+            ]),
+            CliCommand::Notes(NotesCommand::Add(NotesAddOptions {
+                title: "Workflow".to_string(),
+                body: "Use pinned skills.".to_string(),
+                json: true,
+            }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl",
+                "notes",
+                "remember",
+                "note_1",
+                "--scope",
+                "repo",
+                "--scope-key",
+                "/tmp/repo",
+                "--kind",
+                "decision",
+            ]),
+            CliCommand::Notes(NotesCommand::Remember(NotesRememberOptions {
+                id: "note_1".to_string(),
+                scope: MemoryScopeArg::Repo,
+                scope_key: Some("/tmp/repo".to_string()),
+                kind: MemoryKindArg::Decision,
+                json: false,
+            }))
+        );
+        assert_eq!(
+            parse_command([
+                "agl",
+                "notes",
+                "link",
+                "note_1",
+                "--to",
+                "task:AGL-084",
+                "--label",
+                "spec",
+            ]),
+            CliCommand::Notes(NotesCommand::Link(NotesLinkOptions {
+                id: "note_1".to_string(),
+                target_ref: "task:AGL-084".to_string(),
+                label: Some("spec".to_string()),
                 json: false,
             }))
         );

@@ -24,6 +24,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "memory");
+    assert_contains(&stdout, "notes");
     assert_contains(&stdout, "install-hooks");
     assert!(
         !stdout.contains("Compatibility"),
@@ -84,6 +85,15 @@ fn command_help_exits_successfully_for_public_commands() {
         &["memory", "search", "--help"][..],
         &["memory", "show", "--help"][..],
         &["memory", "delete", "--help"][..],
+        &["notes", "--help"][..],
+        &["notes", "add", "--help"][..],
+        &["notes", "list", "--help"][..],
+        &["notes", "search", "--help"][..],
+        &["notes", "show", "--help"][..],
+        &["notes", "update", "--help"][..],
+        &["notes", "delete", "--help"][..],
+        &["notes", "link", "--help"][..],
+        &["notes", "remember", "--help"][..],
     ] {
         let output = run_agl(args);
 
@@ -146,6 +156,70 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_success(&include_deleted);
     assert_contains(&stdout(&include_deleted), &id);
     assert_contains(&stdout(&include_deleted), "deleted=true");
+}
+
+#[test]
+fn notes_commands_manage_notes_and_promote_memory() {
+    let home = TempHome::new("notes-commands");
+    let home_arg = home.path_string();
+
+    let add = run_agl(&[
+        "--home",
+        &home_arg,
+        "notes",
+        "add",
+        "--title",
+        "Repo workflow",
+        "--body",
+        "Use pinned workspace skills.",
+    ]);
+
+    assert_success(&add);
+    let add_stdout = stdout(&add);
+    assert_contains(&add_stdout, "note id=");
+    let id = note_id_from_output(&add_stdout);
+
+    let search = run_agl(&["--home", &home_arg, "notes", "search", "pinned"]);
+    assert_success(&search);
+    assert_contains(&stdout(&search), &id);
+
+    let update = run_agl(&[
+        "--home",
+        &home_arg,
+        "notes",
+        "update",
+        &id,
+        "--body",
+        "Use pinned trusted workspace skills.",
+    ]);
+    assert_success(&update);
+
+    let show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
+    assert_success(&show);
+    assert_contains(&stdout(&show), "Use pinned trusted workspace skills.");
+
+    let remember = run_agl(&["--home", &home_arg, "notes", "remember", &id]);
+    assert_success(&remember);
+    let remember_stdout = stdout(&remember);
+    assert_contains(&remember_stdout, "note.remembered=true");
+    assert_contains(&remember_stdout, "memory id=");
+    assert_contains(&remember_stdout, "note_link id=");
+
+    let memory = run_agl(&["--home", &home_arg, "memory", "search", "trusted"]);
+    assert_success(&memory);
+    assert_contains(&stdout(&memory), "scope=user");
+    assert_contains(&stdout(&memory), "kind=working_note");
+
+    let delete = run_agl(&["--home", &home_arg, "notes", "delete", &id]);
+    assert_success(&delete);
+    assert_contains(&stdout(&delete), "note.deleted=true");
+
+    let hidden = run_agl(&["--home", &home_arg, "notes", "list"]);
+    assert_success(&hidden);
+    assert!(
+        !stdout(&hidden).contains(&id),
+        "deleted note should be hidden by default"
+    );
 }
 
 #[test]
@@ -695,6 +769,14 @@ fn memory_id_from_output(stdout: &str) -> String {
         .split_whitespace()
         .find_map(|part| part.strip_prefix("id="))
         .unwrap_or_else(|| panic!("memory id missing from output:\n{stdout}"))
+        .to_string()
+}
+
+fn note_id_from_output(stdout: &str) -> String {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("id="))
+        .unwrap_or_else(|| panic!("note id missing from output:\n{stdout}"))
         .to_string()
 }
 

@@ -15,6 +15,7 @@ use agl_memory::{
     MemoryDraft, MemoryEntry, MemoryKind, MemoryRepository, MemoryScope, MemoryScopeKind,
     MemorySearchQuery,
 };
+use agl_notes::{Note, NoteDraft, NoteLink, NoteRepository, NoteSearchQuery, NoteUpdate};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::{
     ComponentStatus, HookInstallReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
@@ -42,8 +43,10 @@ mod config;
 use args::{
     CliCommand, DaemonStatusOptions, MemoryAddOptions, MemoryCommand, MemoryDeleteOptions,
     MemoryKindArg, MemoryListOptions, MemoryScopeArg, MemorySearchOptions, MemoryShowOptions,
-    RepoCommand, RepoHooksOptions, RepoInitOptions, RepoStatusOptions, RunOptions, ServeOptions,
-    SkillCommand, SkillInspectOptions, SkillListOptions, SkillLockOptions, SkillRevokeOptions,
+    NotesAddOptions, NotesCommand, NotesDeleteOptions, NotesLinkOptions, NotesListOptions,
+    NotesRememberOptions, NotesSearchOptions, NotesShowOptions, NotesUpdateOptions, RepoCommand,
+    RepoHooksOptions, RepoInitOptions, RepoStatusOptions, RunOptions, ServeOptions, SkillCommand,
+    SkillInspectOptions, SkillListOptions, SkillLockOptions, SkillRevokeOptions,
     SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion,
     print_usage,
 };
@@ -132,6 +135,7 @@ fn runtime_for_command_paths(
             | CliCommand::Repo(_)
             | CliCommand::Skill(_)
             | CliCommand::Memory(_)
+            | CliCommand::Notes(_)
             | CliCommand::DaemonStatus(_)
     ) {
         return Ok(AgentLibreRuntimeConfig {
@@ -152,6 +156,7 @@ fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
         | CliCommand::Memory(_)
+        | CliCommand::Notes(_)
         | CliCommand::DaemonStatus(_)
         | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
@@ -170,12 +175,30 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         }
         CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Memory(command) => run_memory(command, runtime),
+        CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Serve(options) => run_serve(options, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
         CliCommand::Infer(options) => run_infer(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
+    }
+}
+
+fn run_notes(command: NotesCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "notes", "starting command");
+    let store = AglStore::open_default(&runtime.paths).context("failed to open notes store")?;
+    let notes = NoteRepository::new(&store);
+
+    match command {
+        NotesCommand::Add(options) => run_notes_add(options, &notes),
+        NotesCommand::List(options) => run_notes_list(options, &notes),
+        NotesCommand::Search(options) => run_notes_search(options, &notes),
+        NotesCommand::Show(options) => run_notes_show(options, &notes),
+        NotesCommand::Update(options) => run_notes_update(options, &notes),
+        NotesCommand::Delete(options) => run_notes_delete(options, &notes),
+        NotesCommand::Link(options) => run_notes_link(options, &notes),
+        NotesCommand::Remember(options) => run_notes_remember(options, &notes, &store),
     }
 }
 
@@ -199,6 +222,153 @@ fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
     }
+}
+
+fn run_notes_add(options: NotesAddOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let note = notes
+        .add(NoteDraft::new(options.title, options.body))
+        .context("failed to add note")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&note)?);
+    } else {
+        print_note_summary(&note);
+    }
+    Ok(())
+}
+
+fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let query = NoteSearchQuery {
+        include_deleted: options.include_deleted,
+        limit: options.limit,
+        ..NoteSearchQuery::default()
+    };
+    let entries = notes.list(&query).context("failed to list notes")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        print_notes(&entries);
+    }
+    Ok(())
+}
+
+fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let query = NoteSearchQuery {
+        text: Some(options.query),
+        include_deleted: options.include_deleted,
+        limit: options.limit,
+    };
+    let entries = notes.search(&query).context("failed to search notes")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        print_notes(&entries);
+    }
+    Ok(())
+}
+
+fn run_notes_show(options: NotesShowOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let note = notes
+        .get(&options.id)
+        .context("failed to read note")?
+        .ok_or_else(|| anyhow::anyhow!("note not found: {}", options.id))?;
+    let links = notes
+        .links(&options.id)
+        .context("failed to read note links")?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "note": note,
+                "links": links,
+            }))?
+        );
+    } else {
+        print_note_detail(&note, &links);
+    }
+    Ok(())
+}
+
+fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let note = notes
+        .update(
+            &options.id,
+            NoteUpdate {
+                title: options.title,
+                body: options.body,
+            },
+        )
+        .context("failed to update note")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&note)?);
+    } else {
+        print_note_summary(&note);
+    }
+    Ok(())
+}
+
+fn run_notes_delete(options: NotesDeleteOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let note = notes.delete(&options.id).context("failed to delete note")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&note)?);
+    } else {
+        println!("note.deleted=true");
+        print_note_summary(&note);
+    }
+    Ok(())
+}
+
+fn run_notes_link(options: NotesLinkOptions, notes: &NoteRepository<'_>) -> Result<()> {
+    let link = notes
+        .link(&options.id, &options.target_ref, options.label)
+        .context("failed to link note")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&link)?);
+    } else {
+        print_note_link(&link);
+    }
+    Ok(())
+}
+
+fn run_notes_remember(
+    options: NotesRememberOptions,
+    notes: &NoteRepository<'_>,
+    store: &AglStore,
+) -> Result<()> {
+    let note = notes
+        .get(&options.id)
+        .context("failed to read note")?
+        .ok_or_else(|| anyhow::anyhow!("note not found: {}", options.id))?;
+    let memory = MemoryRepository::new(store);
+    let scope = memory_scope(options.scope, options.scope_key)?;
+    let mut draft = MemoryDraft::new(scope, memory_kind(options.kind), &note.title, &note.body);
+    draft.source_ref = Some(format!("note:{}", note.id));
+    let entry = memory
+        .add(draft)
+        .context("failed to promote note into memory")?;
+    let link = notes
+        .link(
+            &note.id,
+            &format!("memory:{}", entry.id),
+            Some("remembered".to_string()),
+        )
+        .context("failed to link note to memory")?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "note": note,
+                "memory": entry,
+                "link": link,
+            }))?
+        );
+    } else {
+        println!("note.remembered=true");
+        print_note_summary(&note);
+        print_memory_entry_summary(&entry);
+        print_note_link(&link);
+    }
+    Ok(())
 }
 
 fn run_memory_add(options: MemoryAddOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -941,6 +1111,44 @@ fn print_memory_entry_detail(entry: &MemoryEntry) {
         println!("memory.{}.deleted_at={deleted_at}", entry.id);
     }
     println!("memory.{}.body={}", entry.id, entry.body);
+}
+
+fn print_notes(notes: &[Note]) {
+    for note in notes {
+        print_note_summary(note);
+    }
+}
+
+fn print_note_summary(note: &Note) {
+    println!(
+        "note id={} title={} deleted={}",
+        note.id,
+        note.title,
+        note.deleted_at.is_some()
+    );
+}
+
+fn print_note_detail(note: &Note, links: &[NoteLink]) {
+    print_note_summary(note);
+    println!("note.{}.created_at={}", note.id, note.created_at);
+    println!("note.{}.updated_at={}", note.id, note.updated_at);
+    if let Some(deleted_at) = &note.deleted_at {
+        println!("note.{}.deleted_at={deleted_at}", note.id);
+    }
+    println!("note.{}.body={}", note.id, note.body);
+    for link in links {
+        print_note_link(link);
+    }
+}
+
+fn print_note_link(link: &NoteLink) {
+    println!(
+        "note_link id={} note_id={} target_ref={}",
+        link.id, link.note_id, link.target_ref
+    );
+    if let Some(label) = &link.label {
+        println!("note_link.{}.label={label}", link.id);
+    }
 }
 
 fn print_hook_install_report(report: &HookInstallReport) {
