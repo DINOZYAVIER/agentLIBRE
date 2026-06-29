@@ -165,6 +165,9 @@ pub enum StoreError {
         found: u32,
         supported: u32,
     },
+    MigrationGap {
+        missing: u32,
+    },
     IdempotencyConflict {
         namespace: String,
         key: String,
@@ -194,6 +197,9 @@ impl fmt::Display for StoreError {
                 f,
                 "unsupported store schema version {found}; this build supports up to {supported}"
             ),
+            Self::MigrationGap { missing } => {
+                write!(f, "store migration history is missing version {missing}")
+            }
             Self::IdempotencyConflict {
                 namespace,
                 key,
@@ -371,6 +377,23 @@ impl AglStore {
 
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    pub fn transaction<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        match f(&tx) {
+            Ok(value) => {
+                tx.commit()?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = tx.rollback();
+                Err(err)
+            }
+        }
     }
 
     pub fn health(&self) -> Result<StoreHealth> {
@@ -551,14 +574,16 @@ impl AglStore {
                 supported: CURRENT_SCHEMA_VERSION,
             });
         }
-        for version in self.applied_migration_versions()? {
-            if version > CURRENT_SCHEMA_VERSION {
+        let applied_versions = self.applied_migration_versions()?;
+        for version in &applied_versions {
+            if *version > CURRENT_SCHEMA_VERSION {
                 return Err(StoreError::UnsupportedSchemaVersion {
-                    found: version,
+                    found: *version,
                     supported: CURRENT_SCHEMA_VERSION,
                 });
             }
         }
+        validate_migration_sequence(&applied_versions)?;
         for migration in STORE_MIGRATIONS {
             if !self.migration_applied(migration.version)? {
                 self.apply_migration(migration)?;
@@ -845,6 +870,17 @@ fn validate_idempotency_part(value: &str, field: &'static str) -> Result<()> {
     Ok(())
 }
 
+fn validate_migration_sequence(versions: &[u32]) -> Result<()> {
+    let mut expected = 1;
+    for version in versions {
+        if *version != expected {
+            return Err(StoreError::MigrationGap { missing: expected });
+        }
+        expected += 1;
+    }
+    Ok(())
+}
+
 fn timestamp() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -931,6 +967,75 @@ mod tests {
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.domains.len(), StoreDomain::all().len());
         assert!(status.domains.iter().all(|domain| domain.total_rows == 0));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn transaction_commits_and_rolls_back() {
+        let root = temp_root("transaction");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .transaction(|tx| {
+                tx.execute("CREATE TABLE tx_probe(value TEXT NOT NULL)", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        let err = store
+            .transaction(|tx| {
+                tx.execute("INSERT INTO tx_probe(value) VALUES ('rolled_back')", [])?;
+                Err::<(), StoreError>(StoreError::InvalidValue {
+                    field: "tx",
+                    value: "rollback".to_string(),
+                    reason: "test rollback",
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InvalidValue { field: "tx", .. }));
+        let count: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM tx_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        store
+            .transaction(|tx| {
+                tx.execute("INSERT INTO tx_probe(value) VALUES ('committed')", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let count: u64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM tx_probe", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_history_gaps_fail_clearly() {
+        let root = temp_root("migration-gap");
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+            INSERT INTO schema_migrations(version, applied_at)
+            VALUES (1, 'unix:1'), (3, 'unix:3');
+            PRAGMA user_version = 3;
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = AglStore::open_at(&root).unwrap_err();
+        assert!(matches!(err, StoreError::MigrationGap { missing: 2 }));
 
         let _ = std::fs::remove_dir_all(root);
     }
