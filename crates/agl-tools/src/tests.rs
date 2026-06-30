@@ -59,6 +59,7 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
     cron::register(&mut catalog).unwrap();
     fs::register(&mut catalog).unwrap();
     matrix::register(&mut catalog).unwrap();
+    matrix_delivery::register(&mut catalog).unwrap();
     memory::register(&mut catalog).unwrap();
     notes::register(&mut catalog).unwrap();
     permissions::register(&mut catalog).unwrap();
@@ -280,6 +281,13 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
         &catalog,
         ToolCapability::Write,
         ToolOperationKind::Write,
+        &[ToolStateEffect::MatrixOutbox],
+    );
+    assert_tool_metadata(
+        MATRIX_OUTBOX_DELIVER_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Execute,
         &[ToolStateEffect::MatrixOutbox],
     );
     assert_tool_metadata(
