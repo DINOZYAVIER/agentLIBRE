@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_runtime::AgentLibrePaths;
-use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, types::Type};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -350,6 +350,30 @@ pub struct StoreHealth {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreSchemaStatus {
+    pub database_path: PathBuf,
+    pub database_exists: bool,
+    pub schema_version: Option<u32>,
+    pub current_schema_version: u32,
+    pub applied_migrations: Vec<u32>,
+    pub migration_required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StoreMigrationReport {
+    pub database_path: PathBuf,
+    pub before_schema_version: u32,
+    pub after_schema_version: u32,
+    pub applied_migrations: Vec<AppliedStoreMigration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AppliedStoreMigration {
+    pub version: u32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct StoreStatus {
     pub database_path: PathBuf,
     pub schema_version: u32,
@@ -677,17 +701,89 @@ impl AglStore {
     }
 
     pub fn open_at(root: impl AsRef<Path>) -> Result<Self> {
+        let store = Self::open_for_migration_at(root)?;
+        store.migrate()?;
+        Ok(store)
+    }
+
+    pub fn migrate_at(root: impl AsRef<Path>) -> Result<StoreMigrationReport> {
+        let store = Self::open_for_migration_at(root)?;
+        store.migrate()
+    }
+
+    pub fn schema_status_at(root: impl AsRef<Path>) -> Result<StoreSchemaStatus> {
+        let database_path = default_database_path(root)?;
+        if !database_path.exists() {
+            return Ok(StoreSchemaStatus {
+                database_path,
+                database_exists: false,
+                schema_version: None,
+                current_schema_version: CURRENT_SCHEMA_VERSION,
+                applied_migrations: Vec::new(),
+                migration_required: true,
+            });
+        }
+        let conn = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let store = Self {
+            conn,
+            database_path: database_path.clone(),
+        };
+        let schema_version = store.schema_version()?;
+        let applied_migrations = if store.schema_migrations_table_exists()? {
+            store.applied_migration_versions()?
+        } else {
+            Vec::new()
+        };
+        let migration_required = schema_version != CURRENT_SCHEMA_VERSION
+            || applied_migrations.len() != STORE_MIGRATIONS.len()
+            || applied_migrations.last().copied() != Some(CURRENT_SCHEMA_VERSION);
+        Ok(StoreSchemaStatus {
+            database_path,
+            database_exists: true,
+            schema_version: Some(schema_version),
+            current_schema_version: CURRENT_SCHEMA_VERSION,
+            applied_migrations,
+            migration_required,
+        })
+    }
+
+    pub fn open_current_read_only_at(root: impl AsRef<Path>) -> Result<Self> {
+        let status = Self::schema_status_at(root)?;
+        if !status.database_exists {
+            return Err(StoreError::InvalidValue {
+                field: "store",
+                value: status.database_path.display().to_string(),
+                reason: "store database does not exist; run store.migrate first",
+            });
+        }
+        if status.migration_required {
+            return Err(StoreError::InvalidValue {
+                field: "store",
+                value: format!(
+                    "schema_version={:?}, current_schema_version={}",
+                    status.schema_version, status.current_schema_version
+                ),
+                reason: "store schema migration required; run store.migrate first",
+            });
+        }
+        let conn =
+            Connection::open_with_flags(&status.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self {
+            conn,
+            database_path: status.database_path,
+        })
+    }
+
+    fn open_for_migration_at(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         let database_path = database_path(root, DEFAULT_DATABASE_FILE)?;
         ensure_private_dir(root)?;
         let conn = Connection::open(&database_path)?;
         set_private_file_permissions(&database_path)?;
-        let store = Self {
+        Ok(Self {
             conn,
             database_path,
-        };
-        store.migrate()?;
-        Ok(store)
+        })
     }
 
     pub fn database_path(&self) -> &Path {
@@ -1322,7 +1418,8 @@ impl AglStore {
             })
     }
 
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&self) -> Result<StoreMigrationReport> {
+        let before_schema_version = self.schema_version()?;
         self.ensure_migration_table()?;
         let current_version = self.schema_version()?;
         if current_version > CURRENT_SCHEMA_VERSION {
@@ -1341,12 +1438,22 @@ impl AglStore {
             }
         }
         validate_migration_sequence(&applied_versions)?;
+        let mut applied_migrations = Vec::new();
         for migration in STORE_MIGRATIONS {
             if !self.migration_applied(migration.version)? {
                 self.apply_migration(migration)?;
+                applied_migrations.push(AppliedStoreMigration {
+                    version: migration.version,
+                    name: migration.name.to_string(),
+                });
             }
         }
-        Ok(())
+        Ok(StoreMigrationReport {
+            database_path: self.database_path.clone(),
+            before_schema_version,
+            after_schema_version: self.schema_version()?,
+            applied_migrations,
+        })
     }
 
     fn ensure_migration_table(&self) -> Result<()> {
@@ -1371,6 +1478,19 @@ impl AglStore {
             versions.push(row?);
         }
         Ok(versions)
+    }
+
+    fn schema_migrations_table_exists(&self) -> Result<bool> {
+        let exists = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists)
     }
 
     fn migration_applied(&self, version: u32) -> Result<bool> {
@@ -1736,6 +1856,10 @@ pub fn default_store_root(paths: &AgentLibrePaths) -> PathBuf {
     paths.data_dir.join("store")
 }
 
+pub fn default_database_path(root: impl AsRef<Path>) -> Result<PathBuf> {
+    database_path(root.as_ref(), DEFAULT_DATABASE_FILE)
+}
+
 fn database_path(root: &Path, file_name: &str) -> Result<PathBuf> {
     validate_database_file_name(file_name)?;
     Ok(root.join(file_name))
@@ -1988,6 +2112,25 @@ mod tests {
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.domains.len(), StoreDomain::all().len());
         assert!(status.domains.iter().all(|domain| domain.total_rows == 0));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_migration_reports_applied_steps_and_schema_status() {
+        let root = temp_root("explicit-migrate");
+        let before = AglStore::schema_status_at(&root).unwrap();
+        assert!(!before.database_exists);
+        assert!(before.migration_required);
+
+        let report = AglStore::migrate_at(&root).unwrap();
+        let after = AglStore::schema_status_at(&root).unwrap();
+
+        assert_eq!(report.before_schema_version, 0);
+        assert_eq!(report.after_schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(report.applied_migrations.len(), STORE_MIGRATIONS.len());
+        assert!(after.database_exists);
+        assert!(!after.migration_required);
 
         let _ = std::fs::remove_dir_all(root);
     }

@@ -18,6 +18,7 @@ pub const REPO_STATUS_TOOL_ID: &str = "repo.status";
 pub const REPO_EXPORT_PROFILE_TOOL_ID: &str = "repo.export_profile";
 pub const REPO_HOOKS_STATUS_TOOL_ID: &str = "repo.hooks.status";
 pub const REPO_INIT_TOOL_ID: &str = "repo.init";
+pub const REPO_IMPORT_PROFILE_TOOL_ID: &str = "repo.import_profile";
 pub const REPO_INSTALL_HOOKS_TOOL_ID: &str = "repo.install_hooks";
 
 const DEFAULT_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -41,6 +42,7 @@ impl RepoTools {
             REPO_EXPORT_PROFILE_TOOL_ID => self.export_profile(arguments),
             REPO_HOOKS_STATUS_TOOL_ID => self.hooks_status(arguments),
             REPO_INIT_TOOL_ID => self.init(arguments),
+            REPO_IMPORT_PROFILE_TOOL_ID => self.import_profile(arguments),
             REPO_INSTALL_HOOKS_TOOL_ID => self.install_hooks(arguments),
             _ => anyhow::bail!("unknown repo tool `{name}`"),
         }
@@ -128,6 +130,26 @@ impl RepoTools {
         ))
     }
 
+    fn import_profile(&self, arguments: Value) -> Result<String> {
+        let args = parse_args::<ImportProfileArgs>(REPO_IMPORT_PROFILE_TOOL_ID, arguments)?;
+        let report = init_repo_workspace(
+            &self.workspace_root,
+            &RepoInitOptions {
+                profile: agl_repo::DEFAULT_PROFILE.to_string(),
+                profile_file: Some(PathBuf::from(args.profile_file)),
+                dry_run: args.dry_run.unwrap_or(false),
+                force: args.force.unwrap_or(false),
+            },
+        )?;
+        Ok(format!(
+            "tool=repo.import_profile\nworkspace_root={}\nmanifest_path={}\ndry_run={}\nchanges={}\nstatus=ok",
+            report.workspace_root.display(),
+            report.manifest_path.display(),
+            report.dry_run,
+            report.changes.len()
+        ))
+    }
+
     fn install_hooks(&self, arguments: Value) -> Result<String> {
         let args = parse_args::<InstallHooksArgs>(REPO_INSTALL_HOOKS_TOOL_ID, arguments)?;
         let report = install_repo_hooks(
@@ -179,6 +201,16 @@ pub fn declaration() -> ToolProviderDeclaration {
             "Initialize AgentLIBRE workspace files.",
             ToolCapability::Write,
             std::iter::empty::<&str>(),
+        )
+        .with_operation_kind(ToolOperationKind::Admin)
+        .with_state_effects([ToolStateEffect::RepoWorkspace]),
+    )
+    .with_tool(
+        ToolDeclaration::new(
+            ToolId::new(REPO_IMPORT_PROFILE_TOOL_ID).expect("builtin repo tool id is valid"),
+            "Apply an explicit AgentLIBRE workspace profile file.",
+            ToolCapability::Write,
+            ["profile_file"],
         )
         .with_operation_kind(ToolOperationKind::Admin)
         .with_state_effects([ToolStateEffect::RepoWorkspace]),
@@ -254,6 +286,13 @@ struct InitArgs {
 }
 
 #[derive(Deserialize)]
+struct ImportProfileArgs {
+    profile_file: String,
+    dry_run: Option<bool>,
+    force: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct InstallHooksArgs {
     dry_run: Option<bool>,
     force: Option<bool>,
@@ -291,6 +330,43 @@ mod tests {
         assert!(profile.contains("name = \"repo-workflow\""));
         assert!(hooks.contains("tool=repo.hooks.status"));
         assert!(hooks.contains("dry_run=true"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn repo_tools_import_profile_requires_explicit_profile_file() {
+        let root = temp_root("import-profile");
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        let profile_path = root.join("profile.toml");
+        std::fs::write(
+            &profile_path,
+            r#"
+version = 1
+name = "team-profile"
+
+[components.skills]
+path = ".agl/skills"
+kind = "local"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "local"
+"#,
+        )
+        .unwrap();
+        let tools = RepoTools::new(&root);
+
+        let imported = tools
+            .dispatch(
+                REPO_IMPORT_PROFILE_TOOL_ID,
+                json!({"profile_file": profile_path, "dry_run": false}),
+            )
+            .unwrap();
+
+        assert!(imported.contains("tool=repo.import_profile"));
+        assert!(imported.contains("status=ok"));
+        assert!(root.join(".agl/workspace.toml").is_file());
 
         cleanup(root);
     }

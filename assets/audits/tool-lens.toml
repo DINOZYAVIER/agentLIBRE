@@ -289,6 +289,15 @@ visible_in_read_only = true
 policy_owner = "agl-tools/store"
 
 [[tools]]
+id = "store.migrate"
+provider = "store-tools"
+capability = "write"
+operation_kind = "admin"
+state_effects = ["store_schema"]
+visible_in_read_only = false
+policy_owner = "agl-tools/store"
+
+[[tools]]
 id = "repo.status"
 provider = "repo-tools"
 capability = "read"
@@ -317,6 +326,15 @@ policy_owner = "agl-tools/repo"
 
 [[tools]]
 id = "repo.init"
+provider = "repo-tools"
+capability = "write"
+operation_kind = "admin"
+state_effects = ["repo_workspace"]
+visible_in_read_only = false
+policy_owner = "agl-tools/repo"
+
+[[tools]]
+id = "repo.import_profile"
 provider = "repo-tools"
 capability = "write"
 operation_kind = "admin"
@@ -431,20 +449,6 @@ operation_kind = "approve"
 state_effects = ["store_permission_grants"]
 visible_in_read_only = false
 policy_owner = "agl-tools/permissions"
-
-[[missing_tools]]
-id = "repo.import_profile"
-domain = "repo"
-operation_kind = "admin"
-target_task = "AGL-095d"
-reason = "Apply workspace profile manifests through a typed admin boundary."
-
-[[missing_tools]]
-id = "store.migrate"
-domain = "store"
-operation_kind = "admin"
-target_task = "AGL-095d"
-reason = "Run migrations through the same audited store boundary."
 
 [[missing_tools]]
 id = "matrix.outbox.deliver"

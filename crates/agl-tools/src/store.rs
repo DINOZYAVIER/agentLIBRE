@@ -7,12 +7,13 @@ use serde_json::Value;
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId,
+    ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
 };
 
 pub const PROVIDER_ID: &str = "store-tools";
 pub const STORE_STATUS_TOOL_ID: &str = "store.status";
 pub const STORE_EXPORT_TOOL_ID: &str = "store.export";
+pub const STORE_MIGRATE_TOOL_ID: &str = "store.migrate";
 
 const DEFAULT_EXPORT_MAX_BYTES: usize = 16 * 1024;
 const MAX_EXPORT_BYTES: usize = 128 * 1024;
@@ -33,30 +34,49 @@ impl StoreTools {
         match name {
             STORE_STATUS_TOOL_ID => self.status(arguments),
             STORE_EXPORT_TOOL_ID => self.export(arguments),
+            STORE_MIGRATE_TOOL_ID => self.migrate(arguments),
             _ => anyhow::bail!("unknown store tool `{name}`"),
         }
     }
 
     fn status(&self, arguments: Value) -> Result<String> {
         parse_args::<StatusArgs>(STORE_STATUS_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
-        let status = store.status()?;
+        let schema = AglStore::schema_status_at(&self.store_root)?;
         let mut output = format!(
-            "tool=store.status\nschema_version={}\ndatabase_path={}\nidempotency.in_progress={}\nidempotency.stale_in_progress={}\n---",
-            status.schema_version,
-            status.database_path.display(),
-            status.idempotency.in_progress,
-            status.idempotency.stale_in_progress.len()
+            "tool=store.status\nschema_version={}\ncurrent_schema_version={}\ndatabase_path={}\ndatabase_exists={}\nmigration_required={}\napplied_migrations={}\n---",
+            schema
+                .schema_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            schema.current_schema_version,
+            schema.database_path.display(),
+            schema.database_exists,
+            schema.migration_required,
+            schema
+                .applied_migrations
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         );
-        for domain in status.domains {
-            output.push('\n');
+        if !schema.migration_required {
+            let store = self.open_current_read_only_store()?;
+            let status = store.status()?;
             output.push_str(&format!(
-                "domain name={} status={} total_rows={} active_rows={}",
-                domain.domain.as_str(),
-                domain.status.as_str(),
-                domain.total_rows,
-                domain.active_rows
+                "\nidempotency.in_progress={}\nidempotency.stale_in_progress={}",
+                status.idempotency.in_progress,
+                status.idempotency.stale_in_progress.len()
             ));
+            for domain in status.domains {
+                output.push('\n');
+                output.push_str(&format!(
+                    "domain name={} status={} total_rows={} active_rows={}",
+                    domain.domain.as_str(),
+                    domain.status.as_str(),
+                    domain.total_rows,
+                    domain.active_rows
+                ));
+            }
         }
         Ok(output)
     }
@@ -68,7 +88,7 @@ impl StoreTools {
             .max_bytes
             .unwrap_or(DEFAULT_EXPORT_MAX_BYTES)
             .min(MAX_EXPORT_BYTES);
-        let store = self.open_store()?;
+        let store = self.open_current_read_only_store()?;
         let mut bytes = Vec::new();
         let records = store.export_domain_jsonl(
             &StoreExportOptions {
@@ -93,9 +113,31 @@ impl StoreTools {
         ))
     }
 
-    fn open_store(&self) -> Result<AglStore> {
-        AglStore::open_at(&self.store_root)
-            .with_context(|| format!("failed to open store {}", self.store_root.display()))
+    fn migrate(&self, arguments: Value) -> Result<String> {
+        parse_args::<MigrateArgs>(STORE_MIGRATE_TOOL_ID, arguments)?;
+        let report = AglStore::migrate_at(&self.store_root)
+            .with_context(|| format!("failed to migrate store {}", self.store_root.display()))?;
+        Ok(format!(
+            "tool=store.migrate\ndatabase_path={}\nbefore_schema_version={}\nafter_schema_version={}\napplied_migrations={}\nstatus=ok",
+            report.database_path.display(),
+            report.before_schema_version,
+            report.after_schema_version,
+            report
+                .applied_migrations
+                .iter()
+                .map(|migration| format!("{}:{}", migration.version, migration.name))
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+    }
+
+    fn open_current_read_only_store(&self) -> Result<AglStore> {
+        AglStore::open_current_read_only_at(&self.store_root).with_context(|| {
+            format!(
+                "failed to open current read-only store {}",
+                self.store_root.display()
+            )
+        })
     }
 }
 
@@ -125,6 +167,16 @@ pub fn declaration() -> ToolProviderDeclaration {
         ToolCapability::Read,
         ["domain"],
     ))
+    .with_tool(
+        ToolDeclaration::new(
+            ToolId::new(STORE_MIGRATE_TOOL_ID).expect("builtin store tool id is valid"),
+            "Run AgentLIBRE store migrations through an explicit admin boundary.",
+            ToolCapability::Write,
+            std::iter::empty::<&str>(),
+        )
+        .with_operation_kind(ToolOperationKind::Admin)
+        .with_state_effects([ToolStateEffect::StoreSchema]),
+    )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
@@ -154,6 +206,9 @@ struct ExportArgs {
     include_deleted: Option<bool>,
     max_bytes: Option<usize>,
 }
+
+#[derive(Deserialize)]
+struct MigrateArgs {}
 
 #[cfg(test)]
 mod tests {
@@ -192,10 +247,33 @@ mod tests {
             .unwrap();
 
         assert!(status.contains("schema_version="));
+        assert!(status.contains("migration_required=false"));
         assert!(status.contains("domain name=memory"));
         assert!(export.contains("domain=memory"));
         assert!(export.contains("records=1"));
         assert!(export.contains("Store export"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn store_tools_status_does_not_create_database_and_migrate_is_explicit() {
+        let root = temp_root("migrate");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = StoreTools::new(&root);
+
+        let status = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
+        assert!(status.contains("database_exists=false"));
+        assert!(status.contains("migration_required=true"));
+        assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
+
+        let migrated = tools.dispatch(STORE_MIGRATE_TOOL_ID, json!({})).unwrap();
+        let current = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
+
+        assert!(migrated.contains("tool=store.migrate"));
+        assert!(migrated.contains("status=ok"));
+        assert!(current.contains("database_exists=true"));
+        assert!(current.contains("migration_required=false"));
 
         cleanup(root);
     }
