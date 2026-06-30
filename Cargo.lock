@@ -77,6 +77,7 @@ dependencies = [
  "agl-assets",
  "agl-config",
  "agl-events",
+ "agl-host-tools",
  "agl-inference",
  "agl-loop",
  "agl-memory",
@@ -176,6 +177,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "agl-host-tools"
+version = "1.0.0-alpha.7"
+dependencies = [
+ "agl-skills",
+ "agl-tools",
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

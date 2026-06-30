@@ -334,6 +334,69 @@ visible_in_read_only = false
 policy_owner = "agl-tools/repo"
 
 [[tools]]
+id = "skill.list"
+provider = "skill-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.inspect"
+provider = "skill-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.status"
+provider = "skill-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.verify"
+provider = "skill-tools"
+capability = "read"
+operation_kind = "read"
+state_effects = []
+visible_in_read_only = true
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.lock"
+provider = "skill-tools"
+capability = "write"
+operation_kind = "admin"
+state_effects = ["repo_workspace"]
+visible_in_read_only = false
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.trust"
+provider = "skill-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["skill_trust"]
+visible_in_read_only = false
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
+id = "skill.revoke"
+provider = "skill-tools"
+capability = "write"
+operation_kind = "approve"
+state_effects = ["skill_trust"]
+visible_in_read_only = false
+policy_owner = "agl-host-tools/skills"
+
+[[tools]]
 id = "permissions.status"
 provider = "permission-tools"
 capability = "read"
@@ -375,41 +438,6 @@ domain = "repo"
 operation_kind = "admin"
 target_task = "AGL-095d"
 reason = "Apply workspace profile manifests through a typed admin boundary."
-
-[[missing_tools]]
-id = "skill.list"
-domain = "skill"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "List builtin and workspace skills as a read tool."
-
-[[missing_tools]]
-id = "skill.inspect"
-domain = "skill"
-operation_kind = "read"
-target_task = "AGL-095a"
-reason = "Inspect skill manifests and trust state as a read tool."
-
-[[missing_tools]]
-id = "skill.lock"
-domain = "skill"
-operation_kind = "admin"
-target_task = "AGL-095d"
-reason = "Pin workspace skill identity through a typed admin boundary."
-
-[[missing_tools]]
-id = "skill.trust"
-domain = "skill"
-operation_kind = "approve"
-target_task = "AGL-095d"
-reason = "Record local trust through an explicit approval tool."
-
-[[missing_tools]]
-id = "skill.revoke"
-domain = "skill"
-operation_kind = "approve"
-target_task = "AGL-095d"
-reason = "Revoke local trust through an explicit approval tool."
 
 [[missing_tools]]
 id = "store.migrate"

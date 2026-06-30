@@ -204,6 +204,10 @@ impl InferenceSession {
         &self.store_root
     }
 
+    pub(crate) fn trust_store_path(&self) -> &std::path::Path {
+        &self.trust_store_path
+    }
+
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
         if let Some(evidence) = &self.runtime_capability_evidence {
             write_runtime_capability_context_evidence(&self.artifact_root, &self.run_id, evidence)?;
@@ -560,6 +564,8 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         .context("failed to register builtin permission tool provider")?;
     agl_tools::repo::register(&mut tool_catalog)
         .context("failed to register builtin repo tool provider")?;
+    agl_tools::skills::register(&mut tool_catalog)
+        .context("failed to register builtin skill tool provider")?;
     agl_tools::store::register(&mut tool_catalog)
         .context("failed to register builtin store tool provider")?;
     let (context, hook_batches) = if selected_skills.is_empty() {
@@ -867,6 +873,10 @@ fn core_tool_ids() -> Result<BTreeSet<ToolId>> {
         agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
         agl_tools::PERMISSIONS_GRANT_TOOL_ID,
         agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
+        agl_tools::SKILL_LIST_TOOL_ID,
+        agl_tools::SKILL_INSPECT_TOOL_ID,
+        agl_tools::SKILL_STATUS_TOOL_ID,
+        agl_tools::SKILL_VERIFY_TOOL_ID,
     ]
     .into_iter()
     .map(ToolId::new)
@@ -1282,6 +1292,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let batches = selected_skill_hook_batches(
             &skill_registry,
@@ -1310,6 +1321,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1331,6 +1343,10 @@ mod tests {
                 "fs.search",
                 "permissions.request",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
         assert_eq!(
@@ -1347,6 +1363,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1367,6 +1384,10 @@ mod tests {
                 "fs.search",
                 "permissions.request",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
     }
@@ -1378,6 +1399,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1399,6 +1421,10 @@ mod tests {
                 "fs.search",
                 "permissions.request",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
     }
@@ -1410,6 +1436,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1433,6 +1460,10 @@ mod tests {
                 "permissions.request",
                 "permissions.revoke",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
     }
@@ -1444,6 +1475,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1464,6 +1496,10 @@ mod tests {
                 "fs.search",
                 "permissions.request",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
     }
@@ -1570,6 +1606,7 @@ mod tests {
         agl_tools::notes::register(&mut catalog).unwrap();
         agl_tools::permissions::register(&mut catalog).unwrap();
         agl_tools::repo::register(&mut catalog).unwrap();
+        agl_tools::skills::register(&mut catalog).unwrap();
         agl_tools::store::register(&mut catalog).unwrap();
         catalog
     }
@@ -1589,6 +1626,7 @@ mod tests {
         agl_tools::guards::register(&mut extension_registry).unwrap();
         agl_tools::fs::register(&mut extension_registry).unwrap();
         agl_tools::permissions::register(&mut extension_registry).unwrap();
+        agl_tools::skills::register(&mut extension_registry).unwrap();
 
         let tools = selected_skill_visible_tools(
             &skill_registry,
@@ -1609,6 +1647,10 @@ mod tests {
                 "fs.search",
                 "permissions.request",
                 "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
             ]
         );
     }

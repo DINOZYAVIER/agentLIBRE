@@ -63,6 +63,7 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
     notes::register(&mut catalog).unwrap();
     permissions::register(&mut catalog).unwrap();
     repo::register(&mut catalog).unwrap();
+    skills::register(&mut catalog).unwrap();
     store::register(&mut catalog).unwrap();
 
     assert_tool_metadata(
@@ -329,6 +330,55 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
         ToolCapability::Write,
         ToolOperationKind::Admin,
         &[ToolStateEffect::RepoHooks],
+    );
+    assert_tool_metadata(
+        SKILL_LIST_TOOL_ID,
+        &catalog,
+        ToolCapability::Read,
+        ToolOperationKind::Read,
+        &[],
+    );
+    assert_tool_metadata(
+        SKILL_INSPECT_TOOL_ID,
+        &catalog,
+        ToolCapability::Read,
+        ToolOperationKind::Read,
+        &[],
+    );
+    assert_tool_metadata(
+        SKILL_STATUS_TOOL_ID,
+        &catalog,
+        ToolCapability::Read,
+        ToolOperationKind::Read,
+        &[],
+    );
+    assert_tool_metadata(
+        SKILL_VERIFY_TOOL_ID,
+        &catalog,
+        ToolCapability::Read,
+        ToolOperationKind::Read,
+        &[],
+    );
+    assert_tool_metadata(
+        SKILL_LOCK_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Admin,
+        &[ToolStateEffect::RepoWorkspace],
+    );
+    assert_tool_metadata(
+        SKILL_TRUST_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Approve,
+        &[ToolStateEffect::SkillTrust],
+    );
+    assert_tool_metadata(
+        SKILL_REVOKE_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Approve,
+        &[ToolStateEffect::SkillTrust],
     );
     assert_tool_metadata(
         PERMISSIONS_STATUS_TOOL_ID,

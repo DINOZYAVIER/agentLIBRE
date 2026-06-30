@@ -10,6 +10,7 @@ pub mod permissions;
 mod provider;
 mod registry;
 pub mod repo;
+pub mod skills;
 pub mod store;
 mod tool;
 
@@ -44,6 +45,10 @@ pub use registry::{ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime
 pub use repo::{
     REPO_EXPORT_PROFILE_TOOL_ID, REPO_HOOKS_STATUS_TOOL_ID, REPO_INIT_TOOL_ID,
     REPO_INSTALL_HOOKS_TOOL_ID, REPO_STATUS_TOOL_ID, RepoTools,
+};
+pub use skills::{
+    SKILL_INSPECT_TOOL_ID, SKILL_LIST_TOOL_ID, SKILL_LOCK_TOOL_ID, SKILL_REVOKE_TOOL_ID,
+    SKILL_STATUS_TOOL_ID, SKILL_TRUST_TOOL_ID, SKILL_VERIFY_TOOL_ID,
 };
 pub use store::{STORE_EXPORT_TOOL_ID, STORE_STATUS_TOOL_ID, StoreTools};
 pub use tool::{ToolHandler, ToolInput, ToolOutput};
