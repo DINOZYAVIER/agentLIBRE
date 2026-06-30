@@ -92,6 +92,7 @@ fn command_help_exits_successfully_for_public_commands() {
         &["cron", "delete", "--help"][..],
         &["store", "--help"][..],
         &["store", "status", "--help"][..],
+        &["store", "migrate", "--help"][..],
         &["store", "export", "--help"][..],
         &["memory", "--help"][..],
         &["memory", "add", "--help"][..],
@@ -594,6 +595,39 @@ fn store_commands_report_status_and_export_jsonl() {
 }
 
 #[test]
+fn store_status_does_not_create_database_before_explicit_migrate() {
+    let home = TempHome::new("store-explicit-migrate");
+    let home_arg = home.path_string();
+    let database_path = home.path().join("data/store/agentlibre.sqlite3");
+
+    let status = run_agl(&["--home", &home_arg, "store", "status"]);
+    assert_success(&status);
+    let status_stdout = stdout(&status);
+    assert_contains(&status_stdout, "store.schema_version=none");
+    assert_contains(&status_stdout, "store.database_exists=false");
+    assert_contains(&status_stdout, "store.migration_required=true");
+    assert_contains(&status_stdout, "next_step=agl store migrate");
+    assert!(
+        !database_path.exists(),
+        "store status should not create {}",
+        database_path.display()
+    );
+
+    let out_path = home.path().join("memory-export.jsonl");
+    let out_arg = out_path.display().to_string();
+    let export = run_agl(&[
+        "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
+    ]);
+    assert_failure(&export);
+    assert_contains(&stderr(&export), "run store.migrate first");
+
+    let migrate = run_agl(&["--home", &home_arg, "store", "migrate"]);
+    assert_success(&migrate);
+    assert_contains(&stdout(&migrate), "store.migrated=true");
+    assert!(database_path.exists());
+}
+
+#[test]
 fn run_help_describes_trusted_workspace_skills() {
     let output = run_agl(&["run", "--help"]);
 
@@ -613,6 +647,10 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "install-hooks");
+    assert!(
+        !stdout.contains("import-profile"),
+        "script-only import-profile command should stay hidden:\n{stdout}"
+    );
 }
 
 #[test]
@@ -628,7 +666,7 @@ fn status_without_workspace_manifest_points_to_init() {
 }
 
 #[test]
-fn logging_init_failure_warns_without_panicking() {
+fn batch_logging_init_failure_is_quiet_without_panicking() {
     let repo = TempRepo::new("bad-log-directory");
     let home = TempHome::new("bad-log-directory");
     let state_dir = home.path().join("state");
@@ -649,11 +687,13 @@ fn logging_init_failure_warns_without_panicking() {
     assert_contains(&stdout, "state=invalid");
     assert_contains(&stdout, "error=workspace_manifest_missing");
     let stderr = stderr(&output);
-    assert_contains(&stderr, "warning: failed to initialize logging");
-    assert_contains(&stderr, "failed to create log directory");
     assert!(
         !stderr.contains("panicked at"),
         "logging fallback should not panic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("warning: failed to initialize logging"),
+        "batch commands should not print noisy logging warnings:\n{stderr}"
     );
 }
 
@@ -751,6 +791,34 @@ fn repo_export_profile_writes_portable_policy_manifest() {
 }
 
 #[test]
+fn repo_import_profile_hidden_command_applies_explicit_profile() {
+    let repo = TempRepo::new("import-profile");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+    let out = repo.path().join("repo-workflow.toml");
+    let out_arg = out.display().to_string();
+    let export = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
+    assert_success(&export);
+
+    let import = run_agl_in(
+        repo.path(),
+        &[
+            "repo",
+            "import-profile",
+            "--profile-file",
+            &out_arg,
+            "--dry-run",
+        ],
+    );
+
+    assert_success(&import);
+    let stdout = stdout(&import);
+    assert_contains(&stdout, "state=initialized");
+    assert_contains(&stdout, "dry_run=true");
+    assert_contains(&stdout, "change path=.agl/workspace.toml action=exists");
+}
+
+#[test]
 fn init_then_status_reports_missing_skills_submodule_warning() {
     let repo = TempRepo::new("status-after-init");
     let init = run_agl_in(repo.path(), &["init"]);
@@ -794,6 +862,48 @@ fn skill_list_reports_workspace_candidates_without_trusting_plain_dir() {
     assert_contains(&stdout, "valid=true");
     assert_contains(&stdout, "usable=false");
     assert_contains(&stdout, "component_not_usable");
+}
+
+#[test]
+fn skill_list_supports_source_trusted_only_and_limit_filters() {
+    let repo = TempRepo::new("skill-list-filters");
+    let init = run_agl_in(repo.path(), &["init"]);
+    assert_success(&init);
+    write_workspace_skill(repo.path(), "repo-change");
+
+    let builtins = run_agl_in(
+        repo.path(),
+        &[
+            "skill",
+            "list",
+            "--source",
+            "builtin",
+            "--trusted-only",
+            "--limit",
+            "1",
+        ],
+    );
+
+    assert_success(&builtins);
+    let builtins_stdout = stdout(&builtins);
+    assert_contains(&builtins_stdout, "source=builtin");
+    assert!(
+        !builtins_stdout.contains("skill name=repo-change"),
+        "builtin-only list should not include workspace skills:\n{builtins_stdout}"
+    );
+    assert!(
+        !builtins_stdout.contains("component_not_usable"),
+        "builtin-only list should not print workspace warnings:\n{builtins_stdout}"
+    );
+
+    let workspace = run_agl_in(repo.path(), &["skill", "list", "--source", "workspace"]);
+    assert_success(&workspace);
+    let workspace_stdout = stdout(&workspace);
+    assert_contains(&workspace_stdout, "skill name=repo-change");
+    assert!(
+        !workspace_stdout.contains("source=builtin"),
+        "workspace-only list should not include builtin skills:\n{workspace_stdout}"
+    );
 }
 
 #[test]
