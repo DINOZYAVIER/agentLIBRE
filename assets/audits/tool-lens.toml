@@ -271,6 +271,15 @@ visible_in_read_only = false
 policy_owner = "agl-tools/matrix"
 
 [[tools]]
+id = "matrix.outbox.deliver"
+provider = "matrix-delivery-tools"
+capability = "write"
+operation_kind = "execute"
+state_effects = ["matrix_outbox"]
+visible_in_read_only = false
+policy_owner = "agl-matrix-bridge/outbox_delivery"
+
+[[tools]]
 id = "store.status"
 provider = "store-tools"
 capability = "read"
@@ -449,13 +458,6 @@ operation_kind = "approve"
 state_effects = ["store_permission_grants"]
 visible_in_read_only = false
 policy_owner = "agl-tools/permissions"
-
-[[missing_tools]]
-id = "matrix.outbox.deliver"
-domain = "matrix"
-operation_kind = "execute"
-target_task = "AGL-095b"
-reason = "Deliver queued Matrix notifications through daemon-owned execution."
 
 [[skills]]
 id = "change"

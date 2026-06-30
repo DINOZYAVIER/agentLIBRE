@@ -221,6 +221,8 @@ dependencies = [
  "aes-gcm",
  "agl-client",
  "agl-protocol",
+ "agl-store",
+ "agl-tools",
  "anyhow",
  "base64",
  "clap",

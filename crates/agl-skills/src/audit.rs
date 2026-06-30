@@ -14,6 +14,7 @@ const TOOL_LENS_AUDIT: &str = include_str!("../../../assets/audits/tool-lens.tom
 struct ToolLensAudit {
     version: u32,
     tools: Vec<AuditTool>,
+    #[serde(default)]
     missing_tools: Vec<MissingTool>,
     skills: Vec<AuditSkill>,
 }
@@ -336,6 +337,7 @@ fn builtin_tool_catalog() -> ToolCatalog {
     agl_tools::cron::register(&mut catalog).unwrap();
     agl_tools::fs::register(&mut catalog).unwrap();
     agl_tools::matrix::register(&mut catalog).unwrap();
+    agl_tools::matrix_delivery::register(&mut catalog).unwrap();
     agl_tools::memory::register(&mut catalog).unwrap();
     agl_tools::notes::register(&mut catalog).unwrap();
     agl_tools::permissions::register(&mut catalog).unwrap();

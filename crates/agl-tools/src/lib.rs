@@ -4,6 +4,7 @@ pub mod guards;
 mod hook;
 mod ids;
 pub mod matrix;
+pub mod matrix_delivery;
 pub mod memory;
 pub mod notes;
 pub mod permissions;
@@ -25,6 +26,7 @@ pub use hook::{
 };
 pub use ids::{HookId, IdKind, SkillId, ToolId, ToolProviderId, ToolProviderIdError};
 pub use matrix::{MATRIX_OUTBOX_ENQUEUE_TOOL_ID, MATRIX_OUTBOX_STATUS_TOOL_ID, MatrixTools};
+pub use matrix_delivery::MATRIX_OUTBOX_DELIVER_TOOL_ID;
 pub use memory::{
     MEMORY_ADD_TOOL_ID, MEMORY_APPROVE_TOOL_ID, MEMORY_LIST_TOOL_ID, MEMORY_REJECT_TOOL_ID,
     MEMORY_SEARCH_TOOL_ID, MEMORY_SUGGEST_TOOL_ID, MemoryTools,

@@ -10,6 +10,7 @@ pub mod client;
 pub mod command;
 pub mod config;
 pub mod handler;
+pub mod outbox_delivery;
 #[cfg(unix)]
 pub mod runtime;
 pub mod state;
@@ -31,10 +32,15 @@ pub use handler::{
     BridgeEventHandler, BridgeInboundEvent, BridgeOutboundAction, BridgeProcessedEvents,
     EncryptionState,
 };
+pub use outbox_delivery::{
+    MATRIX_ROOM_NOTIFY_REF_PREFIX, MatrixOutboxDeliveryTools, MatrixOutboxTransport,
+    parse_matrix_room_notify_ref,
+};
 #[cfg(unix)]
 pub use runtime::{
     MatrixDeviceVerificationRequest, MatrixDeviceVerificationResult,
-    MatrixDeviceVerificationStatus, MatrixLoginResult, MatrixPasswordLogin, MatrixRuntime,
+    MatrixDeviceVerificationStatus, MatrixLoginResult, MatrixOutboxDeliveryAction,
+    MatrixOutboxDeliveryReport, MatrixOutboxDeliveryResult, MatrixPasswordLogin, MatrixRuntime,
     MatrixSasEmoji, MatrixSasPresentation, MatrixUserDevice,
 };
 pub use state::BridgeState;
