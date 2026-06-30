@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
