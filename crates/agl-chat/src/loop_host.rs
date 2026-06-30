@@ -78,6 +78,9 @@ impl ChatLoopHost {
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
+        self.session
+            .set_runtime_capability_workspace_root(workspace_root.as_ref())?;
+        self.session.refresh_runtime_context()?;
         let mut tool_runtime = core_tool_runtime(
             &core_tools,
             self.session.store_root(),
@@ -87,8 +90,19 @@ impl ChatLoopHost {
         tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
-        self.session
-            .set_runtime_capability_workspace_root(self.core_tools.root())?;
+        Ok(())
+    }
+
+    pub fn refresh_runtime_context(&mut self) -> Result<()> {
+        self.session.refresh_runtime_context()?;
+        let mut tool_runtime = core_tool_runtime(
+            &self.core_tools,
+            self.session.store_root(),
+            self.core_tools.root(),
+            permission_runtime_status(&self.session),
+        )?;
+        tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
+        self.tool_runtime = tool_runtime;
         Ok(())
     }
 }
@@ -319,7 +333,9 @@ fn permission_runtime_status(
             .iter()
             .map(|tool| tool.name.clone())
             .collect(),
-        dynamic_grants: false,
+        dynamic_grants: true,
+        granted_visible_tools: session.permission_grants().granted_visible_tools(),
+        ignored_grants: session.permission_grants().ignored_grants(),
     }
 }
 

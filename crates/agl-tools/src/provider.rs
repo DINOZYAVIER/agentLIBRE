@@ -276,6 +276,25 @@ pub enum ToolStateEffect {
     StorePermissionGrants,
 }
 
+impl ToolStateEffect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RepoFiles => "repo_files",
+            Self::RepoWorkspace => "repo_workspace",
+            Self::RepoHooks => "repo_hooks",
+            Self::StoreMemoryEntries => "store_memory_entries",
+            Self::StoreMemorySuggestions => "store_memory_suggestions",
+            Self::StoreNotes => "store_notes",
+            Self::StoreNoteLinks => "store_note_links",
+            Self::StoreCron => "store_cron",
+            Self::MatrixOutbox => "matrix_outbox",
+            Self::StoreIdempotency => "store_idempotency",
+            Self::StorePermissionRequests => "store_permission_requests",
+            Self::StorePermissionGrants => "store_permission_grants",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolProviderDeclarationError {
     BlankField { field: &'static str },

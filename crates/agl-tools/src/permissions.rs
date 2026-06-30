@@ -27,6 +27,8 @@ pub struct PermissionRuntimeStatus {
     pub current_mode: String,
     pub visible_tools: Vec<String>,
     pub dynamic_grants: bool,
+    pub granted_visible_tools: Vec<String>,
+    pub ignored_grants: Vec<String>,
 }
 
 impl Default for PermissionRuntimeStatus {
@@ -35,6 +37,8 @@ impl Default for PermissionRuntimeStatus {
             current_mode: "unknown".to_string(),
             visible_tools: Vec::new(),
             dynamic_grants: false,
+            granted_visible_tools: Vec::new(),
+            ignored_grants: Vec::new(),
         }
     }
 }
@@ -68,10 +72,12 @@ impl PermissionTools {
         let pending = store.pending_permission_requests()?;
         let active = store.active_permission_grants()?;
         let mut output = format!(
-            "tool=permissions.status\ncurrent_mode={}\nvisible_tools={}\ndynamic_grants={}\npending_requests={}\nactive_grants={}\ndefault_duration=one_turn",
+            "tool=permissions.status\ncurrent_mode={}\nvisible_tools={}\ndynamic_grants={}\ngranted_visible_tools={}\nignored_grants={}\npending_requests={}\nactive_grants={}\ndefault_duration=one_turn",
             self.runtime_status.current_mode,
             self.runtime_status.visible_tools.join(","),
             self.runtime_status.dynamic_grants,
+            self.runtime_status.granted_visible_tools.join(","),
+            self.runtime_status.ignored_grants.join(","),
             pending.len(),
             active.len()
         );
@@ -429,6 +435,8 @@ mod tests {
                 "permissions.request".to_string(),
             ],
             dynamic_grants: false,
+            granted_visible_tools: Vec::new(),
+            ignored_grants: Vec::new(),
         });
 
         let status = tools
@@ -438,6 +446,8 @@ mod tests {
         assert!(status.contains("current_mode=read-only"));
         assert!(status.contains("visible_tools=fs.read,permissions.status,permissions.request"));
         assert!(status.contains("dynamic_grants=false"));
+        assert!(status.contains("granted_visible_tools="));
+        assert!(status.contains("ignored_grants="));
 
         let _ = std::fs::remove_dir_all(root);
     }

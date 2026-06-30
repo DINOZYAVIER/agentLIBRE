@@ -15,7 +15,7 @@ use agl_runtime::{
 use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
-use agl_store::{AglStore, default_store_root};
+use agl_store::{AglStore, PermissionGrantRecord, default_store_root};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -36,8 +36,13 @@ pub struct InferenceSession {
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
+    permission_grants: RuntimePermissionGrantSnapshot,
     tool_mode: ToolAccessMode,
     store_root: PathBuf,
+    workspace_root: PathBuf,
+    trust_store_path: PathBuf,
+    config_skills: Vec<String>,
+    option_skills: Vec<String>,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -84,20 +89,23 @@ impl InferenceSession {
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let tool_mode = options.tool_mode;
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
-        let skill_context = resolve_skill_context(
-            &config.prompt.skills,
-            &options.skills,
+        let skill_context = resolve_skill_context(SkillContextRequest {
+            config_skills: &config.prompt.skills,
+            option_skills: &options.skills,
             tool_mode,
-            &artifact_root,
-            &run_id,
-            &workspace_root,
-            &trust_store_path,
-        )?;
+            artifact_root: &artifact_root,
+            run_id: &run_id,
+            workspace_root: &workspace_root,
+            trust_store_path: &trust_store_path,
+            store_root: &store_root,
+        })?;
         let runtime_capabilities = build_runtime_capability_context(
             &workspace_root,
             tool_mode,
             &skill_context.visible_tools,
         );
+        let config_skills = config.prompt.skills.clone();
+        let option_skills = options.skills.clone();
         let memory_context = resolve_memory_context(MemoryContextRequest {
             enabled: options.memory,
             config_skills: &config.prompt.skills,
@@ -121,8 +129,13 @@ impl InferenceSession {
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
+            permission_grants: skill_context.permission_grants,
             tool_mode,
             store_root,
+            workspace_root,
+            trust_store_path,
+            config_skills,
+            option_skills,
             run_id,
             config_path,
             artifact_root,
@@ -179,6 +192,10 @@ impl InferenceSession {
         &self.visible_tools
     }
 
+    pub(crate) fn permission_grants(&self) -> &RuntimePermissionGrantSnapshot {
+        &self.permission_grants
+    }
+
     pub fn tool_mode(&self) -> ToolAccessMode {
         self.tool_mode
     }
@@ -211,8 +228,34 @@ impl InferenceSession {
         &mut self,
         workspace_root: &std::path::Path,
     ) -> Result<()> {
+        self.workspace_root = workspace_root.to_path_buf();
         let runtime_capabilities =
             build_runtime_capability_context(workspace_root, self.tool_mode, &self.visible_tools);
+        self.runtime_capability_context = Some(runtime_capabilities.content);
+        self.runtime_capability_evidence = Some(runtime_capabilities.evidence);
+        Ok(())
+    }
+
+    pub(crate) fn refresh_runtime_context(&mut self) -> Result<()> {
+        let skill_context = resolve_skill_context(SkillContextRequest {
+            config_skills: &self.config_skills,
+            option_skills: &self.option_skills,
+            tool_mode: self.tool_mode,
+            artifact_root: &self.artifact_root,
+            run_id: &self.run_id,
+            workspace_root: &self.workspace_root,
+            trust_store_path: &self.trust_store_path,
+            store_root: &self.store_root,
+        })?;
+        self.skill_context = skill_context.context;
+        self.skill_hook_batches = skill_context.hook_batches;
+        self.visible_tools = skill_context.visible_tools;
+        self.permission_grants = skill_context.permission_grants;
+        let runtime_capabilities = build_runtime_capability_context(
+            &self.workspace_root,
+            self.tool_mode,
+            &self.visible_tools,
+        );
         self.runtime_capability_context = Some(runtime_capabilities.content);
         self.runtime_capability_evidence = Some(runtime_capabilities.evidence);
         Ok(())
@@ -357,6 +400,44 @@ pub(crate) struct ResolvedSkillContext {
     context: Option<String>,
     hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
+    permission_grants: RuntimePermissionGrantSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RuntimePermissionGrantSnapshot {
+    admitted: Vec<AdmittedPermissionGrant>,
+    ignored: Vec<IgnoredPermissionGrant>,
+}
+
+impl RuntimePermissionGrantSnapshot {
+    pub(crate) fn granted_visible_tools(&self) -> Vec<String> {
+        self.admitted
+            .iter()
+            .map(|grant| grant.tool_id.clone())
+            .collect()
+    }
+
+    pub(crate) fn ignored_grants(&self) -> Vec<String> {
+        self.ignored
+            .iter()
+            .map(|grant| format!("{}:{}:{}", grant.grant_id, grant.tool_id, grant.reason))
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdmittedPermissionGrant {
+    grant_id: String,
+    tool_id: String,
+    max_operation_kind: String,
+    duration: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IgnoredPermissionGrant {
+    grant_id: String,
+    tool_id: String,
+    reason: String,
 }
 
 struct MemoryContextRequest<'a> {
@@ -368,6 +449,17 @@ struct MemoryContextRequest<'a> {
     artifact_root: &'a std::path::Path,
     run_id: &'a InferenceRunId,
     runtime: &'a AgentLibreRuntimeConfig,
+}
+
+struct SkillContextRequest<'a> {
+    config_skills: &'a [String],
+    option_skills: &'a [String],
+    tool_mode: ToolAccessMode,
+    artifact_root: &'a std::path::Path,
+    run_id: &'a InferenceRunId,
+    workspace_root: &'a std::path::Path,
+    trust_store_path: &'a std::path::Path,
+    store_root: &'a std::path::Path,
 }
 
 fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<String>> {
@@ -446,18 +538,11 @@ fn render_memory_context(entries: &[MemoryEntry]) -> String {
     content
 }
 
-fn resolve_skill_context(
-    config_skills: &[String],
-    option_skills: &[String],
-    tool_mode: ToolAccessMode,
-    artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
-    workspace_root: &std::path::Path,
-    trust_store_path: &std::path::Path,
-) -> Result<ResolvedSkillContext> {
-    let selected_skills = selected_skill_ids(config_skills, option_skills)?;
-    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
-        .context("failed to load skill registry")?;
+fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSkillContext> {
+    let selected_skills = selected_skill_ids(request.config_skills, request.option_skills)?;
+    let skill_registry =
+        trusted_workspace_registry(request.workspace_root, request.trust_store_path)
+            .context("failed to load skill registry")?;
     let mut tool_catalog = ToolCatalog::new();
     agl_tools::guards::register(&mut tool_catalog)
         .context("failed to register builtin core guard provider")?;
@@ -485,15 +570,23 @@ fn resolve_skill_context(
                 .context("failed to build verified skill context")?;
         let hook_batches =
             selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?;
-        write_skill_context_evidence(artifact_root, run_id, &bundle.evidence)?;
+        write_skill_context_evidence(request.artifact_root, request.run_id, &bundle.evidence)?;
         (Some(bundle.content), hook_batches)
     };
-    let visible_tools =
-        selected_skill_visible_tools(&skill_registry, &tool_catalog, &selected_skills, tool_mode)?;
+    let (visible_tools, permission_grants) = selected_skill_visible_tools_with_dynamic_grants(
+        &skill_registry,
+        &tool_catalog,
+        &selected_skills,
+        request.tool_mode,
+        request.store_root,
+        request.workspace_root,
+        request.run_id,
+    )?;
     Ok(ResolvedSkillContext {
         context,
         hook_batches,
         visible_tools,
+        permission_grants,
     })
 }
 
@@ -543,26 +636,79 @@ fn selected_skill_hook_batches(
         .collect())
 }
 
+#[cfg(test)]
 fn selected_skill_visible_tools(
     skill_registry: &agl_skills::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
 ) -> Result<Vec<VisibleTool>> {
+    let (tools, _) = selected_skill_visible_tools_with_grants(
+        skill_registry,
+        tool_catalog,
+        selected_skills,
+        tool_mode,
+        RuntimePermissionGrantSnapshot::default(),
+    )?;
+    Ok(tools)
+}
+
+fn selected_skill_visible_tools_with_dynamic_grants(
+    skill_registry: &agl_skills::SkillRegistry,
+    tool_catalog: &ToolCatalog,
+    selected_skills: &[SkillId],
+    tool_mode: ToolAccessMode,
+    store_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+    run_id: &InferenceRunId,
+) -> Result<(Vec<VisibleTool>, RuntimePermissionGrantSnapshot)> {
+    let grant_snapshot = admit_dynamic_permission_grants(
+        skill_registry,
+        tool_catalog,
+        selected_skills,
+        store_root,
+        workspace_root,
+        run_id,
+    )?;
+    selected_skill_visible_tools_with_grants(
+        skill_registry,
+        tool_catalog,
+        selected_skills,
+        tool_mode,
+        grant_snapshot,
+    )
+}
+
+fn selected_skill_visible_tools_with_grants(
+    skill_registry: &agl_skills::SkillRegistry,
+    tool_catalog: &ToolCatalog,
+    selected_skills: &[SkillId],
+    tool_mode: ToolAccessMode,
+    grant_snapshot: RuntimePermissionGrantSnapshot,
+) -> Result<(Vec<VisibleTool>, RuntimePermissionGrantSnapshot)> {
     let mut tool_ids = core_tool_ids()?;
     for skill_id in selected_skills {
         skill_registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         tool_ids.extend(skill.harness.allowed_tools.iter().cloned());
     }
+    let granted_tool_ids = grant_snapshot
+        .admitted
+        .iter()
+        .map(|grant| ToolId::new(grant.tool_id.clone()))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .context("admitted permission grant tool id is invalid")?;
+    tool_ids.extend(granted_tool_ids.iter().cloned());
 
-    tool_ids
+    let visible_tools = tool_ids
         .into_iter()
         .map(|tool_id| {
             let declaration = tool_catalog
                 .executable_tool(&tool_id)
                 .with_context(|| format!("selected skill requires missing tool `{tool_id}`"))?;
-            if !tool_mode_allows_declaration(tool_mode, declaration) {
+            if !granted_tool_ids.contains(&tool_id)
+                && !tool_mode_allows_declaration(tool_mode, declaration)
+            {
                 return Ok(None);
             }
             let mut visible =
@@ -577,7 +723,138 @@ fn selected_skill_visible_tools(
             Ok(None) => None,
             Err(err) => Some(Err(err)),
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((visible_tools, grant_snapshot))
+}
+
+fn admit_dynamic_permission_grants(
+    skill_registry: &agl_skills::SkillRegistry,
+    tool_catalog: &ToolCatalog,
+    selected_skills: &[SkillId],
+    store_root: &std::path::Path,
+    workspace_root: &std::path::Path,
+    run_id: &InferenceRunId,
+) -> Result<RuntimePermissionGrantSnapshot> {
+    let store = AglStore::open_at(store_root)
+        .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
+    let grants = store.active_permission_grants()?;
+    let policy = selected_skill_grant_policy(skill_registry, selected_skills)?;
+    let mut snapshot = RuntimePermissionGrantSnapshot::default();
+
+    for grant in grants {
+        match evaluate_permission_grant(&grant, tool_catalog, &policy, workspace_root, run_id) {
+            Ok(tool_id) => {
+                if grant.duration != "one_turn" {
+                    snapshot.ignored.push(IgnoredPermissionGrant {
+                        grant_id: grant.id,
+                        tool_id: grant.tool_id,
+                        reason: format!("unsupported_duration_{}", grant.duration),
+                    });
+                    continue;
+                }
+                let admitted = store.admit_permission_grant(&grant.id, run_id.as_str())?;
+                snapshot.admitted.push(AdmittedPermissionGrant {
+                    grant_id: admitted.id,
+                    tool_id: tool_id.as_str().to_string(),
+                    max_operation_kind: admitted.max_operation_kind,
+                    duration: admitted.duration,
+                });
+            }
+            Err(reason) => snapshot.ignored.push(IgnoredPermissionGrant {
+                grant_id: grant.id,
+                tool_id: grant.tool_id,
+                reason,
+            }),
+        }
+    }
+
+    Ok(snapshot)
+}
+
+#[derive(Default)]
+struct SelectedSkillGrantPolicy {
+    selected: BTreeSet<SkillId>,
+    allowed_or_requestable: BTreeMap<SkillId, BTreeSet<ToolId>>,
+    denied_tools: BTreeSet<ToolId>,
+}
+
+fn selected_skill_grant_policy(
+    skill_registry: &agl_skills::SkillRegistry,
+    selected_skills: &[SkillId],
+) -> Result<SelectedSkillGrantPolicy> {
+    let mut policy = SelectedSkillGrantPolicy::default();
+    for skill_id in selected_skills {
+        policy.selected.insert(skill_id.clone());
+        let skill = skill_registry.resolve_for_context_injection(skill_id)?;
+        let mut routed = BTreeSet::new();
+        routed.extend(skill.harness.allowed_tools.iter().cloned());
+        routed.extend(skill.harness.requestable_tools.iter().cloned());
+        policy
+            .denied_tools
+            .extend(skill.harness.denied_tools.iter().cloned());
+        policy
+            .allowed_or_requestable
+            .insert(skill_id.clone(), routed);
+    }
+    Ok(policy)
+}
+
+fn evaluate_permission_grant(
+    grant: &PermissionGrantRecord,
+    tool_catalog: &ToolCatalog,
+    policy: &SelectedSkillGrantPolicy,
+    workspace_root: &std::path::Path,
+    run_id: &InferenceRunId,
+) -> std::result::Result<ToolId, String> {
+    let tool_id = ToolId::new(grant.tool_id.clone()).map_err(|_| "invalid_tool_id".to_string())?;
+    if let Some(workspace) = grant
+        .scope
+        .get("workspace_root")
+        .and_then(|value| value.as_str())
+        && workspace != workspace_root.display().to_string()
+    {
+        return Err("workspace_scope_mismatch".to_string());
+    }
+    if let Some(scoped_run_id) = grant.scope.get("run_id").and_then(|value| value.as_str())
+        && scoped_run_id != run_id.as_str()
+    {
+        return Err("run_scope_mismatch".to_string());
+    }
+    if policy.denied_tools.contains(&tool_id) {
+        return Err("denied_by_selected_skill".to_string());
+    }
+    if let Some(skill) = grant.scope.get("skill_id").and_then(|value| value.as_str()) {
+        let skill_id =
+            SkillId::new(skill.to_string()).map_err(|_| "invalid_skill_scope".to_string())?;
+        if !policy.selected.contains(&skill_id) {
+            return Err("skill_scope_not_selected".to_string());
+        }
+        if !policy
+            .allowed_or_requestable
+            .get(&skill_id)
+            .is_some_and(|tools| tools.contains(&tool_id))
+        {
+            return Err("skill_scope_not_routed".to_string());
+        }
+    }
+    let declaration = tool_catalog
+        .executable_tool(&tool_id)
+        .map_err(|_| "tool_unavailable".to_string())?;
+    let max_operation_kind = agl_tools::ToolOperationKind::parse(&grant.max_operation_kind)
+        .ok_or_else(|| "invalid_operation_kind".to_string())?;
+    if !max_operation_kind.permits(declaration.operation_kind) {
+        return Err("operation_ceiling_denied".to_string());
+    }
+    if !grant.state_effects.is_empty() {
+        let granted_effects = grant.state_effects.iter().collect::<BTreeSet<_>>();
+        for effect in &declaration.state_effects {
+            let effect = effect.as_str().to_string();
+            if !granted_effects.contains(&effect) {
+                return Err("state_effect_denied".to_string());
+            }
+        }
+    }
+    Ok(tool_id)
 }
 
 fn core_tool_ids() -> Result<BTreeSet<ToolId>> {
@@ -1189,6 +1466,120 @@ mod tests {
                 "permissions.status",
             ]
         );
+    }
+
+    #[test]
+    fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
+        let root = temp_store_root("grant-cron");
+        let store = AglStore::open_at(&root).unwrap();
+        let grant = store
+            .create_permission_grant(agl_store::PermissionGrantDraft {
+                request_id: None,
+                tool_id: "cron.add".to_string(),
+                max_operation_kind: "write".to_string(),
+                state_effects: vec!["store_cron".to_string()],
+                scope: serde_json::json!({}),
+                duration: "one_turn".to_string(),
+                granted_by_ref: "test".to_string(),
+            })
+            .unwrap();
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let catalog = full_tool_catalog();
+        let run_id = InferenceRunId::new("manual-grant-test").unwrap();
+
+        let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
+            &skill_registry,
+            &catalog,
+            &[],
+            ToolAccessMode::ReadOnly,
+            &root,
+            std::path::Path::new("/repo"),
+            &run_id,
+        )
+        .unwrap();
+
+        let tool_names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"cron.add"));
+        assert!(!tool_names.contains(&"cron.delete"));
+        assert_eq!(snapshot.granted_visible_tools(), vec!["cron.add"]);
+        assert!(snapshot.ignored_grants().is_empty());
+        assert!(store.active_permission_grants().unwrap().is_empty());
+        let consumed = store.permission_grant(&grant.id).unwrap().unwrap();
+        assert_eq!(consumed.status, agl_store::PermissionGrantStatus::Expired);
+        assert_eq!(
+            consumed.last_admitted_run_id.as_deref(),
+            Some("manual-grant-test")
+        );
+        assert!(consumed.consumed_at.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dynamic_grant_denied_by_selected_skill_is_ignored() {
+        let root = temp_store_root("grant-denied");
+        let store = AglStore::open_at(&root).unwrap();
+        store
+            .create_permission_grant(agl_store::PermissionGrantDraft {
+                request_id: None,
+                tool_id: "notes.delete".to_string(),
+                max_operation_kind: "write".to_string(),
+                state_effects: vec!["store_notes".to_string()],
+                scope: serde_json::json!({}),
+                duration: "one_turn".to_string(),
+                granted_by_ref: "test".to_string(),
+            })
+            .unwrap();
+        let skill_registry = agl_skills::builtin_registry().unwrap();
+        let catalog = full_tool_catalog();
+        let run_id = InferenceRunId::new("manual-denied-test").unwrap();
+
+        let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
+            &skill_registry,
+            &catalog,
+            &[SkillId::new("notes-capture").unwrap()],
+            ToolAccessMode::ReadOnly,
+            &root,
+            std::path::Path::new("/repo"),
+            &run_id,
+        )
+        .unwrap();
+
+        assert!(!tools.iter().any(|tool| tool.name == "notes.delete"));
+        assert!(snapshot.granted_visible_tools().is_empty());
+        assert!(
+            snapshot.ignored_grants()[0].contains("notes.delete:denied_by_selected_skill"),
+            "{:?}",
+            snapshot.ignored_grants()
+        );
+        assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn full_tool_catalog() -> ToolCatalog {
+        let mut catalog = ToolCatalog::new();
+        agl_tools::guards::register(&mut catalog).unwrap();
+        agl_tools::cron::register(&mut catalog).unwrap();
+        agl_tools::fs::register(&mut catalog).unwrap();
+        agl_tools::matrix::register(&mut catalog).unwrap();
+        agl_tools::memory::register(&mut catalog).unwrap();
+        agl_tools::notes::register(&mut catalog).unwrap();
+        agl_tools::permissions::register(&mut catalog).unwrap();
+        agl_tools::repo::register(&mut catalog).unwrap();
+        agl_tools::store::register(&mut catalog).unwrap();
+        catalog
+    }
+
+    fn temp_store_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("agl-chat-{label}-{}-{nanos}", std::process::id()))
     }
 
     #[test]
