@@ -297,6 +297,9 @@ impl ChatService {
         };
         self.messages = turn_messages;
         self.request_index += generated_requests;
+        self.loop_host
+            .refresh_runtime_context()
+            .context("failed to refresh runtime tool context")?;
         Ok(ChatTurnOutput {
             status,
             generated_requests,
