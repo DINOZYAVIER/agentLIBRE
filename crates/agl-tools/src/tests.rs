@@ -297,6 +297,13 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
         &[],
     );
     assert_tool_metadata(
+        STORE_MIGRATE_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Admin,
+        &[ToolStateEffect::StoreSchema],
+    );
+    assert_tool_metadata(
         REPO_STATUS_TOOL_ID,
         &catalog,
         ToolCapability::Read,
@@ -319,6 +326,13 @@ fn builtin_tools_declare_operation_kinds_and_state_effects() {
     );
     assert_tool_metadata(
         REPO_INIT_TOOL_ID,
+        &catalog,
+        ToolCapability::Write,
+        ToolOperationKind::Admin,
+        &[ToolStateEffect::RepoWorkspace],
+    );
+    assert_tool_metadata(
+        REPO_IMPORT_PROFILE_TOOL_ID,
         &catalog,
         ToolCapability::Write,
         ToolOperationKind::Admin,

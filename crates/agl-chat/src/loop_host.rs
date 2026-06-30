@@ -312,6 +312,7 @@ fn core_tool_runtime(
         agl_tools::REPO_EXPORT_PROFILE_TOOL_ID,
         agl_tools::REPO_HOOKS_STATUS_TOOL_ID,
         agl_tools::REPO_INIT_TOOL_ID,
+        agl_tools::REPO_IMPORT_PROFILE_TOOL_ID,
         agl_tools::REPO_INSTALL_HOOKS_TOOL_ID,
     ] {
         runtime
@@ -322,6 +323,7 @@ fn core_tool_runtime(
     for tool_id in [
         agl_tools::STORE_STATUS_TOOL_ID,
         agl_tools::STORE_EXPORT_TOOL_ID,
+        agl_tools::STORE_MIGRATE_TOOL_ID,
     ] {
         runtime
             .register_handler(ToolId::new(tool_id)?, store_tools.clone())
