@@ -1,4 +1,3 @@
-
 use agl_config::{ModelDialect, ToolCallFormat};
 
 use super::*;
