@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agl_store::{AglStore, MatrixNotificationOutboxItem};
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
@@ -18,13 +19,13 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::{OwnedDeviceId, OwnedEventId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId};
 use matrix_sdk::store::RoomLoadSettings;
 use matrix_sdk::{Client, ClientBuilder, Room, SessionMeta, SessionTokens};
 
 use crate::{
     BridgeApp, BridgeConfig, BridgeInboundEvent, BridgeOutboundAction, EncryptionState,
-    LazyDaemonClient, MatrixConfig,
+    LazyDaemonClient, MatrixConfig, parse_matrix_room_notify_ref,
 };
 
 pub struct MatrixRuntime {
@@ -68,6 +69,36 @@ pub struct MatrixUserDevice {
     pub device_id: String,
     pub display_name: Option<String>,
     pub verified: bool,
+}
+
+pub struct MatrixOutboxDeliveryReport {
+    pub queued: usize,
+    pub sent: usize,
+    pub failed: usize,
+    pub truncated: bool,
+    pub items: Vec<MatrixOutboxDeliveryResult>,
+}
+
+pub struct MatrixOutboxDeliveryResult {
+    pub id: String,
+    pub notify_ref: String,
+    pub action: MatrixOutboxDeliveryAction,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatrixOutboxDeliveryAction {
+    Sent,
+    Failed,
+}
+
+impl MatrixOutboxDeliveryAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +321,65 @@ impl MatrixRuntime {
         Ok(devices)
     }
 
+    pub async fn deliver_outbox(
+        config: BridgeConfig,
+        store_root: impl AsRef<Path>,
+        limit: usize,
+    ) -> Result<MatrixOutboxDeliveryReport> {
+        config
+            .validate()
+            .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
+        let session = matrix_session_from_config(&config.matrix)?;
+        let client = build_matrix_client(&config.matrix).await?;
+        client
+            .matrix_auth()
+            .restore_session(session, RoomLoadSettings::default())
+            .await
+            .context("failed to restore Matrix access-token session")?;
+        client
+            .sync_once(SyncSettings::default())
+            .await
+            .context("failed to sync Matrix room state before outbox delivery")?;
+
+        let store = AglStore::open_current_at(store_root.as_ref())?;
+        let limit = limit.max(1);
+        let queued = store.queued_matrix_notifications(limit)?;
+        let truncated = queued.len() >= limit;
+        let mut report = MatrixOutboxDeliveryReport {
+            queued: queued.len(),
+            sent: 0,
+            failed: 0,
+            truncated,
+            items: Vec::with_capacity(queued.len()),
+        };
+        for item in queued {
+            match deliver_matrix_notification(&client, &item).await {
+                Ok(()) => {
+                    let item = store.mark_matrix_notification_sent(&item.id)?;
+                    report.sent += 1;
+                    report.items.push(MatrixOutboxDeliveryResult {
+                        id: item.id,
+                        notify_ref: item.notify_ref,
+                        action: MatrixOutboxDeliveryAction::Sent,
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    let error = err.to_string();
+                    let item = store.mark_matrix_notification_failed(&item.id, &error)?;
+                    report.failed += 1;
+                    report.items.push(MatrixOutboxDeliveryResult {
+                        id: item.id,
+                        notify_ref: item.notify_ref,
+                        action: MatrixOutboxDeliveryAction::Failed,
+                        error: Some(error),
+                    });
+                }
+            }
+        }
+        Ok(report)
+    }
+
     fn register_bridge_handler(&self) {
         let app = Arc::clone(&self.app);
         let socket_path = self.socket_path.clone();
@@ -339,6 +429,23 @@ impl MatrixRuntime {
             },
         );
     }
+}
+
+async fn deliver_matrix_notification(
+    client: &Client,
+    item: &MatrixNotificationOutboxItem,
+) -> Result<()> {
+    let room_id = parse_matrix_room_notify_ref(&item.notify_ref)?;
+    let room_id = OwnedRoomId::try_from(room_id)
+        .with_context(|| format!("invalid Matrix room id in notify_ref {}", item.notify_ref))?;
+    let room = client
+        .get_room(&room_id)
+        .with_context(|| format!("Matrix room {room_id} is not loaded or joined"))?;
+    let content = RoomMessageEventContent::notice_plain(&item.body);
+    room.send(content)
+        .await
+        .with_context(|| format!("failed to send Matrix outbox notification {}", item.id))?;
+    Ok(())
 }
 
 async fn verify_device_with_client<F>(

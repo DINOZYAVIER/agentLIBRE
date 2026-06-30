@@ -6,8 +6,8 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 #[cfg(unix)]
 use agl_matrix_bridge::{
     AgentClient, BridgeApp, BridgeInboundEvent, EncryptionState, LazyDaemonClient,
-    MatrixDeviceVerificationRequest, MatrixPasswordLogin, MatrixRuntime, MatrixSasPresentation,
-    MatrixUserDevice,
+    MatrixDeviceVerificationRequest, MatrixOutboxDeliveryReport, MatrixPasswordLogin,
+    MatrixRuntime, MatrixSasPresentation, MatrixUserDevice,
 };
 use agl_matrix_bridge::{BridgeConfig, BridgeOutboundAction, BridgeState};
 use anyhow::{Context, Result};
@@ -58,6 +58,20 @@ enum Command {
         /// Override daemon Unix socket path.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+    },
+    /// Deliver queued AgentLIBRE Matrix notification outbox rows.
+    DeliverOutbox {
+        /// Matrix bridge config TOML path.
+        #[arg(long, value_name = "PATH")]
+        config: PathBuf,
+
+        /// AgentLIBRE store root containing agentlibre.sqlite3.
+        #[arg(long, value_name = "PATH")]
+        store_root: PathBuf,
+
+        /// Maximum queued notifications to deliver.
+        #[arg(long, default_value_t = 10, value_name = "N")]
+        limit: usize,
     },
     /// Login to Matrix with password credentials from environment and save session.
     LoginPassword {
@@ -183,6 +197,11 @@ async fn run(cli: Cli) -> Result<()> {
         Command::CheckConfig { config } => check_config(config),
         Command::Status { config, socket } => status(config, socket),
         Command::Sync { config, socket } => sync(config, socket).await,
+        Command::DeliverOutbox {
+            config,
+            store_root,
+            limit,
+        } => deliver_outbox(config, store_root, limit).await,
         Command::LoginPassword {
             config,
             username,
@@ -398,6 +417,40 @@ async fn sync(path: PathBuf, socket: Option<PathBuf>) -> Result<()> {
 #[cfg(not(unix))]
 async fn sync(_path: PathBuf, _socket: Option<PathBuf>) -> Result<()> {
     anyhow::bail!("agl-matrix-bridge sync is only available on Unix platforms in this alpha")
+}
+
+#[cfg(unix)]
+async fn deliver_outbox(path: PathBuf, store_root: PathBuf, limit: usize) -> Result<()> {
+    let config = BridgeConfig::load(&path)?;
+    let report = MatrixRuntime::deliver_outbox(config, store_root, limit).await?;
+    print_outbox_delivery_report(&report);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn deliver_outbox(_path: PathBuf, _store_root: PathBuf, _limit: usize) -> Result<()> {
+    anyhow::bail!(
+        "agl-matrix-bridge deliver-outbox is only available on Unix platforms in this alpha"
+    )
+}
+
+#[cfg(unix)]
+fn print_outbox_delivery_report(report: &MatrixOutboxDeliveryReport) {
+    println!("tool=matrix.outbox.deliver");
+    println!("queued={}", report.queued);
+    println!("sent={}", report.sent);
+    println!("failed={}", report.failed);
+    println!("truncated={}", report.truncated);
+    println!("---");
+    for item in &report.items {
+        println!(
+            "notification id={} notify_ref={} action={} error={}",
+            item.id,
+            item.notify_ref,
+            item.action.as_str(),
+            item.error.as_deref().unwrap_or("")
+        );
+    }
 }
 
 #[cfg(unix)]

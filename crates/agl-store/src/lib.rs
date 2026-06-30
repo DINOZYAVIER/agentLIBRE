@@ -774,6 +774,33 @@ impl AglStore {
         })
     }
 
+    pub fn open_current_at(root: impl AsRef<Path>) -> Result<Self> {
+        let status = Self::schema_status_at(root)?;
+        if !status.database_exists {
+            return Err(StoreError::InvalidValue {
+                field: "store",
+                value: status.database_path.display().to_string(),
+                reason: "store database does not exist; run store.migrate first",
+            });
+        }
+        if status.migration_required {
+            return Err(StoreError::InvalidValue {
+                field: "store",
+                value: format!(
+                    "schema_version={:?}, current_schema_version={}",
+                    status.schema_version, status.current_schema_version
+                ),
+                reason: "store schema migration required; run store.migrate first",
+            });
+        }
+        let conn = Connection::open(&status.database_path)?;
+        set_private_file_permissions(&status.database_path)?;
+        Ok(Self {
+            conn,
+            database_path: status.database_path,
+        })
+    }
+
     fn open_for_migration_at(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         let database_path = database_path(root, DEFAULT_DATABASE_FILE)?;
