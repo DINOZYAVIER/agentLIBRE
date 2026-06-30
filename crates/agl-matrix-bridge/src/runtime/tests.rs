@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn matrix_config(device_id: Option<&str>) -> MatrixConfig {
