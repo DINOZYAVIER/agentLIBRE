@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreMigration {
@@ -233,6 +233,15 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ON permission_grants(status, updated_at);
             CREATE INDEX permission_grants_tool_idx
                 ON permission_grants(tool_id, status);
+        "#,
+    },
+    StoreMigration {
+        version: 9,
+        name: "009_permission_grant_admission_lifecycle",
+        sql: r#"
+            ALTER TABLE permission_grants ADD COLUMN admitted_at TEXT;
+            ALTER TABLE permission_grants ADD COLUMN last_admitted_run_id TEXT;
+            ALTER TABLE permission_grants ADD COLUMN consumed_at TEXT;
         "#,
     },
 ];
@@ -657,6 +666,9 @@ pub struct PermissionGrantRecord {
     pub updated_at: String,
     pub revoked_at: Option<String>,
     pub revoke_ref: Option<String>,
+    pub admitted_at: Option<String>,
+    pub last_admitted_run_id: Option<String>,
+    pub consumed_at: Option<String>,
 }
 
 impl AglStore {
@@ -1242,7 +1254,7 @@ impl AglStore {
         validate_non_blank(id, "permission_grants.id")?;
         self.conn
             .query_row(
-                "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+                "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
                  FROM permission_grants
                  WHERE id = ?1",
                 params![id],
@@ -1254,7 +1266,7 @@ impl AglStore {
 
     pub fn active_permission_grants(&self) -> Result<Vec<PermissionGrantRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
              FROM permission_grants
              WHERE status = 'active'
              ORDER BY updated_at ASC, id ASC",
@@ -1279,6 +1291,30 @@ impl AglStore {
              SET status = 'revoked', updated_at = ?2, revoked_at = ?2, revoke_ref = ?3
              WHERE id = ?1",
             params![grant_id, now, revoke_ref],
+        )?;
+        self.permission_grant(grant_id)?
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("permission grant {grant_id}"),
+            })
+    }
+
+    pub fn admit_permission_grant(
+        &self,
+        grant_id: &str,
+        run_id: &str,
+    ) -> Result<PermissionGrantRecord> {
+        validate_non_blank(grant_id, "permission_grants.id")?;
+        validate_non_blank(run_id, "permission_grants.last_admitted_run_id")?;
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE permission_grants
+             SET status = 'expired',
+                 updated_at = ?2,
+                 admitted_at = COALESCE(admitted_at, ?2),
+                 last_admitted_run_id = ?3,
+                 consumed_at = ?2
+             WHERE id = ?1 AND status = 'active'",
+            params![grant_id, now, run_id],
         )?;
         self.permission_grant(grant_id)?
             .ok_or_else(|| StoreError::NotFound {
@@ -1659,11 +1695,11 @@ impl AglStore {
         let mut count = write_jsonl_rows(&mut writer, requests)?;
 
         let grant_sql = if include_deleted {
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
              FROM permission_grants
              ORDER BY updated_at ASC, id ASC"
         } else {
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
              FROM permission_grants
              WHERE status = 'active'
              ORDER BY updated_at ASC, id ASC"
@@ -1686,6 +1722,9 @@ impl AglStore {
                 "updated_at": row.get::<_, String>(10)?,
                 "revoked_at": row.get::<_, Option<String>>(11)?,
                 "revoke_ref": row.get::<_, Option<String>>(12)?,
+                "admitted_at": row.get::<_, Option<String>>(13)?,
+                "last_admitted_run_id": row.get::<_, Option<String>>(14)?,
+                "consumed_at": row.get::<_, Option<String>>(15)?,
             }))
         })?;
         count += write_jsonl_rows(&mut writer, grants)?;
@@ -1828,6 +1867,9 @@ fn permission_grant_from_row(
             updated_at: row.get(10)?,
             revoked_at: row.get(11)?,
             revoke_ref: row.get(12)?,
+            admitted_at: row.get(13)?,
+            last_admitted_run_id: row.get(14)?,
+            consumed_at: row.get(15)?,
         })
     })())
 }
