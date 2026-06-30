@@ -41,6 +41,7 @@ pub(crate) enum ConfigCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StoreCommand {
     Status(StoreStatusOptions),
+    Migrate(StoreMigrateOptions),
     Export(StoreExportCliOptions),
 }
 
@@ -60,6 +61,7 @@ pub(crate) enum CronCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RepoCommand {
     Init(RepoInitOptions),
+    ImportProfile(RepoImportProfileOptions),
     Status(RepoStatusOptions),
     InstallHooks(RepoHooksOptions),
     ExportProfile(RepoExportProfileOptions),
@@ -130,8 +132,26 @@ pub(crate) struct RepoExportProfileOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoImportProfileOptions {
+    pub(crate) profile_file: PathBuf,
+    pub(crate) dry_run: bool,
+    pub(crate) force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SkillListOptions {
     pub(crate) json: bool,
+    pub(crate) source: SkillListSourceArg,
+    pub(crate) trusted_only: bool,
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum SkillListSourceArg {
+    All,
+    Builtin,
+    Workspace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,6 +347,11 @@ pub(crate) enum StoreDomainArg {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoreStatusOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreMigrateOptions {
     pub(crate) json: bool,
 }
 
@@ -624,6 +649,8 @@ enum ConfigCommands {
 enum StoreCommands {
     /// Report local store health.
     Status(StoreStatusArgs),
+    /// Run local store migrations.
+    Migrate(StoreMigrateArgs),
     /// Export one store domain as JSONL records.
     Export(StoreExportArgs),
 }
@@ -655,6 +682,9 @@ enum CronCommands {
 enum RepoCommands {
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
+    /// Apply an explicit workspace profile file.
+    #[command(hide = true)]
+    ImportProfile(RepoImportProfileArgs),
     /// Report repo-local AgentLIBRE workspace status.
     Status(RepoStatusArgs),
     /// Install AgentLIBRE git hooks for this repository.
@@ -749,6 +779,21 @@ struct RepoInitArgs {
 }
 
 #[derive(Debug, Args)]
+struct RepoImportProfileArgs {
+    /// Local workspace profile manifest to apply.
+    #[arg(long, value_name = "PATH")]
+    profile_file: PathBuf,
+
+    /// Print planned changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Repair or replace AgentLIBRE-managed files.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
 struct RepoStatusArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -791,6 +836,13 @@ struct RepoExportProfileArgs {
 
 #[derive(Debug, Args)]
 struct StoreStatusArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct StoreMigrateArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -968,6 +1020,18 @@ struct CronDeleteArgs {
 
 #[derive(Debug, Args)]
 struct SkillListArgs {
+    /// Skills to list.
+    #[arg(long, value_enum, default_value_t = SkillListSourceArg::All)]
+    source: SkillListSourceArg,
+
+    /// Only list skills currently usable by the runtime trust policy.
+    #[arg(long)]
+    trusted_only: bool,
+
+    /// Maximum number of skills to print.
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
@@ -1496,6 +1560,9 @@ impl Cli {
             }
             Some(Commands::Repo { command }) => CliCommand::Repo(match command {
                 RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)),
+                RepoCommands::ImportProfile(args) => {
+                    RepoCommand::ImportProfile(repo_import_profile_options(args))
+                }
                 RepoCommands::Status(args) => RepoCommand::Status(repo_status_options(args)),
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
@@ -1557,9 +1624,20 @@ fn repo_export_profile_options(args: RepoExportProfileArgs) -> RepoExportProfile
     }
 }
 
+fn repo_import_profile_options(args: RepoImportProfileArgs) -> RepoImportProfileOptions {
+    RepoImportProfileOptions {
+        profile_file: args.profile_file,
+        dry_run: args.dry_run,
+        force: args.force,
+    }
+}
+
 fn store_command(command: StoreCommands) -> StoreCommand {
     match command {
         StoreCommands::Status(args) => StoreCommand::Status(StoreStatusOptions { json: args.json }),
+        StoreCommands::Migrate(args) => {
+            StoreCommand::Migrate(StoreMigrateOptions { json: args.json })
+        }
         StoreCommands::Export(args) => StoreCommand::Export(StoreExportCliOptions {
             domain: args.domain,
             out: args.out,
@@ -1837,7 +1915,12 @@ fn notes_command(command: NotesCommands) -> Result<NotesCommand> {
 
 fn skill_command(command: SkillCommands) -> SkillCommand {
     match command {
-        SkillCommands::List(args) => SkillCommand::List(SkillListOptions { json: args.json }),
+        SkillCommands::List(args) => SkillCommand::List(SkillListOptions {
+            json: args.json,
+            source: args.source,
+            trusted_only: args.trusted_only,
+            limit: args.limit,
+        }),
         SkillCommands::Inspect(args) => SkillCommand::Inspect(SkillInspectOptions {
             name: args.name,
             json: args.json,
@@ -2350,6 +2433,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_repo_import_profile_hidden_command() {
+        let command = parse_command([
+            "agl",
+            "repo",
+            "import-profile",
+            "--profile-file",
+            "repo-workflow.toml",
+            "--dry-run",
+            "--force",
+        ]);
+
+        assert_eq!(
+            command,
+            CliCommand::Repo(RepoCommand::ImportProfile(RepoImportProfileOptions {
+                profile_file: PathBuf::from("repo-workflow.toml"),
+                dry_run: true,
+                force: true,
+            }))
+        );
+    }
+
+    #[test]
     fn parse_install_hooks_command() {
         let command = parse_command(["agl", "install-hooks", "--dry-run"]);
 
@@ -2365,8 +2470,23 @@ mod tests {
     #[test]
     fn parse_skill_commands() {
         assert_eq!(
-            parse_command(["agl", "skill", "list", "--json"]),
-            CliCommand::Skill(SkillCommand::List(SkillListOptions { json: true }))
+            parse_command([
+                "agl",
+                "skill",
+                "list",
+                "--json",
+                "--source",
+                "builtin",
+                "--trusted-only",
+                "--limit",
+                "5",
+            ]),
+            CliCommand::Skill(SkillCommand::List(SkillListOptions {
+                json: true,
+                source: SkillListSourceArg::Builtin,
+                trusted_only: true,
+                limit: Some(5),
+            }))
         );
         assert_eq!(
             parse_command(["agl", "skill", "inspect", "repo-change", "--json"]),
@@ -2695,6 +2815,10 @@ mod tests {
         assert_eq!(
             parse_command(["agl", "store", "status", "--json"]),
             CliCommand::Store(StoreCommand::Status(StoreStatusOptions { json: true }))
+        );
+        assert_eq!(
+            parse_command(["agl", "store", "migrate", "--json"]),
+            CliCommand::Store(StoreCommand::Migrate(StoreMigrateOptions { json: true }))
         );
         assert_eq!(
             parse_command([

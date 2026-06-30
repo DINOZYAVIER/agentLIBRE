@@ -44,7 +44,8 @@ use agl_skills::{
 };
 use agl_store::{
     AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft, StoreDomain,
-    StoreExportOptions as AglStoreExportOptions, StoreStatus,
+    StoreExportOptions as AglStoreExportOptions, StoreSchemaStatus, StoreStatus,
+    default_store_root,
 };
 use anyhow::{Context, Result, bail};
 
@@ -61,11 +62,11 @@ use args::{
     MemoryShowOptions, MemorySuggestOptions, MemorySuggestionStatusArg, NotesAddOptions,
     NotesCommand, NotesDeleteOptions, NotesLinkOptions, NotesListOptions, NotesRememberOptions,
     NotesSearchOptions, NotesShowOptions, NotesUpdateOptions, RepoCommand,
-    RepoExportProfileOptions, RepoHooksOptions, RepoInitOptions, RepoStatusOptions, RunOptions,
-    ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions, SkillLockOptions,
-    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, StoreCommand,
-    StoreDomainArg, StoreExportCliOptions, StoreStatusOptions, parse_cli, print_completion,
-    print_usage,
+    RepoExportProfileOptions, RepoHooksOptions, RepoImportProfileOptions, RepoInitOptions,
+    RepoStatusOptions, RunOptions, ServeOptions, SkillCommand, SkillInspectOptions,
+    SkillListOptions, SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
+    SkillTrustOptions, SkillVerifyOptions, StoreCommand, StoreDomainArg, StoreExportCliOptions,
+    StoreMigrateOptions, StoreStatusOptions, parse_cli, print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -102,14 +103,13 @@ pub fn run_cli() {
             process::exit(1);
         }
     };
-    let _tracing_guards = match init_tracing(
-        &runtime.paths,
-        &runtime.logging,
-        process_mode_for_command(&command),
-    ) {
+    let process_mode = process_mode_for_command(&command);
+    let _tracing_guards = match init_tracing(&runtime.paths, &runtime.logging, process_mode) {
         Ok(guards) => Some(guards),
         Err(err) => {
-            eprintln!("warning: failed to initialize logging: {err:#}");
+            if matches!(process_mode, AgentLibreProcessMode::Interactive) {
+                eprintln!("warning: failed to initialize logging: {err:#}");
+            }
             None
         }
     };
@@ -210,15 +210,26 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
 
 fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "store", "starting command");
-    let store = AglStore::open_default(&runtime.paths).context("failed to open store")?;
+    let store_root = default_store_root(&runtime.paths);
 
     match command {
-        StoreCommand::Status(options) => run_store_status(options, &store),
-        StoreCommand::Export(options) => run_store_export(options, &store),
+        StoreCommand::Status(options) => run_store_status(options, &store_root),
+        StoreCommand::Migrate(options) => run_store_migrate(options, &store_root),
+        StoreCommand::Export(options) => run_store_export(options, &store_root),
     }
 }
 
-fn run_store_status(options: StoreStatusOptions, store: &AglStore) -> Result<()> {
+fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -> Result<()> {
+    let schema = AglStore::schema_status_at(store_root).context("failed to read store schema")?;
+    if schema.migration_required {
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&schema)?);
+        } else {
+            print_store_schema_status(&schema);
+        }
+        return Ok(());
+    }
+    let store = AglStore::open_current_read_only_at(store_root).context("failed to open store")?;
     let status = store.status().context("failed to read store status")?;
     if options.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -228,8 +239,36 @@ fn run_store_status(options: StoreStatusOptions, store: &AglStore) -> Result<()>
     Ok(())
 }
 
-fn run_store_export(options: StoreExportCliOptions, store: &AglStore) -> Result<()> {
+fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
+    let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("store.migrated=true");
+        println!("store.path={}", report.database_path.display());
+        println!(
+            "store.schema_version.before={}",
+            report.before_schema_version
+        );
+        println!("store.schema_version.after={}", report.after_schema_version);
+        println!(
+            "store.migrations.applied={}",
+            report.applied_migrations.len()
+        );
+        for migration in report.applied_migrations {
+            println!(
+                "store.migration version={} name={}",
+                migration.version, migration.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path) -> Result<()> {
     let domain = store_domain(options.domain);
+    let store =
+        AglStore::open_current_read_only_at(store_root).context("failed to open current store")?;
     if let Some(parent) = options
         .out
         .parent()
@@ -349,6 +388,7 @@ fn run_memory(command: MemoryCommand, runtime: &AgentLibreRuntimeConfig) -> Resu
 fn run_repo(command: RepoCommand) -> Result<()> {
     match command {
         RepoCommand::Init(options) => run_repo_init(options),
+        RepoCommand::ImportProfile(options) => run_repo_import_profile(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
         RepoCommand::ExportProfile(options) => run_repo_export_profile(options),
@@ -1183,6 +1223,21 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
     Ok(())
 }
 
+fn run_repo_import_profile(options: RepoImportProfileOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo import-profile", "starting command");
+    let report = init_repo_workspace(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglRepoInitOptions {
+            profile: agl_repo::DEFAULT_PROFILE.to_string(),
+            profile_file: Some(options.profile_file),
+            dry_run: options.dry_run,
+            force: options.force,
+        },
+    )?;
+    print_repo_init_report(&report);
+    Ok(())
+}
+
 fn run_repo_status(options: RepoStatusOptions) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "status", "starting command");
     let report = status_repo_workspace(
@@ -1240,28 +1295,50 @@ fn run_repo_export_profile(options: RepoExportProfileOptions) -> Result<()> {
 
 fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "skill list", "starting command");
+    const DEFAULT_SKILL_LIST_LIMIT: usize = 100;
+    const MAX_SKILL_LIST_LIMIT: usize = 100;
+
     let registry = builtin_registry()?;
     let workspace = workspace_skill_report_with_trust(
         std::env::current_dir().context("failed to resolve current directory")?,
         skill_trust_store_path(runtime),
     )?;
+    let limit = options
+        .limit
+        .unwrap_or(DEFAULT_SKILL_LIST_LIMIT)
+        .min(MAX_SKILL_LIST_LIMIT);
+    let workspace_overrides = workspace
+        .skills
+        .iter()
+        .filter_map(|skill| {
+            skill
+                .overrides_builtin
+                .then(|| skill.name.clone())
+                .flatten()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let include_builtin = matches!(
+        options.source,
+        SkillListSourceArg::All | SkillListSourceArg::Builtin
+    );
+    let include_workspace = matches!(
+        options.source,
+        SkillListSourceArg::All | SkillListSourceArg::Workspace
+    );
+    let mut emitted = 0usize;
 
     if options.json {
-        let workspace_overrides = workspace
-            .skills
-            .iter()
-            .filter_map(|skill| {
-                skill
-                    .overrides_builtin
-                    .then(|| skill.name.clone())
-                    .flatten()
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        let builtins = registry
-            .skills()
-            .iter()
-            .map(|skill| {
-                serde_json::json!({
+        let mut builtins = Vec::new();
+        if include_builtin {
+            for skill in registry.skills() {
+                if emitted >= limit {
+                    break;
+                }
+                if options.trusted_only && !skill.permits_context_injection() {
+                    continue;
+                }
+                emitted += 1;
+                builtins.push(serde_json::json!({
                     "name": skill.harness.name,
                     "source": skill.harness.source.as_str(),
                     "pack": skill.harness.pack,
@@ -1270,54 +1347,95 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                     "usable": skill.permits_context_injection(),
                     "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
                     "permissions": skill.harness.permissions,
-                })
-            })
-            .collect::<Vec<_>>();
+                }));
+            }
+        }
+        let mut workspace_skills = Vec::new();
+        if include_workspace {
+            for skill in &workspace.skills {
+                if emitted >= limit {
+                    break;
+                }
+                if options.trusted_only && !skill.usable {
+                    continue;
+                }
+                emitted += 1;
+                workspace_skills.push(skill);
+            }
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "source": skill_list_source_as_str(options.source),
+                "trusted_only": options.trusted_only,
+                "limit": limit,
                 "builtins": builtins,
-                "workspace": workspace,
+                "workspace": {
+                    "state": workspace.state,
+                    "workspace_root": workspace.workspace_root,
+                    "component": workspace.component,
+                    "lock_path": workspace.lock_path,
+                    "skills": workspace_skills,
+                    "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
+                    "errors": if include_workspace { workspace.errors } else { Vec::new() },
+                    "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
+                },
             }))?
         );
     } else {
-        let workspace_overrides = workspace
-            .skills
-            .iter()
-            .filter_map(|skill| {
-                skill
-                    .overrides_builtin
-                    .then(|| skill.name.clone())
-                    .flatten()
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        for skill in registry.skills() {
-            println!(
-                "skill name={} source={} pack={} trust={:?} usable={} overridden_by_workspace={}",
-                skill.harness.name,
-                skill.harness.source.as_str(),
-                skill.harness.pack,
-                skill.trust,
-                skill.permits_context_injection(),
-                workspace_overrides.contains(&skill.harness.name)
-            );
-            print_skill_permissions(
-                &format!("skill.{}", skill.harness.name),
-                &skill.harness.permissions,
-            );
+        if include_builtin {
+            for skill in registry.skills() {
+                if emitted >= limit {
+                    break;
+                }
+                if options.trusted_only && !skill.permits_context_injection() {
+                    continue;
+                }
+                emitted += 1;
+                println!(
+                    "skill name={} source={} pack={} trust={:?} usable={} overridden_by_workspace={}",
+                    skill.harness.name,
+                    skill.harness.source.as_str(),
+                    skill.harness.pack,
+                    skill.trust,
+                    skill.permits_context_injection(),
+                    workspace_overrides.contains(&skill.harness.name)
+                );
+                print_skill_permissions(
+                    &format!("skill.{}", skill.harness.name),
+                    &skill.harness.permissions,
+                );
+            }
         }
-        for skill in &workspace.skills {
-            print_workspace_skill_status(skill);
-        }
-        for warning in &workspace.warnings {
-            println!("warning={warning}");
-        }
-        for error in &workspace.errors {
-            println!("error={error}");
+        if include_workspace {
+            for skill in &workspace.skills {
+                if emitted >= limit {
+                    break;
+                }
+                if options.trusted_only && !skill.usable {
+                    continue;
+                }
+                emitted += 1;
+                print_workspace_skill_status(skill);
+            }
+            for warning in &workspace.warnings {
+                println!("warning={warning}");
+            }
+            for error in &workspace.errors {
+                println!("error={error}");
+            }
         }
     }
 
     Ok(())
+}
+
+fn skill_list_source_as_str(source: SkillListSourceArg) -> &'static str {
+    match source {
+        SkillListSourceArg::All => "all",
+        SkillListSourceArg::Builtin => "builtin",
+        SkillListSourceArg::Workspace => "workspace",
+    }
 }
 
 fn run_skill_inspect(
@@ -1896,6 +2014,9 @@ fn print_skill_permissions(prefix: &str, permissions: &SkillPermissions) {
 fn print_store_status(status: &StoreStatus) {
     println!("store.path={}", status.database_path.display());
     println!("store.schema_version={}", status.schema_version);
+    println!("store.current_schema_version={}", status.schema_version);
+    println!("store.database_exists=true");
+    println!("store.migration_required=false");
     for domain in &status.domains {
         println!(
             "store.domain.{}={} total_rows={} active_rows={}",
@@ -1927,6 +2048,35 @@ fn print_store_status(status: &StoreStatus) {
             "store.idempotency.stale.{index}.updated_at={}",
             record.updated_at
         );
+    }
+}
+
+fn print_store_schema_status(status: &StoreSchemaStatus) {
+    println!("store.path={}", status.database_path.display());
+    println!(
+        "store.schema_version={}",
+        status
+            .schema_version
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "store.current_schema_version={}",
+        status.current_schema_version
+    );
+    println!("store.database_exists={}", status.database_exists);
+    println!("store.migration_required={}", status.migration_required);
+    println!(
+        "store.applied_migrations={}",
+        status
+            .applied_migrations
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    if status.migration_required {
+        println!("next_step=agl store migrate");
     }
 }
 
