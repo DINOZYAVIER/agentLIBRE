@@ -1059,6 +1059,8 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
         .context("failed to register builtin permission tool provider")?;
     agl_tools::repo::register(&mut catalog)
         .context("failed to register builtin repo tool provider")?;
+    agl_tools::skills::register(&mut catalog)
+        .context("failed to register builtin skill tool provider")?;
     agl_tools::store::register(&mut catalog)
         .context("failed to register builtin store tool provider")?;
     for hook in &harness.required_hooks {

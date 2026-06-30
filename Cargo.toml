@@ -8,6 +8,7 @@ members = [
     "crates/agl-daemon",
     "crates/agl-tools",
     "crates/agl-hooks",
+    "crates/agl-host-tools",
     "crates/agl-inference",
     "crates/agl-loop",
     "crates/agl-memory",
@@ -45,6 +46,7 @@ agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-tools = { path = "crates/agl-tools" }
 agl-hooks = { path = "crates/agl-hooks" }
+agl-host-tools = { path = "crates/agl-host-tools" }
 agl-inference = { path = "crates/agl-inference" }
 agl-loop = { path = "crates/agl-loop" }
 agl-memory = { path = "crates/agl-memory" }

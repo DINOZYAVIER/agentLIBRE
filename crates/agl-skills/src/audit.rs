@@ -340,6 +340,7 @@ fn builtin_tool_catalog() -> ToolCatalog {
     agl_tools::notes::register(&mut catalog).unwrap();
     agl_tools::permissions::register(&mut catalog).unwrap();
     agl_tools::repo::register(&mut catalog).unwrap();
+    agl_tools::skills::register(&mut catalog).unwrap();
     agl_tools::store::register(&mut catalog).unwrap();
     catalog
 }

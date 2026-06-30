@@ -31,6 +31,7 @@ impl ChatLoopHost {
         let mut tool_runtime = core_tool_runtime(
             &core_tools,
             session.store_root(),
+            session.trust_store_path(),
             workspace_root.as_ref(),
             permission_runtime_status(&session),
         )?;
@@ -84,6 +85,7 @@ impl ChatLoopHost {
         let mut tool_runtime = core_tool_runtime(
             &core_tools,
             self.session.store_root(),
+            self.session.trust_store_path(),
             workspace_root.as_ref(),
             permission_runtime_status(&self.session),
         )?;
@@ -98,6 +100,7 @@ impl ChatLoopHost {
         let mut tool_runtime = core_tool_runtime(
             &self.core_tools,
             self.session.store_root(),
+            self.session.trust_store_path(),
             self.core_tools.root(),
             permission_runtime_status(&self.session),
         )?;
@@ -191,6 +194,7 @@ fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
 fn core_tool_runtime(
     core_tools: &agl_tools::CoreTools,
     store_root: &Path,
+    trust_store_path: &Path,
     workspace_root: &Path,
     permission_status: agl_tools::PermissionRuntimeStatus,
 ) -> Result<ToolRuntime> {
@@ -216,6 +220,9 @@ fn core_tool_runtime(
     runtime
         .register_provider(agl_tools::repo::declaration())
         .context("failed to register builtin repo tool provider")?;
+    runtime
+        .register_provider(agl_tools::skills::declaration())
+        .context("failed to register builtin skill tool provider")?;
     runtime
         .register_provider(agl_tools::store::declaration())
         .context("failed to register builtin store tool provider")?;
@@ -319,6 +326,24 @@ fn core_tool_runtime(
         runtime
             .register_handler(ToolId::new(tool_id)?, store_tools.clone())
             .with_context(|| format!("failed to register builtin store tool handler {tool_id}"))?;
+    }
+    let skill_tools = agl_host_tools::SkillTools::new(
+        workspace_root,
+        trust_store_path,
+        env!("CARGO_PKG_VERSION"),
+    );
+    for tool_id in [
+        agl_tools::SKILL_LIST_TOOL_ID,
+        agl_tools::SKILL_INSPECT_TOOL_ID,
+        agl_tools::SKILL_STATUS_TOOL_ID,
+        agl_tools::SKILL_VERIFY_TOOL_ID,
+        agl_tools::SKILL_LOCK_TOOL_ID,
+        agl_tools::SKILL_TRUST_TOOL_ID,
+        agl_tools::SKILL_REVOKE_TOOL_ID,
+    ] {
+        runtime
+            .register_handler(ToolId::new(tool_id)?, skill_tools.clone())
+            .with_context(|| format!("failed to register builtin skill tool handler {tool_id}"))?;
     }
     Ok(runtime)
 }

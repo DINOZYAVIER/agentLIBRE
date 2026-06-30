@@ -9,6 +9,7 @@ repository.workspace = true
 agl-assets.workspace = true
 agl-config.workspace = true
 agl-events.workspace = true
+agl-host-tools.workspace = true
 agl-inference.workspace = true
 agl-loop.workspace = true
 agl-memory.workspace = true
