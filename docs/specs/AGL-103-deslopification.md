@@ -28,6 +28,14 @@ Implemented slices:
 8. `agl-store/src/tests.rs`: store tests.
 9. `agl-cli/src/memory.rs`: memory command handling and output.
 10. `agl-cli/src/notes.rs`: notes command handling and output.
+11. `agl-repo/src/tests.rs`: repo workspace tests.
+12. `agl-repo/src/types.rs`: repo public option/report/manifest/profile/component/hook DTOs.
+13. `agl-repo/src/hooks.rs`: repo hook planning, rendering, and installation.
+14. `agl-chat/src/session/tests.rs`: chat session tests.
+15. `agl-skills/src/workspace/tests.rs`: workspace skill tests.
+16. `agl-cron/src/tests.rs`: cron tests.
+17. `agl-matrix-bridge/src/runtime/tests.rs`: Matrix runtime tests.
+18. `agl-memory/src/tests.rs`: memory tests.
 
 ## Refactor Inventory
 
@@ -175,8 +183,8 @@ Implemented slices:
 
 ## Current Wave Plan
 
-1. `agl-repo`: split tests out of `lib.rs`.
-2. `agl-repo`: split public types out of `lib.rs`.
-3. `agl-repo`: split hook planning/installing into `hooks.rs`.
-4. Run focused `agl-repo` tests/clippy after every slice.
-5. Run full workspace checks after the wave.
+1. Continue `agl-chat/src/session.rs`: split capability rendering into `session/capabilities.rs`.
+2. Continue `agl-cli/src/args.rs`: split validators and completion facade.
+3. Continue `agl-skills/src/workspace.rs`: split trust store and lockfile helpers.
+4. Continue `agl-store/src/lib.rs`: split path/export/idempotency helpers.
+5. Run focused tests/clippy after every slice and full workspace checks before closing the wave.
