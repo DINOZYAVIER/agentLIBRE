@@ -274,6 +274,7 @@ pub enum ToolStateEffect {
     StoreIdempotency,
     StorePermissionRequests,
     StorePermissionGrants,
+    SkillTrust,
 }
 
 impl ToolStateEffect {
@@ -291,6 +292,7 @@ impl ToolStateEffect {
             Self::StoreIdempotency => "store_idempotency",
             Self::StorePermissionRequests => "store_permission_requests",
             Self::StorePermissionGrants => "store_permission_grants",
+            Self::SkillTrust => "skill_trust",
         }
     }
 }

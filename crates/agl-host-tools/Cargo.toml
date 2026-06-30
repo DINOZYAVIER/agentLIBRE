@@ -1,0 +1,13 @@
+[package]
+name = "agl-host-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-skills.workspace = true
+agl-tools.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

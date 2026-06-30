@@ -247,20 +247,7 @@ fn render_tools(tools: &[ToolId]) -> String {
 }
 
 fn state_effect_as_str(effect: agl_tools::ToolStateEffect) -> &'static str {
-    match effect {
-        agl_tools::ToolStateEffect::RepoFiles => "repo_files",
-        agl_tools::ToolStateEffect::RepoWorkspace => "repo_workspace",
-        agl_tools::ToolStateEffect::RepoHooks => "repo_hooks",
-        agl_tools::ToolStateEffect::StoreMemoryEntries => "store_memory_entries",
-        agl_tools::ToolStateEffect::StoreMemorySuggestions => "store_memory_suggestions",
-        agl_tools::ToolStateEffect::StoreNotes => "store_notes",
-        agl_tools::ToolStateEffect::StoreNoteLinks => "store_note_links",
-        agl_tools::ToolStateEffect::StoreCron => "store_cron",
-        agl_tools::ToolStateEffect::MatrixOutbox => "matrix_outbox",
-        agl_tools::ToolStateEffect::StoreIdempotency => "store_idempotency",
-        agl_tools::ToolStateEffect::StorePermissionRequests => "store_permission_requests",
-        agl_tools::ToolStateEffect::StorePermissionGrants => "store_permission_grants",
-    }
+    effect.as_str()
 }
 
 fn previous_char_boundary(value: &str, mut index: usize) -> usize {
