@@ -1330,12 +1330,10 @@ fn parse_json_cell<T: for<'de> Deserialize<'de>>(value: String) -> rusqlite::Res
 }
 
 fn validate_migration_sequence(versions: &[u32]) -> Result<()> {
-    let mut expected = 1;
-    for version in versions {
-        if *version != expected {
+    for (expected, version) in (1_u32..).zip(versions.iter().copied()) {
+        if version != expected {
             return Err(StoreError::MigrationGap { missing: expected });
         }
-        expected += 1;
     }
     Ok(())
 }
