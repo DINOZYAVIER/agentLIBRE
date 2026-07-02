@@ -55,6 +55,28 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 PY
 }
 
+request_tool_context() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    request = json.load(handle)
+
+messages = request.get("messages")
+if messages is None:
+    messages = request.get("rendered", {}).get("messages", [])
+
+for message in messages:
+    content = message.get("content", "")
+    if "<agentlibre_tool_context>" in content:
+        print(content, end="")
+        break
+else:
+    raise SystemExit("missing agentlibre_tool_context")
+PY
+}
+
 latest_response_file() {
   local run_dir="$1"
   shopt -s nullglob
@@ -94,7 +116,7 @@ After the tool observation, do not call another tool. Answer with exactly: skill
     --artifact-root "$run_root" \
     --run-id "$run_id" \
     --workspace-root "$workspace" \
-    --skill core:tool-smoke \
+    --skill tool-smoke \
     --max-output-tokens "$max_output_tokens" \
     --prompt "$prompt" \
     >"$stdout_path"
@@ -105,10 +127,12 @@ events="$run_dir/agent-events.jsonl"
 skill_context="$run_dir/skill-context.json"
 request_1="$run_dir/attempts/attempt-0001/request.json"
 response_1="$run_dir/attempts/attempt-0001/response.json"
+tool_context="$artifact_root/tool-context-$run_suffix.txt"
+request_tool_context "$request_1" >"$tool_context"
 latest_response="$(latest_response_file "$run_dir")"
 latest_content="$(json_content "$latest_response")"
 
-require_contains "$skill_context" '"skill_id": "core:tool-smoke"'
+require_contains "$skill_context" '"skill_id": "tool-smoke"'
 require_contains "$skill_context" '"fs.read"'
 require_not_contains "$skill_context" '"fs.list"'
 require_not_contains "$skill_context" '"fs.search"'
@@ -117,7 +141,7 @@ require_contains "$request_1" "<agentlibre_tool_context>"
 require_contains "$request_1" "fs.read"
 require_contains "$request_1" "fs.list"
 require_contains "$request_1" "fs.search"
-require_not_contains "$request_1" "fs.edit"
+require_not_contains "$tool_context" "fs.edit"
 require_contains "$response_1" "<tool_call>"
 require_contains "$response_1" "fs.read"
 require_contains "$events" '"kind":"tool.call_started"'
@@ -136,6 +160,7 @@ echo "artifact root: $run_root"
 echo "run dir: $run_dir"
 echo "events: $events"
 echo "skill context: $skill_context"
+echo "tool context: $tool_context"
 echo "first request: $request_1"
 echo "first response: $response_1"
 echo "latest response: $latest_response"
