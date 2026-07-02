@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install native dependencies
-        run: scripts/ci/install-native-ubuntu.sh
+        run: scripts/ci/install-native.sh --target ubuntu-apt
 
       - name: Install Rust
         run: scripts/ci/install-rustup.sh
