@@ -15,10 +15,14 @@ it with:
 Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL...]
 ```
 
-Examples:
+Examples are illustrative, not prescribed. Use the actual tool and model that
+materially assisted the patch; it may be Codex, Opencode, Claude Code, or any
+other coding agent/model.
 
 ```text
 Assisted-by: Codex:gpt-5.5
+Assisted-by: Opencode:MODEL_VERSION
+Assisted-by: Claude-Code:MODEL_VERSION
 Assisted-by: Codex:gpt-5.5 coccinelle sparse
 ```
 

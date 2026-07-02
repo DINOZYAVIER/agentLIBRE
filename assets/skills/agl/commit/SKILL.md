@@ -22,9 +22,12 @@ guarantees:
 Use this skill for commit messages and history hygiene.
 
 Follow repository `AGENTS.md` first. LLM agents must not certify DCO or add
-themselves as co-authors. Use `Assisted-by: Codex:gpt-5` when this agent
-meaningfully helped create a patch. List specialized tools only when they
-materially found, generated, transformed, or validated the patch.
+themselves as co-authors. Use `Assisted-by` with the actual assisting tool and
+model version when an LLM or coding agent meaningfully helped create a patch.
+`Assisted-by: Codex:gpt-5.5`, `Assisted-by: Opencode:MODEL_VERSION`, and
+`Assisted-by: Claude-Code:MODEL_VERSION` are examples, not requirements. List
+specialized tools only when they materially found, generated, transformed, or
+validated the patch.
 
 Keep subject lines imperative and scoped. Keep the body focused on why the
 change exists and what behavior changed. Do not include test logs unless a
