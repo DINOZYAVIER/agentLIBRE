@@ -231,7 +231,7 @@ fn commit_message_guard_rejects_llm_dco_trailers() {
         guards
             .run_hook(input(
                 COMMIT_MESSAGE_VALIDATE_HOOK_ID,
-                json!({"content": "Subject\n\nAssisted-by: Codex:gpt-5"})
+                json!({"content": "Subject\n\nAssisted-by: Codex:gpt-5.5"})
             ))
             .status,
         HookStatus::Pass
