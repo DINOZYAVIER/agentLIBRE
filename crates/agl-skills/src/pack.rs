@@ -131,7 +131,8 @@ mod tests {
 
     #[test]
     fn repo_workflow_pack_contract_is_valid() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packs/agl-skills");
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/repo-workflow-pack");
 
         let pack = validate_skill_pack(&root).unwrap();
 

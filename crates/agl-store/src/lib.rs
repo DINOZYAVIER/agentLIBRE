@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_runtime::AgentLibrePaths;
@@ -9,10 +9,13 @@ use serde_json::json;
 
 mod error;
 mod migrations;
+mod path;
 mod types;
 
 pub use error::{Result, StoreError};
 pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
+use path::{database_path, ensure_private_dir, set_private_file_permissions};
+pub use path::{default_database_path, default_store_root};
 pub use types::*;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
@@ -1207,42 +1210,6 @@ impl AglStore {
     }
 }
 
-pub fn default_store_root(paths: &AgentLibrePaths) -> PathBuf {
-    paths.data_dir.join("store")
-}
-
-pub fn default_database_path(root: impl AsRef<Path>) -> Result<PathBuf> {
-    database_path(root.as_ref(), DEFAULT_DATABASE_FILE)
-}
-
-fn database_path(root: &Path, file_name: &str) -> Result<PathBuf> {
-    validate_database_file_name(file_name)?;
-    Ok(root.join(file_name))
-}
-
-fn validate_database_file_name(file_name: &str) -> Result<()> {
-    let path = Path::new(file_name);
-    if path.as_os_str().is_empty() {
-        return Err(StoreError::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "database file name cannot be empty",
-        });
-    }
-    if path.is_absolute() || path.components().count() != 1 {
-        return Err(StoreError::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "database file name must be a single relative path segment",
-        });
-    }
-    match path.components().next() {
-        Some(Component::Normal(_)) => Ok(()),
-        _ => Err(StoreError::InvalidPath {
-            path: path.to_path_buf(),
-            reason: "database file name must be normal path segment",
-        }),
-    }
-}
-
 fn validate_idempotency_part(value: &str, field: &'static str) -> Result<()> {
     validate_non_blank(value, field)
 }
@@ -1402,34 +1369,6 @@ where
         count += 1;
     }
     Ok(count)
-}
-
-#[cfg(unix)]
-fn ensure_private_dir(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::create_dir_all(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn ensure_private_dir(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
