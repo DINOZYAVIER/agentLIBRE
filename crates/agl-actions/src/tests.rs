@@ -23,6 +23,82 @@ fn parses_valid_qwen_hermes_tool_call() {
 }
 
 #[test]
+fn parses_valid_gemma_tool_call() {
+    assert_eq!(
+        parse_model_action(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#),
+        ModelAction::ToolCall(ToolCall {
+            name: "fs.read".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        })
+    );
+}
+
+#[test]
+fn parses_gemma_scalar_arguments() {
+    assert_eq!(
+        parse_model_action(
+            r#"<|tool_call>call:memory.search{query:<|"|>rust<|"|>,limit:5,exact:false,after:null}<tool_call|>"#
+        ),
+        ModelAction::ToolCall(ToolCall {
+            name: "memory.search".to_string(),
+            arguments: json!({
+                "query": "rust",
+                "limit": 5,
+                "exact": false,
+                "after": null,
+            }),
+        })
+    );
+}
+
+#[test]
+fn classifies_missing_gemma_terminator_without_json_repair() {
+    let action = parse_model_action(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}"#);
+
+    let ModelAction::MalformedToolCall(malformed) = action else {
+        panic!("expected malformed tool call");
+    };
+
+    assert_eq!(
+        malformed.classification,
+        MalformedToolJsonKind::MissingTerminator
+    );
+    assert_eq!(
+        malformed.raw_json,
+        r#"call:fs.read{path:<|"|>README.MD<|"|>}"#
+    );
+    assert_eq!(malformed.repair, None);
+}
+
+#[test]
+fn classifies_invalid_gemma_shape() {
+    let action = parse_model_action(r#"<|tool_call>fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#);
+
+    let ModelAction::MalformedToolCall(malformed) = action else {
+        panic!("expected malformed tool call");
+    };
+
+    assert_eq!(
+        malformed.classification,
+        MalformedToolJsonKind::InvalidShape
+    );
+    assert_eq!(malformed.repair, None);
+}
+
+#[test]
+fn parses_earliest_tool_call_format() {
+    assert_eq!(
+        parse_model_action(
+            r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|> then <tool_call>{"name":"other","arguments":{}}</tool_call>"#
+        ),
+        ModelAction::ToolCall(ToolCall {
+            name: "fs.read".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        })
+    );
+}
+
+#[test]
 fn repairs_quoted_tool_json() {
     let action = parse_model_action(
         r#"<tool_call>"{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.MD\"}}"</tool_call>"#,

@@ -194,6 +194,30 @@ fn renders_gemma_function_call_transcript() {
 }
 
 #[test]
+fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
+    let request = ModelRequest {
+        turn_id: "turn-1".to_string(),
+        request_index: 1,
+        messages: vec![TurnMessage::AssistantToolCall {
+            name: "fs.read".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        }],
+        visible_tools: Vec::new(),
+    };
+    let config = ModelConfig {
+        dialect: ModelDialect::Gemma4,
+        tool_call_format: ToolCallFormat::GemmaFunctionCall,
+    };
+
+    let rendered = render_model_request(&request, &config).unwrap();
+
+    assert_eq!(
+        rendered.messages[0].content,
+        r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#
+    );
+}
+
+#[test]
 fn rejects_gemma_function_call_nested_arguments_explicitly() {
     let request = ModelRequest {
         turn_id: "turn-1".to_string(),

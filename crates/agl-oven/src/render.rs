@@ -158,14 +158,14 @@ fn render_hermes_tool_call(name: &str, arguments: &serde_json::Value) -> Result<
 }
 
 fn render_gemma_function_call(name: &str, arguments: &serde_json::Value) -> Result<String> {
-    ensure_gemma_identifier(name, "tool name")?;
+    ensure_gemma_tool_name(name)?;
     let Some(arguments) = arguments.as_object() else {
         bail!("Gemma function calls require object arguments");
     };
 
     let mut fields = Vec::with_capacity(arguments.len());
     for (key, value) in arguments {
-        ensure_gemma_identifier(key, "argument name")?;
+        ensure_gemma_argument_name(key)?;
         fields.push(format!("{key}:{}", render_gemma_value(value)?));
     }
 
@@ -175,16 +175,34 @@ fn render_gemma_function_call(name: &str, arguments: &serde_json::Value) -> Resu
     ))
 }
 
-fn ensure_gemma_identifier(value: &str, kind: &str) -> Result<()> {
+fn ensure_gemma_tool_name(value: &str) -> Result<()> {
     ensure!(
         !value.is_empty(),
-        "Gemma function-call {kind} cannot be empty"
+        "Gemma function-call tool name cannot be empty"
+    );
+    ensure!(
+        value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        }) && value.matches(':').count() <= 1
+            && !value.starts_with(':')
+            && !value.ends_with(':'),
+        "Gemma function-call tool name contains unsupported characters"
+    );
+    Ok(())
+}
+
+fn ensure_gemma_argument_name(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty(),
+        "Gemma function-call argument name cannot be empty"
     );
     ensure!(
         value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
-        "Gemma function-call {kind} contains unsupported characters"
+        "Gemma function-call argument name contains unsupported characters"
     );
     Ok(())
 }
