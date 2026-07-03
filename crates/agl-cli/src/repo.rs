@@ -63,7 +63,7 @@ fn run_repo_status(options: RepoStatusOptions) -> Result<()> {
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_repo_status_report(&report);
     }
@@ -100,7 +100,7 @@ fn run_repo_export_profile(options: RepoExportProfileOptions) -> Result<()> {
         },
     )?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_repo_export_profile_report(&report);
     }

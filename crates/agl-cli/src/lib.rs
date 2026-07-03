@@ -52,6 +52,11 @@ use notes::run_notes;
 use repo::run_repo;
 use store::run_store;
 
+pub(crate) fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
 pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
         Ok(invocation) => invocation,
@@ -237,7 +242,7 @@ fn run_cron_add(
     let job = cron.add_job(draft).context("failed to add cron job")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
+        crate::print_json(&job)?;
     } else {
         print_cron_job_summary(&job);
     }
@@ -249,7 +254,7 @@ fn run_cron_list(options: CronListOptions, cron: &CronRepository<'_>) -> Result<
         .list_jobs(options.include_deleted)
         .context("failed to list cron jobs")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&jobs)?);
+        crate::print_json(&jobs)?;
     } else {
         print_cron_jobs(&jobs);
     }
@@ -262,7 +267,7 @@ fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<
         .context("failed to read cron job")?
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
+        crate::print_json(&job)?;
     } else {
         print_cron_job_detail(&job);
     }
@@ -274,7 +279,7 @@ fn run_cron_enable(options: CronEnableOptions, cron: &CronRepository<'_>) -> Res
         .set_enabled(&options.id, true)
         .context("failed to enable cron job")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
+        crate::print_json(&job)?;
     } else {
         print_cron_job_summary(&job);
     }
@@ -286,7 +291,7 @@ fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> R
         .set_enabled(&options.id, false)
         .context("failed to disable cron job")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
+        crate::print_json(&job)?;
     } else {
         print_cron_job_summary(&job);
     }
@@ -319,14 +324,11 @@ fn run_cron_run(
     let idempotency = idempotency_report(store, &outcome)?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "job": job,
-                "run": run,
-                "idempotency": idempotency,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "job": job,
+            "run": run,
+            "idempotency": idempotency,
+        }))?;
     } else {
         print_cron_run(&run);
         println!(
@@ -361,13 +363,10 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
         "records_run": false,
     });
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "job": job,
-                "preflight": report,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "job": job,
+            "preflight": report,
+        }))?;
     } else {
         println!("cron.preflight.ok=true");
         println!(
@@ -396,15 +395,12 @@ fn run_cron_tick_command(
     let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
         .context("failed to run cron scheduler tick")?;
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "at": unix_seconds,
-                "due_jobs": report.due_jobs,
-                "recorded_runs": report.recorded_runs,
-                "notifications": report.notifications,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "at": unix_seconds,
+            "due_jobs": report.due_jobs,
+            "recorded_runs": report.recorded_runs,
+            "notifications": report.notifications,
+        }))?;
     } else {
         println!("cron.tick.at={unix_seconds}");
         println!("cron.tick.due_jobs={}", report.due_jobs);
@@ -420,7 +416,7 @@ fn run_cron_history(options: CronHistoryOptions, cron: &CronRepository<'_>) -> R
         .history(&options.id)
         .context("failed to read cron run history")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&runs)?);
+        crate::print_json(&runs)?;
     } else {
         print_cron_runs(&runs);
     }
@@ -432,7 +428,7 @@ fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Res
         .delete_job(&options.id)
         .context("failed to delete cron job")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
+        crate::print_json(&job)?;
     } else {
         println!("cron.deleted=true");
         print_cron_job_summary(&job);
@@ -715,25 +711,22 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                 workspace_skills.push(skill);
             }
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "source": skill_list_source_as_str(options.source),
-                "trusted_only": options.trusted_only,
-                "limit": limit,
-                "builtins": builtins,
-                "workspace": {
-                    "state": workspace.state,
-                    "workspace_root": workspace.workspace_root,
-                    "component": workspace.component,
-                    "lock_path": workspace.lock_path,
-                    "skills": workspace_skills,
-                    "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
-                    "errors": if include_workspace { workspace.errors } else { Vec::new() },
-                    "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
-                },
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "source": skill_list_source_as_str(options.source),
+            "trusted_only": options.trusted_only,
+            "limit": limit,
+            "builtins": builtins,
+            "workspace": {
+                "state": workspace.state,
+                "workspace_root": workspace.workspace_root,
+                "component": workspace.component,
+                "lock_path": workspace.lock_path,
+                "skills": workspace_skills,
+                "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
+                "errors": if include_workspace { workspace.errors } else { Vec::new() },
+                "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
+            },
+        }))?;
     } else {
         if include_builtin {
             for skill in registry.skills() {
@@ -842,14 +835,11 @@ fn run_skill_inspect(
                 })
             })
             .collect::<Vec<_>>();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "name": options.name,
-                "builtins": builtins,
-                "workspace": workspace_skills,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "name": options.name,
+            "builtins": builtins,
+            "workspace": workspace_skills,
+        }))?;
     } else {
         let workspace_overrides = workspace_skills
             .iter()
@@ -893,7 +883,7 @@ fn run_skill_status(options: SkillStatusOptions, runtime: &AgentLibreRuntimeConf
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_workspace_skill_report(&report);
     }
@@ -911,7 +901,7 @@ fn run_skill_verify(options: SkillVerifyOptions) -> Result<()> {
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_workspace_skill_report(&report);
     }
@@ -932,7 +922,7 @@ fn run_skill_lock(options: SkillLockOptions) -> Result<()> {
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_skill_lock_report(&report);
     }
@@ -956,7 +946,7 @@ fn run_skill_trust(options: SkillTrustOptions, runtime: &AgentLibreRuntimeConfig
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_skill_trust_update_report(&report);
     }
@@ -976,7 +966,7 @@ fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConf
     )?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         print_skill_trust_update_report(&report);
     }

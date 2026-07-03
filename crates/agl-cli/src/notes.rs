@@ -31,7 +31,7 @@ fn run_notes_add(options: NotesAddOptions, notes: &NoteRepository<'_>) -> Result
         .add(NoteDraft::new(options.title, options.body))
         .context("failed to add note")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&note)?);
+        crate::print_json(&note)?;
     } else {
         print_note_summary(&note);
     }
@@ -46,7 +46,7 @@ fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Resu
     };
     let entries = notes.list(&query).context("failed to list notes")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::print_json(&entries)?;
     } else {
         print_notes(&entries);
     }
@@ -61,7 +61,7 @@ fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> 
     };
     let entries = notes.search(&query).context("failed to search notes")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::print_json(&entries)?;
     } else {
         print_notes(&entries);
     }
@@ -77,13 +77,10 @@ fn run_notes_show(options: NotesShowOptions, notes: &NoteRepository<'_>) -> Resu
         .links(&options.id)
         .context("failed to read note links")?;
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "note": note,
-                "links": links,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "note": note,
+            "links": links,
+        }))?;
     } else {
         print_note_detail(&note, &links);
     }
@@ -101,7 +98,7 @@ fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> 
         )
         .context("failed to update note")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&note)?);
+        crate::print_json(&note)?;
     } else {
         print_note_summary(&note);
     }
@@ -111,7 +108,7 @@ fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> 
 fn run_notes_delete(options: NotesDeleteOptions, notes: &NoteRepository<'_>) -> Result<()> {
     let note = notes.delete(&options.id).context("failed to delete note")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&note)?);
+        crate::print_json(&note)?;
     } else {
         println!("note.deleted=true");
         print_note_summary(&note);
@@ -124,7 +121,7 @@ fn run_notes_link(options: NotesLinkOptions, notes: &NoteRepository<'_>) -> Resu
         .link(&options.id, &options.target_ref, options.label)
         .context("failed to link note")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&link)?);
+        crate::print_json(&link)?;
     } else {
         print_note_link(&link);
     }
@@ -138,14 +135,11 @@ fn run_notes_remember(options: NotesRememberOptions, notes: &NoteRepository<'_>)
         .context("failed to promote note into memory")?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "note": promotion.note,
-                "memory": promotion.memory,
-                "link": promotion.link,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "note": promotion.note,
+            "memory": promotion.memory,
+            "link": promotion.link,
+        }))?;
     } else {
         println!("note.remembered=true");
         print_note_summary(&promotion.note);

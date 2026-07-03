@@ -27,7 +27,7 @@ fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -
     let schema = AglStore::schema_status_at(store_root).context("failed to read store schema")?;
     if schema.migration_required {
         if options.json {
-            println!("{}", serde_json::to_string_pretty(&schema)?);
+            crate::print_json(&schema)?;
         } else {
             print_store_schema_status(&schema);
         }
@@ -36,7 +36,7 @@ fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -
     let store = AglStore::open_current_read_only_at(store_root).context("failed to open store")?;
     let status = store.status().context("failed to read store status")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
+        crate::print_json(&status)?;
     } else {
         print_store_status(&status);
     }
@@ -46,7 +46,7 @@ fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -
 fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
     let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
     } else {
         println!("store.migrated=true");
         println!("store.path={}", report.database_path.display());
@@ -113,16 +113,13 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
     let record_types = record_type_counts(&options.out)?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "domain": domain.as_str(),
-                "path": options.out,
-                "records": records,
-                "record_types": record_types,
-                "include_deleted": options.include_deleted,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "domain": domain.as_str(),
+            "path": options.out,
+            "records": records,
+            "record_types": record_types,
+            "include_deleted": options.include_deleted,
+        }))?;
     } else {
         println!("store.exported=true");
         println!("store.export.domain={}", domain.as_str());

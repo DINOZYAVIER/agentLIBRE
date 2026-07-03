@@ -45,7 +45,7 @@ fn run_memory_add(options: MemoryAddOptions, memory: &MemoryRepository<'_>) -> R
     let entry = memory.add(draft).context("failed to add memory entry")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entry)?);
+        crate::print_json(&entry)?;
     } else {
         print_memory_entry_summary(&entry);
     }
@@ -62,7 +62,7 @@ fn run_memory_list(options: MemoryListOptions, memory: &MemoryRepository<'_>) ->
         .context("failed to list memory entries")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::print_json(&entries)?;
     } else {
         print_memory_entries(&entries);
     }
@@ -79,7 +79,7 @@ fn run_memory_search(options: MemorySearchOptions, memory: &MemoryRepository<'_>
         .context("failed to search memory entries")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::print_json(&entries)?;
     } else {
         print_memory_entries(&entries);
     }
@@ -93,7 +93,7 @@ fn run_memory_show(options: MemoryShowOptions, memory: &MemoryRepository<'_>) ->
         .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", options.id))?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entry)?);
+        crate::print_json(&entry)?;
     } else {
         print_memory_entry_detail(&entry);
     }
@@ -106,7 +106,7 @@ fn run_memory_delete(options: MemoryDeleteOptions, memory: &MemoryRepository<'_>
         .context("failed to delete memory entry")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&entry)?);
+        crate::print_json(&entry)?;
     } else {
         println!("memory.deleted=true");
         print_memory_entry_summary(&entry);
@@ -129,7 +129,7 @@ fn run_memory_suggest(options: MemorySuggestOptions, memory: &MemoryRepository<'
         .context("failed to create memory suggestion")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&suggestion)?);
+        crate::print_json(&suggestion)?;
     } else {
         print_memory_suggestion_summary(&suggestion);
     }
@@ -158,7 +158,7 @@ fn run_memory_list_suggestions(
         .context("failed to list memory suggestions")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&suggestions)?);
+        crate::print_json(&suggestions)?;
     } else {
         print_memory_suggestions(&suggestions);
     }
@@ -171,13 +171,10 @@ fn run_memory_approve(options: MemoryApproveOptions, memory: &MemoryRepository<'
         .context("failed to approve memory suggestion")?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "suggestion": suggestion,
-                "memory": entry,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "suggestion": suggestion,
+            "memory": entry,
+        }))?;
     } else {
         println!("memory_suggestion.approved=true");
         print_memory_suggestion_summary(&suggestion);
@@ -192,7 +189,7 @@ fn run_memory_reject(options: MemoryRejectOptions, memory: &MemoryRepository<'_>
         .context("failed to reject memory suggestion")?;
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&suggestion)?);
+        crate::print_json(&suggestion)?;
     } else {
         println!("memory_suggestion.rejected=true");
         print_memory_suggestion_summary(&suggestion);
