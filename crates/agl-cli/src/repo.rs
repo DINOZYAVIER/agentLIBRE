@@ -62,11 +62,7 @@ fn run_repo_status(options: RepoStatusOptions) -> Result<()> {
         },
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_repo_status_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || print_repo_status_report(&report))?;
 
     if report.should_fail(options.strict) {
         bail!("repo workspace status is not healthy");
@@ -99,12 +95,9 @@ fn run_repo_export_profile(options: RepoExportProfileOptions) -> Result<()> {
             force: options.force,
         },
     )?;
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_repo_export_profile_report(&report);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &report, || {
+        print_repo_export_profile_report(&report)
+    })
 }
 
 fn print_repo_init_report(report: &RepoInitReport) {

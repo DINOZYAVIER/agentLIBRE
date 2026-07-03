@@ -26,28 +26,16 @@ pub(crate) fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig
 fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -> Result<()> {
     let schema = AglStore::schema_status_at(store_root).context("failed to read store schema")?;
     if schema.migration_required {
-        if options.json {
-            crate::print_json(&schema)?;
-        } else {
-            print_store_schema_status(&schema);
-        }
-        return Ok(());
+        return crate::print_json_or(options.json, &schema, || print_store_schema_status(&schema));
     }
     let store = AglStore::open_current_read_only_at(store_root).context("failed to open store")?;
     let status = store.status().context("failed to read store status")?;
-    if options.json {
-        crate::print_json(&status)?;
-    } else {
-        print_store_status(&status);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &status, || print_store_status(&status))
 }
 
 fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
     let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
+    crate::print_json_or(options.json, &report, || {
         println!("store.migrated=true");
         println!("store.path={}", report.database_path.display());
         println!(
@@ -59,14 +47,13 @@ fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path)
             "store.migrations.applied={}",
             report.applied_migrations.len()
         );
-        for migration in report.applied_migrations {
+        for migration in &report.applied_migrations {
             println!(
                 "store.migration version={} name={}",
                 migration.version, migration.name
             );
         }
-    }
-    Ok(())
+    })
 }
 
 fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path) -> Result<()> {
