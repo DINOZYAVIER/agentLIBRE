@@ -60,61 +60,38 @@ impl CoreGuards {
 }
 
 pub fn declaration() -> ToolProviderDeclaration {
-    ToolProviderDeclaration::new(
+    let mut declaration = ToolProviderDeclaration::new(
         ToolProviderId::new(PROVIDER_ID).expect("core guard provider id is valid"),
         "Core Guards",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("core guard declaration is valid")
-    .with_hook(HookDeclaration {
-        id: HookId::new(JSON_VALIDATE_HOOK_ID).expect("json hook id is valid"),
-        event: HookEvent::ModelResponse,
-        required: false,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(REPO_PATH_VALIDATE_HOOK_ID).expect("repo path hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(TASK_SPEC_VALIDATE_HOOK_ID).expect("task spec hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(SECRET_SCAN_VALIDATE_HOOK_ID).expect("secret scan hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(DIFF_SCOPE_VALIDATE_HOOK_ID).expect("diff scope hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(VERIFICATION_VALIDATE_HOOK_ID).expect("verification hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(COMMIT_MESSAGE_VALIDATE_HOOK_ID).expect("commit message hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(SKILL_MANIFEST_VALIDATE_HOOK_ID).expect("skill manifest hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new(REVIEW_PACK_VALIDATE_HOOK_ID).expect("review pack hook id is valid"),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    })
+    .with_hook(hook(JSON_VALIDATE_HOOK_ID, HookEvent::ModelResponse, false));
+    for id in [
+        REPO_PATH_VALIDATE_HOOK_ID,
+        TASK_SPEC_VALIDATE_HOOK_ID,
+        SECRET_SCAN_VALIDATE_HOOK_ID,
+        DIFF_SCOPE_VALIDATE_HOOK_ID,
+        VERIFICATION_VALIDATE_HOOK_ID,
+        COMMIT_MESSAGE_VALIDATE_HOOK_ID,
+        SKILL_MANIFEST_VALIDATE_HOOK_ID,
+        REVIEW_PACK_VALIDATE_HOOK_ID,
+    ] {
+        declaration = declaration.with_hook(hook(id, HookEvent::ArtifactWrite, true));
+    }
+    declaration
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
+}
+
+fn hook(id: &str, event: HookEvent, required: bool) -> HookDeclaration {
+    HookDeclaration {
+        id: HookId::new(id).expect("core guard hook id is valid"),
+        event,
+        required,
+    }
 }
 
 #[cfg(test)]
