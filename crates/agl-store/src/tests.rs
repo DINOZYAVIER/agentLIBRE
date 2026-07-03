@@ -32,8 +32,6 @@ fn opens_store_at_explicit_root_and_reports_health() {
     assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(status.domains.len(), StoreDomain::all().len());
     assert!(status.domains.iter().all(|domain| domain.total_rows == 0));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -51,8 +49,6 @@ fn explicit_migration_reports_applied_steps_and_schema_status() {
     assert_eq!(report.applied_migrations.len(), STORE_MIGRATIONS.len());
     assert!(after.database_exists);
     assert!(!after.migration_required);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -94,8 +90,6 @@ fn transaction_commits_and_rolls_back() {
         .query_row("SELECT COUNT(*) FROM tx_probe", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 1);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -120,8 +114,6 @@ fn migration_history_gaps_fail_clearly() {
 
     let err = AglStore::open_at(&root).unwrap_err();
     assert!(matches!(err, StoreError::MigrationGap { missing: 2 }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -171,8 +163,6 @@ fn store_status_counts_domain_rows() {
             assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
         }
     }
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -200,8 +190,6 @@ fn status_reports_in_progress_idempotency_without_recovering_it() {
     assert_eq!(status.idempotency.stale_in_progress[0].key, "job-1:unix:60");
     assert_eq!(record.status, IdempotencyStatus::InProgress);
     assert!(record.result_ref.is_none());
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -247,8 +235,6 @@ fn export_memory_jsonl_respects_tombstones() {
     assert!(!active.contains("mem_deleted"));
     assert_eq!(all_count, 2);
     assert!(all.contains("\"id\":\"mem_deleted\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -295,8 +281,6 @@ fn export_memory_jsonl_includes_pending_suggestions() {
     assert!(!active.contains("suggest_rejected"));
     assert_eq!(all_count, 2);
     assert!(all.contains("\"id\":\"suggest_rejected\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -369,8 +353,6 @@ fn export_notes_and_cron_include_related_rows() {
     assert_eq!(cron_count, 2);
     assert!(cron.contains("\"record_type\":\"cron_job\""));
     assert!(cron.contains("\"record_type\":\"cron_run\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -425,8 +407,6 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
     assert_eq!(count, 1);
     assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
     assert!(cron.contains("\"status\":\"sent\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -460,8 +440,6 @@ fn matrix_notification_outbox_page_reports_truncation_only_for_extra_rows() {
     assert!(!exact_truncated);
     assert_eq!(limited_page, vec![first]);
     assert!(limited_truncated);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -523,8 +501,6 @@ fn permission_requests_grants_and_revokes_are_persisted() {
         .unwrap();
     assert_eq!(permissions.total_rows, 3);
     assert_eq!(permissions.active_rows, 1);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -578,8 +554,6 @@ fn permission_export_reports_pending_and_historical_records() {
     assert!(all.contains("\"record_type\":\"permission_request\""));
     assert!(all.contains("\"record_type\":\"permission_grant\""));
     assert!(all.contains("\"status\":\"revoked\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -597,8 +571,6 @@ fn migrations_are_repeatable() {
         second.health().unwrap().migration_version,
         CURRENT_SCHEMA_VERSION
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -654,8 +626,6 @@ fn schema_v1_database_migrates_to_current() {
         .skip_idempotency("cron.run", "job-002:unix:1", Some("no-op"))
         .unwrap();
     assert_eq!(skipped.status, IdempotencyStatus::Skipped);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -687,8 +657,6 @@ fn future_schema_version_is_rejected() {
             supported: CURRENT_SCHEMA_VERSION
         }
     ));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -705,8 +673,6 @@ fn idempotency_replays_same_fingerprint() {
 
     assert!(matches!(first, IdempotencyOutcome::Inserted(_)));
     assert!(matches!(second, IdempotencyOutcome::Replayed(_)));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -722,8 +688,6 @@ fn idempotency_rejects_different_fingerprint() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::IdempotencyConflict { .. }));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -740,8 +704,6 @@ fn complete_idempotency_records_result_ref() {
 
     assert_eq!(record.status, IdempotencyStatus::Completed);
     assert_eq!(record.result_ref.as_deref(), Some("session/turn-001"));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -762,8 +724,6 @@ fn fail_idempotency_records_failed_status() {
     assert_eq!(record.status, IdempotencyStatus::Failed);
     assert_eq!(record.result_ref.as_deref(), Some("error-001"));
     assert!(matches!(replay, IdempotencyOutcome::Replayed(_)));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -780,8 +740,6 @@ fn skip_idempotency_records_skipped_status() {
 
     assert_eq!(record.status, IdempotencyStatus::Skipped);
     assert_eq!(record.result_ref.as_deref(), Some("not-due"));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -791,12 +749,34 @@ fn database_file_rejects_path_traversal() {
     let err = database_path(&root, "../agentlibre.sqlite3").unwrap_err();
 
     assert!(matches!(err, StoreError::InvalidPath { .. }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
-fn temp_root(label: &str) -> PathBuf {
+fn temp_root(label: &str) -> TempRoot {
     let root = std::env::temp_dir().join(format!("agl-store-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    root
+    TempRoot { path: root }
+}
+
+struct TempRoot {
+    path: PathBuf,
+}
+
+impl AsRef<std::path::Path> for TempRoot {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempRoot {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
