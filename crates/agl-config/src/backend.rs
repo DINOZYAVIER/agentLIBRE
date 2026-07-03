@@ -1,7 +1,8 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{ModelConfig, PromptConfig};
 
@@ -10,6 +11,7 @@ pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
 pub const MAX_THREADS: u32 = 1024;
 pub const MAX_BATCH_TOKENS: u32 = 1_048_576;
 pub const MAX_MTP_DRAFT_TOKENS: u32 = 64;
+const MTP_PROBABILITY_SCALE: u32 = 1_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +145,7 @@ pub struct MtpRuntimeConfig {
     pub enabled: bool,
     pub draft_model: Option<PathBuf>,
     pub draft_tokens: u32,
+    pub p_min: MtpProbability,
     pub gpu_layers: Option<u32>,
     pub cache_type_k: Option<KvCacheType>,
     pub cache_type_v: Option<KvCacheType>,
@@ -179,6 +182,84 @@ impl MtpRuntimeConfig {
             );
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MtpProbability(u32);
+
+impl MtpProbability {
+    pub fn from_f32(value: f32) -> Result<Self> {
+        Self::from_f64(f64::from(value)).map_err(anyhow::Error::msg)
+    }
+
+    pub fn as_f32(self) -> f32 {
+        self.0 as f32 / MTP_PROBABILITY_SCALE as f32
+    }
+
+    pub fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    fn from_f64(value: f64) -> std::result::Result<Self, String> {
+        if !value.is_finite() {
+            return Err("runtime.mtp p_min must be finite".to_string());
+        }
+        if !(0.0..=1.0).contains(&value) {
+            return Err("runtime.mtp p_min must be between 0.0 and 1.0".to_string());
+        }
+        Ok(Self(
+            (value * f64::from(MTP_PROBABILITY_SCALE)).round() as u32
+        ))
+    }
+}
+
+impl Serialize for MtpProbability {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f32(self.as_f32())
+    }
+}
+
+impl<'de> Deserialize<'de> for MtpProbability {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(MtpProbabilityVisitor)
+    }
+}
+
+struct MtpProbabilityVisitor;
+
+impl<'de> de::Visitor<'de> for MtpProbabilityVisitor {
+    type Value = MtpProbability;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a probability between 0.0 and 1.0")
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        MtpProbability::from_f64(value).map_err(E::custom)
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_f64(value as f64)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_f64(value as f64)
     }
 }
 
