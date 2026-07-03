@@ -120,36 +120,27 @@ fn migration_history_gaps_fail_clearly() {
 fn store_status_counts_domain_rows() {
     let root = temp_root("domain-status");
     let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_entries
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_entries
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
                  VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
                         ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO notes
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO notes
                  (id, title, body, created_at, updated_at, deleted_at)
                  VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL),
                         ('note_deleted', 'Deleted', 'Body', 'unix:1', 'unix:2', 'unix:3')",
-            [],
-        )
-        .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_jobs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
                  VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL),
                         ('cron_deleted', 'Deleted', 0, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
+    );
 
     let status = store.status().unwrap();
 
@@ -169,15 +160,12 @@ fn store_status_counts_domain_rows() {
 fn status_reports_in_progress_idempotency_without_recovering_it() {
     let root = temp_root("stale-idempotency");
     let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO idempotency_keys
+    execute_fixture(
+        &store,
+        "INSERT INTO idempotency_keys
                  (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
                  VALUES ('cron.run', 'job-1:unix:60', 'sha256:abc', 'in_progress', NULL, 'unix:1', 'unix:2')",
-                [],
-            )
-            .unwrap();
+    );
 
     let status = store.status().unwrap();
     let record = store
@@ -196,16 +184,13 @@ fn status_reports_in_progress_idempotency_without_recovering_it() {
 fn export_memory_jsonl_respects_tombstones() {
     let root = temp_root("export-memory");
     let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_entries
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_entries
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
                  VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
                         ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
+    );
     let mut active = Vec::new();
     let mut all = Vec::new();
 
@@ -229,16 +214,13 @@ fn export_memory_jsonl_respects_tombstones() {
 fn export_memory_jsonl_includes_pending_suggestions() {
     let root = temp_root("export-memory-suggestions");
     let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_suggestions
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_suggestions
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
                  VALUES ('suggest_pending', 'user', 'default', 'decision', 'Pending', 'Body', 'chat:1', 95, 'pending', 'unix:1', 'unix:1', NULL, NULL, NULL),
                         ('suggest_rejected', 'user', 'default', 'fact', 'Rejected', 'Body', 'chat:2', 90, 'rejected', 'unix:1', 'unix:2', 'unix:2', NULL, 'not durable')",
-                [],
-            )
-            .unwrap();
+    );
     let mut active = Vec::new();
     let mut all = Vec::new();
 
@@ -263,42 +245,30 @@ fn export_memory_jsonl_includes_pending_suggestions() {
 fn export_notes_and_cron_include_related_rows() {
     let root = temp_root("export-related");
     let store = AglStore::open_at(&root).unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO notes
+    execute_fixture(
+        &store,
+        "INSERT INTO notes
                  (id, title, body, created_at, updated_at, deleted_at)
                  VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL)",
-            [],
-        )
-        .unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO note_links
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO note_links
                  (id, note_id, target_ref, label, created_at)
                  VALUES ('link_1', 'note_active', 'memory:mem_1', 'remembered', 'unix:2')",
-            [],
-        )
-        .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_jobs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
                  VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL)",
-                [],
-            )
-            .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_runs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_runs
                  (id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error)
                  VALUES ('run_1', 'cron_active', 'unix:2', 'unix:2', 'unix:2', 'succeeded', 'builtin:store-status', NULL)",
-                [],
-            )
-            .unwrap();
+    );
     let mut notes = Vec::new();
     let mut cron = Vec::new();
 
@@ -705,6 +675,10 @@ fn export_options(domain: StoreDomain, include_deleted: bool) -> StoreExportOpti
         domain,
         include_deleted,
     }
+}
+
+fn execute_fixture(store: &AglStore, sql: &str) {
+    store.connection().execute(sql, []).unwrap();
 }
 
 fn temp_root(label: &str) -> TempRoot {
