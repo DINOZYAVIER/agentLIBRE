@@ -76,24 +76,7 @@ impl AglStore {
     }
 
     pub fn open_current_read_only_at(root: impl AsRef<Path>) -> Result<Self> {
-        let status = Self::schema_status_at(root)?;
-        if !status.database_exists {
-            return Err(StoreError::InvalidValue {
-                field: "store",
-                value: status.database_path.display().to_string(),
-                reason: "store database does not exist; run store.migrate first",
-            });
-        }
-        if status.migration_required {
-            return Err(StoreError::InvalidValue {
-                field: "store",
-                value: format!(
-                    "schema_version={:?}, current_schema_version={}",
-                    status.schema_version, status.current_schema_version
-                ),
-                reason: "store schema migration required; run store.migrate first",
-            });
-        }
+        let status = Self::current_schema_status_at(root)?;
         let conn =
             Connection::open_with_flags(&status.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(Self {
@@ -103,6 +86,16 @@ impl AglStore {
     }
 
     pub fn open_current_at(root: impl AsRef<Path>) -> Result<Self> {
+        let status = Self::current_schema_status_at(root)?;
+        let conn = Connection::open(&status.database_path)?;
+        set_private_file_permissions(&status.database_path)?;
+        Ok(Self {
+            conn,
+            database_path: status.database_path,
+        })
+    }
+
+    fn current_schema_status_at(root: impl AsRef<Path>) -> Result<StoreSchemaStatus> {
         let status = Self::schema_status_at(root)?;
         if !status.database_exists {
             return Err(StoreError::InvalidValue {
@@ -121,12 +114,7 @@ impl AglStore {
                 reason: "store schema migration required; run store.migrate first",
             });
         }
-        let conn = Connection::open(&status.database_path)?;
-        set_private_file_permissions(&status.database_path)?;
-        Ok(Self {
-            conn,
-            database_path: status.database_path,
-        })
+        Ok(status)
     }
 
     fn open_for_migration_at(root: impl AsRef<Path>) -> Result<Self> {
