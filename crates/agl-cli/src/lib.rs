@@ -254,24 +254,14 @@ fn run_cron_add(
     draft.input = options.input;
     let job = cron.add_job(draft).context("failed to add cron job")?;
 
-    if options.json {
-        crate::print_json(&job)?;
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_list(options: CronListOptions, cron: &CronRepository<'_>) -> Result<()> {
     let jobs = cron
         .list_jobs(options.include_deleted)
         .context("failed to list cron jobs")?;
-    if options.json {
-        crate::print_json(&jobs)?;
-    } else {
-        print_cron_jobs(&jobs);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &jobs, || print_cron_jobs(&jobs))
 }
 
 fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<()> {
@@ -279,36 +269,21 @@ fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<
         .job(&options.id)
         .context("failed to read cron job")?
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
-    if options.json {
-        crate::print_json(&job)?;
-    } else {
-        print_cron_job_detail(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_detail(&job))
 }
 
 fn run_cron_enable(options: CronEnableOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, true)
         .context("failed to enable cron job")?;
-    if options.json {
-        crate::print_json(&job)?;
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, false)
         .context("failed to disable cron job")?;
-    if options.json {
-        crate::print_json(&job)?;
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_run(
@@ -428,25 +403,17 @@ fn run_cron_history(options: CronHistoryOptions, cron: &CronRepository<'_>) -> R
     let runs = cron
         .history(&options.id)
         .context("failed to read cron run history")?;
-    if options.json {
-        crate::print_json(&runs)?;
-    } else {
-        print_cron_runs(&runs);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &runs, || print_cron_runs(&runs))
 }
 
 fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .delete_job(&options.id)
         .context("failed to delete cron job")?;
-    if options.json {
-        crate::print_json(&job)?;
-    } else {
+    crate::print_json_or(options.json, &job, || {
         println!("cron.deleted=true");
         print_cron_job_summary(&job);
-    }
-    Ok(())
+    })
 }
 
 fn validate_cron_target(target: &CronTargetArg, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
@@ -895,11 +862,9 @@ fn run_skill_status(options: SkillStatusOptions, runtime: &AgentLibreRuntimeConf
         skill_trust_store_path(runtime),
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_workspace_skill_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_workspace_skill_report(&report)
+    })?;
 
     if report.should_fail(options.strict) {
         bail!("workspace skill status is not healthy");
@@ -913,11 +878,9 @@ fn run_skill_verify(options: SkillVerifyOptions) -> Result<()> {
         std::env::current_dir().context("failed to resolve current directory")?,
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_workspace_skill_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_workspace_skill_report(&report)
+    })?;
 
     if report.should_fail(true) {
         bail!("workspace skill verification failed");
@@ -934,11 +897,7 @@ fn run_skill_lock(options: SkillLockOptions) -> Result<()> {
         },
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_skill_lock_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || print_skill_lock_report(&report))?;
 
     if report.has_errors() {
         bail!("workspace skill lock failed");
@@ -958,11 +917,9 @@ fn run_skill_trust(options: SkillTrustOptions, runtime: &AgentLibreRuntimeConfig
         },
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_skill_trust_update_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_skill_trust_update_report(&report)
+    })?;
 
     if report.has_errors() {
         bail!("workspace skill trust failed");
@@ -978,11 +935,9 @@ fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConf
         &options.name,
     )?;
 
-    if options.json {
-        crate::print_json(&report)?;
-    } else {
-        print_skill_trust_update_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_skill_trust_update_report(&report)
+    })?;
 
     if report.has_errors() {
         bail!("workspace skill revoke failed");
