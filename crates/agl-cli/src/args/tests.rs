@@ -10,6 +10,19 @@ fn assert_command(args: impl IntoIterator<Item = &'static str>, expected: CliCom
     assert_eq!(parse_command(args), expected);
 }
 
+fn parse_error(args: impl IntoIterator<Item = &'static str>) -> String {
+    parse_cli(args.into_iter().map(str::to_string))
+        .unwrap_err()
+        .to_string()
+}
+
+fn assert_parse_error_contains(args: impl IntoIterator<Item = &'static str>, needle: &str) {
+    assert!(
+        parse_error(args).contains(needle),
+        "expected parse error to contain {needle:?}"
+    );
+}
+
 #[test]
 fn parse_run_command_with_options() {
     assert_command(
@@ -52,32 +65,22 @@ fn parse_run_command_with_options() {
 
 #[test]
 fn parse_run_rejects_invalid_skill_id() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "run".to_string(),
-        "--skill".to_string(),
-        "Bad Skill".to_string(),
-        "--prompt".to_string(),
-        "hello".to_string(),
-    ])
-    .unwrap_err();
-
-    assert!(error.to_string().contains("--skill is invalid"));
+    assert_parse_error_contains(
+        ["agl", "run", "--skill", "Bad Skill", "--prompt", "hello"],
+        "--skill is invalid",
+    );
 }
 
 #[test]
 fn parse_retired_infer_command_rejects_with_run_guidance() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "infer".to_string(),
-        "--config".to_string(),
-        "local.toml".to_string(),
-        "--prompt".to_string(),
-        "hello".to_string(),
-    ])
-    .unwrap_err();
-
-    let message = error.to_string();
+    let message = parse_error([
+        "agl",
+        "infer",
+        "--config",
+        "local.toml",
+        "--prompt",
+        "hello",
+    ]);
     assert!(message.contains("agl infer"));
     assert!(message.contains("Use `agl run --config PATH PROMPT`"));
 }
@@ -268,8 +271,8 @@ fn parse_install_hooks_command() {
 
 #[test]
 fn parse_skill_commands() {
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "skill",
             "list",
@@ -279,69 +282,69 @@ fn parse_skill_commands() {
             "--trusted-only",
             "--limit",
             "5",
-        ]),
+        ],
         CliCommand::Skill(SkillCommand::List(SkillListOptions {
             json: true,
             source: SkillListSourceArg::Builtin,
             trusted_only: true,
             limit: Some(5),
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "inspect", "repo-change", "--json"]),
+    assert_command(
+        ["agl", "skill", "inspect", "repo-change", "--json"],
         CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
             name: "repo-change".to_string(),
             json: true,
             runtime: false,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "inspect", "repo-change", "--runtime"]),
+    assert_command(
+        ["agl", "skill", "inspect", "repo-change", "--runtime"],
         CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
             name: "repo-change".to_string(),
             json: false,
             runtime: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "status", "--strict"]),
+    assert_command(
+        ["agl", "skill", "status", "--strict"],
         CliCommand::Skill(SkillCommand::Status(SkillStatusOptions {
             json: false,
             strict: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "verify", "--json"]),
-        CliCommand::Skill(SkillCommand::Verify(SkillVerifyOptions { json: true }))
+    assert_command(
+        ["agl", "skill", "verify", "--json"],
+        CliCommand::Skill(SkillCommand::Verify(SkillVerifyOptions { json: true })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "lock", "--dry-run"]),
+    assert_command(
+        ["agl", "skill", "lock", "--dry-run"],
         CliCommand::Skill(SkillCommand::Lock(SkillLockOptions {
             json: false,
             dry_run: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "trust", "repo-change", "--yes"]),
+    assert_command(
+        ["agl", "skill", "trust", "repo-change", "--yes"],
         CliCommand::Skill(SkillCommand::Trust(SkillTrustOptions {
             name: "repo-change".to_string(),
             json: false,
             yes: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "skill", "revoke", "repo-change", "--json"]),
+    assert_command(
+        ["agl", "skill", "revoke", "repo-change", "--json"],
         CliCommand::Skill(SkillCommand::Revoke(SkillRevokeOptions {
             name: "repo-change".to_string(),
             json: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_memory_commands() {
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "memory",
             "add",
@@ -360,7 +363,7 @@ fn parse_memory_commands() {
             "--confidence",
             "90",
             "--json",
-        ]),
+        ],
         CliCommand::Memory(MemoryCommand::Add(MemoryAddOptions {
             scope: MemoryScopeArg::Repo,
             scope_key: Some("/tmp/repo".to_string()),
@@ -370,12 +373,12 @@ fn parse_memory_commands() {
             source_ref: Some("manual".to_string()),
             confidence: 90,
             json: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl", "memory", "search", "--scope", "user", "--limit", "10", "approval",
-        ]),
+        ],
         CliCommand::Memory(MemoryCommand::Search(MemorySearchOptions {
             query: "approval".to_string(),
             scope: MemoryScopeArg::User,
@@ -383,21 +386,21 @@ fn parse_memory_commands() {
             include_deleted: false,
             limit: 10,
             json: false,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "memory", "delete", "mem_1"]),
+    assert_command(
+        ["agl", "memory", "delete", "mem_1"],
         CliCommand::Memory(MemoryCommand::Delete(MemoryDeleteOptions {
             id: "mem_1".to_string(),
             json: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_notes_commands() {
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "notes",
             "add",
@@ -406,15 +409,15 @@ fn parse_notes_commands() {
             "--body",
             "Use pinned skills.",
             "--json",
-        ]),
+        ],
         CliCommand::Notes(NotesCommand::Add(NotesAddOptions {
             title: "Workflow".to_string(),
             body: "Use pinned skills.".to_string(),
             json: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "notes",
             "remember",
@@ -425,17 +428,17 @@ fn parse_notes_commands() {
             "/tmp/repo",
             "--kind",
             "decision",
-        ]),
+        ],
         CliCommand::Notes(NotesCommand::Remember(NotesRememberOptions {
             id: "note_1".to_string(),
             scope: MemoryScopeArg::Repo,
             scope_key: Some("/tmp/repo".to_string()),
             kind: MemoryKindArg::Decision,
             json: false,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "notes",
             "link",
@@ -444,20 +447,20 @@ fn parse_notes_commands() {
             "task:AGL-084",
             "--label",
             "spec",
-        ]),
+        ],
         CliCommand::Notes(NotesCommand::Link(NotesLinkOptions {
             id: "note_1".to_string(),
             target_ref: "task:AGL-084".to_string(),
             label: Some("spec".to_string()),
             json: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_cron_commands() {
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "cron",
             "add",
@@ -470,7 +473,7 @@ fn parse_cron_commands() {
             "--notify",
             "matrix-room:!room",
             "--json",
-        ]),
+        ],
         CliCommand::Cron(CronCommand::Add(CronAddOptions {
             name: "Store status".to_string(),
             schedule: "0 9 * * *".to_string(),
@@ -484,10 +487,10 @@ fn parse_cron_commands() {
             prompt: None,
             input: None,
             json: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "cron",
             "add",
@@ -504,7 +507,7 @@ fn parse_cron_commands() {
             "--disabled",
             "--timezone",
             "UTC-07:00",
-        ]),
+        ],
         CliCommand::Cron(CronCommand::Add(CronAddOptions {
             name: "Repo review".to_string(),
             schedule: "daily 09:00".to_string(),
@@ -518,81 +521,67 @@ fn parse_cron_commands() {
             prompt: Some("Review repository changes.".to_string()),
             input: Some("{\"limit\":10}".to_string()),
             json: false,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command(["agl", "cron", "run", "cron_1", "--now"]),
+    assert_command(
+        ["agl", "cron", "run", "cron_1", "--now"],
         CliCommand::Cron(CronCommand::Run(CronRunOptions {
             id: "cron_1".to_string(),
             now: true,
             preflight: false,
             mock_skill_execution: false,
             json: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_cron_rejects_missing_target_and_run_without_now() {
-    let missing_target = parse_cli([
-        "agl".to_string(),
-        "cron".to_string(),
-        "add".to_string(),
-        "--name".to_string(),
-        "Store status".to_string(),
-        "--schedule".to_string(),
-        "hourly".to_string(),
-    ])
-    .unwrap_err();
-    assert!(
-        missing_target
-            .to_string()
-            .contains("exactly one of --skill or --builtin is required")
+    assert_parse_error_contains(
+        [
+            "agl",
+            "cron",
+            "add",
+            "--name",
+            "Store status",
+            "--schedule",
+            "hourly",
+        ],
+        "exactly one of --skill or --builtin is required",
     );
 
-    let missing_prompt = parse_cli([
-        "agl".to_string(),
-        "cron".to_string(),
-        "add".to_string(),
-        "--name".to_string(),
-        "Repo review".to_string(),
-        "--schedule".to_string(),
-        "hourly".to_string(),
-        "--skill".to_string(),
-        "repo-review".to_string(),
-    ])
-    .unwrap_err();
-    assert!(
-        missing_prompt
-            .to_string()
-            .contains("--prompt is required when --skill is used")
+    assert_parse_error_contains(
+        [
+            "agl",
+            "cron",
+            "add",
+            "--name",
+            "Repo review",
+            "--schedule",
+            "hourly",
+            "--skill",
+            "repo-review",
+        ],
+        "--prompt is required when --skill is used",
     );
 
-    let missing_now = parse_cli([
-        "agl".to_string(),
-        "cron".to_string(),
-        "run".to_string(),
-        "cron_1".to_string(),
-    ])
-    .unwrap_err();
-    assert!(
-        missing_now
-            .to_string()
-            .contains("agl cron run requires --now or --preflight")
+    assert_parse_error_contains(
+        ["agl", "cron", "run", "cron_1"],
+        "agl cron run requires --now or --preflight",
     );
 
-    assert_eq!(
-        parse_command(["agl", "cron", "run", "cron_1", "--preflight", "--json"]),
+    assert_command(
+        ["agl", "cron", "run", "cron_1", "--preflight", "--json"],
         CliCommand::Cron(CronCommand::Run(CronRunOptions {
             id: "cron_1".to_string(),
             now: false,
             preflight: true,
             mock_skill_execution: false,
             json: true,
-        }))
+        })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "cron",
             "tick",
@@ -600,27 +589,27 @@ fn parse_cron_rejects_missing_target_and_run_without_now() {
             "60",
             "--mock-skill-execution",
             "--json",
-        ]),
+        ],
         CliCommand::Cron(CronCommand::Tick(CronTickOptions {
             at: Some(60),
             mock_skill_execution: true,
             json: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_store_commands() {
-    assert_eq!(
-        parse_command(["agl", "store", "status", "--json"]),
-        CliCommand::Store(StoreCommand::Status(StoreStatusOptions { json: true }))
+    assert_command(
+        ["agl", "store", "status", "--json"],
+        CliCommand::Store(StoreCommand::Status(StoreStatusOptions { json: true })),
     );
-    assert_eq!(
-        parse_command(["agl", "store", "migrate", "--json"]),
-        CliCommand::Store(StoreCommand::Migrate(StoreMigrateOptions { json: true }))
+    assert_command(
+        ["agl", "store", "migrate", "--json"],
+        CliCommand::Store(StoreCommand::Migrate(StoreMigrateOptions { json: true })),
     );
-    assert_eq!(
-        parse_command([
+    assert_command(
+        [
             "agl",
             "store",
             "export",
@@ -630,32 +619,22 @@ fn parse_store_commands() {
             "memory.jsonl",
             "--include-deleted",
             "--force",
-        ]),
+        ],
         CliCommand::Store(StoreCommand::Export(StoreExportCliOptions {
             domain: StoreDomainArg::Memory,
             out: PathBuf::from("memory.jsonl"),
             include_deleted: true,
             force: true,
             json: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_memory_rejects_zero_limit() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "memory".to_string(),
-        "list".to_string(),
-        "--limit".to_string(),
-        "0".to_string(),
-    ])
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("--limit must be greater than zero")
+    assert_parse_error_contains(
+        ["agl", "memory", "list", "--limit", "0"],
+        "--limit must be greater than zero",
     );
 }
 
@@ -682,9 +661,7 @@ fn parse_bare_prompt_as_run() {
 
 #[test]
 fn parse_rejects_blank_bare_prompt() {
-    let error = parse_cli(["agl".to_string(), "   ".to_string()]).unwrap_err();
-
-    assert!(error.to_string().contains("prompt cannot be empty"));
+    assert_parse_error_contains(["agl", "   "], "prompt cannot be empty");
 }
 
 #[test]
@@ -725,33 +702,21 @@ fn parse_chat_session_options() {
 
 #[test]
 fn parse_chat_rejects_new_session_with_session_id() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "chat".to_string(),
-        "--new-session".to_string(),
-        "--session-id".to_string(),
-        "session-001".to_string(),
-    ])
-    .unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("--new-session cannot be used with --session-id")
+    assert_parse_error_contains(
+        [
+            "agl",
+            "chat",
+            "--new-session",
+            "--session-id",
+            "session-001",
+        ],
+        "--new-session cannot be used with --session-id",
     );
 }
 
 #[test]
 fn parse_chat_rejects_prompt() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "chat".to_string(),
-        "--prompt".to_string(),
-        "hello".to_string(),
-    ])
-    .unwrap_err();
-
-    assert!(error.to_string().contains("unexpected argument"));
+    assert_parse_error_contains(["agl", "chat", "--prompt", "hello"], "unexpected argument");
 }
 
 #[test]
@@ -780,15 +745,7 @@ fn parse_config_init_force_command() {
 
 #[test]
 fn parse_config_paths_rejects_force() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "config".to_string(),
-        "paths".to_string(),
-        "--force".to_string(),
-    ])
-    .unwrap_err();
-
-    assert!(error.to_string().contains("unexpected argument"));
+    assert_parse_error_contains(["agl", "config", "paths", "--force"], "unexpected argument");
 }
 
 #[test]
@@ -801,31 +758,26 @@ fn parse_completion_command() {
 
 #[test]
 fn parse_reserved_setup_rejects_before_bare_prompt() {
-    let error = parse_cli(["agl".to_string(), "setup".to_string()]).unwrap_err();
-
-    assert!(error.to_string().contains("planned but not implemented"));
+    assert_parse_error_contains(["agl", "setup"], "planned but not implemented");
 }
 
 #[test]
 fn parse_reserved_doctor_rejects_before_bare_prompt() {
-    let error = parse_cli(["agl".to_string(), "doctor".to_string()]).unwrap_err();
-
-    assert!(error.to_string().contains("planned but not implemented"));
+    assert_parse_error_contains(["agl", "doctor"], "planned but not implemented");
 }
 
 #[test]
 fn parse_reserved_model_rejects_subcommand_before_bare_prompt() {
-    let error = parse_cli([
-        "agl".to_string(),
-        "model".to_string(),
-        "pull".to_string(),
-        "owner/repo/model.gguf".to_string(),
-        "--set-default".to_string(),
-    ])
-    .unwrap_err();
+    let message = parse_error([
+        "agl",
+        "model",
+        "pull",
+        "owner/repo/model.gguf",
+        "--set-default",
+    ]);
 
-    assert!(error.to_string().contains("agl model pull"));
-    assert!(error.to_string().contains("planned but not implemented"));
+    assert!(message.contains("agl model pull"));
+    assert!(message.contains("planned but not implemented"));
 }
 
 #[test]
