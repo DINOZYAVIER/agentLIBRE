@@ -52,6 +52,33 @@ The 256k q4_0 estimate still leaves too little VRAM once the 6.24 GiB model
 and compute buffers are included. It should not be launched as a fully offloaded
 desktop GPU smoke.
 
+## 2026-07-03 Smoke Result
+
+The updated 12B profile was smoke-tested with:
+
+- `context_tokens = 131072`
+- `cache_type_k = "q4_0"`
+- `cache_type_v = "q4_0"`
+- `flash_attention = "on"`
+- `runtime.mtp.enabled = false`
+
+Artifact path:
+`/tmp/agl-gemma4-context-bench/inference-runs/gemma4-12b-128k-q4-no-mtp-smoke`
+
+Observed runtime values:
+
+- `n_ctx = 131072`
+- `llama_context: flash_attn = enabled`
+- model file: `6.24 GiB`
+- KV cache: `576 MiB + 11520 MiB = 12096 MiB`
+- compute buffer: `264.50 MiB` GPU and `136.81 MiB` host
+- selected device: `Vulkan0`
+- duration: `5720 ms`
+- wall time: `5.92s`
+- max RSS: `6780960 KiB`
+
+This makes 12B/128k/q4_0 the current verified high-context GPU profile.
+
 ## Acceptance Criteria
 
 1. Gemma4 profile updates use `32768` as the minimum normal context.
