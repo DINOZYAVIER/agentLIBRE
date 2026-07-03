@@ -143,13 +143,6 @@ impl LlamaCppRuntime {
         &mut self,
         rendered: &RenderedModelRequest,
     ) -> Result<LlamaCppRuntimeOutput> {
-        if self.config().runtime.mtp.enabled {
-            return Err(runtime_error(
-                "llama.cpp in-process MTP is configured but the MTP decoder bridge is not implemented; set [runtime.mtp].enabled = false until the AGL-112 MTP bridge lands".to_string(),
-                mtp_runtime_gate_log(self.config()),
-            ));
-        }
-
         match &mut self.inner {
             LlamaCppRuntimeInner::Native(runtime) => runtime.generate(rendered),
             #[cfg(test)]
@@ -511,14 +504,6 @@ fn runtime_log_header(config: &LocalInferenceConfig, supports_gpu_offload: bool)
         log.push_str(&system_info);
         log.push('\n');
     }
-    log
-}
-
-fn mtp_runtime_gate_log(config: &LocalInferenceConfig) -> String {
-    let mut log = String::new();
-    log.push_str("backend = llama_cpp\n");
-    append_mtp_config_log(&mut log, &config.runtime.mtp);
-    log.push_str("mtp_runtime_state = unsupported\n");
     log
 }
 

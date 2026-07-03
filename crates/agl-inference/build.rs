@@ -44,6 +44,12 @@ fn main() {
             .join("src/llama_cpp/chat_template_bridge.cpp")
             .display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("src/llama_cpp/mtp_speculative_bridge.cpp")
+            .display()
+    );
     for env_name in [
         "AGL_LLAMA_CPP_SOURCE_DIR",
         "AGL_LLAMA_CPP_BUILD_DIR",
@@ -62,6 +68,7 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .file(manifest_dir.join("src/llama_cpp/chat_template_bridge.cpp"))
+        .file(manifest_dir.join("src/llama_cpp/mtp_speculative_bridge.cpp"))
         .include(repo_root.join("vendor/llama.cpp/include"))
         .include(repo_root.join("vendor/llama.cpp/common"))
         .include(repo_root.join("vendor/llama.cpp/ggml/include"))
