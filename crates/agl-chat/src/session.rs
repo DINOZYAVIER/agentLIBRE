@@ -547,27 +547,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     let skill_registry =
         trusted_workspace_registry(request.workspace_root, request.trust_store_path)
             .context("failed to load skill registry")?;
-    let mut tool_catalog = ToolCatalog::new();
-    agl_tools::guards::register(&mut tool_catalog)
-        .context("failed to register builtin core guard provider")?;
-    agl_tools::cron::register(&mut tool_catalog)
-        .context("failed to register builtin cron tool provider")?;
-    agl_tools::fs::register(&mut tool_catalog)
-        .context("failed to register builtin core tool provider")?;
-    agl_tools::matrix::register(&mut tool_catalog)
-        .context("failed to register builtin Matrix tool provider")?;
-    agl_tools::memory::register(&mut tool_catalog)
-        .context("failed to register builtin memory tool provider")?;
-    agl_tools::notes::register(&mut tool_catalog)
-        .context("failed to register builtin notes tool provider")?;
-    agl_tools::permissions::register(&mut tool_catalog)
-        .context("failed to register builtin permission tool provider")?;
-    agl_tools::repo::register(&mut tool_catalog)
-        .context("failed to register builtin repo tool provider")?;
-    agl_tools::skills::register(&mut tool_catalog)
-        .context("failed to register builtin skill tool provider")?;
-    agl_tools::store::register(&mut tool_catalog)
-        .context("failed to register builtin store tool provider")?;
+    let tool_catalog = crate::tools::chat_extension_catalog()?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {
