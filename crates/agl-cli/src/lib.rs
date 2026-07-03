@@ -792,13 +792,13 @@ fn run_skill_inspect(
         .iter()
         .any(|skill| skill.permits_context_injection())
         || workspace_skills.iter().any(|skill| skill.usable);
+    let workspace_overrides = workspace_skills
+        .iter()
+        .filter(|skill| skill.overrides_builtin)
+        .filter_map(|skill| skill.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
 
     if options.json {
-        let workspace_overrides = workspace_skills
-            .iter()
-            .filter(|skill| skill.overrides_builtin)
-            .filter_map(|skill| skill.name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
         let builtins = builtins
             .into_iter()
             .map(|skill| {
@@ -821,11 +821,6 @@ fn run_skill_inspect(
             "workspace": workspace_skills,
         }))?;
     } else {
-        let workspace_overrides = workspace_skills
-            .iter()
-            .filter(|skill| skill.overrides_builtin)
-            .filter_map(|skill| skill.name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
         for skill in builtins {
             println!(
                 "skill name={} source={} pack={} version={} trust={:?} usable={} overridden_by_workspace={}",
