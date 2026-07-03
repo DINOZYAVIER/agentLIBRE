@@ -521,6 +521,11 @@ fn append_mtp_config_log(log: &mut String, mtp: &MtpRuntimeConfig) {
         log.push_str(&mtp.draft_tokens.to_string());
         log.push('\n');
     }
+    if mtp.enabled || !mtp.p_min.is_zero() {
+        log.push_str("mtp_p_min = ");
+        log.push_str(&mtp.p_min.as_f32().to_string());
+        log.push('\n');
+    }
     if let Some(gpu_layers) = mtp.gpu_layers {
         log.push_str("mtp_gpu_layers = ");
         log.push_str(&gpu_layers.to_string());

@@ -612,6 +612,7 @@ impl MtpState {
             target_context,
             draft_context.as_ptr(),
             i32::try_from(draft_tokens).context("runtime.mtp draft_tokens exceeds i32")?,
+            config.runtime.mtp.p_min.as_f32(),
         )?;
 
         log.push_str("mtp_runtime_state = active\n");
@@ -679,6 +680,7 @@ impl MtpSpeculative {
         target_context: *mut c_void,
         draft_context: *mut c_void,
         draft_tokens: i32,
+        p_min: f32,
     ) -> Result<Self> {
         let mut error = vec![0_i8; 4096];
         let raw = unsafe {
@@ -687,7 +689,7 @@ impl MtpSpeculative {
                 draft_context,
                 draft_tokens,
                 0,
-                0.0,
+                p_min,
                 error.as_mut_ptr(),
                 error.len(),
             )
