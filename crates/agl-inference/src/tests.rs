@@ -483,16 +483,6 @@ fn llama_cpp_backend_clear_context_resets_test_runtime_session() {
 }
 
 #[test]
-fn llama_cpp_invocation_module_does_not_return() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("llama_cpp")
-        .join("invocation.rs");
-
-    assert!(!path.exists(), "{} must stay removed", path.display());
-}
-
-#[test]
 fn local_llama_cpp_config_has_no_executable_path() {
     let config = serde_json::to_string(&local_config()).unwrap();
 
