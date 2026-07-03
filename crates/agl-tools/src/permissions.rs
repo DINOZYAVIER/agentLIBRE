@@ -358,13 +358,13 @@ struct RevokeArgs {
 mod tests {
     use serde_json::json;
 
+    use crate::test_support::temp_root;
+
     use super::*;
 
     #[test]
     fn permission_request_creates_pending_one_turn_request() {
-        let root =
-            std::env::temp_dir().join(format!("agl-permission-tools-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("permission-request");
         let tools = PermissionTools::new(&root);
 
         let output = tools
@@ -389,17 +389,11 @@ mod tests {
         assert!(status.contains("dynamic_grants=false"));
         assert!(status.contains("pending_requests=1"));
         assert!(status.contains("active_grants=0"));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn permission_request_rejects_permission_tools() {
-        let root = std::env::temp_dir().join(format!(
-            "agl-permission-tools-reject-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("permission-reject");
         let tools = PermissionTools::new(&root);
 
         let err = tools
@@ -413,17 +407,11 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("permission tools cannot request"));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn permission_status_reports_runtime_snapshot() {
-        let root = std::env::temp_dir().join(format!(
-            "agl-permission-tools-status-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("permission-status");
         let tools = PermissionTools::new(&root).with_runtime_status(PermissionRuntimeStatus {
             current_mode: "read-only".to_string(),
             visible_tools: vec![
@@ -445,7 +433,5 @@ mod tests {
         assert!(status.contains("dynamic_grants=false"));
         assert!(status.contains("granted_visible_tools="));
         assert!(status.contains("ignored_grants="));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -453,22 +453,11 @@ struct EditArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use serde_json::json;
 
+    use crate::test_support::temp_root;
+
     use super::*;
-
-    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    fn temp_root(name: &str) -> PathBuf {
-        let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("agl-tools-{name}-{}-{id}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
 
     #[test]
     fn declaration_registers_core_filesystem_tools() {
@@ -500,7 +489,6 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("parent traversal"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -517,7 +505,6 @@ mod tests {
 
         assert!(output.contains("README.MD"));
         assert!(!output.contains(".git"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -538,7 +525,6 @@ mod tests {
         assert!(output.contains("truncated=true"));
         assert!(output.contains("src/lib.rs:1:alpha"));
         assert!(!output.contains("src/lib.rs:3:alpha"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -557,7 +543,6 @@ mod tests {
 
         assert!(output.contains("status=edited"));
         assert_eq!(fs::read_to_string(path).unwrap(), "hello new\n");
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -574,7 +559,6 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("found 2"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -590,6 +574,5 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("symlink"));
-        fs::remove_dir_all(root).unwrap();
     }
 }

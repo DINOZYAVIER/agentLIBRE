@@ -212,12 +212,10 @@ struct MigrateArgs {}
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
 
     use crate::memory::{MEMORY_ADD_TOOL_ID, MemoryTools};
+    use crate::test_support::temp_root;
 
     use super::*;
 
@@ -252,14 +250,11 @@ mod tests {
         assert!(export.contains("domain=memory"));
         assert!(export.contains("records=1"));
         assert!(export.contains("Store export"));
-
-        cleanup(root);
     }
 
     #[test]
     fn store_tools_status_does_not_create_database_and_migrate_is_explicit() {
         let root = temp_root("migrate");
-        std::fs::create_dir_all(&root).unwrap();
         let tools = StoreTools::new(&root);
 
         let status = tools.dispatch(STORE_STATUS_TOOL_ID, json!({})).unwrap();
@@ -274,22 +269,5 @@ mod tests {
         assert!(migrated.contains("status=ok"));
         assert!(current.contains("database_exists=true"));
         assert!(current.contains("migration_required=false"));
-
-        cleanup(root);
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-store-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

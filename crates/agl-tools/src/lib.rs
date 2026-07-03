@@ -13,6 +13,8 @@ mod registry;
 pub mod repo;
 pub mod skills;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 mod tool;
 
 pub use cron::{

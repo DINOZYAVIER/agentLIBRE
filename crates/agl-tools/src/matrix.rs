@@ -153,10 +153,9 @@ struct EnqueueArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::temp_root;
 
     use super::*;
 
@@ -184,8 +183,6 @@ mod tests {
         assert!(enqueue.contains("status=queued"));
         assert!(status.contains("queued=1"));
         assert!(status.contains("notify_ref=matrix-room:!room:example.org"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -219,22 +216,5 @@ mod tests {
         assert!(exact.contains("truncated=false"));
         assert!(truncated.contains("queued=1"));
         assert!(truncated.contains("truncated=true"));
-
-        cleanup(root);
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-matrix-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

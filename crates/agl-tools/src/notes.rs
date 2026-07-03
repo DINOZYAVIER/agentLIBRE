@@ -344,10 +344,9 @@ struct RememberArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::{temp_root, value_for};
 
     use super::*;
 
@@ -362,11 +361,7 @@ mod tests {
                 json!({"title":"Workflow","body":"Use pinned skills."}),
             )
             .unwrap();
-        let note_id = add
-            .lines()
-            .find_map(|line| line.strip_prefix("note_id="))
-            .unwrap()
-            .to_string();
+        let note_id = value_for(&add, "note_id=").unwrap();
         let search = tools
             .dispatch(NOTES_SEARCH_TOOL_ID, json!({"query":"pinned"}))
             .unwrap();
@@ -376,8 +371,6 @@ mod tests {
 
         assert!(search.contains("matches=1"));
         assert!(show.contains("Use pinned skills."));
-
-        cleanup(root);
     }
 
     #[test]
@@ -416,8 +409,6 @@ mod tests {
 
         assert!(delete.contains("status=deleted"));
         assert!(show.contains("deleted=true"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -435,27 +426,5 @@ mod tests {
                 .tool(&ToolId::new(NOTES_ADD_TOOL_ID).unwrap())
                 .is_some()
         );
-    }
-
-    fn value_for(output: &str, prefix: &str) -> Option<String> {
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .map(str::to_string)
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-notes-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

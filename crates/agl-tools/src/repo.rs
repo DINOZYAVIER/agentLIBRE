@@ -303,10 +303,9 @@ struct InstallHooksArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::temp_root;
 
     use super::*;
 
@@ -333,8 +332,6 @@ mod tests {
         assert!(profile.contains("name = \"repo-workflow\""));
         assert!(hooks.contains("tool=repo.hooks.status"));
         assert!(hooks.contains("dry_run=true"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -370,22 +367,5 @@ kind = "local"
         assert!(imported.contains("tool=repo.import_profile"));
         assert!(imported.contains("status=ok"));
         assert!(root.join(".agl/workspace.toml").is_file());
-
-        cleanup(root);
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-repo-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }
