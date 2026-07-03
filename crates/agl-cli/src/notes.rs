@@ -30,12 +30,7 @@ fn run_notes_add(options: NotesAddOptions, notes: &NoteRepository<'_>) -> Result
     let note = notes
         .add(NoteDraft::new(options.title, options.body))
         .context("failed to add note")?;
-    if options.json {
-        crate::print_json(&note)?;
-    } else {
-        print_note_summary(&note);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &note, || print_note_summary(&note))
 }
 
 fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Result<()> {
@@ -45,12 +40,7 @@ fn run_notes_list(options: NotesListOptions, notes: &NoteRepository<'_>) -> Resu
         ..NoteSearchQuery::default()
     };
     let entries = notes.list(&query).context("failed to list notes")?;
-    if options.json {
-        crate::print_json(&entries)?;
-    } else {
-        print_notes(&entries);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entries, || print_notes(&entries))
 }
 
 fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> Result<()> {
@@ -60,12 +50,7 @@ fn run_notes_search(options: NotesSearchOptions, notes: &NoteRepository<'_>) -> 
         limit: options.limit,
     };
     let entries = notes.search(&query).context("failed to search notes")?;
-    if options.json {
-        crate::print_json(&entries)?;
-    } else {
-        print_notes(&entries);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entries, || print_notes(&entries))
 }
 
 fn run_notes_show(options: NotesShowOptions, notes: &NoteRepository<'_>) -> Result<()> {
@@ -97,35 +82,22 @@ fn run_notes_update(options: NotesUpdateOptions, notes: &NoteRepository<'_>) -> 
             },
         )
         .context("failed to update note")?;
-    if options.json {
-        crate::print_json(&note)?;
-    } else {
-        print_note_summary(&note);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &note, || print_note_summary(&note))
 }
 
 fn run_notes_delete(options: NotesDeleteOptions, notes: &NoteRepository<'_>) -> Result<()> {
     let note = notes.delete(&options.id).context("failed to delete note")?;
-    if options.json {
-        crate::print_json(&note)?;
-    } else {
+    crate::print_json_or(options.json, &note, || {
         println!("note.deleted=true");
         print_note_summary(&note);
-    }
-    Ok(())
+    })
 }
 
 fn run_notes_link(options: NotesLinkOptions, notes: &NoteRepository<'_>) -> Result<()> {
     let link = notes
         .link(&options.id, &options.target_ref, options.label)
         .context("failed to link note")?;
-    if options.json {
-        crate::print_json(&link)?;
-    } else {
-        print_note_link(&link);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &link, || print_note_link(&link))
 }
 
 fn run_notes_remember(options: NotesRememberOptions, notes: &NoteRepository<'_>) -> Result<()> {

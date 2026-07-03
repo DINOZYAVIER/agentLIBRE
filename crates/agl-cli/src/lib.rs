@@ -57,6 +57,19 @@ pub(crate) fn print_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn print_json_or(
+    json: bool,
+    value: &impl serde::Serialize,
+    print_text: impl FnOnce(),
+) -> Result<()> {
+    if json {
+        print_json(value)
+    } else {
+        print_text();
+        Ok(())
+    }
+}
+
 pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
         Ok(invocation) => invocation,

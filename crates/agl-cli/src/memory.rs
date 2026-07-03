@@ -44,12 +44,7 @@ fn run_memory_add(options: MemoryAddOptions, memory: &MemoryRepository<'_>) -> R
     draft.confidence = options.confidence;
     let entry = memory.add(draft).context("failed to add memory entry")?;
 
-    if options.json {
-        crate::print_json(&entry)?;
-    } else {
-        print_memory_entry_summary(&entry);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entry, || print_memory_entry_summary(&entry))
 }
 
 fn run_memory_list(options: MemoryListOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -61,12 +56,7 @@ fn run_memory_list(options: MemoryListOptions, memory: &MemoryRepository<'_>) ->
         .list(&query)
         .context("failed to list memory entries")?;
 
-    if options.json {
-        crate::print_json(&entries)?;
-    } else {
-        print_memory_entries(&entries);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entries, || print_memory_entries(&entries))
 }
 
 fn run_memory_search(options: MemorySearchOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -78,12 +68,7 @@ fn run_memory_search(options: MemorySearchOptions, memory: &MemoryRepository<'_>
         .search(&query)
         .context("failed to search memory entries")?;
 
-    if options.json {
-        crate::print_json(&entries)?;
-    } else {
-        print_memory_entries(&entries);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entries, || print_memory_entries(&entries))
 }
 
 fn run_memory_show(options: MemoryShowOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -92,12 +77,7 @@ fn run_memory_show(options: MemoryShowOptions, memory: &MemoryRepository<'_>) ->
         .context("failed to read memory entry")?
         .ok_or_else(|| anyhow::anyhow!("memory entry not found: {}", options.id))?;
 
-    if options.json {
-        crate::print_json(&entry)?;
-    } else {
-        print_memory_entry_detail(&entry);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &entry, || print_memory_entry_detail(&entry))
 }
 
 fn run_memory_delete(options: MemoryDeleteOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -105,13 +85,10 @@ fn run_memory_delete(options: MemoryDeleteOptions, memory: &MemoryRepository<'_>
         .delete(&options.id)
         .context("failed to delete memory entry")?;
 
-    if options.json {
-        crate::print_json(&entry)?;
-    } else {
+    crate::print_json_or(options.json, &entry, || {
         println!("memory.deleted=true");
         print_memory_entry_summary(&entry);
-    }
-    Ok(())
+    })
 }
 
 fn run_memory_suggest(options: MemorySuggestOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -128,12 +105,9 @@ fn run_memory_suggest(options: MemorySuggestOptions, memory: &MemoryRepository<'
         .suggest(draft)
         .context("failed to create memory suggestion")?;
 
-    if options.json {
-        crate::print_json(&suggestion)?;
-    } else {
-        print_memory_suggestion_summary(&suggestion);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &suggestion, || {
+        print_memory_suggestion_summary(&suggestion)
+    })
 }
 
 fn run_memory_list_suggestions(
@@ -157,12 +131,9 @@ fn run_memory_list_suggestions(
         })
         .context("failed to list memory suggestions")?;
 
-    if options.json {
-        crate::print_json(&suggestions)?;
-    } else {
-        print_memory_suggestions(&suggestions);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &suggestions, || {
+        print_memory_suggestions(&suggestions)
+    })
 }
 
 fn run_memory_approve(options: MemoryApproveOptions, memory: &MemoryRepository<'_>) -> Result<()> {
@@ -188,13 +159,10 @@ fn run_memory_reject(options: MemoryRejectOptions, memory: &MemoryRepository<'_>
         .reject_suggestion(&options.id, options.reason.as_deref())
         .context("failed to reject memory suggestion")?;
 
-    if options.json {
-        crate::print_json(&suggestion)?;
-    } else {
+    crate::print_json_or(options.json, &suggestion, || {
         println!("memory_suggestion.rejected=true");
         print_memory_suggestion_summary(&suggestion);
-    }
-    Ok(())
+    })
 }
 
 pub(crate) fn memory_scope(kind: MemoryScopeArg, key: Option<String>) -> Result<MemoryScope> {
