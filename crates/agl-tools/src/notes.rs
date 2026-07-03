@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    memory::{parse_kind as parse_memory_kind, parse_scope_kind as parse_memory_scope_kind},
     parse_tool_args as parse_args,
 };
 
@@ -272,27 +273,6 @@ fn tool(
             ToolStateEffect::StoreNoteLinks,
         ]),
         _ => declaration,
-    }
-}
-
-fn parse_memory_scope_kind(scope: &str) -> Result<agl_memory::MemoryScopeKind> {
-    match scope {
-        "user" => Ok(agl_memory::MemoryScopeKind::User),
-        "repo" => Ok(agl_memory::MemoryScopeKind::Repo),
-        "matrix_room" => Ok(agl_memory::MemoryScopeKind::MatrixRoom),
-        "matrix_user" => Ok(agl_memory::MemoryScopeKind::MatrixUser),
-        _ => anyhow::bail!("unknown memory scope `{scope}`"),
-    }
-}
-
-fn parse_memory_kind(kind: &str) -> Result<agl_memory::MemoryKind> {
-    match kind {
-        "fact" => Ok(agl_memory::MemoryKind::Fact),
-        "preference" => Ok(agl_memory::MemoryKind::Preference),
-        "summary" => Ok(agl_memory::MemoryKind::Summary),
-        "decision" => Ok(agl_memory::MemoryKind::Decision),
-        "working_note" => Ok(agl_memory::MemoryKind::WorkingNote),
-        _ => anyhow::bail!("unknown memory kind `{kind}`"),
     }
 }
 

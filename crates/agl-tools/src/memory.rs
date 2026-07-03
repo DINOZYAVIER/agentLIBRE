@@ -224,13 +224,7 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
 }
 
 fn parse_scope(scope: &str, scope_key: Option<String>) -> Result<MemoryScope> {
-    let kind = match scope {
-        "user" => MemoryScopeKind::User,
-        "repo" => MemoryScopeKind::Repo,
-        "matrix_room" => MemoryScopeKind::MatrixRoom,
-        "matrix_user" => MemoryScopeKind::MatrixUser,
-        _ => bail!("unknown memory scope `{scope}`"),
-    };
+    let kind = parse_scope_kind(scope)?;
     match (kind, scope_key) {
         (MemoryScopeKind::User, None) => Ok(MemoryScope::user()),
         (kind, Some(key)) => MemoryScope::new(kind, key).map_err(anyhow::Error::from),
@@ -245,7 +239,17 @@ fn parse_optional_scope(
     scope.map(|scope| parse_scope(scope, scope_key)).transpose()
 }
 
-fn parse_kind(kind: &str) -> Result<MemoryKind> {
+pub(crate) fn parse_scope_kind(scope: &str) -> Result<MemoryScopeKind> {
+    match scope {
+        "user" => Ok(MemoryScopeKind::User),
+        "repo" => Ok(MemoryScopeKind::Repo),
+        "matrix_room" => Ok(MemoryScopeKind::MatrixRoom),
+        "matrix_user" => Ok(MemoryScopeKind::MatrixUser),
+        _ => bail!("unknown memory scope `{scope}`"),
+    }
+}
+
+pub(crate) fn parse_kind(kind: &str) -> Result<MemoryKind> {
     match kind {
         "fact" => Ok(MemoryKind::Fact),
         "preference" => Ok(MemoryKind::Preference),
