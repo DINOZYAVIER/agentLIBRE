@@ -148,12 +148,10 @@ fn memory_commands_manage_explicit_user_memory() {
     let id = id_from_output(&add_stdout, "memory");
 
     let list = run_agl(&["--home", &home_arg, "memory", "list"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &id);
+    assert_success_stdout_contains(&list, &id);
 
     let search = run_agl(&["--home", &home_arg, "memory", "search", "imperative"]);
-    assert_success(&search);
-    assert_contains(&stdout(&search), &id);
+    assert_success_stdout_contains(&search, &id);
 
     let show = run_agl(&["--home", &home_arg, "memory", "show", &id]);
     assert_success(&show);
@@ -161,8 +159,7 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_contains(&stdout(&show), "Use imperative subjects.");
 
     let delete = run_agl(&["--home", &home_arg, "memory", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "memory.deleted=true");
+    assert_success_stdout_contains(&delete, "memory.deleted=true");
 
     let hidden = run_agl(&["--home", &home_arg, "memory", "list"]);
     assert_success(&hidden);
@@ -208,8 +205,7 @@ fn memory_commands_manage_explicit_user_memory() {
         "--scope-key",
         "profile-a",
     ]);
-    assert_success(&profile_user);
-    assert_contains(&stdout(&profile_user), &keyed_id);
+    assert_success_stdout_contains(&profile_user, &keyed_id);
 }
 
 #[test]
@@ -246,8 +242,7 @@ fn memory_suggestion_commands_require_approval() {
     );
 
     let list = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &suggestion_id);
+    assert_success_stdout_contains(&list, &suggestion_id);
 
     let approve = run_agl(&["--home", &home_arg, "memory", "approve", &suggestion_id]);
     assert_success(&approve);
@@ -255,8 +250,7 @@ fn memory_suggestion_commands_require_approval() {
     assert_contains(&stdout(&approve), "memory id=");
 
     let memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
-    assert_success(&memory);
-    assert_contains(&stdout(&memory), "kind=decision");
+    assert_success_stdout_contains(&memory, "kind=decision");
 
     let pending = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
     assert_success(&pending);
@@ -288,8 +282,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     let id = id_from_output(&add_stdout, "note");
 
     let search = run_agl(&["--home", &home_arg, "notes", "search", "pinned"]);
-    assert_success(&search);
-    assert_contains(&stdout(&search), &id);
+    assert_success_stdout_contains(&search, &id);
 
     let update = run_agl(&[
         "--home",
@@ -303,8 +296,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     assert_success(&update);
 
     let show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
-    assert_success(&show);
-    assert_contains(&stdout(&show), "Use pinned trusted workspace skills.");
+    assert_success_stdout_contains(&show, "Use pinned trusted workspace skills.");
 
     let remember = run_agl(&["--home", &home_arg, "notes", "remember", &id]);
     assert_success(&remember);
@@ -337,8 +329,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     );
 
     let delete = run_agl(&["--home", &home_arg, "notes", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "note.deleted=true");
+    assert_success_stdout_contains(&delete, "note.deleted=true");
 
     let audit_show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
     assert_success(&audit_show);
@@ -381,20 +372,16 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     let id = id_from_output(&add_stdout, "cron");
 
     let list = run_agl(&["--home", &home_arg, "cron", "list"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &id);
+    assert_success_stdout_contains(&list, &id);
 
     let show = run_agl(&["--home", &home_arg, "cron", "show", &id]);
-    assert_success(&show);
-    assert_contains(&stdout(&show), "notify_ref=matrix-room:!status");
+    assert_success_stdout_contains(&show, "notify_ref=matrix-room:!status");
 
     let disable = run_agl(&["--home", &home_arg, "cron", "disable", &id]);
-    assert_success(&disable);
-    assert_contains(&stdout(&disable), "enabled=false");
+    assert_success_stdout_contains(&disable, "enabled=false");
 
     let enable = run_agl(&["--home", &home_arg, "cron", "enable", &id]);
-    assert_success(&enable);
-    assert_contains(&stdout(&enable), "enabled=true");
+    assert_success_stdout_contains(&enable, "enabled=true");
 
     let run = run_agl(&["--home", &home_arg, "cron", "run", &id, "--now"]);
     assert_success(&run);
@@ -427,8 +414,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_contains(&stdout(&preflight), "\"records_run\": false");
 
     let history = run_agl(&["--home", &home_arg, "cron", "history", &id]);
-    assert_success(&history);
-    assert_contains(&stdout(&history), "status=succeeded");
+    assert_success_stdout_contains(&history, "status=succeeded");
 
     let tick = run_agl(&[
         "--home", &home_arg, "cron", "tick", "--at", "32400", "--json",
@@ -467,8 +453,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     );
 
     let delete = run_agl(&["--home", &home_arg, "cron", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "cron.deleted=true");
+    assert_success_stdout_contains(&delete, "cron.deleted=true");
 
     let hidden = run_agl(&["--home", &home_arg, "cron", "list"]);
     assert_success(&hidden);
@@ -1012,7 +997,7 @@ fn retired_infer_command_fails_with_run_guidance() {
     let output = run_agl(&["infer", "--config", "local.toml", "--prompt", "hello"]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "agl infer");
     assert_contains(&stderr, "Use `agl run --config PATH PROMPT`");
@@ -1066,10 +1051,7 @@ fn chat_rejects_prompt_option_with_clap_error() {
     let output = run_agl(&["chat", "--prompt", "hello"]);
 
     assert_failure(&output);
-    assert!(
-        stdout(&output).is_empty(),
-        "stdout should be empty on parse error"
-    );
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "unexpected argument '--prompt'");
     assert!(
@@ -1090,10 +1072,7 @@ fn chat_new_session_conflict_fails_before_inference_path() {
     ]);
 
     assert_failure(&output);
-    assert!(
-        stdout(&output).is_empty(),
-        "stdout should be empty on parse validation error"
-    );
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "--new-session cannot be used with --session-id");
     assert!(
@@ -1112,7 +1091,7 @@ fn reserved_future_commands_fail_before_bare_prompt_execution() {
         let output = run_agl(args);
 
         assert_failure(&output);
-        assert!(stdout(&output).is_empty(), "stdout should be empty");
+        assert_empty_stdout(&output);
         let stderr = stderr(&output);
         assert_contains(&stderr, "planned but not implemented");
         assert!(
@@ -1127,7 +1106,7 @@ fn blank_bare_prompt_fails_before_inference_path() {
     let output = run_agl(&["   "]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "prompt cannot be empty");
     assert!(
@@ -1170,7 +1149,7 @@ fn invalid_workspace_root_fails_before_inference_config() {
     ]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "failed to canonicalize workspace root");
     assert!(
@@ -1316,6 +1295,16 @@ fn assert_empty_stderr(output: &Output) {
         "stderr should be empty:\n{}",
         stderr(output)
     );
+}
+
+fn assert_empty_stdout(output: &Output) {
+    let stdout = stdout(output);
+    assert!(stdout.is_empty(), "stdout should be empty:\n{stdout}");
+}
+
+fn assert_success_stdout_contains(output: &Output, needle: &str) {
+    assert_success(output);
+    assert_contains(&stdout(output), needle);
 }
 
 fn assert_contains(haystack: &str, needle: &str) {
