@@ -6,31 +6,33 @@ fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
         .command
 }
 
+fn assert_command(args: impl IntoIterator<Item = &'static str>, expected: CliCommand) {
+    assert_eq!(parse_command(args), expected);
+}
+
 #[test]
 fn parse_run_command_with_options() {
-    let command = parse_command([
-        "agl",
-        "run",
-        "--config",
-        "local.toml",
-        "--artifact-root",
-        "artifacts",
-        "--prompt",
-        "hello",
-        "--run-id",
-        "manual-test",
-        "--workspace-root",
-        "/tmp/workspace",
-        "--max-output-tokens",
-        "32",
-        "--skill",
-        "task-spec",
-        "--tool-mode",
-        "write",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "run",
+            "--config",
+            "local.toml",
+            "--artifact-root",
+            "artifacts",
+            "--prompt",
+            "hello",
+            "--run-id",
+            "manual-test",
+            "--workspace-root",
+            "/tmp/workspace",
+            "--max-output-tokens",
+            "32",
+            "--skill",
+            "task-spec",
+            "--tool-mode",
+            "write",
+        ],
         CliCommand::Infer(RunOptions {
             config: Some(PathBuf::from("local.toml")),
             artifact_root: Some(PathBuf::from("artifacts")),
@@ -44,7 +46,7 @@ fn parse_run_command_with_options() {
             skills: vec!["task-spec".to_string()],
             memory: false,
             prompt: Some("hello".to_string()),
-        })
+        }),
     );
 }
 
@@ -82,67 +84,59 @@ fn parse_retired_infer_command_rejects_with_run_guidance() {
 
 #[test]
 fn parse_run_prompt_argument() {
-    let command = parse_command(["agl", "run", "hello", "world"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "run", "hello", "world"],
         CliCommand::Infer(RunOptions {
             prompt: Some("hello world".to_string()),
             ..RunOptions::default()
-        })
+        }),
     );
 }
 
 #[test]
 fn parse_generate_alias() {
-    let command = parse_command(["agl", "generate", "--prompt", "hello"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "generate", "--prompt", "hello"],
         CliCommand::Infer(RunOptions {
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
-        })
+        }),
     );
 }
 
 #[test]
 fn parse_run_command_with_memory_context() {
-    let command = parse_command(["agl", "run", "--memory", "--prompt", "hello"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "run", "--memory", "--prompt", "hello"],
         CliCommand::Infer(RunOptions {
             memory: true,
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
-        })
+        }),
     );
 }
 
 #[test]
 fn parse_serve_command_with_daemon_options() {
-    let command = parse_command([
-        "agl",
-        "serve",
-        "--socket",
-        "/tmp/agl.sock",
-        "--config",
-        "local.toml",
-        "--artifact-root",
-        "artifacts",
-        "--workspace-root",
-        "/tmp/workspace",
-        "--max-output-tokens",
-        "33",
-        "--tool-mode",
-        "write",
-        "--skill",
-        "tool-smoke",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "serve",
+            "--socket",
+            "/tmp/agl.sock",
+            "--config",
+            "local.toml",
+            "--artifact-root",
+            "artifacts",
+            "--workspace-root",
+            "/tmp/workspace",
+            "--max-output-tokens",
+            "33",
+            "--tool-mode",
+            "write",
+            "--skill",
+            "tool-smoke",
+        ],
         CliCommand::Serve(ServeOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             config: Some(PathBuf::from("local.toml")),
@@ -153,136 +147,122 @@ fn parse_serve_command_with_daemon_options() {
             tool_mode: ToolAccessMode::Write,
             skills: vec!["tool-smoke".to_string()],
             memory: false,
-        })
+        }),
     );
 }
 
 #[test]
 fn parse_init_command() {
-    let command = parse_command(["agl", "init", "--dry-run"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "init", "--dry-run"],
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             dry_run: true,
             force: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_repo_init_hidden_alias() {
-    let command = parse_command([
-        "agl",
-        "repo",
-        "init",
-        "--force",
-        "--profile-file",
-        "profiles/custom.toml",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "repo",
+            "init",
+            "--force",
+            "--profile-file",
+            "profiles/custom.toml",
+        ],
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: Some(PathBuf::from("profiles/custom.toml")),
             dry_run: false,
             force: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_status_command_with_repo_options() {
-    let command = parse_command([
-        "agl",
-        "status",
-        "--json",
-        "--component",
-        "skills",
-        "--strict",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "status",
+            "--json",
+            "--component",
+            "skills",
+            "--strict",
+        ],
         CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
             json: true,
             component: Some("skills".to_string()),
             strict: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_repo_status_hidden_alias() {
-    let command = parse_command(["agl", "repo", "status", "--json"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "repo", "status", "--json"],
         CliCommand::Repo(RepoCommand::Status(RepoStatusOptions {
             json: true,
             component: None,
             strict: false,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_repo_export_profile_hidden_command() {
-    let command = parse_command([
-        "agl",
-        "repo",
-        "export-profile",
-        "--out",
-        "repo-workflow.toml",
-        "--force",
-        "--json",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "repo",
+            "export-profile",
+            "--out",
+            "repo-workflow.toml",
+            "--force",
+            "--json",
+        ],
         CliCommand::Repo(RepoCommand::ExportProfile(RepoExportProfileOptions {
             out: PathBuf::from("repo-workflow.toml"),
             force: true,
             json: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_repo_import_profile_hidden_command() {
-    let command = parse_command([
-        "agl",
-        "repo",
-        "import-profile",
-        "--profile-file",
-        "repo-workflow.toml",
-        "--dry-run",
-        "--force",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "repo",
+            "import-profile",
+            "--profile-file",
+            "repo-workflow.toml",
+            "--dry-run",
+            "--force",
+        ],
         CliCommand::Repo(RepoCommand::ImportProfile(RepoImportProfileOptions {
             profile_file: PathBuf::from("repo-workflow.toml"),
             dry_run: true,
             force: true,
-        }))
+        })),
     );
 }
 
 #[test]
 fn parse_install_hooks_command() {
-    let command = parse_command(["agl", "install-hooks", "--dry-run"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "install-hooks", "--dry-run"],
         CliCommand::Repo(RepoCommand::InstallHooks(RepoHooksOptions {
             dry_run: true,
             force: false,
-        }))
+        })),
     );
 }
 
@@ -681,26 +661,22 @@ fn parse_memory_rejects_zero_limit() {
 
 #[test]
 fn parse_daemon_status_command_with_socket_override() {
-    let command = parse_command(["agl", "daemon", "status", "--socket", "/tmp/agl.sock"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "daemon", "status", "--socket", "/tmp/agl.sock"],
         CliCommand::DaemonStatus(DaemonStatusOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
-        })
+        }),
     );
 }
 
 #[test]
 fn parse_bare_prompt_as_run() {
-    let command = parse_command(["agl", "hello"]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        ["agl", "hello"],
         CliCommand::Infer(RunOptions {
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
-        })
+        }),
     );
 }
 
@@ -728,24 +704,22 @@ fn parse_home_override() {
 
 #[test]
 fn parse_chat_session_options() {
-    let command = parse_command([
-        "agl",
-        "chat",
-        "--session-id",
-        "session-001",
-        "--no-history",
-        "--workspace-root",
-        "/tmp/workspace",
-    ]);
-
-    assert_eq!(
-        command,
+    assert_command(
+        [
+            "agl",
+            "chat",
+            "--session-id",
+            "session-001",
+            "--no-history",
+            "--workspace-root",
+            "/tmp/workspace",
+        ],
         CliCommand::Chat(RunOptions {
             session_id: Some("session-001".to_string()),
             no_history: true,
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
             ..RunOptions::default()
-        })
+        }),
     );
 }
 
@@ -782,28 +756,25 @@ fn parse_chat_rejects_prompt() {
 
 #[test]
 fn parse_config_paths_command() {
-    let command = parse_command(["agl", "config", "paths"]);
-
-    assert_eq!(command, CliCommand::Config(ConfigCommand::Paths));
+    assert_command(
+        ["agl", "config", "paths"],
+        CliCommand::Config(ConfigCommand::Paths),
+    );
 }
 
 #[test]
 fn parse_config_init_command() {
-    let command = parse_command(["agl", "config", "init"]);
-
-    assert_eq!(
-        command,
-        CliCommand::Config(ConfigCommand::Init { force: false })
+    assert_command(
+        ["agl", "config", "init"],
+        CliCommand::Config(ConfigCommand::Init { force: false }),
     );
 }
 
 #[test]
 fn parse_config_init_force_command() {
-    let command = parse_command(["agl", "config", "init", "--force"]);
-
-    assert_eq!(
-        command,
-        CliCommand::Config(ConfigCommand::Init { force: true })
+    assert_command(
+        ["agl", "config", "init", "--force"],
+        CliCommand::Config(ConfigCommand::Init { force: true }),
     );
 }
 
@@ -822,9 +793,10 @@ fn parse_config_paths_rejects_force() {
 
 #[test]
 fn parse_completion_command() {
-    let command = parse_command(["agl", "completion", "bash"]);
-
-    assert_eq!(command, CliCommand::Completion { shell: Shell::Bash });
+    assert_command(
+        ["agl", "completion", "bash"],
+        CliCommand::Completion { shell: Shell::Bash },
+    );
 }
 
 #[test]
