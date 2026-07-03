@@ -207,12 +207,13 @@ pub fn render_runtime_capability_context(
         .iter()
         .map(|capability| capability.id.to_string())
         .collect::<Vec<_>>();
+    let rendered_chars = content.chars().count();
     RenderedRuntimeCapabilityContext {
         content,
         evidence: RuntimeCapabilityContextEvidence {
             capability_ids,
             tool_mode: options.tool_mode.to_string(),
-            rendered_chars: selected_context_len(&selected, &options),
+            rendered_chars,
             budget_cap_chars: cap,
             truncated,
             registry_hash: runtime_capability_registry_hash(capabilities),
@@ -239,13 +240,6 @@ pub fn runtime_capability_registry_hash(capabilities: &[RuntimeCapability]) -> S
         }
     }
     format!("fnv1a64:{hash:016x}")
-}
-
-fn selected_context_len(
-    capabilities: &[&RuntimeCapability],
-    options: &RuntimeCapabilityRenderOptions<'_>,
-) -> usize {
-    render_context(capabilities, options).chars().count()
 }
 
 fn render_context(
