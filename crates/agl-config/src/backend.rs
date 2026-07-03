@@ -9,6 +9,7 @@ pub const MAX_GPU_LAYERS: u32 = 4096;
 pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
 pub const MAX_THREADS: u32 = 1024;
 pub const MAX_BATCH_TOKENS: u32 = 1_048_576;
+pub const MAX_MTP_DRAFT_TOKENS: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +81,8 @@ pub struct InferenceRuntimeConfig {
     pub cache_type_v: Option<KvCacheType>,
     #[serde(default)]
     pub mmap: Option<bool>,
+    #[serde(default)]
+    pub mtp: MtpRuntimeConfig,
 }
 
 impl InferenceRuntimeConfig {
@@ -117,6 +120,7 @@ impl InferenceRuntimeConfig {
         }
         validate_optional_token_limit("batch_size", self.batch_size)?;
         validate_optional_token_limit("ubatch_size", self.ubatch_size)?;
+        self.mtp.validate()?;
         if let Some(ubatch_size) = self.ubatch_size {
             if let Some(batch_size) = self.batch_size {
                 if ubatch_size > batch_size {
@@ -128,6 +132,51 @@ impl InferenceRuntimeConfig {
                     self.context_tokens
                 );
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MtpRuntimeConfig {
+    pub enabled: bool,
+    pub draft_model: Option<PathBuf>,
+    pub draft_tokens: u32,
+    pub gpu_layers: Option<u32>,
+    pub cache_type_k: Option<KvCacheType>,
+    pub cache_type_v: Option<KvCacheType>,
+}
+
+impl MtpRuntimeConfig {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(path) = &self.draft_model {
+            ensure!(
+                !path_is_blank(path),
+                "runtime.mtp draft_model path cannot be empty"
+            );
+        }
+        if self.enabled && self.draft_model.is_none() {
+            bail!("runtime.mtp enabled requires draft_model");
+        }
+        if self.enabled && self.draft_tokens == 0 {
+            bail!("runtime.mtp draft_tokens must be between 1 and {MAX_MTP_DRAFT_TOKENS}");
+        }
+        if self.draft_tokens > MAX_MTP_DRAFT_TOKENS {
+            bail!(
+                "runtime.mtp draft_tokens {} exceeds maximum {}",
+                self.draft_tokens,
+                MAX_MTP_DRAFT_TOKENS
+            );
+        }
+        if let Some(gpu_layers) = self.gpu_layers
+            && gpu_layers > MAX_GPU_LAYERS
+        {
+            bail!(
+                "runtime.mtp gpu_layers {} exceeds maximum {}",
+                gpu_layers,
+                MAX_GPU_LAYERS
+            );
         }
         Ok(())
     }

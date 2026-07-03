@@ -58,6 +58,14 @@ cache_type_k = "q8_0"
 cache_type_v = "q8_0"
 mmap = false
 
+[runtime.mtp]
+enabled = false
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+draft_tokens = 4
+gpu_layers = 999
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+
 [model]
 dialect = "qwen3"
 tool_call_format = "hermes_json"
@@ -79,6 +87,15 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.cache_type_k, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.cache_type_v, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.mmap, Some(false));
+    assert!(!config.runtime.mtp.enabled);
+    assert_eq!(
+        config.runtime.mtp.draft_model.as_deref(),
+        Some(Path::new("/models/gemma4-mtp-q4_0.gguf"))
+    );
+    assert_eq!(config.runtime.mtp.draft_tokens, 4);
+    assert_eq!(config.runtime.mtp.gpu_layers, Some(999));
+    assert_eq!(config.runtime.mtp.cache_type_k, Some(KvCacheType::Q8_0));
+    assert_eq!(config.runtime.mtp.cache_type_v, Some(KvCacheType::Q8_0));
     assert_eq!(config.model.dialect, ModelDialect::Qwen3);
     assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
@@ -112,8 +129,132 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.ubatch_size, None);
     assert_eq!(config.runtime.flash_attention, None);
     assert_eq!(config.runtime.cache_type_k, None);
+    assert_eq!(config.runtime.mtp, MtpRuntimeConfig::default());
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
     assert!(config.prompt.skills.is_empty());
+}
+
+#[test]
+fn local_inference_config_accepts_enabled_mtp_runtime() {
+    let path = write_temp_config(
+        "local-inference-mtp-runtime",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = true
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+draft_tokens = 4
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let config = load_local_inference_config(&path).unwrap();
+
+    assert!(config.runtime.mtp.enabled);
+    assert_eq!(
+        config.runtime.mtp.draft_model.as_deref(),
+        Some(Path::new("/models/gemma4-mtp-q4_0.gguf"))
+    );
+    assert_eq!(config.runtime.mtp.draft_tokens, 4);
+}
+
+#[test]
+fn local_inference_config_rejects_enabled_mtp_without_draft_model() {
+    let path = write_temp_config(
+        "local-inference-mtp-missing-draft",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = true
+draft_tokens = 4
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "runtime.mtp enabled requires draft_model");
+}
+
+#[test]
+fn local_inference_config_rejects_enabled_mtp_without_draft_tokens() {
+    let path = write_temp_config(
+        "local-inference-mtp-missing-draft-tokens",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = true
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "runtime.mtp draft_tokens must be between 1 and 64");
+}
+
+#[test]
+fn local_inference_config_rejects_mtp_draft_tokens_above_limit() {
+    let path = write_temp_config(
+        "local-inference-mtp-draft-token-limit",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = false
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+draft_tokens = 65
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "runtime.mtp draft_tokens 65 exceeds maximum 64");
 }
 
 #[test]
