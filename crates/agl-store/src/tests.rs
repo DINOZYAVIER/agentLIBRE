@@ -53,8 +53,7 @@ fn explicit_migration_reports_applied_steps_and_schema_status() {
 
 #[test]
 fn transaction_commits_and_rolls_back() {
-    let root = temp_root("transaction");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("transaction");
     store
         .transaction(|tx| {
             tx.execute("CREATE TABLE tx_probe(value TEXT NOT NULL)", [])?;
@@ -95,10 +94,8 @@ fn transaction_commits_and_rolls_back() {
 #[test]
 fn migration_history_gaps_fail_clearly() {
     let root = temp_root("migration-gap");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
+    write_raw_database(
+        &root,
         r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -108,9 +105,7 @@ fn migration_history_gaps_fail_clearly() {
             VALUES (1, 'unix:1'), (3, 'unix:3');
             PRAGMA user_version = 3;
             "#,
-    )
-    .unwrap();
-    drop(conn);
+    );
 
     let err = AglStore::open_at(&root).unwrap_err();
     assert!(matches!(err, StoreError::MigrationGap { missing: 2 }));
@@ -118,8 +113,7 @@ fn migration_history_gaps_fail_clearly() {
 
 #[test]
 fn store_status_counts_domain_rows() {
-    let root = temp_root("domain-status");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("domain-status");
     execute_fixture(
         &store,
         "INSERT INTO memory_entries
@@ -158,8 +152,7 @@ fn store_status_counts_domain_rows() {
 
 #[test]
 fn status_reports_in_progress_idempotency_without_recovering_it() {
-    let root = temp_root("stale-idempotency");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("stale-idempotency");
     execute_fixture(
         &store,
         "INSERT INTO idempotency_keys
@@ -182,8 +175,7 @@ fn status_reports_in_progress_idempotency_without_recovering_it() {
 
 #[test]
 fn export_memory_jsonl_respects_tombstones() {
-    let root = temp_root("export-memory");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("export-memory");
     execute_fixture(
         &store,
         "INSERT INTO memory_entries
@@ -202,8 +194,7 @@ fn export_memory_jsonl_respects_tombstones() {
 
 #[test]
 fn export_memory_jsonl_includes_pending_suggestions() {
-    let root = temp_root("export-memory-suggestions");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("export-memory-suggestions");
     execute_fixture(
         &store,
         "INSERT INTO memory_suggestions
@@ -223,8 +214,7 @@ fn export_memory_jsonl_includes_pending_suggestions() {
 
 #[test]
 fn export_notes_and_cron_include_related_rows() {
-    let root = temp_root("export-related");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("export-related");
     execute_fixture(
         &store,
         "INSERT INTO notes
@@ -261,8 +251,7 @@ fn export_notes_and_cron_include_related_rows() {
 
 #[test]
 fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
-    let root = temp_root("matrix-outbox");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("matrix-outbox");
 
     let first = store
         .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
@@ -305,8 +294,7 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
 
 #[test]
 fn matrix_notification_outbox_page_reports_truncation_only_for_extra_rows() {
-    let root = temp_root("matrix-outbox-page");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("matrix-outbox-page");
 
     let first = store
         .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
@@ -338,8 +326,7 @@ fn matrix_notification_outbox_page_reports_truncation_only_for_extra_rows() {
 
 #[test]
 fn permission_requests_grants_and_revokes_are_persisted() {
-    let root = temp_root("permission-requests");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("permission-requests");
 
     let request = store
         .create_permission_request(PermissionRequestDraft {
@@ -399,8 +386,7 @@ fn permission_requests_grants_and_revokes_are_persisted() {
 
 #[test]
 fn permission_export_reports_pending_and_historical_records() {
-    let root = temp_root("permission-export");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("permission-export");
     let request = store
         .create_permission_request(PermissionRequestDraft {
             requested_tools: vec!["notes.add".to_string()],
@@ -449,11 +435,9 @@ fn migrations_are_repeatable() {
 #[test]
 fn schema_v1_database_migrates_to_current() {
     let root = temp_root("migrate-v1");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-            r#"
+    write_raw_database(
+        &root,
+        r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -475,9 +459,7 @@ fn schema_v1_database_migrates_to_current() {
             VALUES ('cron.run', 'job-001:unix:1', 'sha256:abc', 'completed', 'run-001', 'unix:1', 'unix:1');
             PRAGMA user_version = 1;
             "#,
-        )
-        .unwrap();
-    drop(conn);
+    );
 
     let store = AglStore::open_at(&root).unwrap();
     assert_eq!(
@@ -504,10 +486,8 @@ fn schema_v1_database_migrates_to_current() {
 #[test]
 fn future_schema_version_is_rejected() {
     let root = temp_root("future-version");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(
+    write_raw_database(
+        &root,
         r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -517,9 +497,7 @@ fn future_schema_version_is_rejected() {
             VALUES (999, 'unix:1');
             PRAGMA user_version = 999;
             "#,
-    )
-    .unwrap();
-    drop(conn);
+    );
 
     let err = AglStore::open_at(&root).unwrap_err();
 
@@ -534,8 +512,7 @@ fn future_schema_version_is_rejected() {
 
 #[test]
 fn idempotency_replays_same_fingerprint() {
-    let root = temp_root("idempotency-replay");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-replay");
 
     let first = store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
@@ -550,8 +527,7 @@ fn idempotency_replays_same_fingerprint() {
 
 #[test]
 fn idempotency_rejects_different_fingerprint() {
-    let root = temp_root("idempotency-conflict");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-conflict");
     store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
         .unwrap();
@@ -565,8 +541,7 @@ fn idempotency_rejects_different_fingerprint() {
 
 #[test]
 fn complete_idempotency_records_result_ref() {
-    let root = temp_root("idempotency-complete");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-complete");
     store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
         .unwrap();
@@ -581,8 +556,7 @@ fn complete_idempotency_records_result_ref() {
 
 #[test]
 fn fail_idempotency_records_failed_status() {
-    let root = temp_root("idempotency-failed");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-failed");
     store
         .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
         .unwrap();
@@ -601,8 +575,7 @@ fn fail_idempotency_records_failed_status() {
 
 #[test]
 fn skip_idempotency_records_skipped_status() {
-    let root = temp_root("idempotency-skipped");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-skipped");
     store
         .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
         .unwrap();
@@ -640,6 +613,19 @@ fn export_domain(store: &AglStore, domain: StoreDomain, include_deleted: bool) -
 
 fn execute_fixture(store: &AglStore, sql: &str) {
     store.connection().execute(sql, []).unwrap();
+}
+
+fn write_raw_database(root: &std::path::Path, sql: &str) {
+    std::fs::create_dir_all(root).unwrap();
+    let db_path = database_path(root, DEFAULT_DATABASE_FILE).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(sql).unwrap();
+}
+
+fn open_temp_store(label: &str) -> (TempRoot, AglStore) {
+    let root = temp_root(label);
+    let store = AglStore::open_at(&root).unwrap();
+    (root, store)
 }
 
 fn temp_root(label: &str) -> TempRoot {
