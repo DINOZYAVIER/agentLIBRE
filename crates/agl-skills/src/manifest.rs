@@ -362,15 +362,7 @@ fn parse_skill_text(
     tree_sha256: &str,
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
-    let (frontmatter, body) = split_frontmatter(manifest_asset.source_path, text)?;
-    let raw = serde_yaml::from_str::<RawSkillManifest>(frontmatter).map_err(|err| {
-        SkillManifestError::InvalidYaml {
-            source_path: manifest_asset.source_path.to_string(),
-            message: err.to_string(),
-        }
-    })?;
-    validate_raw_manifest(&raw)?;
-
+    let (mut raw, body) = parse_manifest_text(manifest_asset.source_path, text)?;
     let actual_id = raw.name.clone();
     if expected_id != actual_id {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
@@ -378,55 +370,45 @@ fn parse_skill_text(
             actual: actual_id,
         });
     }
-    if expected_pack != raw.pack {
+    if expected_pack != raw.pack.as_str() {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
             expected: expected_pack.to_string(),
-            actual: raw.pack,
+            actual: raw.pack.clone(),
         });
     }
     if raw.source != SkillSource::Builtin {
         return Err(SkillManifestError::BuiltinSourceMismatch);
     }
 
-    let reference_policy = normalize_references(raw.references)?;
+    let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(
         expected_pack,
         &raw.name,
         reference_assets,
         &reference_policy.include,
     )?;
-    if body.trim().is_empty() {
-        return Err(SkillManifestError::EmptyBody);
-    }
-    let allowed_tools = sort_unique_ids(raw.allowed_tools, "allowed_tools")?;
-    let requestable_tools = sort_unique_ids(raw.requestable_tools, "requestable_tools")?;
-    let denied_tools = sort_unique_ids(raw.denied_tools, "denied_tools")?;
-    validate_tool_routing(&allowed_tools, &requestable_tools, &denied_tools)?;
-    let permission_request_templates = normalize_permission_request_templates(
-        raw.permission_request_templates,
-        &requestable_tools,
-    )?;
-
+    normalize_raw_manifest(&mut raw, body)?;
+    let id = SkillId::new(expected_id).map_err(|err| SkillManifestError::InvalidYaml {
+        source_path: manifest_asset.source_path.to_string(),
+        message: err.to_string(),
+    })?;
     Ok(SkillHarness {
-        id: SkillId::new(expected_id).map_err(|err| SkillManifestError::InvalidYaml {
-            source_path: manifest_asset.source_path.to_string(),
-            message: err.to_string(),
-        })?,
+        id,
         name: raw.name,
         description: raw.description,
         version: raw.version,
         source: raw.source,
         pack: expected_pack.to_string(),
-        required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
-        allowed_tools,
-        requestable_tools,
-        denied_tools,
-        permission_request_templates,
-        permissions: normalize_permissions(raw.permissions)?,
+        required_hooks: raw.required_hooks,
+        allowed_tools: raw.allowed_tools,
+        requestable_tools: raw.requestable_tools,
+        denied_tools: raw.denied_tools,
+        permission_request_templates: raw.permission_request_templates,
+        permissions: raw.permissions,
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
-        guarantees: sort_unique_strings(raw.guarantees, "guarantees")?,
+        guarantees: raw.guarantees,
         body: body.to_string(),
         source_path: manifest_asset.source_path.to_string(),
         manifest_sha256: manifest_asset.sha256.to_string(),
@@ -442,6 +424,46 @@ fn parse_workspace_text(
     tree_sha256: &str,
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
+    let (mut raw, body) = parse_manifest_text(source_path, text)?;
+    if raw.source != SkillSource::Workspace {
+        return Err(SkillManifestError::WorkspaceSourceMismatch);
+    }
+
+    let reference_policy = normalize_references(&raw.references)?;
+    let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
+    normalize_raw_manifest(&mut raw, body)?;
+    let id = SkillId::new(raw.name.clone()).map_err(|err| SkillManifestError::InvalidYaml {
+        source_path: source_path.to_string(),
+        message: err.to_string(),
+    })?;
+    Ok(SkillHarness {
+        id,
+        name: raw.name,
+        description: raw.description,
+        version: raw.version,
+        source: raw.source,
+        pack: raw.pack,
+        required_hooks: raw.required_hooks,
+        allowed_tools: raw.allowed_tools,
+        requestable_tools: raw.requestable_tools,
+        denied_tools: raw.denied_tools,
+        permission_request_templates: raw.permission_request_templates,
+        permissions: raw.permissions,
+        context_budget_tokens: raw.context_budget_tokens,
+        reference_policy,
+        references,
+        guarantees: raw.guarantees,
+        body: body.to_string(),
+        source_path: source_path.to_string(),
+        manifest_sha256: sha256_hex(manifest_bytes),
+        tree_sha256: tree_sha256.to_string(),
+    })
+}
+
+fn parse_manifest_text<'a>(
+    source_path: &str,
+    text: &'a str,
+) -> Result<(RawSkillManifest, &'a str), SkillManifestError> {
     let (frontmatter, body) = split_frontmatter(source_path, text)?;
     let raw = serde_yaml::from_str::<RawSkillManifest>(frontmatter).map_err(|err| {
         SkillManifestError::InvalidYaml {
@@ -450,49 +472,36 @@ fn parse_workspace_text(
         }
     })?;
     validate_raw_manifest(&raw)?;
-    if raw.source != SkillSource::Workspace {
-        return Err(SkillManifestError::WorkspaceSourceMismatch);
-    }
+    Ok((raw, body))
+}
 
-    let reference_policy = normalize_references(raw.references)?;
-    let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
+fn normalize_raw_manifest(
+    raw: &mut RawSkillManifest,
+    body: &str,
+) -> Result<(), SkillManifestError> {
     if body.trim().is_empty() {
         return Err(SkillManifestError::EmptyBody);
     }
-    let allowed_tools = sort_unique_ids(raw.allowed_tools, "allowed_tools")?;
-    let requestable_tools = sort_unique_ids(raw.requestable_tools, "requestable_tools")?;
-    let denied_tools = sort_unique_ids(raw.denied_tools, "denied_tools")?;
-    validate_tool_routing(&allowed_tools, &requestable_tools, &denied_tools)?;
-    let permission_request_templates = normalize_permission_request_templates(
-        raw.permission_request_templates,
-        &requestable_tools,
+    raw.allowed_tools = sort_unique_ids(std::mem::take(&mut raw.allowed_tools), "allowed_tools")?;
+    raw.requestable_tools = sort_unique_ids(
+        std::mem::take(&mut raw.requestable_tools),
+        "requestable_tools",
     )?;
-
-    Ok(SkillHarness {
-        id: SkillId::new(raw.name.clone()).map_err(|err| SkillManifestError::InvalidYaml {
-            source_path: source_path.to_string(),
-            message: err.to_string(),
-        })?,
-        name: raw.name,
-        description: raw.description,
-        version: raw.version,
-        source: raw.source,
-        pack: raw.pack,
-        required_hooks: sort_unique_ids(raw.required_hooks, "required_hooks")?,
-        allowed_tools,
-        requestable_tools,
-        denied_tools,
-        permission_request_templates,
-        permissions: normalize_permissions(raw.permissions)?,
-        context_budget_tokens: raw.context_budget_tokens,
-        reference_policy,
-        references,
-        guarantees: sort_unique_strings(raw.guarantees, "guarantees")?,
-        body: body.to_string(),
-        source_path: source_path.to_string(),
-        manifest_sha256: sha256_hex(manifest_bytes),
-        tree_sha256: tree_sha256.to_string(),
-    })
+    raw.denied_tools = sort_unique_ids(std::mem::take(&mut raw.denied_tools), "denied_tools")?;
+    validate_tool_routing(
+        &raw.allowed_tools,
+        &raw.requestable_tools,
+        &raw.denied_tools,
+    )?;
+    raw.permission_request_templates = normalize_permission_request_templates(
+        std::mem::take(&mut raw.permission_request_templates),
+        &raw.requestable_tools,
+    )?;
+    raw.required_hooks =
+        sort_unique_ids(std::mem::take(&mut raw.required_hooks), "required_hooks")?;
+    raw.permissions = normalize_permissions(std::mem::take(&mut raw.permissions))?;
+    raw.guarantees = sort_unique_strings(std::mem::take(&mut raw.guarantees), "guarantees")?;
+    Ok(())
 }
 
 fn split_frontmatter<'a>(
@@ -639,9 +648,9 @@ fn normalize_permission_request_templates(
 }
 
 fn normalize_references(
-    references: RawReferencePolicy,
+    references: &RawReferencePolicy,
 ) -> Result<SkillReferencePolicy, SkillManifestError> {
-    let include = sort_unique_strings(references.include, "references.include")?;
+    let include = sort_unique_strings(references.include.clone(), "references.include")?;
     for path in &include {
         validate_reference_path(path)?;
     }
