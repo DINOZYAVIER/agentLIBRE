@@ -1436,21 +1436,10 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
         validate_prompt(prompt)?;
     }
 
-    let options = RunOptions {
-        config: args.common.config,
-        artifact_root: args.common.artifact_root,
-        run_id: args.common.run_id,
-        workspace_root: args.common.workspace_root,
-        session_id: None,
-        no_history: false,
-        new_session: false,
-        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
-        tool_mode: args.common.tool_mode,
-        skills: validate_skill_ids(args.common.skills)?,
-        memory: args.common.memory,
+    Ok(RunOptions {
         prompt,
-    };
-    Ok(options)
+        ..run_options_from_common(args.common)?
+    })
 }
 
 fn run_options_from_prompt(prompt: String) -> Result<RunOptions> {
@@ -1467,18 +1456,10 @@ fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
     }
 
     Ok(RunOptions {
-        config: args.common.config,
-        artifact_root: args.common.artifact_root,
-        run_id: args.common.run_id,
-        workspace_root: args.common.workspace_root,
         session_id: args.session_id,
         no_history: args.no_history,
         new_session: args.new_session,
-        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
-        tool_mode: args.common.tool_mode,
-        skills: validate_skill_ids(args.common.skills)?,
-        memory: args.common.memory,
-        prompt: None,
+        ..run_options_from_common(args.common)?
     })
 }
 
@@ -1493,6 +1474,23 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
         tool_mode: args.common.tool_mode,
         skills: validate_skill_ids(args.common.skills)?,
         memory: args.common.memory,
+    })
+}
+
+fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
+    Ok(RunOptions {
+        config: common.config,
+        artifact_root: common.artifact_root,
+        run_id: common.run_id,
+        workspace_root: common.workspace_root,
+        session_id: None,
+        no_history: false,
+        new_session: false,
+        max_output_tokens: validate_max_output_tokens(common.max_output_tokens)?,
+        tool_mode: common.tool_mode,
+        skills: validate_skill_ids(common.skills)?,
+        memory: common.memory,
+        prompt: None,
     })
 }
 
