@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
-    ModelConfig, ModelDialect, MtpRuntimeConfig, PromptConfig, RuntimeSwitch, ToolCallFormat,
-    load_local_inference_config,
+    ModelConfig, ModelDialect, MtpProbability, MtpRuntimeConfig, PromptConfig, RuntimeSwitch,
+    ToolCallFormat, load_local_inference_config,
 };
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
 
@@ -165,6 +165,7 @@ fn llama_cpp_test_runtime_records_enabled_mtp_config() {
         enabled: true,
         draft_model: Some(PathBuf::from("/models/gemma4-mtp-q4_0.gguf")),
         draft_tokens: 4,
+        p_min: MtpProbability::from_f32(0.2).unwrap(),
         gpu_layers: Some(999),
         cache_type_k: Some(KvCacheType::Q8_0),
         cache_type_v: Some(KvCacheType::Q8_0),
@@ -179,6 +180,7 @@ fn llama_cpp_test_runtime_records_enabled_mtp_config() {
     assert!(runtime_log.contains("mtp_enabled = true"));
     assert!(runtime_log.contains("mtp_draft_model = /models/gemma4-mtp-q4_0.gguf"));
     assert!(runtime_log.contains("mtp_draft_tokens = 4"));
+    assert!(runtime_log.contains("mtp_p_min = 0.2"));
     assert!(paths.response_json().exists());
 
     std::fs::remove_dir_all(root_path).unwrap();

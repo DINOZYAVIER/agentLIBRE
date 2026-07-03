@@ -62,6 +62,7 @@ mmap = false
 enabled = false
 draft_model = "/models/gemma4-mtp-q4_0.gguf"
 draft_tokens = 4
+p_min = 0.2
 gpu_layers = 999
 cache_type_k = "q8_0"
 cache_type_v = "q8_0"
@@ -93,6 +94,10 @@ tool_call_format = "hermes_json"
         Some(Path::new("/models/gemma4-mtp-q4_0.gguf"))
     );
     assert_eq!(config.runtime.mtp.draft_tokens, 4);
+    assert_eq!(
+        config.runtime.mtp.p_min,
+        MtpProbability::from_f32(0.2).unwrap()
+    );
     assert_eq!(config.runtime.mtp.gpu_layers, Some(999));
     assert_eq!(config.runtime.mtp.cache_type_k, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.mtp.cache_type_v, Some(KvCacheType::Q8_0));
@@ -152,6 +157,7 @@ threads = 8
 enabled = true
 draft_model = "/models/gemma4-mtp-q4_0.gguf"
 draft_tokens = 4
+p_min = 0.25
 
 [model]
 dialect = "gemma4"
@@ -167,6 +173,10 @@ tool_call_format = "gemma_function_call"
         Some(Path::new("/models/gemma4-mtp-q4_0.gguf"))
     );
     assert_eq!(config.runtime.mtp.draft_tokens, 4);
+    assert_eq!(
+        config.runtime.mtp.p_min,
+        MtpProbability::from_f32(0.25).unwrap()
+    );
 }
 
 #[test]
@@ -255,6 +265,37 @@ tool_call_format = "gemma_function_call"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "runtime.mtp draft_tokens 65 exceeds maximum 64");
+}
+
+#[test]
+fn local_inference_config_rejects_mtp_p_min_above_one() {
+    let path = write_temp_config(
+        "local-inference-mtp-p-min-limit",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = false
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+draft_tokens = 4
+p_min = 1.01
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let err = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(&err, "runtime.mtp p_min must be between 0.0 and 1.0");
 }
 
 #[test]

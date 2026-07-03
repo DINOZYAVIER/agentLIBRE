@@ -5,7 +5,7 @@ mod prompt;
 
 pub use backend::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
-    MtpRuntimeConfig, RuntimeSwitch,
+    MtpProbability, MtpRuntimeConfig, RuntimeSwitch,
 };
 pub use load::load_local_inference_config;
 pub use model::{ModelConfig, ModelDialect, ToolCallFormat};
