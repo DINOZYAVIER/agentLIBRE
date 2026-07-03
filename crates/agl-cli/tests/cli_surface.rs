@@ -145,7 +145,7 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_contains(&add_stdout, "memory id=");
     assert_contains(&add_stdout, "scope=user");
     assert_contains(&add_stdout, "kind=preference");
-    let id = memory_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "memory");
 
     let list = run_agl(&["--home", &home_arg, "memory", "list"]);
     assert_success(&list);
@@ -191,7 +191,7 @@ fn memory_commands_manage_explicit_user_memory() {
         "Only profile-a should see this.",
     ]);
     assert_success(&keyed);
-    let keyed_id = memory_id_from_output(&stdout(&keyed));
+    let keyed_id = id_from_output(&stdout(&keyed), "memory");
     let default_user = run_agl(&["--home", &home_arg, "memory", "list", "--scope", "user"]);
     assert_success(&default_user);
     assert!(
@@ -236,7 +236,7 @@ fn memory_suggestion_commands_require_approval() {
     let suggest_stdout = stdout(&suggest);
     assert_contains(&suggest_stdout, "memory_suggestion id=");
     assert_contains(&suggest_stdout, "status=pending");
-    let suggestion_id = memory_suggestion_id_from_output(&suggest_stdout);
+    let suggestion_id = id_from_output(&suggest_stdout, "memory suggestion");
 
     let empty_memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
     assert_success(&empty_memory);
@@ -285,7 +285,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     assert_success(&add);
     let add_stdout = stdout(&add);
     assert_contains(&add_stdout, "note id=");
-    let id = note_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "note");
 
     let search = run_agl(&["--home", &home_arg, "notes", "search", "pinned"]);
     assert_success(&search);
@@ -378,7 +378,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_contains(&add_stdout, "cron id=");
     assert_contains(&add_stdout, "target=builtin:store-status");
     assert_contains(&add_stdout, "enabled=true");
-    let id = cron_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "cron");
 
     let list = run_agl(&["--home", &home_arg, "cron", "list"]);
     assert_success(&list);
@@ -1337,35 +1337,11 @@ fn version_from_stdout<'a>(binary: &str, stdout: &'a str) -> &'a str {
         .unwrap_or_else(|| panic!("missing version in output: {stdout}"))
 }
 
-fn memory_id_from_output(stdout: &str) -> String {
+fn id_from_output(stdout: &str, label: &str) -> String {
     stdout
         .split_whitespace()
         .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("memory id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn memory_suggestion_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("memory suggestion id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn note_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("note id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn cron_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("cron id missing from output:\n{stdout}"))
+        .unwrap_or_else(|| panic!("{label} id missing from output:\n{stdout}"))
         .to_string()
 }
 
