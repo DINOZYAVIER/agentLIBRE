@@ -12,7 +12,7 @@ use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    default_socket_path, run_cron_tick,
+    default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
@@ -346,7 +346,7 @@ fn run_cron_run(
 fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bool) -> Result<()> {
     validate_stored_cron_target(job, runtime)?;
     let prompt = if job.target_kind == CronTargetKind::Skill {
-        Some(cron_skill_prompt(job)?)
+        Some(render_cron_skill_prompt(job)?)
     } else {
         None
     };
@@ -512,7 +512,7 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
 }
 
 fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
-    let prompt = cron_skill_prompt(job)?;
+    let prompt = render_cron_skill_prompt(job)?;
     let inference = InferenceOptions {
         skills: vec![job.target_ref.clone()],
         tool_mode: ChatToolAccessMode::Write,
@@ -546,20 +546,8 @@ fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Re
 }
 
 fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
-    let _prompt = cron_skill_prompt(job)?;
+    let _prompt = render_cron_skill_prompt(job)?;
     Ok(format!("skill:{}:mock", job.target_ref))
-}
-
-fn cron_skill_prompt(job: &CronJob) -> Result<String> {
-    let prompt = job
-        .prompt
-        .as_deref()
-        .context("skill cron job missing prompt")?;
-    if let Some(input) = job.input.as_deref() {
-        Ok(format!("{prompt}\n\nCron input:\n{input}"))
-    } else {
-        Ok(prompt.to_string())
-    }
 }
 
 fn prompt_preview(prompt: &str) -> String {
@@ -616,7 +604,7 @@ impl CronNotifier for CliStoreCronNotifier<'_> {
         if !notification.notify_ref.starts_with("matrix-room:") {
             return Ok(());
         }
-        let body = cron_notification_body(&notification);
+        let body = render_cron_notification_body(&notification);
         let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
         self.store
             .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
@@ -629,23 +617,6 @@ impl CronNotifier for CliStoreCronNotifier<'_> {
             .context("failed to enqueue Matrix notification")?;
         Ok(())
     }
-}
-
-fn cron_notification_body(notification: &CronNotification) -> String {
-    let mut body = format!(
-        "Cron job `{}` ({}) {} for {}.",
-        notification.job_name,
-        notification.job_id,
-        notification.status.as_str(),
-        notification.scheduled_for
-    );
-    if let Some(result_ref) = &notification.result_ref {
-        body.push_str(&format!("\nresult_ref: {result_ref}"));
-    }
-    if let Some(error) = &notification.error {
-        body.push_str(&format!("\nerror: {error}"));
-    }
-    body
 }
 
 fn unix_now() -> u64 {
