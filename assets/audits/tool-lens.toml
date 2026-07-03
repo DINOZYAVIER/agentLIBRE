@@ -1,702 +1,82 @@
 version = 1
 
-[[tools]]
-id = "fs.read"
-provider = "core-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/fs"
-
-[[tools]]
-id = "fs.list"
-provider = "core-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/fs"
-
-[[tools]]
-id = "fs.search"
-provider = "core-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/fs"
-
-[[tools]]
-id = "fs.edit"
-provider = "core-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["repo_files"]
-visible_in_read_only = false
-policy_owner = "agl-tools/fs"
-
-[[tools]]
-id = "memory.suggest"
-provider = "memory-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_memory_suggestions"]
-visible_in_read_only = false
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "memory.search"
-provider = "memory-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "memory.list"
-provider = "memory-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "memory.add"
-provider = "memory-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_memory_entries"]
-visible_in_read_only = false
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "memory.approve"
-provider = "memory-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_memory_suggestions", "store_memory_entries"]
-visible_in_read_only = false
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "memory.reject"
-provider = "memory-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_memory_suggestions"]
-visible_in_read_only = false
-policy_owner = "agl-tools/memory"
-
-[[tools]]
-id = "notes.add"
-provider = "notes-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_notes"]
-visible_in_read_only = false
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.search"
-provider = "notes-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.show"
-provider = "notes-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.update"
-provider = "notes-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_notes"]
-visible_in_read_only = false
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.link"
-provider = "notes-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_note_links"]
-visible_in_read_only = false
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.delete"
-provider = "notes-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_notes"]
-visible_in_read_only = false
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "notes.remember"
-provider = "notes-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_memory_entries", "store_note_links"]
-visible_in_read_only = false
-policy_owner = "agl-tools/notes"
-
-[[tools]]
-id = "cron.list"
-provider = "cron-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.show"
-provider = "cron-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.history"
-provider = "cron-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.preflight"
-provider = "cron-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.add"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.update"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.delete"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.enable"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.disable"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.run"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "execute"
-state_effects = ["store_cron"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "cron.tick"
-provider = "cron-tools"
-capability = "write"
-operation_kind = "execute"
-state_effects = ["store_cron", "matrix_outbox"]
-visible_in_read_only = false
-policy_owner = "agl-tools/cron"
-
-[[tools]]
-id = "matrix.outbox.status"
-provider = "matrix-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/matrix"
-
-[[tools]]
-id = "matrix.outbox.enqueue"
-provider = "matrix-tools"
-capability = "write"
-operation_kind = "write"
-state_effects = ["matrix_outbox"]
-visible_in_read_only = false
-policy_owner = "agl-tools/matrix"
-
-[[tools]]
-id = "matrix.outbox.deliver"
-provider = "matrix-delivery-tools"
-capability = "write"
-operation_kind = "execute"
-state_effects = ["matrix_outbox"]
-visible_in_read_only = false
-policy_owner = "agl-matrix-bridge/outbox_delivery"
-
-[[tools]]
-id = "store.status"
-provider = "store-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/store"
-
-[[tools]]
-id = "store.export"
-provider = "store-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/store"
-
-[[tools]]
-id = "store.migrate"
-provider = "store-tools"
-capability = "write"
-operation_kind = "admin"
-state_effects = ["store_schema"]
-visible_in_read_only = false
-policy_owner = "agl-tools/store"
-
-[[tools]]
-id = "repo.status"
-provider = "repo-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "repo.export_profile"
-provider = "repo-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "repo.hooks.status"
-provider = "repo-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "repo.init"
-provider = "repo-tools"
-capability = "write"
-operation_kind = "admin"
-state_effects = ["repo_workspace"]
-visible_in_read_only = false
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "repo.import_profile"
-provider = "repo-tools"
-capability = "write"
-operation_kind = "admin"
-state_effects = ["repo_workspace"]
-visible_in_read_only = false
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "repo.install_hooks"
-provider = "repo-tools"
-capability = "write"
-operation_kind = "admin"
-state_effects = ["repo_hooks"]
-visible_in_read_only = false
-policy_owner = "agl-tools/repo"
-
-[[tools]]
-id = "skill.list"
-provider = "skill-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.inspect"
-provider = "skill-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.status"
-provider = "skill-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.verify"
-provider = "skill-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.lock"
-provider = "skill-tools"
-capability = "write"
-operation_kind = "admin"
-state_effects = ["repo_workspace"]
-visible_in_read_only = false
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.trust"
-provider = "skill-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["skill_trust"]
-visible_in_read_only = false
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "skill.revoke"
-provider = "skill-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["skill_trust"]
-visible_in_read_only = false
-policy_owner = "agl-host-tools/skills"
-
-[[tools]]
-id = "permissions.status"
-provider = "permission-tools"
-capability = "read"
-operation_kind = "read"
-state_effects = []
-visible_in_read_only = true
-policy_owner = "agl-tools/permissions"
-
-[[tools]]
-id = "permissions.request"
-provider = "permission-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_permission_requests"]
-visible_in_read_only = true
-policy_owner = "agl-tools/permissions"
-
-[[tools]]
-id = "permissions.grant"
-provider = "permission-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_permission_grants"]
-visible_in_read_only = false
-policy_owner = "agl-tools/permissions"
-
-[[tools]]
-id = "permissions.revoke"
-provider = "permission-tools"
-capability = "write"
-operation_kind = "approve"
-state_effects = ["store_permission_grants"]
-visible_in_read_only = false
-policy_owner = "agl-tools/permissions"
-
-[[skills]]
-id = "change"
-pack = "agl"
-classification = "filesystem_mutating"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
-state_effects = ["repo_files"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["fs.edit can change repository files; keep repo_path, diff_scope, secret_scan, and verification hooks."]
-
-[[skills]]
-id = "commit"
-pack = "agl"
-classification = "read_only_planning"
-allowed_tools = ["fs.read", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["commit_message.validate", "secret_scan.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "commit-hygiene"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["commit_message.validate", "secret_scan.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "cron-planner"
-pack = "agl"
-classification = "read_only_planning"
-allowed_tools = ["cron.preflight", "fs.read", "fs.search"]
-requestable_tools = ["cron.add", "matrix.outbox.enqueue"]
-denied_tools = ["matrix.outbox.deliver"]
-permission_request_templates = [
-  { id = "schedule-matrix-cron", tools = ["cron.add", "matrix.outbox.enqueue"], max_operation_kind = "write", state_effects = [], default_duration = "one_turn", reason_template = "Schedule a recurring Matrix notification." },
-]
-required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["May propose cron jobs but must not execute or schedule until cron tools and permission grants exist."]
-
-[[skills]]
-id = "memory-capture"
-pack = "agl"
-classification = "memory_mutating_suggestion"
-allowed_tools = ["fs.read", "fs.search", "memory.suggest"]
-requestable_tools = []
-denied_tools = ["memory.approve"]
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "secret_scan.validate"]
-state_effects = ["store_memory_suggestions"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["memory.suggest creates pending suggestions; approval remains outside this skill."]
-
-[[skills]]
-id = "notes-capture"
-pack = "agl"
-classification = "notes_mutating"
-allowed_tools = ["fs.read", "fs.search", "notes.add", "notes.search", "notes.show", "notes.link"]
-requestable_tools = []
-denied_tools = ["notes.delete", "notes.remember", "notes.update"]
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "secret_scan.validate"]
-state_effects = ["store_notes", "store_note_links"]
-memory_read_scopes = []
-notes_read = true
-notes_write = true
-risks = ["notes.add and notes.link mutate local store; note creation must be explicit."]
-
-[[skills]]
-id = "repo-review"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "repo-status"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "repo.status"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "verification.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "review-pack"
-pack = "agl"
-classification = "filesystem_mutating"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "review_pack.validate", "secret_scan.validate", "verification.validate"]
-state_effects = ["repo_files"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["fs.edit writes review artifacts; review_pack.validate must stay required."]
-
-[[skills]]
-id = "rust"
-pack = "agl"
-classification = "filesystem_mutating"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
-state_effects = ["repo_files"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["fs.edit can change workspace code; keep focused verification."]
-
-[[skills]]
-id = "security-review"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "diff_scope.validate", "secret_scan.validate", "verification.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "skill"
-pack = "agl"
-classification = "filesystem_mutating"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "skill_manifest.validate", "secret_scan.validate"]
-state_effects = ["repo_files"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["fs.edit changes builtin skill assets; skill_manifest.validate must stay required."]
-
-[[skills]]
-id = "smoke-test"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "task-spec"
-pack = "agl"
-classification = "filesystem_mutating"
-allowed_tools = ["fs.read", "fs.list", "fs.search", "fs.edit"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "task_spec.validate"]
-state_effects = ["repo_files"]
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = ["fs.edit writes task specs; task_spec.validate must stay required."]
-
-[[skills]]
-id = "test-triage"
-pack = "agl"
-classification = "read_only_analysis"
-allowed_tools = ["fs.read", "fs.list", "fs.search"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate", "verification.validate", "secret_scan.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
-
-[[skills]]
-id = "tool-smoke"
-pack = "agl"
-classification = "read_only_smoke"
-allowed_tools = ["fs.read"]
-requestable_tools = []
-denied_tools = []
-permission_request_templates = []
-required_hooks = ["repo_path.validate"]
-state_effects = []
-memory_read_scopes = []
-notes_read = false
-notes_write = false
-risks = []
+[tool_policy_owners]
+"fs.read" = "agl-tools/fs"
+"fs.list" = "agl-tools/fs"
+"fs.search" = "agl-tools/fs"
+"fs.edit" = "agl-tools/fs"
+"memory.suggest" = "agl-tools/memory"
+"memory.search" = "agl-tools/memory"
+"memory.list" = "agl-tools/memory"
+"memory.add" = "agl-tools/memory"
+"memory.approve" = "agl-tools/memory"
+"memory.reject" = "agl-tools/memory"
+"notes.add" = "agl-tools/notes"
+"notes.search" = "agl-tools/notes"
+"notes.show" = "agl-tools/notes"
+"notes.update" = "agl-tools/notes"
+"notes.link" = "agl-tools/notes"
+"notes.delete" = "agl-tools/notes"
+"notes.remember" = "agl-tools/notes"
+"cron.list" = "agl-tools/cron"
+"cron.show" = "agl-tools/cron"
+"cron.history" = "agl-tools/cron"
+"cron.preflight" = "agl-tools/cron"
+"cron.add" = "agl-tools/cron"
+"cron.update" = "agl-tools/cron"
+"cron.delete" = "agl-tools/cron"
+"cron.enable" = "agl-tools/cron"
+"cron.disable" = "agl-tools/cron"
+"cron.run" = "agl-tools/cron"
+"cron.tick" = "agl-tools/cron"
+"matrix.outbox.status" = "agl-tools/matrix"
+"matrix.outbox.enqueue" = "agl-tools/matrix"
+"matrix.outbox.deliver" = "agl-matrix-bridge/outbox_delivery"
+"store.status" = "agl-tools/store"
+"store.export" = "agl-tools/store"
+"store.migrate" = "agl-tools/store"
+"repo.status" = "agl-tools/repo"
+"repo.export_profile" = "agl-tools/repo"
+"repo.hooks.status" = "agl-tools/repo"
+"repo.init" = "agl-tools/repo"
+"repo.import_profile" = "agl-tools/repo"
+"repo.install_hooks" = "agl-tools/repo"
+"skill.list" = "agl-host-tools/skills"
+"skill.inspect" = "agl-host-tools/skills"
+"skill.status" = "agl-host-tools/skills"
+"skill.verify" = "agl-host-tools/skills"
+"skill.lock" = "agl-host-tools/skills"
+"skill.trust" = "agl-host-tools/skills"
+"skill.revoke" = "agl-host-tools/skills"
+"permissions.status" = "agl-tools/permissions"
+"permissions.request" = "agl-tools/permissions"
+"permissions.grant" = "agl-tools/permissions"
+"permissions.revoke" = "agl-tools/permissions"
+
+[skill_classifications]
+change = "filesystem_mutating"
+commit = "read_only_planning"
+"commit-hygiene" = "read_only_analysis"
+"cron-planner" = "read_only_planning"
+"memory-capture" = "memory_mutating_suggestion"
+"notes-capture" = "notes_mutating"
+"repo-review" = "read_only_analysis"
+"repo-status" = "read_only_analysis"
+"review-pack" = "filesystem_mutating"
+rust = "filesystem_mutating"
+"security-review" = "read_only_analysis"
+skill = "filesystem_mutating"
+"smoke-test" = "read_only_analysis"
+"task-spec" = "filesystem_mutating"
+"test-triage" = "read_only_analysis"
+"tool-smoke" = "read_only_smoke"
+
+[skill_risks]
+change = ["fs.edit can change repository files; keep repo_path, diff_scope, secret_scan, and verification hooks."]
+"cron-planner" = ["May propose cron jobs but must not execute or schedule until cron tools and permission grants exist."]
+"memory-capture" = ["memory.suggest creates pending suggestions; approval remains outside this skill."]
+"notes-capture" = ["notes.add and notes.link mutate local store; note creation must be explicit."]
+"review-pack" = ["fs.edit writes review artifacts; review_pack.validate must stay required."]
+rust = ["fs.edit can change workspace code; keep focused verification."]
+skill = ["fs.edit changes builtin skill assets; skill_manifest.validate must stay required."]
+"task-spec" = ["fs.edit writes task specs; task_spec.validate must stay required."]
