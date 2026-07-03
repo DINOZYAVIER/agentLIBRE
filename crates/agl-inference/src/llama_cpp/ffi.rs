@@ -10,6 +10,7 @@ pub(crate) type llama_memory_t = *mut c_void;
 pub(crate) type ggml_backend_dev_t = *mut c_void;
 
 pub(crate) const LLAMA_SPLIT_MODE_LAYER: c_int = 1;
+pub(crate) const LLAMA_CONTEXT_TYPE_MTP: c_int = 1;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_AUTO: c_int = -1;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_DISABLED: c_int = 0;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_ENABLED: c_int = 1;
@@ -106,6 +107,15 @@ pub(crate) struct llama_chat_message {
     pub content: *const c_char,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct agl_llama_mtp_stats {
+    pub draft_calls: u64,
+    pub empty_drafts: u64,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+}
+
 unsafe extern "C" {
     pub(crate) fn ggml_backend_load_all_from_path(dir_path: *const c_char);
     pub(crate) fn ggml_backend_dev_count() -> usize;
@@ -146,6 +156,12 @@ unsafe extern "C" {
     pub(crate) fn llama_n_ctx(ctx: *const c_void) -> u32;
     pub(crate) fn llama_get_memory(ctx: *const c_void) -> llama_memory_t;
     pub(crate) fn llama_memory_seq_pos_max(mem: llama_memory_t, seq_id: llama_seq_id) -> llama_pos;
+    pub(crate) fn llama_memory_seq_rm(
+        mem: llama_memory_t,
+        seq_id: llama_seq_id,
+        p0: llama_pos,
+        p1: llama_pos,
+    ) -> bool;
     pub(crate) fn llama_print_system_info() -> *const c_char;
     pub(crate) fn llama_supports_gpu_offload() -> bool;
 
@@ -167,6 +183,34 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
+    pub(crate) fn agl_llama_mtp_init(
+        ctx_tgt: *mut c_void,
+        ctx_dft: *mut c_void,
+        n_max: i32,
+        n_min: i32,
+        p_min: c_float,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> *mut c_void;
+    pub(crate) fn agl_llama_mtp_free(spec: *mut c_void);
+    pub(crate) fn agl_llama_mtp_begin(
+        spec: *mut c_void,
+        prompt_tokens: *const llama_token,
+        prompt_tokens_count: usize,
+    ) -> c_int;
+    pub(crate) fn agl_llama_mtp_process(spec: *mut c_void, batch: *const llama_batch) -> c_int;
+    pub(crate) fn agl_llama_mtp_draft(
+        spec: *mut c_void,
+        n_past: llama_pos,
+        id_last: llama_token,
+        prompt_tokens: *const llama_token,
+        prompt_tokens_count: usize,
+        out_tokens: *mut llama_token,
+        out_tokens_capacity: usize,
+        out_tokens_count: *mut usize,
+    ) -> c_int;
+    pub(crate) fn agl_llama_mtp_accept(spec: *mut c_void, n_accepted: u16) -> c_int;
+    pub(crate) fn agl_llama_mtp_get_stats(spec: *const c_void) -> agl_llama_mtp_stats;
     pub(crate) fn llama_tokenize(
         vocab: *const c_void,
         text: *const c_char,
