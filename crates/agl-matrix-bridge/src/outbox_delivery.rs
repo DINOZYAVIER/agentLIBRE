@@ -42,7 +42,7 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
         let limit = args
             .limit
             .unwrap_or(DEFAULT_DELIVERY_LIMIT)
-            .min(MAX_DELIVERY_LIMIT);
+            .clamp(1, MAX_DELIVERY_LIMIT);
         let dry_run = args.dry_run.unwrap_or(false);
         let store = if dry_run {
             AglStore::open_current_read_only_at(&self.store_root)
@@ -55,8 +55,7 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
                 self.store_root.display()
             )
         })?;
-        let queued = store.queued_matrix_notifications(limit)?;
-        let truncated = queued.len() >= limit;
+        let (queued, truncated) = store.queued_matrix_notifications_page(limit)?;
         let mut sent = 0usize;
         let mut failed = 0usize;
         let mut output = format!(

@@ -298,6 +298,67 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
 }
 
 #[test]
+fn llama_cpp_backend_resets_session_when_rendered_prefix_changes() {
+    let root_path = temp_root("llama-session-prefix-change");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let mut backend = LlamaCppBackend::new_with_test_runtime(
+        local_config(),
+        artifact_root,
+        vec!["first answer", "second answer"],
+    )
+    .unwrap();
+
+    let first = inference_request_with_messages(
+        "attempt-0001",
+        1,
+        vec![RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "first".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        }],
+    );
+    let second = inference_request_with_messages(
+        "attempt-0002",
+        2,
+        vec![
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "edited first".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Assistant,
+                content: "first answer".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "second".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+        ],
+    );
+
+    let first_response = backend.generate(first).unwrap();
+    let second_response = backend.generate(second).unwrap();
+
+    assert_eq!(
+        first_response.metadata.model_state.as_deref(),
+        Some("loaded")
+    );
+    assert_eq!(
+        second_response.metadata.model_state.as_deref(),
+        Some("loaded")
+    );
+
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
 fn llama_cpp_backend_records_auto_selected_device_metadata() {
     let root_path = temp_root("llama-auto-selected-device");
     let artifact_root = InferenceArtifactRoot::new(&root_path);

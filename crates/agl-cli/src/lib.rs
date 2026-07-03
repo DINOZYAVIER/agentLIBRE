@@ -129,43 +129,50 @@ fn runtime_for_command_paths(
     command: &CliCommand,
     paths: AgentLibrePaths,
 ) -> Result<AgentLibreRuntimeConfig> {
-    if matches!(
-        command,
-        CliCommand::Config(_)
-            | CliCommand::Cron(_)
-            | CliCommand::Store(_)
-            | CliCommand::Repo(_)
-            | CliCommand::Skill(_)
-            | CliCommand::Memory(_)
-            | CliCommand::Notes(_)
-            | CliCommand::DaemonStatus(_)
-    ) {
-        return Ok(AgentLibreRuntimeConfig {
+    match cli_runtime_profile(command) {
+        CliRuntimeProfile::LightBatch => Ok(AgentLibreRuntimeConfig {
             paths,
             logging: AgentLibreLoggingConfig::from_env(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
-        });
+        }),
+        CliRuntimeProfile::FullBatch | CliRuntimeProfile::Interactive => {
+            AgentLibreRuntimeConfig::from_paths(paths)
+        }
     }
-
-    AgentLibreRuntimeConfig::from_paths(paths)
 }
 
 fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
+    match cli_runtime_profile(command) {
+        CliRuntimeProfile::Interactive => AgentLibreProcessMode::Interactive,
+        CliRuntimeProfile::FullBatch | CliRuntimeProfile::LightBatch => {
+            AgentLibreProcessMode::Batch
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliRuntimeProfile {
+    Interactive,
+    FullBatch,
+    LightBatch,
+}
+
+fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Infer(_) | CliCommand::Chat(_) => AgentLibreProcessMode::Interactive,
-        CliCommand::Serve(_)
-        | CliCommand::Repo(_)
-        | CliCommand::Skill(_)
+        CliCommand::Infer(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
+        CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Store(_)
+        | CliCommand::Repo(_)
+        | CliCommand::Skill(_)
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
-        | CliCommand::DaemonStatus(_)
+        | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
+        CliCommand::Serve(_)
         | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
-        | CliCommand::Completion { .. }
-        | CliCommand::Config(_) => AgentLibreProcessMode::Batch,
+        | CliCommand::Completion { .. } => CliRuntimeProfile::FullBatch,
     }
 }
 
@@ -193,7 +200,8 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
 
 fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "cron", "starting command");
-    let store = AglStore::open_default(&runtime.paths).context("failed to open cron store")?;
+    let store =
+        AglStore::open_at(runtime.paths.store_root()).context("failed to open cron store")?;
     let cron = CronRepository::new(&store);
 
     match command {
@@ -1598,6 +1606,44 @@ mod tests {
     use crate::args::ConfigCommand;
 
     use super::*;
+
+    fn serve_options() -> ServeOptions {
+        ServeOptions {
+            socket_path: None,
+            config: None,
+            artifact_root: None,
+            run_id: None,
+            workspace_root: None,
+            max_output_tokens: 256,
+            tool_mode: crate::args::ToolAccessMode::ReadOnly,
+            skills: Vec::new(),
+            memory: false,
+        }
+    }
+
+    #[test]
+    fn cli_runtime_profile_drives_config_loading_and_process_mode() {
+        let config = CliCommand::Config(ConfigCommand::Paths);
+        assert_eq!(cli_runtime_profile(&config), CliRuntimeProfile::LightBatch);
+        assert_eq!(
+            process_mode_for_command(&config),
+            AgentLibreProcessMode::Batch
+        );
+
+        let serve = CliCommand::Serve(serve_options());
+        assert_eq!(cli_runtime_profile(&serve), CliRuntimeProfile::FullBatch);
+        assert_eq!(
+            process_mode_for_command(&serve),
+            AgentLibreProcessMode::Batch
+        );
+
+        let infer = CliCommand::Infer(RunOptions::default());
+        assert_eq!(cli_runtime_profile(&infer), CliRuntimeProfile::Interactive);
+        assert_eq!(
+            process_mode_for_command(&infer),
+            AgentLibreProcessMode::Interactive
+        );
+    }
 
     #[test]
     fn config_command_runtime_does_not_parse_existing_config() {

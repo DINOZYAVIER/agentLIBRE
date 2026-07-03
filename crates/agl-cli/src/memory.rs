@@ -15,7 +15,8 @@ use crate::args::{
 
 pub(crate) fn run_memory(command: MemoryCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "memory", "starting command");
-    let store = AglStore::open_default(&runtime.paths).context("failed to open memory store")?;
+    let store =
+        AglStore::open_at(runtime.paths.store_root()).context("failed to open memory store")?;
     let memory = MemoryRepository::new(&store);
 
     match command {

@@ -38,7 +38,7 @@ impl DaemonServer {
         listener
             .set_nonblocking(true)
             .context("failed to set daemon socket nonblocking")?;
-        let store = AglStore::open_default(&self.runtime.paths)
+        let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
         tracing::info!(
             target: "agentlibre::daemon",

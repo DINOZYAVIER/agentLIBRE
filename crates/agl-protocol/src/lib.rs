@@ -32,7 +32,6 @@ pub enum DaemonRequestKind {
     SessionTurn(SessionTurnRequest),
     SessionClear(SessionClearRequest),
     SessionFinish(SessionFinishRequest),
-    SessionCancel(SessionCancelRequest),
     SessionStatus(SessionStatusRequest),
     SessionList(SessionListRequest),
     SessionTranscript(SessionTranscriptRequest),
@@ -100,6 +99,7 @@ pub enum DaemonCapability {
     SessionClear,
     SessionFinish,
     SessionStatus,
+    SessionList,
     SessionTranscript,
     FinalAssistantMessage,
 }
@@ -172,11 +172,6 @@ pub struct SessionClearRequest {
 pub struct SessionFinishRequest {
     pub session_id: String,
     pub reason: SessionFinishReason,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionCancelRequest {
-    pub session_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

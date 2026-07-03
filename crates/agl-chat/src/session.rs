@@ -15,7 +15,7 @@ use agl_runtime::{
 use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
-use agl_store::{AglStore, PermissionGrantRecord, default_store_root};
+use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -61,7 +61,7 @@ impl InferenceSession {
                 .clone()
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
-        let store_root = default_store_root(&runtime.paths);
+        let store_root = runtime.paths.store_root();
 
         tracing::info!(
             target: "agentlibre::app",
@@ -476,8 +476,8 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.workspace_root,
         request.trust_store_path,
     )?;
-    let store =
-        AglStore::open_default(&request.runtime.paths).context("failed to open memory store")?;
+    let store = AglStore::open_at(request.runtime.paths.store_root())
+        .context("failed to open memory store")?;
     let memory = MemoryRepository::new(&store);
     let mut query = MemorySearchQuery::scoped(MemoryScope::user());
     query.limit = MEMORY_CONTEXT_ENTRY_LIMIT;

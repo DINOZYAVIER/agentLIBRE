@@ -13,7 +13,6 @@ pub(crate) const LLAMA_SPLIT_MODE_LAYER: c_int = 1;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_AUTO: c_int = -1;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_DISABLED: c_int = 0;
 pub(crate) const LLAMA_FLASH_ATTN_TYPE_ENABLED: c_int = 1;
-pub(crate) const LLAMA_DEFAULT_SEED: u32 = 0xFFFF_FFFF;
 pub(crate) const GGML_TYPE_F32: c_int = 0;
 pub(crate) const GGML_TYPE_F16: c_int = 1;
 pub(crate) const GGML_TYPE_Q4_0: c_int = 2;
@@ -181,9 +180,6 @@ unsafe extern "C" {
     pub(crate) fn llama_sampler_chain_init(params: llama_sampler_chain_params) -> *mut c_void;
     pub(crate) fn llama_sampler_chain_add(chain: *mut c_void, sampler: *mut c_void);
     pub(crate) fn llama_sampler_init_greedy() -> *mut c_void;
-    pub(crate) fn llama_sampler_init_min_p(p: c_float, min_keep: usize) -> *mut c_void;
-    pub(crate) fn llama_sampler_init_temp(t: c_float) -> *mut c_void;
-    pub(crate) fn llama_sampler_init_dist(seed: u32) -> *mut c_void;
     pub(crate) fn llama_sampler_sample(
         sampler: *mut c_void,
         ctx: *mut c_void,

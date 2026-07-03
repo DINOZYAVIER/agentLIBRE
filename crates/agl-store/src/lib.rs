@@ -2,7 +2,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_runtime::AgentLibrePaths;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, types::Type};
 use serde::Deserialize;
 use serde_json::json;
@@ -14,8 +13,8 @@ mod types;
 
 pub use error::{Result, StoreError};
 pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
+pub use path::default_database_path;
 use path::{database_path, ensure_private_dir, set_private_file_permissions};
-pub use path::{default_database_path, default_store_root};
 pub use types::*;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";
@@ -27,10 +26,6 @@ pub struct AglStore {
 }
 
 impl AglStore {
-    pub fn open_default(paths: &AgentLibrePaths) -> Result<Self> {
-        Self::open_at(default_store_root(paths))
-    }
-
     pub fn open_at(root: impl AsRef<Path>) -> Result<Self> {
         let store = Self::open_for_migration_at(root)?;
         store.migrate()?;
@@ -425,6 +420,19 @@ impl AglStore {
             notifications.push(row??);
         }
         Ok(notifications)
+    }
+
+    pub fn queued_matrix_notifications_page(
+        &self,
+        limit: usize,
+    ) -> Result<(Vec<MatrixNotificationOutboxItem>, bool)> {
+        let limit = limit.max(1);
+        let mut notifications = self.queued_matrix_notifications(limit.saturating_add(1))?;
+        let truncated = notifications.len() > limit;
+        if truncated {
+            notifications.truncate(limit);
+        }
+        Ok((notifications, truncated))
     }
 
     pub fn mark_matrix_notification_sent(&self, id: &str) -> Result<MatrixNotificationOutboxItem> {

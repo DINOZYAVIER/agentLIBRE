@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{
     AglStore, StoreDomain, StoreExportOptions as AglStoreExportOptions, StoreSchemaStatus,
-    StoreStatus, default_store_root,
+    StoreStatus,
 };
 use anyhow::{Context, Result};
 
@@ -14,7 +14,7 @@ use crate::args::{
 
 pub(crate) fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "store", "starting command");
-    let store_root = default_store_root(&runtime.paths);
+    let store_root = runtime.paths.store_root();
 
     match command {
         StoreCommand::Status(options) => run_store_status(options, &store_root),

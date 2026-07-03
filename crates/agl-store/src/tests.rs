@@ -15,11 +15,11 @@ fn current_schema_version_matches_last_migration() {
 }
 
 #[test]
-fn opens_default_store_and_reports_health() {
+fn opens_store_at_explicit_root_and_reports_health() {
     let root = temp_root("health");
-    let paths = AgentLibrePaths::from_agl_home(&root);
+    let store_root = root.join("data/store");
 
-    let store = AglStore::open_default(&paths).unwrap();
+    let store = AglStore::open_at(&store_root).unwrap();
     let health = store.health().unwrap();
     let status = store.status().unwrap();
 
@@ -401,6 +401,10 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
     assert_eq!(queued, vec![first.clone()]);
     assert_eq!(first.status, MatrixNotificationOutboxStatus::Queued);
 
+    let (page, truncated) = store.queued_matrix_notifications_page(1).unwrap();
+    assert_eq!(page, vec![first.clone()]);
+    assert!(!truncated);
+
     let sent = store.mark_matrix_notification_sent(&first.id).unwrap();
     assert_eq!(sent.status, MatrixNotificationOutboxStatus::Sent);
     assert!(sent.delivered_at.is_some());
@@ -420,6 +424,41 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
     assert_eq!(count, 1);
     assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
     assert!(cron.contains("\"status\":\"sent\""));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn matrix_notification_outbox_page_reports_truncation_only_for_extra_rows() {
+    let root = temp_root("matrix-outbox-page");
+    let store = AglStore::open_at(&root).unwrap();
+
+    let first = store
+        .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+            "matrix-room:!room",
+            "cron",
+            "run_1",
+            "cron:run_1:matrix-room:!room",
+            "First.",
+        ))
+        .unwrap();
+    let second = store
+        .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+            "matrix-room:!room",
+            "cron",
+            "run_2",
+            "cron:run_2:matrix-room:!room",
+            "Second.",
+        ))
+        .unwrap();
+
+    let (exact_page, exact_truncated) = store.queued_matrix_notifications_page(2).unwrap();
+    let (limited_page, limited_truncated) = store.queued_matrix_notifications_page(1).unwrap();
+
+    assert_eq!(exact_page, vec![first.clone(), second]);
+    assert!(!exact_truncated);
+    assert_eq!(limited_page, vec![first]);
+    assert!(limited_truncated);
 
     std::fs::remove_dir_all(root).unwrap();
 }

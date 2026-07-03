@@ -11,7 +11,8 @@ use crate::memory::{memory_kind, memory_scope, print_memory_entry_summary};
 
 pub(crate) fn run_notes(command: NotesCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "notes", "starting command");
-    let store = AglStore::open_default(&runtime.paths).context("failed to open notes store")?;
+    let store =
+        AglStore::open_at(runtime.paths.store_root()).context("failed to open notes store")?;
     let notes = NoteRepository::new(&store);
 
     match command {

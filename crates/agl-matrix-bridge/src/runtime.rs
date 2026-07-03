@@ -343,8 +343,7 @@ impl MatrixRuntime {
 
         let store = AglStore::open_current_at(store_root.as_ref())?;
         let limit = limit.max(1);
-        let queued = store.queued_matrix_notifications(limit)?;
-        let truncated = queued.len() >= limit;
+        let (queued, truncated) = store.queued_matrix_notifications_page(limit)?;
         let mut report = MatrixOutboxDeliveryReport {
             queued: queued.len(),
             sent: 0,
