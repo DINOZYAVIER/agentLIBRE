@@ -155,8 +155,8 @@ fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
 }
 
 #[test]
-fn llama_cpp_backend_rejects_enabled_mtp_until_bridge_lands() {
-    let root_path = temp_root("llama-mtp-gated");
+fn llama_cpp_test_runtime_records_enabled_mtp_config() {
+    let root_path = temp_root("llama-mtp-test-runtime");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
     let request = inference_request();
     let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
@@ -170,21 +170,16 @@ fn llama_cpp_backend_rejects_enabled_mtp_until_bridge_lands() {
         cache_type_v: Some(KvCacheType::Q8_0),
     };
     let mut backend =
-        LlamaCppBackend::new_with_test_runtime(config, artifact_root, vec!["unused"]).unwrap();
+        LlamaCppBackend::new_with_test_runtime(config, artifact_root, vec!["mtp test"]).unwrap();
 
-    let err = backend.generate(request).unwrap_err();
+    let response = backend.generate(request).unwrap();
 
-    assert!(err.to_string().contains("llama.cpp runtime failed"));
-    assert!(
-        err.to_string()
-            .contains("MTP decoder bridge is not implemented")
-    );
+    assert_eq!(response.content, "mtp test");
     let runtime_log = std::fs::read_to_string(paths.runtime_log()).unwrap();
     assert!(runtime_log.contains("mtp_enabled = true"));
     assert!(runtime_log.contains("mtp_draft_model = /models/gemma4-mtp-q4_0.gguf"));
     assert!(runtime_log.contains("mtp_draft_tokens = 4"));
-    assert!(runtime_log.contains("mtp_runtime_state = unsupported"));
-    assert!(!paths.response_json().exists());
+    assert!(paths.response_json().exists());
 
     std::fs::remove_dir_all(root_path).unwrap();
 }
