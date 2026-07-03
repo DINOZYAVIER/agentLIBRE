@@ -191,18 +191,8 @@ fn export_memory_jsonl_respects_tombstones() {
                  VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
                         ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
     );
-    let mut active = Vec::new();
-    let mut all = Vec::new();
-
-    let active_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Memory, false), &mut active)
-        .unwrap();
-    let all_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Memory, true), &mut all)
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    let (active_count, active) = export_domain(&store, StoreDomain::Memory, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Memory, true);
     assert_eq!(active_count, 1);
     assert!(active.contains("\"id\":\"mem_active\""));
     assert!(!active.contains("mem_deleted"));
@@ -221,18 +211,8 @@ fn export_memory_jsonl_includes_pending_suggestions() {
                  VALUES ('suggest_pending', 'user', 'default', 'decision', 'Pending', 'Body', 'chat:1', 95, 'pending', 'unix:1', 'unix:1', NULL, NULL, NULL),
                         ('suggest_rejected', 'user', 'default', 'fact', 'Rejected', 'Body', 'chat:2', 90, 'rejected', 'unix:1', 'unix:2', 'unix:2', NULL, 'not durable')",
     );
-    let mut active = Vec::new();
-    let mut all = Vec::new();
-
-    let active_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Memory, false), &mut active)
-        .unwrap();
-    let all_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Memory, true), &mut all)
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    let (active_count, active) = export_domain(&store, StoreDomain::Memory, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Memory, true);
     assert_eq!(active_count, 1);
     assert!(active.contains("\"record_type\":\"memory_suggestion\""));
     assert!(active.contains("\"id\":\"suggest_pending\""));
@@ -269,18 +249,8 @@ fn export_notes_and_cron_include_related_rows() {
                  (id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error)
                  VALUES ('run_1', 'cron_active', 'unix:2', 'unix:2', 'unix:2', 'succeeded', 'builtin:store-status', NULL)",
     );
-    let mut notes = Vec::new();
-    let mut cron = Vec::new();
-
-    let notes_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Notes, false), &mut notes)
-        .unwrap();
-    let cron_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Cron, false), &mut cron)
-        .unwrap();
-
-    let notes = String::from_utf8(notes).unwrap();
-    let cron = String::from_utf8(cron).unwrap();
+    let (notes_count, notes) = export_domain(&store, StoreDomain::Notes, false);
+    let (cron_count, cron) = export_domain(&store, StoreDomain::Cron, false);
     assert_eq!(notes_count, 2);
     assert!(notes.contains("\"record_type\":\"note\""));
     assert!(notes.contains("\"record_type\":\"note_link\""));
@@ -327,11 +297,7 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
     assert!(sent.delivered_at.is_some());
     assert!(store.queued_matrix_notifications(10).unwrap().is_empty());
 
-    let mut cron = Vec::new();
-    let count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Cron, false), &mut cron)
-        .unwrap();
-    let cron = String::from_utf8(cron).unwrap();
+    let (count, cron) = export_domain(&store, StoreDomain::Cron, false);
     assert_eq!(count, 1);
     assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
     assert!(cron.contains("\"status\":\"sent\""));
@@ -453,20 +419,8 @@ fn permission_export_reports_pending_and_historical_records() {
         .revoke_permission_grant(&grants[0].id, Some("chat:turn-3"))
         .unwrap();
 
-    let mut active = Vec::new();
-    let active_count = store
-        .export_domain_jsonl(
-            &export_options(StoreDomain::Permissions, false),
-            &mut active,
-        )
-        .unwrap();
-    let mut all = Vec::new();
-    let all_count = store
-        .export_domain_jsonl(&export_options(StoreDomain::Permissions, true), &mut all)
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    let (active_count, active) = export_domain(&store, StoreDomain::Permissions, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Permissions, true);
     assert_eq!(active_count, 0);
     assert_eq!(all_count, 2);
     assert!(active.is_empty());
@@ -670,11 +624,18 @@ fn database_file_rejects_path_traversal() {
     assert!(matches!(err, StoreError::InvalidPath { .. }));
 }
 
-fn export_options(domain: StoreDomain, include_deleted: bool) -> StoreExportOptions {
-    StoreExportOptions {
-        domain,
-        include_deleted,
-    }
+fn export_domain(store: &AglStore, domain: StoreDomain, include_deleted: bool) -> (usize, String) {
+    let mut output = Vec::new();
+    let count = store
+        .export_domain_jsonl(
+            &StoreExportOptions {
+                domain,
+                include_deleted,
+            },
+            &mut output,
+        )
+        .unwrap();
+    (count, String::from_utf8(output).unwrap())
 }
 
 fn execute_fixture(store: &AglStore, sql: &str) {
