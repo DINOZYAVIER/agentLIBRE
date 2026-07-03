@@ -12,8 +12,7 @@ static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn agl_help_uses_public_alias_and_hides_infer() {
     let output = run_agl(&["--help"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl");
     assert_contains(&stdout, "run");
@@ -48,8 +47,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
 fn agl_no_arg_help_uses_public_alias() {
     let output = run_agl(&[]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "Usage: agl");
 }
 
@@ -116,8 +114,7 @@ fn command_help_exits_successfully_for_public_commands() {
     ] {
         let output = run_agl(args);
 
-        assert_success(&output);
-        assert_empty_stderr(&output);
+        assert_success_no_stderr(&output);
         assert_contains(&stdout(&output), "Usage: agl");
     }
 }
@@ -481,8 +478,7 @@ fn cron_add_rejects_invalid_schedule() {
         "store-status",
     ]);
 
-    assert_failure(&output);
-    assert_contains(&stderr(&output), "invalid cron schedule_expr value");
+    assert_failure_stderr_contains(&output, "invalid cron schedule_expr value");
 }
 
 #[test]
@@ -551,8 +547,7 @@ fn store_commands_report_status_and_export_jsonl() {
     let overwrite = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
-    assert_failure(&overwrite);
-    assert_contains(&stderr(&overwrite), "pass --force to overwrite");
+    assert_failure_stderr_contains(&overwrite, "pass --force to overwrite");
 
     let forced = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg, "--force",
@@ -571,8 +566,7 @@ fn store_commands_report_status_and_export_jsonl() {
         "--out",
         &matrix_out_arg,
     ]);
-    assert_failure(&matrix_export);
-    assert_contains(&stderr(&matrix_export), "invalid value 'matrix'");
+    assert_failure_stderr_contains(&matrix_export, "invalid value 'matrix'");
     assert!(
         !matrix_out.exists(),
         "unknown domain must not create export file"
@@ -603,8 +597,7 @@ fn store_status_does_not_create_database_before_explicit_migrate() {
     let export = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
-    assert_failure(&export);
-    assert_contains(&stderr(&export), "run store.migrate first");
+    assert_failure_stderr_contains(&export, "run store.migrate first");
 
     let migrate = run_agl(&["--home", &home_arg, "store", "migrate"]);
     assert_success(&migrate);
@@ -625,8 +618,7 @@ fn run_help_describes_trusted_workspace_skills() {
 fn hidden_repo_help_remains_available_for_advanced_usage() {
     let output = run_agl(&["repo", "--help"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl repo");
     assert_contains(&stdout, "init");
@@ -688,10 +680,8 @@ fn init_and_repo_init_dry_run_are_equivalent() {
     let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
     let repo_init = run_agl_in(repo.path(), &["repo", "init", "--dry-run"]);
 
-    assert_success(&init);
-    assert_success(&repo_init);
-    assert_empty_stderr(&init);
-    assert_empty_stderr(&repo_init);
+    assert_success_no_stderr(&init);
+    assert_success_no_stderr(&repo_init);
     assert_eq!(stdout(&init), stdout(&repo_init));
 }
 
@@ -771,8 +761,7 @@ fn repo_export_profile_writes_portable_policy_manifest() {
     );
 
     let overwrite = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
-    assert_failure(&overwrite);
-    assert_contains(&stderr(&overwrite), "failed to create profile export");
+    assert_failure_stderr_contains(&overwrite, "failed to create profile export");
 }
 
 #[test]
@@ -811,8 +800,7 @@ fn init_then_status_reports_missing_skills_submodule_warning() {
 
     let output = run_agl_in(repo.path(), &["status"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=warning");
     assert_contains(&stdout, "component.skills.warning=missing");
@@ -927,8 +915,7 @@ fn skill_lock_refuses_plain_workspace_skills_directory() {
 fn skill_inspect_runtime_succeeds_for_builtin_skill() {
     let output = run_agl(&["skill", "inspect", "change", "--runtime"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "skill name=change");
     assert_contains(&stdout(&output), "usable=true");
 }
@@ -937,8 +924,7 @@ fn skill_inspect_runtime_succeeds_for_builtin_skill() {
 fn skill_inspect_runtime_succeeds_for_expanded_repo_builtin_skill() {
     let output = run_agl(&["skill", "inspect", "repo-review", "--runtime"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "skill name=repo-review");
     assert_contains(&stdout(&output), "usable=true");
 }
@@ -981,8 +967,7 @@ fn daemon_status_without_daemon_reports_not_running_without_model_config() {
     let home_arg = home.path_string();
     let output = run_agl(&["--home", &home_arg, "daemon", "status"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=not_running");
     assert_contains(
@@ -1007,8 +992,7 @@ fn retired_infer_command_fails_with_run_guidance() {
 fn completion_bash_emits_agl_completion_function() {
     let output = run_agl(&["completion", "bash"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "_agl()");
     assert_contains(&stdout, "complete -F _agl");
@@ -1033,8 +1017,7 @@ fn home_override_roots_config_paths_in_requested_home() {
     let home_arg = home.path_string();
     let output = run_agl(&["--home", &home_arg, "config", "paths"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, &format!("config_dir={home_arg}/config"));
     assert_contains(&stdout, &format!("data_dir={home_arg}/data"));
@@ -1302,9 +1285,19 @@ fn assert_empty_stdout(output: &Output) {
     assert!(stdout.is_empty(), "stdout should be empty:\n{stdout}");
 }
 
+fn assert_success_no_stderr(output: &Output) {
+    assert_success(output);
+    assert_empty_stderr(output);
+}
+
 fn assert_success_stdout_contains(output: &Output, needle: &str) {
     assert_success(output);
     assert_contains(&stdout(output), needle);
+}
+
+fn assert_failure_stderr_contains(output: &Output, needle: &str) {
+    assert_failure(output);
+    assert_contains(&stderr(output), needle);
 }
 
 fn assert_contains(haystack: &str, needle: &str) {
