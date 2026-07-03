@@ -87,7 +87,6 @@ dependencies = [
  "agl-client",
  "agl-cron",
  "agl-daemon",
- "agl-loop",
  "agl-memory",
  "agl-notes",
  "agl-protocol",

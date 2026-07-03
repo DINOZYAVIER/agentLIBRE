@@ -18,7 +18,6 @@ agl-cron.workspace = true
 agl-daemon.workspace = true
 agl-protocol.workspace = true
 agl-tools.workspace = true
-agl-loop.workspace = true
 agl-memory.workspace = true
 agl-notes.workspace = true
 agl-repo.workspace = true

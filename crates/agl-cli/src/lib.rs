@@ -5,9 +5,8 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    ChatLoopHost, ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, InferenceSession,
-    ToolAccessMode as ChatToolAccessMode, assistant_text_for_terminal, build_turn_input,
-    chat_workspace_root, default_run_id,
+    ChatOptions, ChatService, ChatTurnStatus, InferenceOptions,
+    ToolAccessMode as ChatToolAccessMode, chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
@@ -15,7 +14,6 @@ use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
     default_socket_path, run_cron_tick,
 };
-use agl_loop::{TurnOutput, run_turn};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
 use agl_runtime::{
@@ -1070,6 +1068,14 @@ fn chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
     }
 }
 
+fn one_shot_chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
+    let mut chat_options = chat_options_from_run_options(options);
+    chat_options.session_id = None;
+    chat_options.no_history = true;
+    chat_options.new_session = true;
+    chat_options
+}
+
 fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
     match mode {
         args::ToolAccessMode::ReadOnly => ChatToolAccessMode::ReadOnly,
@@ -1086,32 +1092,24 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .prompt
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
-    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
     let tool_mode = options.tool_mode;
-    let inference_options = inference_options_from_run_options(&options);
-    let session = InferenceSession::new(inference_options, runtime, None)?;
-    let mut loop_host = ChatLoopHost::new(session, &workspace_root)?;
+    let mut chat_service =
+        ChatService::open(one_shot_chat_options_from_run_options(&options), runtime)?;
+    let summary = chat_service.summary();
     tracing::info!(
         target: "agentlibre::app",
-        run_id = %loop_host.session().run_id(),
-        event_stream = %loop_host.event_sink_path().display(),
-        workspace_root = %loop_host.workspace_root().display(),
+        run_id = %summary.run_id,
+        event_stream = %summary.event_stream.display(),
+        workspace_root = %summary.workspace_root.display(),
         tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
-    let hook_batches = loop_host.session().turn_hook_batches().to_vec();
-    let visible_tools = loop_host.session().turn_visible_tools().to_vec();
-    let input = build_turn_input(
-        loop_host.session().run_id().as_str(),
-        1,
-        &[],
-        &hook_batches,
-        &visible_tools,
-        &prompt,
-    );
-    loop_host.reset_turn_counters();
-    let output = run_turn(&mut loop_host, input)?;
-    print_turn_output(&output);
+    match chat_service.run_user_turn(&prompt)?.status {
+        ChatTurnStatus::Answered { answer } => println!("{answer}"),
+        ChatTurnStatus::Stopped { reason } => {
+            println!("stopped=true reason={}", reason.as_str());
+        }
+    }
     Ok(())
 }
 
@@ -1587,13 +1585,6 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     Ok(())
 }
 
-fn print_turn_output(output: &TurnOutput) {
-    match output {
-        TurnOutput::Answered { answer } => println!("{}", assistant_text_for_terminal(answer)),
-        TurnOutput::Stopped { reason, .. } => println!("stopped=true reason={}", reason.as_str()),
-    }
-}
-
 fn print_chat_session_summary(chat_service: &ChatService) {
     println!("session_id={}", chat_service.session_id());
     println!("run_id={}", chat_service.run_id());
@@ -1642,6 +1633,32 @@ mod tests {
         assert_eq!(
             process_mode_for_command(&infer),
             AgentLibreProcessMode::Interactive
+        );
+    }
+
+    #[test]
+    fn one_shot_run_uses_chat_service_without_history() {
+        let options = RunOptions {
+            workspace_root: Some(PathBuf::from("/tmp/workspace")),
+            session_id: Some("ignored-session".to_string()),
+            no_history: false,
+            new_session: false,
+            prompt: Some("hello".to_string()),
+            ..RunOptions::default()
+        };
+
+        let chat_options = one_shot_chat_options_from_run_options(&options);
+
+        assert!(chat_options.no_history);
+        assert!(chat_options.new_session);
+        assert_eq!(chat_options.session_id, None);
+        assert_eq!(
+            chat_options.workspace_root,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+        assert_eq!(
+            chat_options.inference.workspace_root,
+            Some(PathBuf::from("/tmp/workspace"))
         );
     }
 
