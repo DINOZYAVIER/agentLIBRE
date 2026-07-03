@@ -210,22 +210,10 @@ fn export_memory_jsonl_respects_tombstones() {
     let mut all = Vec::new();
 
     let active_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: false,
-            },
-            &mut active,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Memory, false), &mut active)
         .unwrap();
     let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: true,
-            },
-            &mut all,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Memory, true), &mut all)
         .unwrap();
 
     let active = String::from_utf8(active).unwrap();
@@ -255,22 +243,10 @@ fn export_memory_jsonl_includes_pending_suggestions() {
     let mut all = Vec::new();
 
     let active_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: false,
-            },
-            &mut active,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Memory, false), &mut active)
         .unwrap();
     let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: true,
-            },
-            &mut all,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Memory, true), &mut all)
         .unwrap();
 
     let active = String::from_utf8(active).unwrap();
@@ -327,22 +303,10 @@ fn export_notes_and_cron_include_related_rows() {
     let mut cron = Vec::new();
 
     let notes_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Notes,
-                include_deleted: false,
-            },
-            &mut notes,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Notes, false), &mut notes)
         .unwrap();
     let cron_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Cron,
-                include_deleted: false,
-            },
-            &mut cron,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Cron, false), &mut cron)
         .unwrap();
 
     let notes = String::from_utf8(notes).unwrap();
@@ -395,13 +359,7 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
 
     let mut cron = Vec::new();
     let count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Cron,
-                include_deleted: false,
-            },
-            &mut cron,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Cron, false), &mut cron)
         .unwrap();
     let cron = String::from_utf8(cron).unwrap();
     assert_eq!(count, 1);
@@ -528,22 +486,13 @@ fn permission_export_reports_pending_and_historical_records() {
     let mut active = Vec::new();
     let active_count = store
         .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Permissions,
-                include_deleted: false,
-            },
+            &export_options(StoreDomain::Permissions, false),
             &mut active,
         )
         .unwrap();
     let mut all = Vec::new();
     let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Permissions,
-                include_deleted: true,
-            },
-            &mut all,
-        )
+        .export_domain_jsonl(&export_options(StoreDomain::Permissions, true), &mut all)
         .unwrap();
 
     let active = String::from_utf8(active).unwrap();
@@ -749,6 +698,13 @@ fn database_file_rejects_path_traversal() {
     let err = database_path(&root, "../agentlibre.sqlite3").unwrap_err();
 
     assert!(matches!(err, StoreError::InvalidPath { .. }));
+}
+
+fn export_options(domain: StoreDomain, include_deleted: bool) -> StoreExportOptions {
+    StoreExportOptions {
+        domain,
+        include_deleted,
+    }
 }
 
 fn temp_root(label: &str) -> TempRoot {
