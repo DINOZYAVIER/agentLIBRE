@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "notes-tools";
@@ -295,17 +296,15 @@ fn parse_memory_kind(kind: &str) -> Result<agl_memory::MemoryKind> {
     }
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddArgs {
     title: String,
     body: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     limit: Option<usize>,
@@ -313,11 +312,13 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IdArgs {
     id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateArgs {
     id: String,
     title: Option<String>,
@@ -325,6 +326,7 @@ struct UpdateArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LinkArgs {
     id: String,
     target_ref: String,
@@ -332,6 +334,7 @@ struct LinkArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RememberArgs {
     id: String,
     scope: String,

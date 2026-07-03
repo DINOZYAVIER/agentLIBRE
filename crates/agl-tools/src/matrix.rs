@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "matrix-tools";
@@ -43,12 +44,12 @@ impl MatrixTools {
         let limit = args
             .limit
             .unwrap_or(DEFAULT_OUTBOX_LIMIT)
-            .min(MAX_OUTBOX_LIMIT);
-        let queued = store.queued_matrix_notifications(limit)?;
+            .clamp(1, MAX_OUTBOX_LIMIT);
+        let (queued, truncated) = store.queued_matrix_notifications_page(limit)?;
         let mut output = format!(
             "tool=matrix.outbox.status\nqueued={}\ntruncated={}\n---",
             queued.len(),
-            queued.len() >= limit
+            truncated
         );
         for item in queued {
             output.push('\n');
@@ -134,16 +135,14 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StatusArgs {
     limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EnqueueArgs {
     notify_ref: String,
     source_kind: String,
@@ -185,6 +184,41 @@ mod tests {
         assert!(enqueue.contains("status=queued"));
         assert!(status.contains("queued=1"));
         assert!(status.contains("notify_ref=matrix-room:!room:example.org"));
+
+        cleanup(root);
+    }
+
+    #[test]
+    fn matrix_tools_status_truncates_only_when_extra_rows_exist() {
+        let root = temp_root("outbox-limit");
+        let tools = MatrixTools::new(&root);
+
+        for index in 0..2 {
+            tools
+                .dispatch(
+                    MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
+                    json!({
+                        "notify_ref": "matrix-room:!room:example.org",
+                        "source_kind": "test",
+                        "source_id": format!("source-{index}"),
+                        "dedupe_key": format!("test:source-{index}"),
+                        "body": "hello"
+                    }),
+                )
+                .unwrap();
+        }
+
+        let exact = tools
+            .dispatch(MATRIX_OUTBOX_STATUS_TOOL_ID, json!({"limit": 2}))
+            .unwrap();
+        let truncated = tools
+            .dispatch(MATRIX_OUTBOX_STATUS_TOOL_ID, json!({"limit": 1}))
+            .unwrap();
+
+        assert!(exact.contains("queued=2"));
+        assert!(exact.contains("truncated=false"));
+        assert!(truncated.contains("queued=1"));
+        assert!(truncated.contains("truncated=true"));
 
         cleanup(root);
     }

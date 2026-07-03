@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "store-tools";
@@ -183,10 +184,6 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 fn parse_domain(value: &str) -> Result<StoreDomain> {
     match value {
         "memory" => Ok(StoreDomain::Memory),
@@ -198,9 +195,11 @@ fn parse_domain(value: &str) -> Result<StoreDomain> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StatusArgs {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExportArgs {
     domain: String,
     include_deleted: Option<bool>,
@@ -208,6 +207,7 @@ struct ExportArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MigrateArgs {}
 
 #[cfg(test)]

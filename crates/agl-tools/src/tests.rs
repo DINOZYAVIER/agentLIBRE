@@ -55,17 +55,7 @@ fn declaration_rejects_duplicate_hooks() {
 
 #[test]
 fn builtin_tools_declare_operation_kinds_and_state_effects() {
-    let mut catalog = ToolCatalog::new();
-    cron::register(&mut catalog).unwrap();
-    fs::register(&mut catalog).unwrap();
-    matrix::register(&mut catalog).unwrap();
-    matrix_delivery::register(&mut catalog).unwrap();
-    memory::register(&mut catalog).unwrap();
-    notes::register(&mut catalog).unwrap();
-    permissions::register(&mut catalog).unwrap();
-    repo::register(&mut catalog).unwrap();
-    skills::register(&mut catalog).unwrap();
-    store::register(&mut catalog).unwrap();
+    let catalog = builtin_tool_catalog().unwrap();
 
     assert_tool_metadata(
         FS_READ_TOOL_ID,

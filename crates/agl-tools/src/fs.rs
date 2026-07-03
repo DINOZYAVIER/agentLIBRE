@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
@@ -368,14 +369,6 @@ fn tool(
     } else {
         declaration
     }
-}
-
-fn parse_args<T>(tool_name: &str, arguments: Value) -> Result<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    serde_json::from_value(arguments)
-        .with_context(|| format!("failed to parse {tool_name} arguments"))
 }
 
 fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {

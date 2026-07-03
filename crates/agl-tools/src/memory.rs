@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "memory-tools";
@@ -222,10 +223,6 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 fn parse_scope(scope: &str, scope_key: Option<String>) -> Result<MemoryScope> {
     let kind = match scope {
         "user" => MemoryScopeKind::User,
@@ -281,6 +278,7 @@ fn render_entries(tool_id: &str, entries: Vec<agl_memory::MemoryEntry>) -> Strin
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     scope: Option<String>,
@@ -290,6 +288,7 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListArgs {
     scope: Option<String>,
     scope_key: Option<String>,
@@ -298,6 +297,7 @@ struct ListArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SuggestArgs {
     scope: String,
     scope_key: Option<String>,
@@ -309,6 +309,7 @@ struct SuggestArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddArgs {
     scope: String,
     scope_key: Option<String>,
@@ -320,11 +321,13 @@ struct AddArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SuggestionIdArgs {
     suggestion_id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RejectArgs {
     suggestion_id: String,
     resolution_note: Option<String>,

@@ -10,6 +10,8 @@ mod model;
 
 pub(crate) use model::*;
 
+const CLI_DISPLAY_NAME: &str = "agl";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "agl",
@@ -982,7 +984,7 @@ struct ReservedCommandArgs {
 
 pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInvocation> {
     let args = args.into_iter().collect::<Vec<_>>();
-    let display_name = cli_display_name(args.first().map(String::as_str));
+    let display_name = cli_display_name();
     let command = Cli::command().name(display_name).bin_name(display_name);
 
     match command.try_get_matches_from(args) {
@@ -1573,9 +1575,8 @@ pub(crate) fn print_completion(shell: Shell) {
     generate(shell, &mut command, "agl", &mut std::io::stdout());
 }
 
-fn cli_display_name(program: Option<&str>) -> &'static str {
-    let _ = program;
-    "agl"
+fn cli_display_name() -> &'static str {
+    CLI_DISPLAY_NAME
 }
 
 #[derive(Debug, Parser)]

@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "permission-tools";
@@ -279,10 +280,6 @@ fn tool(
     .with_operation_kind(operation_kind)
     .with_state_effects(state_effects.iter().copied())
     .visible_in_read_only(visible_in_read_only)
-}
-
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
 }
 
 fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {

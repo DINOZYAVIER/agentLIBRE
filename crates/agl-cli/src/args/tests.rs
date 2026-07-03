@@ -857,10 +857,6 @@ fn parse_reserved_model_rejects_subcommand_before_bare_prompt() {
 }
 
 #[test]
-fn display_name_prefers_agl_alias() {
-    assert_eq!(cli_display_name(Some("agl")), "agl");
-    assert_eq!(cli_display_name(Some("/usr/local/bin/agl")), "agl");
-    assert_eq!(cli_display_name(Some("agentLIBRE")), "agl");
-    assert_eq!(cli_display_name(Some("/usr/local/bin/agentLIBRE")), "agl");
-    assert_eq!(cli_display_name(None), "agl");
+fn display_name_is_fixed_to_agl() {
+    assert_eq!(cli_display_name(), "agl");
 }

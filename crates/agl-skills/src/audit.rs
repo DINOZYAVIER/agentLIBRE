@@ -73,7 +73,7 @@ struct AuditPermissionRequestTemplate {
 #[test]
 fn tool_lens_audit_fixture_covers_builtin_tools() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let audit_tools = audit
         .tools
         .iter()
@@ -115,7 +115,7 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
 #[test]
 fn tool_lens_audit_fixture_covers_builtin_skills() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let registry = SkillRegistry::from_builtin_assets().unwrap();
     let audit_skills = audit
         .skills
@@ -278,7 +278,7 @@ fn tool_lens_audit_fixture_covers_builtin_skills() {
 #[test]
 fn tool_lens_missing_tools_are_future_work_not_current_tools() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let current_tools = catalog
         .providers()
         .iter()
@@ -329,22 +329,6 @@ fn tool_lens_missing_tools_are_future_work_not_current_tools() {
 
 fn read_audit() -> ToolLensAudit {
     toml::from_str(TOOL_LENS_AUDIT).expect("tool lens audit fixture must parse")
-}
-
-fn builtin_tool_catalog() -> ToolCatalog {
-    let mut catalog = ToolCatalog::new();
-    agl_tools::guards::register(&mut catalog).unwrap();
-    agl_tools::cron::register(&mut catalog).unwrap();
-    agl_tools::fs::register(&mut catalog).unwrap();
-    agl_tools::matrix::register(&mut catalog).unwrap();
-    agl_tools::matrix_delivery::register(&mut catalog).unwrap();
-    agl_tools::memory::register(&mut catalog).unwrap();
-    agl_tools::notes::register(&mut catalog).unwrap();
-    agl_tools::permissions::register(&mut catalog).unwrap();
-    agl_tools::repo::register(&mut catalog).unwrap();
-    agl_tools::skills::register(&mut catalog).unwrap();
-    agl_tools::store::register(&mut catalog).unwrap();
-    catalog
 }
 
 fn state_effects_for_skill<'a>(
