@@ -163,14 +163,8 @@ impl MatrixRuntime {
         config
             .validate()
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
-        let session = matrix_session_from_config(&config.matrix)?;
         let bot_user_id = config.matrix.user_id.clone();
-        let client = build_matrix_client(&config.matrix).await?;
-        client
-            .matrix_auth()
-            .restore_session(session, RoomLoadSettings::default())
-            .await
-            .context("failed to restore Matrix access-token session")?;
+        let client = restore_matrix_client_from_config(&config.matrix).await?;
         let app = Arc::new(Mutex::new(BridgeApp::from_config(config)?));
 
         Ok(Self {
@@ -253,12 +247,7 @@ impl MatrixRuntime {
                 target_device_id
             );
         }
-        let client = build_matrix_client(&config.matrix).await?;
-        client
-            .matrix_auth()
-            .restore_session(session, RoomLoadSettings::default())
-            .await
-            .context("failed to restore Matrix access-token session")?;
+        let client = restore_matrix_client(&config.matrix, session).await?;
 
         if request.accept_incoming {
             accept_incoming_device_verification(
@@ -290,13 +279,7 @@ impl MatrixRuntime {
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
         let target_user_id = OwnedUserId::try_from(user_id.as_str())
             .with_context(|| format!("invalid Matrix target user id {user_id}"))?;
-        let session = matrix_session_from_config(&config.matrix)?;
-        let client = build_matrix_client(&config.matrix).await?;
-        client
-            .matrix_auth()
-            .restore_session(session, RoomLoadSettings::default())
-            .await
-            .context("failed to restore Matrix access-token session")?;
+        let client = restore_matrix_client_from_config(&config.matrix).await?;
         client
             .encryption()
             .request_user_identity(&target_user_id)
@@ -329,13 +312,7 @@ impl MatrixRuntime {
         config
             .validate()
             .map_err(|err| anyhow!("bridge config is invalid: {err:?}"))?;
-        let session = matrix_session_from_config(&config.matrix)?;
-        let client = build_matrix_client(&config.matrix).await?;
-        client
-            .matrix_auth()
-            .restore_session(session, RoomLoadSettings::default())
-            .await
-            .context("failed to restore Matrix access-token session")?;
+        let client = restore_matrix_client_from_config(&config.matrix).await?;
         client
             .sync_once(SyncSettings::default())
             .await
@@ -981,6 +958,21 @@ async fn build_matrix_client(config: &MatrixConfig) -> Result<Client> {
         .build()
         .await
         .context("failed to build Matrix client")
+}
+
+async fn restore_matrix_client_from_config(config: &MatrixConfig) -> Result<Client> {
+    let session = matrix_session_from_config(config)?;
+    restore_matrix_client(config, session).await
+}
+
+async fn restore_matrix_client(config: &MatrixConfig, session: MatrixSession) -> Result<Client> {
+    let client = build_matrix_client(config).await?;
+    client
+        .matrix_auth()
+        .restore_session(session, RoomLoadSettings::default())
+        .await
+        .context("failed to restore Matrix access-token session")?;
+    Ok(client)
 }
 
 async fn build_matrix_auth_client(config: &MatrixConfig) -> Result<Client> {
