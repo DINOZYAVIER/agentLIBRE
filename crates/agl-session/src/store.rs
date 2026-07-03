@@ -293,11 +293,10 @@ impl ChatSessionStore {
         self.apply(ChatSessionTransition::ReadUserMessage {
             content: content.clone(),
         })?;
-        let record = self.apply(ChatSessionTransition::RecordUserMessage {
+        self.append_transition_event(ChatSessionTransition::RecordUserMessage {
             message_id,
             content,
-        })?;
-        self.append_record_event(&record)
+        })
     }
 
     pub fn append_assistant_message(
@@ -305,13 +304,10 @@ impl ChatSessionStore {
         message_id: AgentLibreMessageId,
         content: String,
     ) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::RecordAssistantAnswer {
+        self.append_transition_event_and_prompt(ChatSessionTransition::RecordAssistantAnswer {
             message_id,
             content,
-        })?;
-        self.append_record_event(&record)?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
+        })
     }
 
     pub fn append_assistant_stop_marker(
@@ -319,13 +315,10 @@ impl ChatSessionStore {
         message_id: AgentLibreMessageId,
         content: String,
     ) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::RecordAssistantStopMarker {
+        self.append_transition_event_and_prompt(ChatSessionTransition::RecordAssistantStopMarker {
             message_id,
             content,
-        })?;
-        self.append_record_event(&record)?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
+        })
     }
 
     pub fn append_assistant_tool_call(
@@ -334,12 +327,11 @@ impl ChatSessionStore {
         name: String,
         arguments: serde_json::Value,
     ) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::RecordAssistantToolCall {
+        self.append_transition_event(ChatSessionTransition::RecordAssistantToolCall {
             message_id,
             name,
             arguments,
-        })?;
-        self.append_record_event(&record)
+        })
     }
 
     pub fn append_tool_message(
@@ -348,28 +340,23 @@ impl ChatSessionStore {
         name: String,
         content: String,
     ) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::RecordToolMessage {
+        self.append_transition_event(ChatSessionTransition::RecordToolMessage {
             message_id,
             name,
             content,
-        })?;
-        self.append_record_event(&record)
+        })
     }
 
     pub fn link_attempt(&mut self, attempt_id: impl Into<String>) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::LinkModelAttempt {
+        self.append_transition_event(ChatSessionTransition::LinkModelAttempt {
             run_id: self.run_id.clone(),
             attempt_id: attempt_id.into(),
-        })?;
-        self.append_record_event(&record)
+        })
     }
 
     pub fn append_context_cleared(&mut self) -> Result<()> {
         self.apply(ChatSessionTransition::ReadCommandClear)?;
-        let record = self.apply(ChatSessionTransition::ClearContext)?;
-        self.append_record_event(&record)?;
-        self.apply(ChatSessionTransition::PromptForInput)?;
-        Ok(())
+        self.append_transition_event_and_prompt(ChatSessionTransition::ClearContext)
     }
 
     pub fn finish(&mut self) -> Result<()> {
@@ -381,24 +368,35 @@ impl ChatSessionStore {
     }
 
     pub fn request_exit(&mut self) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::ReadCommandExit)?;
-        self.append_record_event(&record)
+        self.append_transition_event(ChatSessionTransition::ReadCommandExit)
     }
 
     pub fn fail(&mut self, message: impl Into<String>) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::FailSession {
+        self.append_transition_event(ChatSessionTransition::FailSession {
             message: message.into(),
-        })?;
-        self.append_record_event(&record)
+        })
     }
 
     fn finish_with_reason(&mut self, reason: AgentLibreSessionFinishReason) -> Result<()> {
-        let record = self.apply(ChatSessionTransition::FinishSession { reason })?;
-        self.append_record_event(&record)
+        self.append_transition_event(ChatSessionTransition::FinishSession { reason })
     }
 
     fn apply(&mut self, transition: ChatSessionTransition) -> Result<ChatSessionTransitionRecord> {
         Ok(self.machine.apply(transition)?)
+    }
+
+    fn append_transition_event(&mut self, transition: ChatSessionTransition) -> Result<()> {
+        let record = self.apply(transition)?;
+        self.append_record_event(&record)
+    }
+
+    fn append_transition_event_and_prompt(
+        &mut self,
+        transition: ChatSessionTransition,
+    ) -> Result<()> {
+        self.append_transition_event(transition)?;
+        self.apply(ChatSessionTransition::PromptForInput)?;
+        Ok(())
     }
 
     fn append_record_event(&self, record: &ChatSessionTransitionRecord) -> Result<()> {
