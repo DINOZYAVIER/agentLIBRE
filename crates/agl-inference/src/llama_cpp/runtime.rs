@@ -28,9 +28,9 @@ pub(super) struct LlamaCppRuntime {
 }
 
 enum LlamaCppRuntimeInner {
-    Native(NativeLlamaCppRuntime),
+    Native(Box<NativeLlamaCppRuntime>),
     #[cfg(test)]
-    Test(TestLlamaCppRuntime),
+    Test(Box<TestLlamaCppRuntime>),
 }
 
 struct NativeLlamaCppRuntime {
@@ -74,11 +74,11 @@ impl Error for LlamaCppRuntimeError {}
 impl LlamaCppRuntime {
     pub(super) fn new(config: LocalInferenceConfig, max_output_tokens: u32) -> Self {
         Self {
-            inner: LlamaCppRuntimeInner::Native(NativeLlamaCppRuntime {
+            inner: LlamaCppRuntimeInner::Native(Box::new(NativeLlamaCppRuntime {
                 config,
                 max_output_tokens,
                 session: None,
-            }),
+            })),
         }
     }
 
@@ -90,7 +90,7 @@ impl LlamaCppRuntime {
         auto_selected_device: Option<&str>,
     ) -> Self {
         Self {
-            inner: LlamaCppRuntimeInner::Test(TestLlamaCppRuntime {
+            inner: LlamaCppRuntimeInner::Test(Box::new(TestLlamaCppRuntime {
                 config,
                 max_output_tokens,
                 responses: responses
@@ -101,7 +101,7 @@ impl LlamaCppRuntime {
                 loaded: false,
                 rendered_message_history_len: 0,
                 messages: Vec::new(),
-            }),
+            })),
         }
     }
 
