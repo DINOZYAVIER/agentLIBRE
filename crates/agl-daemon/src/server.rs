@@ -3,7 +3,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agl_chat::{ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, ToolAccessMode};
+use agl_chat::InferenceOptions;
 use agl_cron::{CronJob, CronTargetKind};
 use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, ProtocolError, ProtocolErrorCode};
 use agl_runtime::AgentLibreRuntimeConfig;
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonState,
-    render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
+    render_cron_notification_body, run_cron_skill_chat_turn, run_cron_tick,
 };
 
 #[cfg(unix)]
@@ -110,7 +110,12 @@ impl CronTargetExecutor for DaemonCronExecutor {
                 CronExecution::failed(format!("unknown builtin cron target: {target}"))
             }
             (CronTargetKind::Skill, _target) => {
-                match run_daemon_skill_cron(job, &self.runtime, &self.inference_defaults) {
+                match run_cron_skill_chat_turn(
+                    job,
+                    &self.runtime,
+                    self.inference_defaults.clone(),
+                    Some("daemon"),
+                ) {
                     Ok(result_ref) => CronExecution::succeeded(result_ref),
                     Err(err) => CronExecution::failed(format!("{err:#}")),
                 }
@@ -158,42 +163,6 @@ impl CronNotifier for StoreCronNotifier<'_> {
             );
         }
         Ok(())
-    }
-}
-
-fn run_daemon_skill_cron(
-    job: &CronJob,
-    runtime: &AgentLibreRuntimeConfig,
-    inference_defaults: &InferenceOptions,
-) -> Result<String> {
-    let prompt = render_cron_skill_prompt(job)?;
-    let mut inference = inference_defaults.clone();
-    inference.skills.push(job.target_ref.clone());
-    inference.tool_mode = ToolAccessMode::Write;
-    let mut service = ChatService::open(
-        ChatOptions {
-            inference,
-            workspace_root: None,
-            session_id: None,
-            no_history: false,
-            new_session: true,
-        },
-        runtime,
-    )
-    .context("failed to open daemon cron skill chat session")?;
-    let summary = service.summary();
-    let output = service
-        .run_user_turn(&prompt)
-        .context("failed to run daemon cron skill turn")?;
-    service
-        .finish_eof_if_needed()
-        .context("failed to finish daemon cron skill session")?;
-    match output.status {
-        ChatTurnStatus::Answered { .. } => Ok(format!(
-            "skill:{}:session:{}:run:{}",
-            job.target_ref, summary.session_id, summary.run_id
-        )),
-        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
     }
 }
 
