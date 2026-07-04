@@ -10,6 +10,26 @@ pub type Result<T> = std::result::Result<T, CronError>;
 const DEFAULT_TIMEZONE: &str = "UTC";
 const IDEMPOTENCY_NAMESPACE: &str = "cron.run";
 
+pub const STORE_STATUS_BUILTIN_CRON_TARGET: &str = "store-status";
+
+pub fn supported_builtin_cron_targets() -> &'static [&'static str] {
+    &[STORE_STATUS_BUILTIN_CRON_TARGET]
+}
+
+pub fn validate_builtin_cron_target(target_ref: &str) -> std::result::Result<(), String> {
+    if supported_builtin_cron_targets().contains(&target_ref) {
+        return Ok(());
+    }
+    Err(unsupported_builtin_cron_target_message(target_ref))
+}
+
+pub fn unsupported_builtin_cron_target_message(target_ref: &str) -> String {
+    format!(
+        "unknown builtin cron target: {target_ref}; supported builtin targets: {}",
+        supported_builtin_cron_targets().join(", ")
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CronFieldKind {
     Minute,
