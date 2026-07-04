@@ -385,6 +385,45 @@ fn permission_requests_grants_and_revokes_are_persisted() {
 }
 
 #[test]
+fn grant_permission_request_rolls_back_grants_when_resolution_fails() {
+    let (_root, store) = open_temp_store("permission-grant-transaction");
+
+    let request = store
+        .create_permission_request(PermissionRequestDraft {
+            requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
+            max_operation_kind: "write".to_string(),
+            state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
+            scope: json!({"repo": "/tmp/repo", "matrix_room": "!room:server"}),
+            duration: "one_turn".to_string(),
+            reason: "Schedule a daily Matrix greeting.".to_string(),
+            requester_ref: "chat:session-1:turn-1".to_string(),
+        })
+        .unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER permission_request_resolution_blocker
+             BEFORE UPDATE ON permission_requests
+             BEGIN
+                 SELECT RAISE(FAIL, 'blocked permission resolution');
+             END;",
+        )
+        .unwrap();
+
+    let err = store
+        .grant_permission_request(&request.id, "cli:operator", Some("chat:session-1:turn-2"))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("blocked permission resolution"),
+        "{err}"
+    );
+
+    let unresolved = store.permission_request(&request.id).unwrap().unwrap();
+    assert_eq!(unresolved.status, PermissionRequestStatus::Pending);
+    assert_eq!(store.active_permission_grants().unwrap(), Vec::new());
+}
+
+#[test]
 fn permission_export_reports_pending_and_historical_records() {
     let (_root, store) = open_temp_store("permission-export");
     let request = store
