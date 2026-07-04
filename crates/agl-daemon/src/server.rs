@@ -14,8 +14,8 @@ use agl_store::{AglStore, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonState,
-    render_cron_notification_body, run_cron_skill_chat_turn, run_cron_tick,
+    CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions,
+    SharedDaemonState, render_cron_notification_body, run_cron_skill_chat_turn, run_cron_tick,
 };
 
 #[cfg(unix)]
@@ -48,7 +48,7 @@ impl DaemonServer {
             socket_path = %self.options.socket_path.display(),
             "daemon listening"
         );
-        let mut state = DaemonState::new(self.runtime.clone(), self.options.inference.clone());
+        let state = SharedDaemonState::open(self.runtime.clone(), self.options.inference.clone())?;
         let mut last_cron_tick = None;
         loop {
             let now = unix_now();
@@ -80,9 +80,15 @@ impl DaemonServer {
 
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    if let Err(err) = handle_stream(stream, &mut state) {
-                        tracing::warn!(target: "agentlibre::daemon", error = %err, "daemon client failed");
-                    }
+                    let state = state.clone();
+                    thread::Builder::new()
+                        .name("agl-daemon-client".to_string())
+                        .spawn(move || {
+                            if let Err(err) = handle_stream(stream, &state) {
+                                tracing::warn!(target: "agentlibre::daemon", error = %err, "daemon client failed");
+                            }
+                        })
+                        .context("failed to spawn daemon client thread")?;
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(250));
@@ -213,7 +219,7 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
 }
 
 #[cfg(unix)]
-fn handle_stream(stream: UnixStream, state: &mut DaemonState) -> Result<()> {
+fn handle_stream(stream: UnixStream, state: &SharedDaemonState) -> Result<()> {
     let mut writer = stream
         .try_clone()
         .context("failed to clone daemon client stream")?;
