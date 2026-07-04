@@ -1,0 +1,28 @@
+[backend]
+kind = "llama_cpp"
+model = "/home/dinozyavier/.dyno/models/gemma-4-31b-it-qat/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 16384
+threads = 8
+batch_size = 1024
+ubatch_size = 256
+flash_attention = "on"
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+
+[runtime.mtp]
+enabled = false
+draft_model = "/home/dinozyavier/.dyno/models/gemma-4-31b-it-qat/gemma-4-31B-it-Q4_0-MTP.gguf"
+draft_tokens = 4
+gpu_layers = 999
+cache_type_k = "q8_0"
+cache_type_v = "q8_0"
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+
+[prompt]
+system = "builtin:default"
