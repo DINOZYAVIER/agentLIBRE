@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatTurnOutput, ChatTurnStatus, InferenceOptions,
+    ChatOptions, ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus, InferenceOptions,
     ToolAccessMode as ChatToolMode,
 };
 use agl_protocol::{
@@ -15,7 +19,7 @@ use agl_protocol::{
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_session::{AgentLibreSessionId, ChatSessionEvent};
 use agl_store::{AglStore, IdempotencyOutcome, IdempotencyStatus, StoreError};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -100,24 +104,26 @@ impl DaemonState {
             DaemonRequestKind::SessionClear(request) => {
                 match self.sessions.get_mut(&request.session_id) {
                     Some(session) if session.status == SessionStatus::Busy => Err(busy_error()),
-                    Some(session) => match session.service.clear_context().map_err(runtime_error) {
-                        Ok(_) => {
-                            session.status = SessionStatus::Open;
-                            Ok(vec![status_event(
-                                &request_id,
-                                &request.session_id,
-                                session.status,
-                            )])
+                    Some(session) => {
+                        match session.endpoint.clear_context().map_err(runtime_error) {
+                            Ok(_) => {
+                                session.status = SessionStatus::Open;
+                                Ok(vec![status_event(
+                                    &request_id,
+                                    &request.session_id,
+                                    session.status,
+                                )])
+                            }
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
-                    },
+                    }
                     None => Err(not_found_error(&request.session_id)),
                 }
             }
             DaemonRequestKind::SessionFinish(request) => {
                 match self.sessions.get_mut(&request.session_id) {
                     Some(session) if session.status == SessionStatus::Busy => Err(busy_error()),
-                    Some(session) => match session.service.request_exit().map_err(runtime_error) {
+                    Some(session) => match session.endpoint.request_exit().map_err(runtime_error) {
                         Ok(_) => {
                             session.status = SessionStatus::Finished;
                             Ok(vec![DaemonEvent::new(
@@ -191,7 +197,7 @@ impl DaemonState {
                 Some(request_id),
                 DaemonEventKind::SessionOpened(SessionOpenedEvent {
                     session_id: session_id.clone(),
-                    run_id: session.service.run_id().to_string(),
+                    run_id: session.run_id.clone(),
                     resumed: true,
                 }),
             )]);
@@ -207,15 +213,16 @@ impl DaemonState {
             no_history: false,
             new_session: request.new_session,
         };
-        let service = ChatService::open(options, &self.runtime).map_err(runtime_error)?;
-        let summary = service.summary();
+        let (endpoint, summary) =
+            SessionEndpoint::spawn_real(options, self.runtime.clone()).map_err(runtime_error)?;
         let session_id = summary.session_id.to_string();
         let run_id = summary.run_id;
         let resumed = summary.resumed;
         self.sessions.insert(
             session_id.clone(),
             SessionRuntime {
-                service: SessionService::Real(service),
+                endpoint,
+                run_id: run_id.clone(),
                 status: SessionStatus::Open,
             },
         );
@@ -235,6 +242,19 @@ impl DaemonState {
         request_id: String,
         request: SessionTurnRequest,
     ) -> Result<Vec<DaemonEvent>, ProtocolError> {
+        let turn = match self.prepare_turn(request_id, request)? {
+            PreparedTurnAdmission::Run(turn) => turn,
+            PreparedTurnAdmission::Replay(events) => return Ok(events),
+        };
+        let turn_result = turn.endpoint.run_user_turn(&turn.text);
+        self.finish_turn(turn, turn_result)
+    }
+
+    fn prepare_turn(
+        &mut self,
+        request_id: String,
+        request: SessionTurnRequest,
+    ) -> Result<PreparedTurnAdmission, ProtocolError> {
         let session_id = request.session_id.clone();
         let Some(status) = self.sessions.get(&session_id).map(|session| session.status) else {
             return Err(not_found_error(&session_id));
@@ -252,23 +272,37 @@ impl DaemonState {
 
         let turn_idempotency = match self.begin_turn_idempotency(&request_id, &request)? {
             TurnIdempotencyAdmission::Fresh(key) => key,
-            TurnIdempotencyAdmission::Replay(events) => return Ok(events),
+            TurnIdempotencyAdmission::Replay(events) => {
+                return Ok(PreparedTurnAdmission::Replay(events));
+            }
         };
-        let (mut events, turn_result) = {
-            let Some(session) = self.sessions.get_mut(&session_id) else {
-                return Err(not_found_error(&session_id));
-            };
-            session.status = SessionStatus::Busy;
-            let events = vec![DaemonEvent::new(
-                Some(request_id.clone()),
-                DaemonEventKind::TurnStarted(TurnStartedEvent {
-                    session_id: session_id.clone(),
-                    turn_id: session.service.run_id().to_string(),
-                }),
-            )];
-            let turn_result = session.service.run_user_turn(&request.text);
-            (events, turn_result)
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(not_found_error(&session_id));
         };
+        session.status = SessionStatus::Busy;
+        let endpoint = session.endpoint.clone();
+        let events = vec![DaemonEvent::new(
+            Some(request_id.clone()),
+            DaemonEventKind::TurnStarted(TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: session.run_id.clone(),
+            }),
+        )];
+        Ok(PreparedTurnAdmission::Run(PreparedTurn {
+            request_id,
+            session_id,
+            text: request.text,
+            endpoint,
+            events,
+            turn_idempotency,
+        }))
+    }
+
+    fn finish_turn(
+        &mut self,
+        mut turn: PreparedTurn,
+        turn_result: Result<ChatTurnOutput>,
+    ) -> Result<Vec<DaemonEvent>, ProtocolError> {
         match turn_result {
             Ok(output) => {
                 let terminal = match output.status {
@@ -276,17 +310,17 @@ impl DaemonState {
                         let terminal = TurnReplayTerminal::Answered {
                             answer: answer.clone(),
                         };
-                        events.push(DaemonEvent::new(
-                            Some(request_id.clone()),
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
                             DaemonEventKind::AssistantMessage(AssistantMessageEvent {
-                                session_id: session_id.clone(),
+                                session_id: turn.session_id.clone(),
                                 content: answer,
                             }),
                         ));
-                        events.push(DaemonEvent::new(
-                            Some(request_id),
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
                             DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                                session_id: session_id.clone(),
+                                session_id: turn.session_id.clone(),
                                 status: TurnTerminalStatus::Answered,
                             }),
                         ));
@@ -296,28 +330,31 @@ impl DaemonState {
                         let terminal = TurnReplayTerminal::Stopped {
                             reason: reason.as_str().to_string(),
                         };
-                        events.push(DaemonEvent::new(
-                            Some(request_id.clone()),
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
                             DaemonEventKind::TurnStopped(TurnStoppedEvent {
-                                session_id: session_id.clone(),
+                                session_id: turn.session_id.clone(),
                                 reason: reason.as_str().to_string(),
                             }),
                         ));
-                        events.push(DaemonEvent::new(
-                            Some(request_id),
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
                             DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                                session_id: session_id.clone(),
+                                session_id: turn.session_id.clone(),
                                 status: TurnTerminalStatus::Stopped,
                             }),
                         ));
                         terminal
                     }
                 };
-                self.finish_turn_idempotency(turn_idempotency.as_ref(), &session_id, &terminal)?;
-                let Some(session) = self.sessions.get_mut(&session_id) else {
-                    return Err(not_found_error(&session_id));
-                };
-                session.status = SessionStatus::Open;
+                let idempotency_result = self.finish_turn_idempotency(
+                    turn.turn_idempotency.as_ref(),
+                    &turn.session_id,
+                    &terminal,
+                );
+                let events = turn.events.clone();
+                self.restore_finished_turn(turn, SessionStatus::Open)?;
+                idempotency_result?;
                 Ok(events)
             }
             Err(err) => {
@@ -325,29 +362,44 @@ impl DaemonState {
                 let terminal = TurnReplayTerminal::Failed {
                     message: message.clone(),
                 };
-                self.finish_turn_idempotency(turn_idempotency.as_ref(), &session_id, &terminal)?;
-                let Some(session) = self.sessions.get_mut(&session_id) else {
-                    return Err(not_found_error(&session_id));
-                };
-                session.status = SessionStatus::Failed;
-                Ok(vec![
+                let idempotency_result = self.finish_turn_idempotency(
+                    turn.turn_idempotency.as_ref(),
+                    &turn.session_id,
+                    &terminal,
+                );
+                let events = vec![
                     DaemonEvent::new(
-                        Some(request_id.clone()),
+                        Some(turn.request_id.clone()),
                         DaemonEventKind::TurnFailed(TurnFailedEvent {
-                            session_id: session_id.clone(),
+                            session_id: turn.session_id.clone(),
                             message,
                         }),
                     ),
                     DaemonEvent::new(
-                        Some(request_id),
+                        Some(turn.request_id.clone()),
                         DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                            session_id,
+                            session_id: turn.session_id.clone(),
                             status: TurnTerminalStatus::Failed,
                         }),
                     ),
-                ])
+                ];
+                self.restore_finished_turn(turn, SessionStatus::Failed)?;
+                idempotency_result?;
+                Ok(events)
             }
         }
+    }
+
+    fn restore_finished_turn(
+        &mut self,
+        turn: PreparedTurn,
+        status: SessionStatus,
+    ) -> Result<(), ProtocolError> {
+        let Some(session) = self.sessions.get_mut(&turn.session_id) else {
+            return Err(not_found_error(&turn.session_id));
+        };
+        session.status = status;
+        Ok(())
     }
 
     fn read_transcript(
@@ -465,14 +517,30 @@ impl DaemonState {
 
     #[cfg(test)]
     pub(crate) fn insert_test_session(&mut self, session_id: &str, outputs: Vec<ChatTurnStatus>) {
+        let run_id = format!("run-{session_id}");
         self.sessions.insert(
             session_id.to_string(),
             SessionRuntime {
-                service: SessionService::Test(TestSessionService {
-                    run_id: format!("run-{session_id}"),
-                    outputs,
-                    turns: 0,
-                }),
+                endpoint: SessionEndpoint::spawn_test(outputs, None),
+                run_id,
+                status: SessionStatus::Open,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_slow_test_session(
+        &mut self,
+        session_id: &str,
+        outputs: Vec<ChatTurnStatus>,
+        delay: std::time::Duration,
+    ) {
+        let run_id = format!("run-{session_id}");
+        self.sessions.insert(
+            session_id.to_string(),
+            SessionRuntime {
+                endpoint: SessionEndpoint::spawn_test(outputs, Some(delay)),
+                run_id,
                 status: SessionStatus::Open,
             },
         );
@@ -482,10 +550,7 @@ impl DaemonState {
     pub(crate) fn test_session_turns(&self, session_id: &str) -> usize {
         self.sessions
             .get(session_id)
-            .and_then(|session| match &session.service {
-                SessionService::Test(service) => Some(service.turns),
-                SessionService::Real(_) => None,
-            })
+            .and_then(|session| session.endpoint.test_turns())
             .unwrap_or(0)
     }
 
@@ -511,78 +576,308 @@ impl DaemonState {
     }
 }
 
+#[derive(Clone)]
+pub struct SharedDaemonState {
+    inner: Arc<Mutex<DaemonState>>,
+}
+
+impl SharedDaemonState {
+    pub fn new(runtime: AgentLibreRuntimeConfig, inference_defaults: InferenceOptions) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DaemonState::new(runtime, inference_defaults))),
+        }
+    }
+
+    pub fn open(
+        runtime: AgentLibreRuntimeConfig,
+        inference_defaults: InferenceOptions,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(Mutex::new(DaemonState::open(runtime, inference_defaults)?)),
+        })
+    }
+
+    pub fn handle_request(&self, request: DaemonRequest) -> Vec<DaemonEvent> {
+        let request_id = request.request_id.clone();
+        if request.schema != REQUEST_SCHEMA {
+            return vec![protocol_error_event(
+                Some(request_id),
+                ProtocolErrorCode::UnsupportedProtocolVersion,
+                format!("unsupported request schema {}", request.schema),
+                false,
+            )];
+        }
+
+        match request.kind {
+            DaemonRequestKind::SessionTurn(request) => self.handle_turn(request_id, request),
+            kind => match self.inner.lock() {
+                Ok(mut state) => state.handle_request(DaemonRequest {
+                    schema: REQUEST_SCHEMA.to_string(),
+                    request_id,
+                    kind,
+                }),
+                Err(err) => vec![protocol_error_event(
+                    Some(request_id),
+                    ProtocolErrorCode::RuntimeFailure,
+                    format!("daemon state lock is poisoned: {err}"),
+                    false,
+                )],
+            },
+        }
+    }
+
+    fn handle_turn(&self, request_id: String, request: SessionTurnRequest) -> Vec<DaemonEvent> {
+        let turn = match self.inner.lock() {
+            Ok(mut state) => match state.prepare_turn(request_id.clone(), request) {
+                Ok(PreparedTurnAdmission::Run(turn)) => turn,
+                Ok(PreparedTurnAdmission::Replay(events)) => return events,
+                Err(error) => {
+                    return vec![DaemonEvent::new(
+                        Some(request_id),
+                        DaemonEventKind::Error(error),
+                    )];
+                }
+            },
+            Err(err) => {
+                return vec![protocol_error_event(
+                    Some(request_id),
+                    ProtocolErrorCode::RuntimeFailure,
+                    format!("daemon state lock is poisoned: {err}"),
+                    false,
+                )];
+            }
+        };
+
+        let turn_result = turn.endpoint.run_user_turn(&turn.text);
+        match self.inner.lock() {
+            Ok(mut state) => match state.finish_turn(turn, turn_result) {
+                Ok(events) => events,
+                Err(error) => vec![DaemonEvent::new(
+                    Some(request_id),
+                    DaemonEventKind::Error(error),
+                )],
+            },
+            Err(err) => vec![protocol_error_event(
+                Some(request_id),
+                ProtocolErrorCode::RuntimeFailure,
+                format!("daemon state lock is poisoned after turn execution: {err}"),
+                false,
+            )],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_slow_test_session(
+        &self,
+        session_id: &str,
+        outputs: Vec<ChatTurnStatus>,
+        delay: std::time::Duration,
+    ) {
+        self.inner
+            .lock()
+            .unwrap()
+            .insert_slow_test_session(session_id, outputs, delay);
+    }
+}
+
 struct SessionRuntime {
-    service: SessionService,
+    endpoint: SessionEndpoint,
+    run_id: String,
     status: SessionStatus,
 }
 
-enum SessionService {
-    Real(ChatService),
+#[derive(Clone)]
+struct SessionEndpoint {
+    commands: mpsc::Sender<SessionCommand>,
     #[cfg(test)]
-    Test(TestSessionService),
+    turns: Option<Arc<AtomicUsize>>,
 }
 
-impl SessionService {
-    fn run_id(&self) -> &str {
-        match self {
-            Self::Real(service) => service.run_id(),
-            #[cfg(test)]
-            Self::Test(service) => &service.run_id,
-        }
+enum SessionCommand {
+    RunTurn {
+        text: String,
+        reply: mpsc::Sender<WorkerResult<ChatTurnOutput>>,
+    },
+    ClearContext {
+        reply: mpsc::Sender<WorkerResult<usize>>,
+    },
+    RequestExit {
+        reply: mpsc::Sender<WorkerResult<()>>,
+    },
+}
+
+type WorkerResult<T> = std::result::Result<T, String>;
+
+impl SessionEndpoint {
+    fn spawn_real(
+        options: ChatOptions,
+        runtime: AgentLibreRuntimeConfig,
+    ) -> Result<(Self, ChatSessionSummary)> {
+        let (commands, receiver) = mpsc::channel();
+        let (init_sender, init_receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("agl-daemon-session".to_string())
+            .spawn(move || {
+                let service = ChatService::open(options, &runtime);
+                match service {
+                    Ok(service) => {
+                        let summary = service.summary();
+                        if init_sender.send(Ok(summary)).is_ok() {
+                            run_session_worker(service, receiver);
+                        }
+                    }
+                    Err(err) => {
+                        let _ = init_sender.send(Err(format!("{err:#}")));
+                    }
+                }
+            })
+            .context("failed to spawn daemon session worker")?;
+        let summary = init_receiver
+            .recv()
+            .context("daemon session worker exited before initialization")?
+            .map_err(|message| anyhow!(message))?;
+        Ok((
+            Self {
+                commands,
+                #[cfg(test)]
+                turns: None,
+            },
+            summary,
+        ))
+    }
+
+    fn run_user_turn(&self, input: &str) -> Result<ChatTurnOutput> {
+        let (reply, receiver) = mpsc::channel();
+        self.commands
+            .send(SessionCommand::RunTurn {
+                text: input.to_string(),
+                reply,
+            })
+            .context("failed to send daemon session turn command")?;
+        receive_worker_result(receiver, "turn")
     }
 
     fn clear_context(&mut self) -> Result<usize> {
-        match self {
-            Self::Real(service) => service.clear_context(),
-            #[cfg(test)]
-            Self::Test(_) => Ok(0),
-        }
+        let (reply, receiver) = mpsc::channel();
+        self.commands
+            .send(SessionCommand::ClearContext { reply })
+            .context("failed to send daemon session clear command")?;
+        receive_worker_result(receiver, "clear")
     }
 
     fn request_exit(&mut self) -> Result<()> {
-        match self {
-            Self::Real(service) => service.request_exit(),
-            #[cfg(test)]
-            Self::Test(_) => Ok(()),
+        let (reply, receiver) = mpsc::channel();
+        self.commands
+            .send(SessionCommand::RequestExit { reply })
+            .context("failed to send daemon session finish command")?;
+        receive_worker_result(receiver, "finish")
+    }
+
+    #[cfg(test)]
+    fn spawn_test(outputs: Vec<ChatTurnStatus>, delay: Option<std::time::Duration>) -> Self {
+        let (commands, receiver) = mpsc::channel();
+        let turns = Arc::new(AtomicUsize::new(0));
+        let worker_turns = Arc::clone(&turns);
+        std::thread::spawn(move || run_test_session_worker(receiver, outputs, delay, worker_turns));
+        Self {
+            commands,
+            turns: Some(turns),
         }
     }
 
-    fn run_user_turn(&mut self, input: &str) -> Result<ChatTurnOutput> {
-        match self {
-            Self::Real(service) => service.run_user_turn(input),
-            #[cfg(test)]
-            Self::Test(service) => service.run_user_turn(input),
-        }
+    #[cfg(test)]
+    fn test_turns(&self) -> Option<usize> {
+        self.turns
+            .as_ref()
+            .map(|turns| turns.load(Ordering::SeqCst))
     }
 }
 
-#[cfg(test)]
-struct TestSessionService {
-    run_id: String,
-    outputs: Vec<ChatTurnStatus>,
-    turns: usize,
-}
-
-#[cfg(test)]
-impl TestSessionService {
-    fn run_user_turn(&mut self, _input: &str) -> Result<ChatTurnOutput> {
-        self.turns += 1;
-        let status = if self.outputs.is_empty() {
-            ChatTurnStatus::Answered {
-                answer: "test answer".to_string(),
+fn run_session_worker(mut service: ChatService, receiver: mpsc::Receiver<SessionCommand>) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            SessionCommand::RunTurn { text, reply } => {
+                let _ = reply.send(
+                    service
+                        .run_user_turn(&text)
+                        .map_err(|err| format!("{err:#}")),
+                );
             }
-        } else {
-            self.outputs.remove(0)
-        };
-        Ok(ChatTurnOutput {
-            status,
-            generated_requests: 1,
-        })
+            SessionCommand::ClearContext { reply } => {
+                let _ = reply.send(service.clear_context().map_err(|err| format!("{err:#}")));
+            }
+            SessionCommand::RequestExit { reply } => {
+                let result = service.request_exit().map_err(|err| format!("{err:#}"));
+                let _ = reply.send(result);
+                break;
+            }
+        }
     }
+}
+
+#[cfg(test)]
+fn run_test_session_worker(
+    receiver: mpsc::Receiver<SessionCommand>,
+    mut outputs: Vec<ChatTurnStatus>,
+    delay: Option<std::time::Duration>,
+    turns: Arc<AtomicUsize>,
+) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            SessionCommand::RunTurn { reply, .. } => {
+                turns.fetch_add(1, Ordering::SeqCst);
+                if let Some(delay) = delay {
+                    std::thread::sleep(delay);
+                }
+                let status = if outputs.is_empty() {
+                    ChatTurnStatus::Answered {
+                        answer: "test answer".to_string(),
+                    }
+                } else {
+                    outputs.remove(0)
+                };
+                let _ = reply.send(Ok(ChatTurnOutput {
+                    status,
+                    generated_requests: 1,
+                }));
+            }
+            SessionCommand::ClearContext { reply } => {
+                let _ = reply.send(Ok(0));
+            }
+            SessionCommand::RequestExit { reply } => {
+                let _ = reply.send(Ok(()));
+                break;
+            }
+        }
+    }
+}
+
+fn receive_worker_result<T>(
+    receiver: mpsc::Receiver<WorkerResult<T>>,
+    operation: &str,
+) -> Result<T> {
+    receiver
+        .recv()
+        .with_context(|| format!("daemon session worker exited during {operation}"))?
+        .map_err(|message| anyhow!(message))
 }
 
 struct TurnIdempotencyKey {
     key: String,
+}
+
+enum PreparedTurnAdmission {
+    Run(PreparedTurn),
+    Replay(Vec<DaemonEvent>),
+}
+
+struct PreparedTurn {
+    request_id: String,
+    session_id: String,
+    text: String,
+    endpoint: SessionEndpoint,
+    events: Vec<DaemonEvent>,
+    turn_idempotency: Option<TurnIdempotencyKey>,
 }
 
 enum TurnIdempotencyAdmission {
@@ -710,6 +1005,18 @@ fn status_event(request_id: &str, session_id: &str, status: SessionStatus) -> Da
             session_id: session_id.to_string(),
             status,
         }),
+    )
+}
+
+fn protocol_error_event(
+    request_id: Option<String>,
+    code: ProtocolErrorCode,
+    message: impl Into<String>,
+    retryable: bool,
+) -> DaemonEvent {
+    DaemonEvent::new(
+        request_id,
+        DaemonEventKind::Error(ProtocolError::new(code, message, retryable)),
     )
 }
 
