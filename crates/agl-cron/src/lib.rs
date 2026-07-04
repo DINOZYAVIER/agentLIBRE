@@ -555,8 +555,8 @@ impl<'a> CronRepository<'a> {
     pub fn due_jobs(&self, unix_seconds: u64) -> Result<Vec<CronDueJob>> {
         let scheduled_for = minute_timestamp(unix_seconds);
         let mut due = Vec::new();
-        for job in self.list_jobs(false)? {
-            if job.enabled && schedule_matches(&job.schedule_expr, unix_seconds, &job.timezone)? {
+        for job in self.enabled_jobs()? {
+            if schedule_matches(&job.schedule_expr, unix_seconds, &job.timezone)? {
                 due.push(CronDueJob {
                     job,
                     scheduled_for: scheduled_for.clone(),
@@ -564,6 +564,16 @@ impl<'a> CronRepository<'a> {
             }
         }
         Ok(due)
+    }
+
+    fn enabled_jobs(&self) -> Result<Vec<CronJob>> {
+        self.query_jobs(
+            "SELECT id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, prompt, input, created_at, updated_at, deleted_at
+             FROM cron_jobs
+             WHERE enabled = 1 AND deleted_at IS NULL
+             ORDER BY updated_at DESC, id DESC",
+            [],
+        )
     }
 
     fn run(&self, id: &str) -> Result<Option<CronRun>> {
