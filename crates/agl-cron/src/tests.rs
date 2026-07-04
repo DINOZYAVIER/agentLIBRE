@@ -15,6 +15,17 @@ fn validates_human_and_cron_schedules() {
 }
 
 #[test]
+fn builtin_cron_target_validation_reports_supported_targets() {
+    validate_builtin_cron_target(STORE_STATUS_BUILTIN_CRON_TARGET).unwrap();
+    let err = validate_builtin_cron_target("missing-target").unwrap_err();
+
+    assert_eq!(
+        err,
+        "unknown builtin cron target: missing-target; supported builtin targets: store-status"
+    );
+}
+
+#[test]
 fn validates_utc_and_fixed_offset_timezones() {
     for value in ["UTC", "Z", "+02:00", "-07:00", "UTC+05:30"] {
         parse_timezone(value).unwrap();
