@@ -12,8 +12,9 @@ use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    default_socket_path, render_cron_notification_body, render_cron_skill_prompt,
-    run_cron_skill_chat_turn, run_cron_tick,
+    STORE_STATUS_BUILTIN_CRON_TARGET, default_socket_path, render_cron_notification_body,
+    render_cron_skill_prompt, run_cron_skill_chat_turn, run_cron_tick,
+    unsupported_builtin_cron_target_message, validate_builtin_cron_target,
 };
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
@@ -431,15 +432,6 @@ fn validate_stored_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig)
     }
 }
 
-fn validate_builtin_cron_target(target_ref: &str) -> Result<()> {
-    match target_ref {
-        "store-status" => Ok(()),
-        _ => bail!(
-            "unknown builtin cron target: {target_ref}; supported builtin targets: store-status"
-        ),
-    }
-}
-
 fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     let workspace = workspace_skill_report_with_trust(
         std::env::current_dir().context("failed to resolve current directory")?,
@@ -474,7 +466,7 @@ fn run_cron_target(
 
 fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
     match job.target_ref.as_str() {
-        "store-status" => {
+        STORE_STATUS_BUILTIN_CRON_TARGET => {
             let health = store.health().context("failed to check store health")?;
             Ok(format!(
                 "builtin:store-status:schema:{}",
@@ -482,8 +474,8 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
             ))
         }
         _ => bail!(
-            "unknown builtin cron target: {}; supported builtin targets: store-status",
-            job.target_ref
+            "{}",
+            unsupported_builtin_cron_target_message(&job.target_ref)
         ),
     }
 }

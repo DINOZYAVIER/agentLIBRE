@@ -12,7 +12,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonState,
-    render_cron_notification_body, run_cron_skill_chat_turn, run_cron_tick,
+    STORE_STATUS_BUILTIN_CRON_TARGET, render_cron_notification_body, run_cron_skill_chat_turn,
+    run_cron_tick, unsupported_builtin_cron_target_message,
 };
 
 #[cfg(unix)]
@@ -103,11 +104,11 @@ struct DaemonCronExecutor {
 impl CronTargetExecutor for DaemonCronExecutor {
     fn execute(&mut self, job: &CronJob) -> CronExecution {
         match (job.target_kind, job.target_ref.as_str()) {
-            (CronTargetKind::Builtin, "store-status") => {
+            (CronTargetKind::Builtin, STORE_STATUS_BUILTIN_CRON_TARGET) => {
                 CronExecution::succeeded("builtin:store-status")
             }
             (CronTargetKind::Builtin, target) => {
-                CronExecution::failed(format!("unknown builtin cron target: {target}"))
+                CronExecution::failed(unsupported_builtin_cron_target_message(target))
             }
             (CronTargetKind::Skill, _target) => {
                 match run_cron_skill_chat_turn(
