@@ -74,8 +74,7 @@ impl ChatLoopHost {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
         self.session
-            .set_runtime_capability_workspace_root(workspace_root.as_ref())?;
-        self.session.refresh_runtime_context()?;
+            .set_workspace_root_and_refresh(workspace_root.as_ref())?;
         let tool_runtime =
             build_chat_tool_runtime(&self.session, &core_tools, workspace_root.as_ref())?;
         self.core_tools = core_tools;
