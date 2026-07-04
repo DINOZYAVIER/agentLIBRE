@@ -228,16 +228,12 @@ impl InferenceSession {
         self.backend.clear_context();
     }
 
-    pub fn set_runtime_capability_workspace_root(
+    pub(crate) fn set_workspace_root_and_refresh(
         &mut self,
         workspace_root: &std::path::Path,
     ) -> Result<()> {
         self.workspace_root = workspace_root.to_path_buf();
-        let runtime_capabilities =
-            build_runtime_capability_context(workspace_root, self.tool_mode, &self.visible_tools);
-        self.runtime_capability_context = Some(runtime_capabilities.content);
-        self.runtime_capability_evidence = Some(runtime_capabilities.evidence);
-        Ok(())
+        self.refresh_runtime_context()
     }
 
     pub(crate) fn refresh_runtime_context(&mut self) -> Result<()> {
