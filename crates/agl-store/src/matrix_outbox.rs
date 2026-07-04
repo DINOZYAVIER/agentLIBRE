@@ -2,7 +2,8 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     AglStore, MatrixNotificationOutboxDraft, MatrixNotificationOutboxItem,
-    MatrixNotificationOutboxStatus, Result, StoreError, store_id, timestamp, validate_non_blank,
+    MatrixNotificationOutboxStatus, Result, StoreError,
+    util::{store_id, timestamp, validate_non_blank},
 };
 
 impl AglStore {

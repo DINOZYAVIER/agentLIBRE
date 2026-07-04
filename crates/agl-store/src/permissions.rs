@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{
     AglStore, PermissionGrantDraft, PermissionGrantRecord, PermissionGrantStatus,
     PermissionRequestDraft, PermissionRequestRecord, PermissionRequestStatus, Result, StoreError,
-    store_id, timestamp, validate_non_blank, validate_non_empty_list,
+    util::{store_id, timestamp, validate_non_blank, validate_non_empty_list},
 };
 
 impl AglStore {
