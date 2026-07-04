@@ -1,6 +1,8 @@
+use agl_chat::{ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, ToolAccessMode};
 use agl_cron::{CronJob, CronRepository, CronRun, CronRunAdmission, CronRunStatus};
+use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::AglStore;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronExecution {
@@ -81,6 +83,49 @@ pub fn render_cron_notification_body(notification: &CronNotification) -> String 
         body.push_str(&format!("\nerror: {error}"));
     }
     body
+}
+
+pub fn run_cron_skill_chat_turn(
+    job: &CronJob,
+    runtime: &AgentLibreRuntimeConfig,
+    mut inference: InferenceOptions,
+    context_label: Option<&str>,
+) -> Result<String> {
+    let prompt = render_cron_skill_prompt(job)?;
+    inference.skills.push(job.target_ref.clone());
+    inference.tool_mode = ToolAccessMode::Write;
+    let mut service = ChatService::open(
+        ChatOptions {
+            inference,
+            workspace_root: None,
+            session_id: None,
+            no_history: false,
+            new_session: true,
+        },
+        runtime,
+    )
+    .with_context(|| cron_skill_context("open", context_label, "chat session"))?;
+    let summary = service.summary();
+    let output = service
+        .run_user_turn(&prompt)
+        .with_context(|| cron_skill_context("run", context_label, "turn"))?;
+    service
+        .finish_eof_if_needed()
+        .with_context(|| cron_skill_context("finish", context_label, "session"))?;
+    match output.status {
+        ChatTurnStatus::Answered { .. } => Ok(format!(
+            "skill:{}:session:{}:run:{}",
+            job.target_ref, summary.session_id, summary.run_id
+        )),
+        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
+    }
+}
+
+fn cron_skill_context(verb: &str, label: Option<&str>, noun: &str) -> String {
+    match label.filter(|value| !value.is_empty()) {
+        Some(label) => format!("failed to {verb} {label} cron skill {noun}"),
+        None => format!("failed to {verb} cron skill {noun}"),
+    }
 }
 
 #[derive(Default)]

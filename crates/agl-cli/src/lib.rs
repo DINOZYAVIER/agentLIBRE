@@ -12,7 +12,8 @@ use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
+    default_socket_path, render_cron_notification_body, render_cron_skill_prompt,
+    run_cron_skill_chat_turn, run_cron_tick,
 };
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
@@ -488,37 +489,7 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
 }
 
 fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
-    let prompt = render_cron_skill_prompt(job)?;
-    let inference = InferenceOptions {
-        skills: vec![job.target_ref.clone()],
-        tool_mode: ChatToolAccessMode::Write,
-        ..InferenceOptions::default()
-    };
-    let mut service = ChatService::open(
-        ChatOptions {
-            inference,
-            workspace_root: None,
-            session_id: None,
-            no_history: false,
-            new_session: true,
-        },
-        runtime,
-    )
-    .context("failed to open cron skill chat session")?;
-    let summary = service.summary();
-    let output = service
-        .run_user_turn(&prompt)
-        .context("failed to run cron skill turn")?;
-    service
-        .finish_eof_if_needed()
-        .context("failed to finish cron skill session")?;
-    match output.status {
-        ChatTurnStatus::Answered { .. } => Ok(format!(
-            "skill:{}:session:{}:run:{}",
-            job.target_ref, summary.session_id, summary.run_id
-        )),
-        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
-    }
+    run_cron_skill_chat_turn(job, runtime, InferenceOptions::default(), None)
 }
 
 fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
