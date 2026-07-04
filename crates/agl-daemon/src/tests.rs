@@ -1,9 +1,10 @@
 use agl_chat::InferenceOptions;
 use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, EVENT_SCHEMA,
-    HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode, SessionListEvent, SessionListRequest,
-    SessionStatusRequest, SessionTranscriptRequest, TranscriptEvent,
+    AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
+    DaemonRequestKind, EVENT_SCHEMA, HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode,
+    SessionListEvent, SessionListRequest, SessionStatusRequest, SessionTranscriptRequest,
+    SessionTurnRequest, TranscriptEvent, TurnTerminalStatus,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -78,6 +79,105 @@ fn session_list_starts_empty() {
 
     match &events[0].kind {
         DaemonEventKind::SessionList(event) => assert!(event.sessions.is_empty()),
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn session_turn_idempotency_replays_without_rerunning_turn() {
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    state.insert_test_session(
+        "s1",
+        vec![agl_chat::ChatTurnStatus::Answered {
+            answer: "hello".to_string(),
+        }],
+    );
+
+    let first = state.handle_request(request(DaemonRequestKind::SessionTurn(
+        SessionTurnRequest {
+            session_id: "s1".to_string(),
+            text: "say hi".to_string(),
+            idempotency_key: Some("matrix-event-1".to_string()),
+        },
+    )));
+    let second = state.handle_request(DaemonRequest::new(
+        "req-2",
+        DaemonRequestKind::SessionTurn(SessionTurnRequest {
+            session_id: "s1".to_string(),
+            text: "say hi".to_string(),
+            idempotency_key: Some("matrix-event-1".to_string()),
+        }),
+    ));
+
+    assert_eq!(state.test_session_turns("s1"), 1);
+    assert!(matches!(first[0].kind, DaemonEventKind::TurnStarted(_)));
+    assert!(matches!(
+        second[0].kind,
+        DaemonEventKind::AssistantMessage(AssistantMessageEvent { .. })
+    ));
+    match &second[1].kind {
+        DaemonEventKind::TurnFinished(event) => {
+            assert_eq!(event.status, TurnTerminalStatus::Answered);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn session_turn_idempotency_rejects_key_reuse_with_different_text() {
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    state.insert_test_session(
+        "s1",
+        vec![agl_chat::ChatTurnStatus::Answered {
+            answer: "hello".to_string(),
+        }],
+    );
+
+    let _first = state.handle_request(request(DaemonRequestKind::SessionTurn(
+        SessionTurnRequest {
+            session_id: "s1".to_string(),
+            text: "say hi".to_string(),
+            idempotency_key: Some("matrix-event-1".to_string()),
+        },
+    )));
+    let conflict = state.handle_request(request(DaemonRequestKind::SessionTurn(
+        SessionTurnRequest {
+            session_id: "s1".to_string(),
+            text: "different".to_string(),
+            idempotency_key: Some("matrix-event-1".to_string()),
+        },
+    )));
+
+    assert_eq!(state.test_session_turns("s1"), 1);
+    match &conflict[0].kind {
+        DaemonEventKind::Error(error) => {
+            assert_eq!(error.code, ProtocolErrorCode::InvalidRequest);
+            assert!(!error.retryable);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn session_turn_idempotency_reports_in_progress_key_as_busy() {
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    state.insert_test_session("s1", Vec::new());
+    state.begin_test_turn_idempotency("s1", "say hi", "matrix-event-1");
+
+    let events = state.handle_request(request(DaemonRequestKind::SessionTurn(
+        SessionTurnRequest {
+            session_id: "s1".to_string(),
+            text: "say hi".to_string(),
+            idempotency_key: Some("matrix-event-1".to_string()),
+        },
+    )));
+
+    assert_eq!(state.test_session_turns("s1"), 0);
+    match &events[0].kind {
+        DaemonEventKind::Error(error) => {
+            assert_eq!(error.code, ProtocolErrorCode::Busy);
+            assert!(error.retryable);
+        }
         other => panic!("unexpected event: {other:?}"),
     }
 }
