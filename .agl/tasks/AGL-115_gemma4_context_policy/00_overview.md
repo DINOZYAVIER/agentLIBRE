@@ -79,6 +79,34 @@ Observed runtime values:
 
 This makes 12B/128k/q4_0 the current verified high-context GPU profile.
 
+## 2026-07-03 Q8 Ceiling Smoke
+
+Temporary q8_0 KV profiles were smoke-tested to find the practical full-offload
+ceiling for the 24GB Vulkan0 GPU. Each run used Flash Attention, no MTP, and a
+short output limit.
+
+| Model | Passed q8_0 context | GPU model buffer | GPU KV buffer | GPU compute buffer | Core GPU buffers | Headroom vs 24560 MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Gemma4 12B | 98304 | 6390.13 MiB | 17136.00 MiB | 264.50 MiB | 23790.63 MiB | 769.37 MiB |
+| Gemma4 26B A4B | 90112 | 13573.86 MiB | 10285.00 MiB | 264.25 MiB | 24123.11 MiB | 436.89 MiB |
+| Gemma4 31B | 16384 | 16471.71 MiB | 7480.00 MiB | 266.50 MiB | 24218.21 MiB | 341.79 MiB |
+
+Artifact roots:
+
+- `/tmp/agl-gemma4-q8-ceiling/inference-runs/gemma4-12b-96k-q8-ceiling-smoke`
+- `/tmp/agl-gemma4-q8-ceiling/inference-runs/gemma4-26b-88k-q8-ceiling-smoke`
+- `/tmp/agl-gemma4-q8-ceiling/inference-runs/gemma4-31b-16k-q8-ceiling-smoke`
+
+Estimated hard ceilings with no desktop safety margin are roughly:
+
+- 12B: about 100k q8_0 context.
+- 26B A4B: about 92k q8_0 context.
+- 31B: about 16k-17k q8_0 context.
+
+The practical q8_0 ceilings for this workstation are the passed values above:
+96k for 12B, 88k for 26B A4B, and 16k for 31B. Higher values leave too little
+headroom for a graphical desktop and should not become normal profiles.
+
 ## Acceptance Criteria
 
 1. Gemma4 profile updates use `32768` as the minimum normal context.
