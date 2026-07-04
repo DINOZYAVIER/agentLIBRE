@@ -23,6 +23,22 @@ fn assert_parse_error_contains(args: impl IntoIterator<Item = &'static str>, nee
     );
 }
 
+fn visible_subcommand_names(command: clap::Command) -> Vec<String> {
+    command
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| command.get_name().to_string())
+        .collect()
+}
+
+#[test]
+fn completion_surface_matches_visible_cli_commands() {
+    assert_eq!(
+        visible_subcommand_names(PublicCompletionCli::command()),
+        visible_subcommand_names(Cli::command())
+    );
+}
+
 #[test]
 fn parse_run_command_with_options() {
     assert_command(
