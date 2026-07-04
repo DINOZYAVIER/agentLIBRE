@@ -10,7 +10,7 @@ use agl_chat::{
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{
-    CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind,
+    CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind,
     STORE_STATUS_BUILTIN_CRON_TARGET, unsupported_builtin_cron_target_message,
     validate_builtin_cron_target,
 };
@@ -306,13 +306,14 @@ fn run_cron_run(
         return run_cron_preflight(&job, runtime, options.json);
     }
     validate_stored_cron_target(&job, runtime)?;
-    let execution = run_cron_target(&job, store, runtime, options.mock_skill_execution);
-    let (status, result_ref, error) = match execution {
-        Ok(result_ref) => (CronRunStatus::Succeeded, Some(result_ref), None),
-        Err(err) => (CronRunStatus::Failed, None, Some(format!("{err:#}"))),
-    };
+    let execution = execute_cron_target(&job, store, runtime, options.mock_skill_execution);
     let (run, outcome) = cron
-        .record_manual_run_result(&job.id, status, result_ref.as_deref(), error.as_deref())
+        .record_manual_run_result(
+            &job.id,
+            execution.status,
+            execution.result_ref.as_deref(),
+            execution.error.as_deref(),
+        )
         .context("failed to record cron run")?;
     let idempotency = idempotency_report(store, &outcome)?;
 
@@ -458,6 +459,18 @@ fn validate_trusted_cron_skill(name: &str, runtime: &AgentLibreRuntimeConfig) ->
     bail!("cron skill target is not runtime usable: {name}");
 }
 
+fn execute_cron_target(
+    job: &CronJob,
+    store: &AglStore,
+    runtime: &AgentLibreRuntimeConfig,
+    mock_skill_execution: bool,
+) -> CronExecution {
+    match run_cron_target(job, store, runtime, mock_skill_execution) {
+        Ok(result_ref) => CronExecution::succeeded(result_ref),
+        Err(err) => CronExecution::failed(format!("{err:#}")),
+    }
+}
+
 fn run_cron_target(
     job: &CronJob,
     store: &AglStore,
@@ -534,10 +547,7 @@ struct CliCronExecutor<'a> {
 
 impl CronTargetExecutor for CliCronExecutor<'_> {
     fn execute(&mut self, job: &CronJob) -> CronExecution {
-        match run_cron_target(job, self.store, self.runtime, self.mock_skill_execution) {
-            Ok(result_ref) => CronExecution::succeeded(result_ref),
-            Err(err) => CronExecution::failed(format!("{err:#}")),
-        }
+        execute_cron_target(job, self.store, self.runtime, self.mock_skill_execution)
     }
 }
 
