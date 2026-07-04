@@ -50,9 +50,11 @@ need_tool readelf
 
 [[ -n "$config" ]] || fail "AGL_SMOKE_CONFIG must point to a local inference TOML file"
 [[ -f "$config" ]] || fail "missing smoke config: $config"
+config="$(smoke_abs_path "$config")"
 
 cd "$repo_root"
 cargo build -p agl-cli
+agl_bin="$(smoke_abs_path "$agl_bin")"
 
 linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"
 [[ "$linked_libraries" == *"libllama"* ]] || fail "$agl_bin is not linked to libllama"
