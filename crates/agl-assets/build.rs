@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
+const BUILTIN_SKILL_PACKS: &[&str] = &["agl", "dev"];
+
 #[derive(Clone, Copy)]
 enum AssetKind {
     SystemPrompt,
@@ -85,12 +87,23 @@ fn add_skills(
         return;
     }
     reject_symlink(&skills_root);
-    for pack in ["agl", "dev"] {
-        let pack_root = skills_root.join(pack);
-        if !pack_root.exists() {
-            continue;
-        }
+    for pack_root in read_dir_sorted(&skills_root)
+        .into_iter()
+        .filter(|path| path.is_dir())
+    {
         reject_symlink(&pack_root);
+        let pack = pack_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("builtin skill pack directory must have a UTF-8 name");
+        validate_name(pack, "builtin skill pack directory");
+        if !BUILTIN_SKILL_PACKS.contains(&pack) {
+            panic!(
+                "unsupported builtin skill pack directory {}; supported packs: {}",
+                pack_root.display(),
+                BUILTIN_SKILL_PACKS.join(", ")
+            );
+        }
         let mut skill_dirs = read_dir_sorted(&pack_root)
             .into_iter()
             .filter(|path| path.is_dir())
