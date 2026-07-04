@@ -2,7 +2,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::{
     AglStore, IdempotencyOutcome, IdempotencyRecord, IdempotencyStatus, Result, StoreError,
-    timestamp, validate_non_blank,
+    util::{timestamp, validate_non_blank},
 };
 
 impl AglStore {
