@@ -7,7 +7,7 @@ mod terminal;
 mod tools;
 
 pub use loop_host::ChatLoopHost;
-pub use options::{ChatOptions, InferenceOptions, ToolAccessMode};
+pub use options::{ChatOptions, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions, ToolAccessMode};
 pub use service::{
     ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus, build_turn_input,
     chat_workspace_root, replay_turn_messages, stopped_turn_context_message,

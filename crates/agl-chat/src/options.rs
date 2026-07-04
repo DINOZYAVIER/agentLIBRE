@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ToolAccessMode {
     #[default]
@@ -51,7 +53,7 @@ impl Default for InferenceOptions {
             artifact_root: None,
             run_id: None,
             workspace_root: None,
-            max_output_tokens: 256,
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             tool_mode: ToolAccessMode::ReadOnly,
             skills: Vec::new(),
             memory: false,

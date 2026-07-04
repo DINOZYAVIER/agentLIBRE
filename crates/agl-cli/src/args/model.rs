@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use clap_complete::Shell;
 
-pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
+pub(crate) use agl_chat::DEFAULT_MAX_OUTPUT_TOKENS;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CliInvocation {
