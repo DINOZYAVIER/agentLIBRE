@@ -140,7 +140,9 @@ dependencies = [
  "agl-session",
  "agl-store",
  "anyhow",
+ "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 
