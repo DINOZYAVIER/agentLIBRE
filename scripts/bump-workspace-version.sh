@@ -11,7 +11,7 @@ on the latest local signed/annotated alpha tag, then:
 
   1. updates Cargo.lock with cargo generate-lockfile
   2. commits Cargo.toml and Cargo.lock with Signed-off-by
-  3. creates a signed tag for the new version
+  3. creates a signed tag, or an annotated tag when signing is not configured
 
 The script does not fetch tags. Run git fetch --tags first if local tags may be
 stale.
@@ -143,9 +143,26 @@ update_workspace_version() {
   mv "$tmp" "$cargo_toml"
 }
 
-create_signed_tag() {
+git_signing_configured() {
+  [[ -n "$(git config --get user.signingkey || true)" ]] ||
+    [[ "$(git config --bool tag.gpgSign || true)" == "true" ]] ||
+    [[ -n "$(git config --get gpg.ssh.defaultKeyCommand || true)" ]]
+}
+
+tag_mode() {
+  if git_signing_configured; then
+    echo "signed"
+  else
+    echo "annotated"
+  fi
+}
+
+create_checkpoint_tag() {
   local tag="$1"
-  if ! git tag -s "$tag" -m "$tag"; then
+  if [[ "$(tag_mode)" == "signed" ]]; then
+    if git tag -s "$tag" -m "$tag"; then
+      return 0
+    fi
     cat >&2 <<EOF
 error: failed to create signed tag $tag
 The version bump commit may already exist, but the checkpoint tag was not
@@ -154,6 +171,8 @@ created. After fixing signing, rerun this script or run:
 EOF
     exit 1
   fi
+
+  git tag -a "$tag" -m "$tag"
 }
 
 current_workspace_version="$(workspace_version)"
@@ -165,6 +184,11 @@ latest_tag="$(latest_alpha_tag || true)"
 base_version="${latest_tag#v}"
 next_version="$(next_alpha_version "$base_version")"
 next_tag="v$next_version"
+checkpoint_tag_mode="$(tag_mode)"
+checkpoint_tag_flag="-a"
+if [[ "$checkpoint_tag_mode" == "signed" ]]; then
+  checkpoint_tag_flag="-s"
+fi
 
 if git rev-parse -q --verify "refs/tags/$next_tag" >/dev/null; then
   die "tag already exists: $next_tag"
@@ -185,6 +209,7 @@ latest_tag=$latest_tag
 current_workspace_version=$current_workspace_version
 next_workspace_version=$next_version
 next_tag=$next_tag
+tag_mode=$checkpoint_tag_mode
 commit_message=$commit_message
 EOF
 
@@ -196,7 +221,7 @@ planned:
   cargo generate-lockfile
   git add Cargo.toml Cargo.lock
   git commit --signoff -m "$commit_message"
-  git tag -s $next_tag -m "$next_tag"
+  git tag $checkpoint_tag_flag $next_tag -m "$next_tag"
 EOF
   exit 0
 fi
@@ -205,8 +230,8 @@ fi
 
 if [[ "$current_workspace_version" == "$next_version" ]]; then
   echo "workspace version is already $next_version; skipping commit and creating $next_tag on HEAD"
-  create_signed_tag "$next_tag"
-  echo "created $next_tag"
+  create_checkpoint_tag "$next_tag"
+  echo "created $next_tag ($checkpoint_tag_mode)"
   exit 0
 fi
 
@@ -220,6 +245,6 @@ if git diff --cached --quiet; then
 fi
 
 git commit --signoff -m "$commit_message"
-create_signed_tag "$next_tag"
+create_checkpoint_tag "$next_tag"
 
-echo "created $next_tag"
+echo "created $next_tag ($checkpoint_tag_mode)"
