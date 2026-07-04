@@ -15,4 +15,5 @@ fi
 "$script_dir/clippy.sh"
 "$script_dir/test.sh"
 "$script_dir/fsm-boundaries.sh"
+"$script_dir/systemd-dry-run.sh"
 "$script_dir/diff-check.sh"

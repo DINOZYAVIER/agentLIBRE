@@ -21,6 +21,15 @@ agl_systemd_validate_absolute_path() {
   fi
 }
 
+agl_systemd_validate_absolute_vars() {
+  local value_name
+  local value
+  for value_name in "$@"; do
+    value="${!value_name}"
+    agl_systemd_validate_absolute_path "--${value_name//_/-}" "$value"
+  done
+}
+
 agl_systemd_validate_nonempty_no_newline() {
   local option="$1"
   local value="$2"
@@ -93,4 +102,20 @@ agl_systemd_install_user_unit() {
   fi
 
   systemctl --user --no-pager show "$unit" -p UnitFileState -p ActiveState -p ExecStart
+}
+
+agl_systemd_print_or_install_user_unit() {
+  local dry_run="$1"
+  local unit_dir="$2"
+  local unit="$3"
+  local unit_content="$4"
+  local enable="$5"
+  local restart="$6"
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    printf '\n%s' "$unit_content"
+    return 0
+  fi
+
+  agl_systemd_install_user_unit "$unit_dir" "$unit" "$unit_content" "$enable" "$restart"
 }
