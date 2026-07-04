@@ -29,14 +29,7 @@ impl ChatLoopHost {
         let event_sink = RuntimeEventWriter::new(session.event_stream_path());
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
-        let mut tool_runtime = chat_tool_runtime(ChatToolRuntimeConfig {
-            core_tools: &core_tools,
-            store_root: session.store_root(),
-            trust_store_path: session.trust_store_path(),
-            workspace_root: workspace_root.as_ref(),
-            permission_status: permission_runtime_status(&session),
-        })?;
-        tool_runtime.set_allowed_tools(visible_tool_ids(session.turn_visible_tools())?);
+        let tool_runtime = build_chat_tool_runtime(&session, &core_tools, workspace_root.as_ref())?;
         Ok(Self {
             session,
             event_sink,
@@ -83,14 +76,8 @@ impl ChatLoopHost {
         self.session
             .set_runtime_capability_workspace_root(workspace_root.as_ref())?;
         self.session.refresh_runtime_context()?;
-        let mut tool_runtime = chat_tool_runtime(ChatToolRuntimeConfig {
-            core_tools: &core_tools,
-            store_root: self.session.store_root(),
-            trust_store_path: self.session.trust_store_path(),
-            workspace_root: workspace_root.as_ref(),
-            permission_status: permission_runtime_status(&self.session),
-        })?;
-        tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
+        let tool_runtime =
+            build_chat_tool_runtime(&self.session, &core_tools, workspace_root.as_ref())?;
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
         Ok(())
@@ -98,15 +85,8 @@ impl ChatLoopHost {
 
     pub fn refresh_runtime_context(&mut self) -> Result<()> {
         self.session.refresh_runtime_context()?;
-        let mut tool_runtime = chat_tool_runtime(ChatToolRuntimeConfig {
-            core_tools: &self.core_tools,
-            store_root: self.session.store_root(),
-            trust_store_path: self.session.trust_store_path(),
-            workspace_root: self.core_tools.root(),
-            permission_status: permission_runtime_status(&self.session),
-        })?;
-        tool_runtime.set_allowed_tools(visible_tool_ids(self.session.turn_visible_tools())?);
-        self.tool_runtime = tool_runtime;
+        self.tool_runtime =
+            build_chat_tool_runtime(&self.session, &self.core_tools, self.core_tools.root())?;
         Ok(())
     }
 }
@@ -206,6 +186,22 @@ fn permission_runtime_status(
         granted_visible_tools: session.permission_grants().granted_visible_tools(),
         ignored_grants: session.permission_grants().ignored_grants(),
     }
+}
+
+fn build_chat_tool_runtime(
+    session: &InferenceSession,
+    core_tools: &agl_tools::CoreTools,
+    workspace_root: &Path,
+) -> Result<ToolRuntime> {
+    let mut tool_runtime = chat_tool_runtime(ChatToolRuntimeConfig {
+        core_tools,
+        store_root: session.store_root(),
+        trust_store_path: session.trust_store_path(),
+        workspace_root,
+        permission_status: permission_runtime_status(session),
+    })?;
+    tool_runtime.set_allowed_tools(visible_tool_ids(session.turn_visible_tools())?);
+    Ok(tool_runtime)
 }
 
 fn visible_tool_ids(visible_tools: &[VisibleTool]) -> Result<Vec<ToolId>> {
