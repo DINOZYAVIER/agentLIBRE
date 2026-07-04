@@ -29,6 +29,13 @@ require_not_contains() {
   fi
 }
 
+smoke_abs_path() {
+  local path="$1"
+  local dir
+  dir="$(cd -- "$(dirname -- "$path")" && pwd)"
+  printf '%s/%s' "$dir" "$(basename -- "$path")"
+}
+
 json_content() {
   python3 - "$1" <<'PY'
 import json
