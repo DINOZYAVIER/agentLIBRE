@@ -210,6 +210,50 @@ fn due_jobs_match_human_schedules() {
 }
 
 #[test]
+fn due_jobs_ignore_disabled_and_deleted_jobs() {
+    let root = temp_root("due-active");
+    let store = AglStore::open_at(&root).unwrap();
+    let repo = CronRepository::new(&store);
+    let active = repo
+        .add_job(CronJobDraft::new(
+            "Active",
+            CronTargetKind::Builtin,
+            "store-status",
+            "hourly",
+        ))
+        .unwrap();
+    let disabled = repo
+        .add_job(CronJobDraft::new(
+            "Disabled",
+            CronTargetKind::Builtin,
+            "store-status",
+            "hourly",
+        ))
+        .unwrap();
+    repo.set_enabled(&disabled.id, false).unwrap();
+    let deleted = repo
+        .add_job(CronJobDraft::new(
+            "Deleted",
+            CronTargetKind::Builtin,
+            "store-status",
+            "hourly",
+        ))
+        .unwrap();
+    repo.delete_job(&deleted.id).unwrap();
+
+    let due = repo.due_jobs(0).unwrap();
+
+    assert_eq!(
+        due.iter()
+            .map(|due| due.job.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![active.id.as_str()]
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn due_jobs_match_cron_minute_and_hour_fields() {
     let root = temp_root("due-cron");
     let store = AglStore::open_at(&root).unwrap();
