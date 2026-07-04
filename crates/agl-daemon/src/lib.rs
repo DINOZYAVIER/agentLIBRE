@@ -14,4 +14,4 @@ pub use scheduler::{
     run_cron_skill_chat_turn, run_cron_tick,
 };
 pub use server::DaemonServer;
-pub use state::DaemonState;
+pub use state::{DaemonState, SharedDaemonState};

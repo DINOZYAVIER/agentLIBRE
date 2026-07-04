@@ -3,8 +3,8 @@ use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
 use agl_protocol::{
     AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
     DaemonRequestKind, EVENT_SCHEMA, HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode,
-    SessionListEvent, SessionListRequest, SessionStatusRequest, SessionTranscriptRequest,
-    SessionTurnRequest, TranscriptEvent, TurnTerminalStatus,
+    SessionListEvent, SessionListRequest, SessionStatus, SessionStatusRequest,
+    SessionTranscriptRequest, SessionTurnRequest, TranscriptEvent, TurnTerminalStatus,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -12,14 +12,20 @@ use agl_runtime::{
 };
 use agl_session::{AgentLibreSessionId, ChatSessionEvent};
 use agl_store::AglStore;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use super::*;
 
+static TEST_RUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 fn runtime() -> AgentLibreRuntimeConfig {
+    let index = TEST_RUNTIME_COUNTER.fetch_add(1, Ordering::SeqCst);
     let root = std::env::temp_dir().join(format!(
-        "agl-daemon-test-{}-{}",
+        "agl-daemon-test-{}-{}-{}",
         std::process::id(),
-        std::thread::current().name().unwrap_or("main")
+        std::thread::current().name().unwrap_or("main"),
+        index
     ));
     AgentLibreRuntimeConfig {
         paths: AgentLibrePaths::from_agl_home(root),
@@ -180,6 +186,56 @@ fn session_turn_idempotency_reports_in_progress_key_as_busy() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+}
+
+#[test]
+fn shared_daemon_state_reports_busy_while_turn_runs() {
+    let state = SharedDaemonState::new(runtime(), InferenceOptions::default());
+    state.insert_slow_test_session(
+        "s1",
+        vec![agl_chat::ChatTurnStatus::Answered {
+            answer: "done".to_string(),
+        }],
+        Duration::from_millis(300),
+    );
+    let worker_state = state.clone();
+    let worker = std::thread::spawn(move || {
+        worker_state.handle_request(DaemonRequest::new(
+            "turn",
+            DaemonRequestKind::SessionTurn(SessionTurnRequest {
+                session_id: "s1".to_string(),
+                text: "slow".to_string(),
+                idempotency_key: None,
+            }),
+        ))
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut observed_busy = false;
+    while Instant::now() < deadline {
+        let events = state.handle_request(DaemonRequest::new(
+            "status",
+            DaemonRequestKind::SessionStatus(SessionStatusRequest {
+                session_id: "s1".to_string(),
+            }),
+        ));
+        match &events[0].kind {
+            DaemonEventKind::SessionStatus(event) if event.status == SessionStatus::Busy => {
+                observed_busy = true;
+                break;
+            }
+            DaemonEventKind::SessionStatus(_) => std::thread::sleep(Duration::from_millis(10)),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    let turn_events = worker.join().unwrap();
+
+    assert!(observed_busy, "status should be readable while turn runs");
+    assert!(matches!(
+        turn_events.last().map(|event| &event.kind),
+        Some(DaemonEventKind::TurnFinished(_))
+    ));
 }
 
 #[test]
