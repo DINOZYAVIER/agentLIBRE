@@ -55,11 +55,11 @@ need_tool python3
 
 [[ -n "$config" ]] || fail "AGL_SMOKE_CONFIG must point to a local inference TOML file"
 [[ -f "$config" ]] || fail "missing smoke config: $config"
-config="$(cd -- "$(dirname -- "$config")" && pwd)/$(basename -- "$config")"
+config="$(smoke_abs_path "$config")"
 
 cd "$repo_root"
 cargo build -p agl-cli
-agl_bin="$(cd -- "$(dirname -- "$agl_bin")" && pwd)/$(basename -- "$agl_bin")"
+agl_bin="$(smoke_abs_path "$agl_bin")"
 [[ -x "$agl_bin" ]] || fail "missing executable agl binary: $agl_bin"
 
 mkdir -p "$workspace"
