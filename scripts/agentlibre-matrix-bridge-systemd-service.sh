@@ -90,11 +90,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 agl_systemd_validate_unit_name "$unit"
-
-for value_name in cwd binary config; do
-  value="${!value_name}"
-  agl_systemd_validate_absolute_path "--${value_name//_/-}" "$value"
-done
+agl_systemd_validate_absolute_vars cwd binary config
 
 agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
 agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
@@ -128,9 +124,10 @@ echo "config: $config"
 echo "log filter: $log_filter"
 echo "unit file: $unit_file"
 
-if [[ "$dry_run" -eq 1 ]]; then
-  printf '\n%s' "$unit_content"
-  exit 0
-fi
-
-agl_systemd_install_user_unit "$unit_dir" "$unit" "$unit_content" "$enable" "$restart"
+agl_systemd_print_or_install_user_unit \
+  "$dry_run" \
+  "$unit_dir" \
+  "$unit" \
+  "$unit_content" \
+  "$enable" \
+  "$restart"
