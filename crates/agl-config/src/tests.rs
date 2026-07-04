@@ -56,6 +56,7 @@ ubatch_size = 256
 flash_attention = "on"
 cache_type_k = "q8_0"
 cache_type_v = "q8_0"
+kv_unified = true
 mmap = false
 
 [runtime.mtp]
@@ -87,6 +88,7 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.flash_attention, Some(RuntimeSwitch::On));
     assert_eq!(config.runtime.cache_type_k, Some(KvCacheType::Q8_0));
     assert_eq!(config.runtime.cache_type_v, Some(KvCacheType::Q8_0));
+    assert_eq!(config.runtime.kv_unified, Some(true));
     assert_eq!(config.runtime.mmap, Some(false));
     assert!(!config.runtime.mtp.enabled);
     assert_eq!(
@@ -134,6 +136,7 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.ubatch_size, None);
     assert_eq!(config.runtime.flash_attention, None);
     assert_eq!(config.runtime.cache_type_k, None);
+    assert_eq!(config.runtime.kv_unified, None);
     assert_eq!(config.runtime.mtp, MtpRuntimeConfig::default());
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
     assert!(config.prompt.skills.is_empty());

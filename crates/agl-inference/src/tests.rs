@@ -85,6 +85,7 @@ fn local_config() -> LocalInferenceConfig {
             cache_type_k: Some(KvCacheType::Q8_0),
             cache_type_v: Some(KvCacheType::Q8_0),
             mmap: Some(false),
+            kv_unified: None,
             mtp: MtpRuntimeConfig::default(),
         },
         model: ModelConfig {
