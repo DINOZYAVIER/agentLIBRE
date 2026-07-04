@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_cron::{
     CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun, CronRunAdmission, CronRunStatus,
-    CronTargetKind, validate_job_draft,
+    CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET, validate_job_draft,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result};
@@ -340,7 +340,7 @@ fn execute_tick_target(
     mock_skill_execution: bool,
 ) -> (CronRunStatus, Option<String>, Option<String>) {
     match job.target_kind {
-        CronTargetKind::Builtin if job.target_ref == "store-status" => (
+        CronTargetKind::Builtin if job.target_ref == STORE_STATUS_BUILTIN_CRON_TARGET => (
             CronRunStatus::Succeeded,
             Some(format!("tool:cron.tick:builtin:{}", job.target_ref)),
             None,

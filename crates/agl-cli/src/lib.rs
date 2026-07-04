@@ -9,12 +9,15 @@ use agl_chat::{
     ToolAccessMode as ChatToolAccessMode, chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
-use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
+use agl_cron::{
+    CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind,
+    STORE_STATUS_BUILTIN_CRON_TARGET, unsupported_builtin_cron_target_message,
+    validate_builtin_cron_target,
+};
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    STORE_STATUS_BUILTIN_CRON_TARGET, default_socket_path, render_cron_notification_body,
-    render_cron_skill_prompt, run_cron_skill_chat_turn, run_cron_tick,
-    unsupported_builtin_cron_target_message, validate_builtin_cron_target,
+    default_socket_path, render_cron_notification_body, render_cron_skill_prompt,
+    run_cron_skill_chat_turn, run_cron_tick,
 };
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
@@ -420,14 +423,18 @@ fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Res
 
 fn validate_cron_target(target: &CronTargetArg, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match target.kind {
-        CronTargetKindArg::Builtin => validate_builtin_cron_target(&target.target_ref),
+        CronTargetKindArg::Builtin => {
+            validate_builtin_cron_target(&target.target_ref).map_err(anyhow::Error::msg)
+        }
         CronTargetKindArg::Skill => validate_trusted_cron_skill(&target.target_ref, runtime),
     }
 }
 
 fn validate_stored_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match job.target_kind {
-        CronTargetKind::Builtin => validate_builtin_cron_target(&job.target_ref),
+        CronTargetKind::Builtin => {
+            validate_builtin_cron_target(&job.target_ref).map_err(anyhow::Error::msg)
+        }
         CronTargetKind::Skill => validate_trusted_cron_skill(&job.target_ref, runtime),
     }
 }
