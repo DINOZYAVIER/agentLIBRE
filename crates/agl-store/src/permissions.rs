@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     AglStore, PermissionGrantDraft, PermissionGrantRecord, PermissionGrantStatus,
@@ -53,17 +53,7 @@ impl AglStore {
     }
 
     pub fn permission_request(&self, id: &str) -> Result<Option<PermissionRequestRecord>> {
-        validate_non_blank(id, "permission_requests.id")?;
-        self.conn
-            .query_row(
-                "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
-                 FROM permission_requests
-                 WHERE id = ?1",
-                params![id],
-                permission_request_from_row,
-            )
-            .optional()?
-            .transpose()
+        permission_request_by_id(&self.conn, id)
     }
 
     pub fn pending_permission_requests(&self) -> Result<Vec<PermissionRequestRecord>> {
@@ -92,41 +82,7 @@ impl AglStore {
         &self,
         draft: PermissionGrantDraft,
     ) -> Result<PermissionGrantRecord> {
-        validate_non_blank(&draft.tool_id, "permission_grants.tool_id")?;
-        validate_non_blank(
-            &draft.max_operation_kind,
-            "permission_grants.max_operation_kind",
-        )?;
-        validate_non_blank(&draft.duration, "permission_grants.duration")?;
-        validate_non_blank(&draft.granted_by_ref, "permission_grants.granted_by_ref")?;
-        if let Some(request_id) = &draft.request_id {
-            validate_non_blank(request_id, "permission_grants.request_id")?;
-        }
-
-        let id = store_id("permission_grant");
-        let now = timestamp();
-        let state_effects_json = serde_json::to_string(&draft.state_effects)?;
-        let scope_json = serde_json::to_string(&draft.scope)?;
-        self.conn.execute(
-            "INSERT INTO permission_grants
-             (id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?9, NULL, NULL)",
-            params![
-                &id,
-                &draft.request_id,
-                &draft.tool_id,
-                &draft.max_operation_kind,
-                &state_effects_json,
-                &scope_json,
-                &draft.duration,
-                &draft.granted_by_ref,
-                &now
-            ],
-        )?;
-        self.permission_grant(&id)?
-            .ok_or_else(|| StoreError::NotFound {
-                resource: format!("permission grant {id}"),
-            })
+        insert_permission_grant(&self.conn, draft)
     }
 
     pub fn grant_permission_request(
@@ -137,38 +93,43 @@ impl AglStore {
     ) -> Result<Vec<PermissionGrantRecord>> {
         validate_non_blank(request_id, "permission_requests.id")?;
         validate_non_blank(granted_by_ref, "permission_grants.granted_by_ref")?;
-        let request = self
-            .permission_request(request_id)?
-            .ok_or_else(|| StoreError::NotFound {
-                resource: format!("permission request {request_id}"),
-            })?;
-        if request.status != PermissionRequestStatus::Pending {
-            return Err(StoreError::InvalidValue {
-                field: "permission_requests.status",
-                value: request.status.as_str().to_string(),
-                reason: "permission request is not pending",
-            });
-        }
+        self.transaction(|tx| {
+            let request =
+                permission_request_by_id(tx, request_id)?.ok_or_else(|| StoreError::NotFound {
+                    resource: format!("permission request {request_id}"),
+                })?;
+            if request.status != PermissionRequestStatus::Pending {
+                return Err(StoreError::InvalidValue {
+                    field: "permission_requests.status",
+                    value: request.status.as_str().to_string(),
+                    reason: "permission request is not pending",
+                });
+            }
 
-        let mut grants = Vec::with_capacity(request.requested_tools.len());
-        for tool_id in &request.requested_tools {
-            grants.push(self.create_permission_grant(PermissionGrantDraft {
-                request_id: Some(request.id.clone()),
-                tool_id: tool_id.clone(),
-                max_operation_kind: request.max_operation_kind.clone(),
-                state_effects: request.state_effects.clone(),
-                scope: request.scope.clone(),
-                duration: request.duration.clone(),
-                granted_by_ref: granted_by_ref.to_string(),
-            })?);
-        }
-        self.resolve_permission_request(
-            request_id,
-            PermissionRequestStatus::Granted,
-            resolution_ref,
-            None,
-        )?;
-        Ok(grants)
+            let mut grants = Vec::with_capacity(request.requested_tools.len());
+            for tool_id in &request.requested_tools {
+                grants.push(insert_permission_grant(
+                    tx,
+                    PermissionGrantDraft {
+                        request_id: Some(request.id.clone()),
+                        tool_id: tool_id.clone(),
+                        max_operation_kind: request.max_operation_kind.clone(),
+                        state_effects: request.state_effects.clone(),
+                        scope: request.scope.clone(),
+                        duration: request.duration.clone(),
+                        granted_by_ref: granted_by_ref.to_string(),
+                    },
+                )?);
+            }
+            resolve_permission_request_on(
+                tx,
+                request_id,
+                PermissionRequestStatus::Granted,
+                resolution_ref,
+                None,
+            )?;
+            Ok(grants)
+        })
     }
 
     pub fn deny_permission_request(
@@ -206,32 +167,11 @@ impl AglStore {
         resolution_ref: Option<&str>,
         note: Option<&str>,
     ) -> Result<PermissionRequestRecord> {
-        validate_non_blank(request_id, "permission_requests.id")?;
-        let now = timestamp();
-        self.conn.execute(
-            "UPDATE permission_requests
-             SET status = ?2, updated_at = ?3, resolved_at = ?3, resolution_ref = ?4, resolution_note = ?5
-             WHERE id = ?1",
-            params![request_id, status.as_str(), now, resolution_ref, note],
-        )?;
-        self.permission_request(request_id)?
-            .ok_or_else(|| StoreError::NotFound {
-                resource: format!("permission request {request_id}"),
-            })
+        resolve_permission_request_on(&self.conn, request_id, status, resolution_ref, note)
     }
 
     pub fn permission_grant(&self, id: &str) -> Result<Option<PermissionGrantRecord>> {
-        validate_non_blank(id, "permission_grants.id")?;
-        self.conn
-            .query_row(
-                "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
-                 FROM permission_grants
-                 WHERE id = ?1",
-                params![id],
-                permission_grant_from_row,
-            )
-            .optional()?
-            .transpose()
+        permission_grant_by_id(&self.conn, id)
     }
 
     pub fn active_permission_grants(&self) -> Result<Vec<PermissionGrantRecord>> {
@@ -291,6 +231,95 @@ impl AglStore {
                 resource: format!("permission grant {grant_id}"),
             })
     }
+}
+
+fn permission_request_by_id(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<PermissionRequestRecord>> {
+    validate_non_blank(id, "permission_requests.id")?;
+    conn.query_row(
+        "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+         FROM permission_requests
+         WHERE id = ?1",
+        params![id],
+        permission_request_from_row,
+    )
+    .optional()?
+    .transpose()
+}
+
+fn insert_permission_grant(
+    conn: &Connection,
+    draft: PermissionGrantDraft,
+) -> Result<PermissionGrantRecord> {
+    validate_non_blank(&draft.tool_id, "permission_grants.tool_id")?;
+    validate_non_blank(
+        &draft.max_operation_kind,
+        "permission_grants.max_operation_kind",
+    )?;
+    validate_non_blank(&draft.duration, "permission_grants.duration")?;
+    validate_non_blank(&draft.granted_by_ref, "permission_grants.granted_by_ref")?;
+    if let Some(request_id) = &draft.request_id {
+        validate_non_blank(request_id, "permission_grants.request_id")?;
+    }
+
+    let id = store_id("permission_grant");
+    let now = timestamp();
+    let state_effects_json = serde_json::to_string(&draft.state_effects)?;
+    let scope_json = serde_json::to_string(&draft.scope)?;
+    conn.execute(
+        "INSERT INTO permission_grants
+         (id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?9, NULL, NULL)",
+        params![
+            &id,
+            &draft.request_id,
+            &draft.tool_id,
+            &draft.max_operation_kind,
+            &state_effects_json,
+            &scope_json,
+            &draft.duration,
+            &draft.granted_by_ref,
+            &now
+        ],
+    )?;
+    permission_grant_by_id(conn, &id)?.ok_or_else(|| StoreError::NotFound {
+        resource: format!("permission grant {id}"),
+    })
+}
+
+fn resolve_permission_request_on(
+    conn: &Connection,
+    request_id: &str,
+    status: PermissionRequestStatus,
+    resolution_ref: Option<&str>,
+    note: Option<&str>,
+) -> Result<PermissionRequestRecord> {
+    validate_non_blank(request_id, "permission_requests.id")?;
+    let now = timestamp();
+    conn.execute(
+        "UPDATE permission_requests
+         SET status = ?2, updated_at = ?3, resolved_at = ?3, resolution_ref = ?4, resolution_note = ?5
+         WHERE id = ?1",
+        params![request_id, status.as_str(), now, resolution_ref, note],
+    )?;
+    permission_request_by_id(conn, request_id)?.ok_or_else(|| StoreError::NotFound {
+        resource: format!("permission request {request_id}"),
+    })
+}
+
+fn permission_grant_by_id(conn: &Connection, id: &str) -> Result<Option<PermissionGrantRecord>> {
+    validate_non_blank(id, "permission_grants.id")?;
+    conn.query_row(
+        "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
+         FROM permission_grants
+         WHERE id = ?1",
+        params![id],
+        permission_grant_from_row,
+    )
+    .optional()?
+    .transpose()
 }
 
 fn permission_request_from_row(
