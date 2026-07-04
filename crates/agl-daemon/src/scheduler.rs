@@ -4,6 +4,26 @@ use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::AglStore;
 use anyhow::{Context, Result, bail};
 
+pub const STORE_STATUS_BUILTIN_CRON_TARGET: &str = "store-status";
+
+pub fn supported_builtin_cron_targets() -> &'static [&'static str] {
+    &[STORE_STATUS_BUILTIN_CRON_TARGET]
+}
+
+pub fn validate_builtin_cron_target(target_ref: &str) -> Result<()> {
+    if supported_builtin_cron_targets().contains(&target_ref) {
+        return Ok(());
+    }
+    bail!("{}", unsupported_builtin_cron_target_message(target_ref))
+}
+
+pub fn unsupported_builtin_cron_target_message(target_ref: &str) -> String {
+    format!(
+        "unknown builtin cron target: {target_ref}; supported builtin targets: {}",
+        supported_builtin_cron_targets().join(", ")
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronExecution {
     pub status: CronRunStatus,
@@ -211,6 +231,17 @@ mod tests {
         assert_eq!(
             render_cron_skill_prompt(&job).unwrap(),
             "Review changes.\n\nCron input:\nOnly docs."
+        );
+    }
+
+    #[test]
+    fn builtin_cron_target_validation_reports_supported_targets() {
+        validate_builtin_cron_target(STORE_STATUS_BUILTIN_CRON_TARGET).unwrap();
+        let err = validate_builtin_cron_target("missing-target").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "unknown builtin cron target: missing-target; supported builtin targets: store-status"
         );
     }
 
