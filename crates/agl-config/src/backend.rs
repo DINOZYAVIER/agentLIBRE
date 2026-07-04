@@ -84,6 +84,8 @@ pub struct InferenceRuntimeConfig {
     #[serde(default)]
     pub mmap: Option<bool>,
     #[serde(default)]
+    pub kv_unified: Option<bool>,
+    #[serde(default)]
     pub mtp: MtpRuntimeConfig,
 }
 

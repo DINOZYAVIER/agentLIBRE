@@ -97,6 +97,9 @@ impl LlamaCppSession {
             i32::try_from(config.runtime.threads).context("llama.cpp threads exceeds i32")?;
         context_params.n_threads_batch = context_params.n_threads;
         context_params.flash_attn_type = map_flash_attention(config.runtime.flash_attention);
+        if let Some(kv_unified) = config.runtime.kv_unified {
+            context_params.kv_unified = kv_unified;
+        }
         if let Some(cache_type) = config.runtime.cache_type_k {
             context_params.type_k = map_cache_type(cache_type);
         }
@@ -589,6 +592,9 @@ impl MtpState {
         context_params.n_rs_seq = 0;
         context_params.n_outputs_max = 1;
         context_params.ctx_other = target_context;
+        if let Some(kv_unified) = config.runtime.kv_unified {
+            context_params.kv_unified = kv_unified;
+        }
         if let Some(cache_type) = config
             .runtime
             .mtp
