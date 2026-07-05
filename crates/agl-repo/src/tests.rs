@@ -202,8 +202,13 @@ fn artifact_sync_creates_missing_declared_roots() {
     .unwrap();
 
     assert!(root.join(".agl/tasks").is_dir());
+    assert!(!root.join(".agl/skills").exists());
     assert!(report.actions.iter().any(|action| {
         action.artifact_id == "tasks" && action.action == ArtifactSyncActionKind::CreatedDir
+    }));
+    assert!(report.actions.iter().any(|action| {
+        action.artifact_id == "skills"
+            && action.action == ArtifactSyncActionKind::SkippedNoCreateRule
     }));
 
     fs::remove_dir_all(root).unwrap();
@@ -224,6 +229,11 @@ fn artifact_lock_writes_contract_hashes() {
     .unwrap();
 
     assert!(report.wrote);
+    assert!(
+        !report
+            .warnings
+            .contains(&"artifact_lock_missing".to_string())
+    );
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
     let locked = report.lock.artifacts.get("tasks").unwrap();
     assert_eq!(locked.source_id, "workspace");
