@@ -245,6 +245,8 @@ enum SkillCommands {
     Status(SkillStatusArgs),
     /// Verify workspace skills and lock state.
     Verify(SkillVerifyArgs),
+    /// Create missing writable folders declared by workspace skills.
+    SyncFolders(SkillFolderSyncArgs),
     /// Write or preview .agl/skills.lock.
     Lock(SkillLockArgs),
     /// Locally approve a locked workspace skill identity.
@@ -977,6 +979,17 @@ struct SkillVerifyArgs {
 }
 
 #[derive(Debug, Args)]
+struct SkillFolderSyncArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Print planned folder changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args)]
 struct SkillLockArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1586,6 +1599,10 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
             strict: args.strict,
         }),
         SkillCommands::Verify(args) => SkillCommand::Verify(SkillVerifyOptions { json: args.json }),
+        SkillCommands::SyncFolders(args) => SkillCommand::SyncFolders(SkillFolderSyncOptions {
+            json: args.json,
+            dry_run: args.dry_run,
+        }),
         SkillCommands::Lock(args) => SkillCommand::Lock(SkillLockOptions {
             json: args.json,
             dry_run: args.dry_run,

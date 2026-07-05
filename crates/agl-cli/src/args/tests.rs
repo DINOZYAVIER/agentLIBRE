@@ -452,6 +452,13 @@ fn parse_skill_commands() {
         CliCommand::Skill(SkillCommand::Verify(SkillVerifyOptions { json: true })),
     );
     assert_command(
+        ["agl", "skill", "sync-folders", "--dry-run", "--json"],
+        CliCommand::Skill(SkillCommand::SyncFolders(SkillFolderSyncOptions {
+            json: true,
+            dry_run: true,
+        })),
+    );
+    assert_command(
         ["agl", "skill", "lock", "--dry-run"],
         CliCommand::Skill(SkillCommand::Lock(SkillLockOptions {
             json: false,
