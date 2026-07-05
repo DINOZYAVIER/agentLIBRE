@@ -103,7 +103,7 @@ pub fn sync_artifacts(
         },
     )?;
     let mut actions = Vec::new();
-    let warnings = status.warnings;
+    let mut warnings = status.warnings;
     let mut errors = status.errors;
 
     let blocking_errors = errors
@@ -121,37 +121,67 @@ pub fn sync_artifacts(
     }
 
     for artifact in &status.artifacts {
-        if artifact.exists {
+        if artifact.create.is_empty() {
             actions.push(ArtifactSyncAction {
                 artifact_id: artifact.id.clone(),
                 path: artifact.path.clone(),
-                action: ArtifactSyncActionKind::Exists,
+                action: if artifact.exists {
+                    ArtifactSyncActionKind::Exists
+                } else {
+                    ArtifactSyncActionKind::SkippedNoCreateRule
+                },
             });
             continue;
         }
         if artifact.kind == ArtifactKind::Cache {
             continue;
         }
-        if options.dry_run {
-            actions.push(ArtifactSyncAction {
-                artifact_id: artifact.id.clone(),
-                path: artifact.path.clone(),
-                action: ArtifactSyncActionKind::WouldCreateDir,
-            });
-        } else {
-            let absolute_path = status.workspace_root.join(&artifact.path);
-            match fs::create_dir_all(&absolute_path) {
-                Ok(()) => actions.push(ArtifactSyncAction {
+        for create in &artifact.create {
+            let relative_path = artifact_create_path(&artifact.path, &create.dir);
+            let absolute_path = status.workspace_root.join(&relative_path);
+            if absolute_path.exists() {
+                actions.push(ArtifactSyncAction {
                     artifact_id: artifact.id.clone(),
-                    path: artifact.path.clone(),
-                    action: ArtifactSyncActionKind::CreatedDir,
-                }),
-                Err(err) => errors.push(format!("artifact.{}.create_failed: {}", artifact.id, err)),
+                    path: relative_path,
+                    action: ArtifactSyncActionKind::Exists,
+                });
+            } else if options.dry_run {
+                actions.push(ArtifactSyncAction {
+                    artifact_id: artifact.id.clone(),
+                    path: relative_path,
+                    action: ArtifactSyncActionKind::WouldCreateDir,
+                });
+            } else {
+                let action_path = relative_path.clone();
+                let error_path = relative_path.display().to_string();
+                match fs::create_dir_all(&absolute_path) {
+                    Ok(()) => actions.push(ArtifactSyncAction {
+                        artifact_id: artifact.id.clone(),
+                        path: action_path,
+                        action: ArtifactSyncActionKind::CreatedDir,
+                    }),
+                    Err(err) => errors.push(format!(
+                        "artifact.{}.create_failed: {}: {}",
+                        artifact.id, error_path, err
+                    )),
+                }
             }
         }
     }
 
-    errors.retain(|error| !error.ends_with(".missing") && error != "missing");
+    if options.dry_run {
+        errors.retain(|error| !error.ends_with(".missing") && error != "missing");
+    } else {
+        let refreshed = status_artifacts(
+            &status.workspace_root,
+            &ArtifactStatusOptions {
+                artifact: None,
+                strict: false,
+            },
+        )?;
+        warnings = refreshed.warnings;
+        errors = refreshed.errors;
+    }
 
     Ok(ArtifactSyncReport {
         workspace_root: status.workspace_root,
@@ -218,6 +248,7 @@ pub fn lock_artifacts(
                 )
             })?;
             wrote = true;
+            warnings.retain(|warning| warning != "artifact_lock_missing");
         }
     }
 
@@ -446,12 +477,25 @@ fn artifact_status(workspace_root: &Path, resolved: ResolvedArtifactContract) ->
         access: resolved.contract.access,
         provides: resolved.contract.provides,
         schema: resolved.contract.schema,
+        create: resolved.contract.create,
         state,
         exists,
         contract_hash: resolved.contract_hash,
         warnings,
         errors,
     }
+}
+
+fn artifact_create_path(artifact_path: &Path, create_dir: &Path) -> PathBuf {
+    let mut path = artifact_path.to_path_buf();
+    for component in create_dir.components() {
+        match component {
+            Component::Normal(segment) => path.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    path
 }
 
 fn validate_artifact_path(path: &Path) -> Result<()> {

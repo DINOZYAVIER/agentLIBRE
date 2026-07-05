@@ -416,6 +416,7 @@ fn artifact_state(state: ArtifactState) -> &'static str {
 fn artifact_sync_action(action: ArtifactSyncActionKind) -> &'static str {
     match action {
         ArtifactSyncActionKind::Exists => "exists",
+        ArtifactSyncActionKind::SkippedNoCreateRule => "skipped_no_create_rule",
         ArtifactSyncActionKind::WouldCreateDir => "would_create_dir",
         ArtifactSyncActionKind::CreatedDir => "created_dir",
     }

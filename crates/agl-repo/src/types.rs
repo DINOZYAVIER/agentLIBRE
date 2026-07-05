@@ -271,6 +271,8 @@ pub struct ArtifactStatus {
     pub access: ArtifactAccess,
     pub provides: Vec<String>,
     pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub create: Vec<ArtifactCreateRule>,
     pub state: ArtifactState,
     pub exists: bool,
     pub contract_hash: String,
@@ -322,6 +324,7 @@ pub struct ArtifactSyncAction {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactSyncActionKind {
     Exists,
+    SkippedNoCreateRule,
     WouldCreateDir,
     CreatedDir,
 }
