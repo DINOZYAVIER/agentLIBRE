@@ -256,10 +256,11 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Res
 
 fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillReport) -> String {
     let mut output = format!(
-        "tool={tool_id}\nstate={:?}\nworkspace_root={}\nskills={}\nwarnings={}\nerrors={}\n---",
+        "tool={tool_id}\nstate={:?}\nworkspace_root={}\nskills={}\ndiagnostics={}\nwarnings={}\nerrors={}\n---",
         report.state,
         report.workspace_root.display(),
         report.skills.len(),
+        report.diagnostics.len(),
         report.warnings.len(),
         report.errors.len()
     );
@@ -269,7 +270,7 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
         for folder in &skill.artifact_folders {
             output.push_str(&format!(
                 "\nskill.{}.folder id={} path={} kind={:?} access={:?} exists={}",
-                skill.name.as_deref().unwrap_or("<invalid>"),
+                workspace_skill_key(skill),
                 folder.id,
                 folder.path.display(),
                 folder.kind,
@@ -279,7 +280,7 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
             for readiness in &folder.readiness {
                 output.push_str(&format!(
                     "\nskill.{}.folder.{}.ready.when={} action={}",
-                    skill.name.as_deref().unwrap_or("<invalid>"),
+                    workspace_skill_key(skill),
                     folder.id,
                     skill_folder_create_situation(readiness.situation),
                     skill_folder_sync_action(readiness.action)
@@ -287,13 +288,17 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
             }
         }
     }
+    for diagnostic in &report.diagnostics {
+        output.push('\n');
+        output.push_str(&render_workspace_skill_diagnostic(diagnostic));
+    }
     output
 }
 
 fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
     format!(
         "skill id={} source=workspace usable={} trust={:?} valid={} broadens_builtin_routing={} folders={} allowed={} requestable={} denied={}",
-        skill.name.as_deref().unwrap_or("<invalid>"),
+        workspace_skill_key(skill),
         skill.usable,
         skill.trust_state,
         skill.valid,
@@ -303,6 +308,61 @@ fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
         skill.requestable_tools.join(","),
         skill.denied_tools.join(",")
     )
+}
+
+fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {
+    skill
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", skill.path.display()))
+}
+
+fn render_workspace_skill_diagnostic(diagnostic: &agl_skills::WorkspaceSkillDiagnostic) -> String {
+    let mut output = format!(
+        "diagnostic severity={} scope={} code={} message={}",
+        workspace_skill_diagnostic_severity(diagnostic.severity),
+        workspace_skill_diagnostic_scope(diagnostic.scope),
+        diagnostic.code,
+        diagnostic.message
+    );
+    if let Some(component) = &diagnostic.component {
+        output.push_str(&format!(" component={component}"));
+    }
+    if let Some(skill) = &diagnostic.skill {
+        output.push_str(&format!(" skill={skill}"));
+    }
+    if let Some(skill_path) = &diagnostic.skill_path {
+        output.push_str(&format!(" skill_path={}", skill_path.display()));
+    }
+    if let Some(folder_id) = &diagnostic.folder_id {
+        output.push_str(&format!(" folder={folder_id}"));
+    }
+    if let Some(path) = &diagnostic.path {
+        output.push_str(&format!(" path={}", path.display()));
+    }
+    output
+}
+
+fn workspace_skill_diagnostic_severity(
+    severity: agl_skills::WorkspaceSkillDiagnosticSeverity,
+) -> &'static str {
+    match severity {
+        agl_skills::WorkspaceSkillDiagnosticSeverity::Warning => "warning",
+        agl_skills::WorkspaceSkillDiagnosticSeverity::Error => "error",
+    }
+}
+
+fn workspace_skill_diagnostic_scope(
+    scope: agl_skills::WorkspaceSkillDiagnosticScope,
+) -> &'static str {
+    match scope {
+        agl_skills::WorkspaceSkillDiagnosticScope::Workspace => "workspace",
+        agl_skills::WorkspaceSkillDiagnosticScope::Component => "component",
+        agl_skills::WorkspaceSkillDiagnosticScope::Lock => "lock",
+        agl_skills::WorkspaceSkillDiagnosticScope::SkillManifest => "skill_manifest",
+        agl_skills::WorkspaceSkillDiagnosticScope::SkillArtifactFolder => "skill_artifact_folder",
+        agl_skills::WorkspaceSkillDiagnosticScope::SkillTrust => "skill_trust",
+    }
 }
 
 fn render_harness_details(
@@ -495,6 +555,8 @@ mod tests {
             .unwrap();
 
         assert!(status.contains("tool=skill.status"));
+        assert!(status.contains("diagnostics="));
+        assert!(status.contains("diagnostic severity=error"));
         assert!(status.contains("errors="));
         assert!(lock.contains("tool=skill.lock"));
         assert!(lock.contains("dry_run=true"));

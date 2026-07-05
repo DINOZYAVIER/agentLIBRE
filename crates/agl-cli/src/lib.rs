@@ -31,7 +31,8 @@ use agl_skills::{
     SkillFolderCreateSituation, SkillFolderSyncActionKind,
     SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport,
     SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
-    SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillReport,
+    SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillDiagnostic,
+    WorkspaceSkillDiagnosticScope, WorkspaceSkillDiagnosticSeverity, WorkspaceSkillReport,
     WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
     sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report,
     workspace_skill_report_with_trust,
@@ -1128,6 +1129,9 @@ fn print_workspace_skill_report(report: &WorkspaceSkillReport) {
     for skill in &report.skills {
         print_workspace_skill_status(skill);
     }
+    for diagnostic in &report.diagnostics {
+        print_workspace_skill_diagnostic(diagnostic);
+    }
     for warning in &report.warnings {
         println!("warning={warning}");
     }
@@ -1274,7 +1278,7 @@ fn print_component_status(component: &ComponentStatus) {
 }
 
 fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
-    let name = skill.name.as_deref().unwrap_or("<invalid>");
+    let name = workspace_skill_key(skill);
     println!(
         "skill name={} path={} valid={} usable={} shadowed_by_builtin={} overrides_builtin={} trust_state={:?}",
         name,
@@ -1352,6 +1356,57 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     }
     for error in &skill.errors {
         println!("skill.{name}.error={error}");
+    }
+}
+
+fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {
+    skill
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", skill.path.display()))
+}
+
+fn print_workspace_skill_diagnostic(diagnostic: &WorkspaceSkillDiagnostic) {
+    print!(
+        "diagnostic severity={} scope={} code={} message={}",
+        workspace_skill_diagnostic_severity(diagnostic.severity),
+        workspace_skill_diagnostic_scope(diagnostic.scope),
+        diagnostic.code,
+        diagnostic.message
+    );
+    if let Some(component) = &diagnostic.component {
+        print!(" component={component}");
+    }
+    if let Some(skill) = &diagnostic.skill {
+        print!(" skill={skill}");
+    }
+    if let Some(skill_path) = &diagnostic.skill_path {
+        print!(" skill_path={}", skill_path.display());
+    }
+    if let Some(folder_id) = &diagnostic.folder_id {
+        print!(" folder={folder_id}");
+    }
+    if let Some(path) = &diagnostic.path {
+        print!(" path={}", path.display());
+    }
+    println!();
+}
+
+fn workspace_skill_diagnostic_severity(severity: WorkspaceSkillDiagnosticSeverity) -> &'static str {
+    match severity {
+        WorkspaceSkillDiagnosticSeverity::Warning => "warning",
+        WorkspaceSkillDiagnosticSeverity::Error => "error",
+    }
+}
+
+fn workspace_skill_diagnostic_scope(scope: WorkspaceSkillDiagnosticScope) -> &'static str {
+    match scope {
+        WorkspaceSkillDiagnosticScope::Workspace => "workspace",
+        WorkspaceSkillDiagnosticScope::Component => "component",
+        WorkspaceSkillDiagnosticScope::Lock => "lock",
+        WorkspaceSkillDiagnosticScope::SkillManifest => "skill_manifest",
+        WorkspaceSkillDiagnosticScope::SkillArtifactFolder => "skill_artifact_folder",
+        WorkspaceSkillDiagnosticScope::SkillTrust => "skill_trust",
     }
 }
 
