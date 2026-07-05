@@ -307,11 +307,17 @@ fn render_harness_details(
     ));
     for artifact in &harness.artifacts {
         output.push_str(&format!(
-            "\nfolder id={} path={} kind={:?} access={:?} provides={} schema={}",
+            "\nfolder id={} path={} kind={:?} access={:?} create={} provides={} schema={}",
             artifact.id,
             artifact.path.display(),
             artifact.kind,
             artifact.access,
+            artifact
+                .create
+                .iter()
+                .map(|rule| skill_folder_create_situation(rule.when))
+                .collect::<Vec<_>>()
+                .join(","),
             artifact.provides.join(","),
             artifact.schema.as_deref().unwrap_or("")
         ));
@@ -343,6 +349,14 @@ fn render_tool_ids(tools: &[agl_tools::ToolId]) -> String {
         .map(agl_tools::ToolId::as_str)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn skill_folder_create_situation(when: agl_skills::SkillFolderCreateSituation) -> &'static str {
+    match when {
+        agl_skills::SkillFolderCreateSituation::SkillSync => "skill_sync",
+        agl_skills::SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
+        agl_skills::SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
+    }
 }
 
 fn truncate_str(value: &str, max_bytes: usize) -> &str {

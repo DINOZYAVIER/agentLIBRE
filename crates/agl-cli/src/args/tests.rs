@@ -456,6 +456,7 @@ fn parse_skill_commands() {
         CliCommand::Skill(SkillCommand::SyncFolders(SkillFolderSyncOptions {
             json: true,
             dry_run: true,
+            when: SkillFolderSyncSituationArg::SkillSync,
         })),
     );
     assert_command(

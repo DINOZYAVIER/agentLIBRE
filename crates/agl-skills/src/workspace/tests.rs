@@ -76,6 +76,8 @@ folders:
     kind: generated
     path: .agl/tasks/repo-change
     access: read_write
+    create:
+      - when: skill_sync
     provides:
       - task-drafts
     schema: agl.task_draft.v1"#,
@@ -97,14 +99,58 @@ folders:
             .contains(&"artifact_folder.task-drafts.missing".to_string())
     );
 
-    let sync =
-        sync_workspace_skill_folders(&root, &SkillFolderSyncOptions { dry_run: false }).unwrap();
+    let sync = sync_workspace_skill_folders(
+        &root,
+        &SkillFolderSyncOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::SkillSync,
+        },
+    )
+    .unwrap();
     assert!(!sync.has_errors());
     assert!(root.join(".agl/tasks/repo-change").is_dir());
     assert!(sync.actions.iter().any(|action| {
         action.folder_id == "task-drafts" && action.action == SkillFolderSyncActionKind::CreatedDir
     }));
     assert!(sync.warnings.is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn folder_sync_skips_missing_folders_without_create_rule() {
+    let root = temp_root("skill-folder-no-create");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let skill_dir = root.join(".agl/skills/agl/repo-change");
+    write_workspace_skill_with_folders(
+        &skill_dir,
+        "repo-change",
+        r#"
+folders:
+  - id: task-drafts
+    kind: generated
+    path: .agl/tasks/repo-change
+    access: read_write
+    provides:
+      - task-drafts"#,
+    );
+
+    let sync = sync_workspace_skill_folders(
+        &root,
+        &SkillFolderSyncOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::SkillSync,
+        },
+    )
+    .unwrap();
+
+    assert!(!sync.has_errors());
+    assert!(!root.join(".agl/tasks/repo-change").exists());
+    assert!(sync.actions.iter().any(|action| {
+        action.folder_id == "task-drafts"
+            && action.action == SkillFolderSyncActionKind::SkippedNoCreateRule
+    }));
 
     fs::remove_dir_all(root).unwrap();
 }
