@@ -272,12 +272,13 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
 
 fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
     format!(
-        "skill id={} source=workspace usable={} trust={:?} valid={} broadens_builtin_routing={} allowed={} requestable={} denied={}",
+        "skill id={} source=workspace usable={} trust={:?} valid={} broadens_builtin_routing={} folders={} allowed={} requestable={} denied={}",
         skill.name.as_deref().unwrap_or("<invalid>"),
         skill.usable,
         skill.trust_state,
         skill.valid,
         skill.broadens_builtin_routing,
+        skill.artifact_folders.len(),
         skill.allowed_tools.join(","),
         skill.requestable_tools.join(","),
         skill.denied_tools.join(",")
@@ -304,6 +305,17 @@ fn render_harness_details(
         render_tool_ids(&harness.requestable_tools),
         render_tool_ids(&harness.denied_tools)
     ));
+    for artifact in &harness.artifacts {
+        output.push_str(&format!(
+            "\nfolder id={} path={} kind={:?} access={:?} provides={} schema={}",
+            artifact.id,
+            artifact.path.display(),
+            artifact.kind,
+            artifact.access,
+            artifact.provides.join(","),
+            artifact.schema.as_deref().unwrap_or("")
+        ));
+    }
     if include_body {
         output.push_str("\nbody_truncated=");
         output.push_str(if harness.body.len() > max_bytes {

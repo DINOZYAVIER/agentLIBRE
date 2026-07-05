@@ -62,6 +62,54 @@ Body.
 }
 
 #[test]
+fn workspace_status_reports_declared_skill_folders() {
+    let root = temp_root("skill-folders");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let skill_dir = root.join(".agl/skills/agl/repo-change");
+    write_workspace_skill_with_folders(
+        &skill_dir,
+        "repo-change",
+        r#"
+folders:
+  - id: task-drafts
+    kind: generated
+    path: .agl/tasks/repo-change
+    access: read_write
+    provides:
+      - task-drafts
+    schema: agl.task_draft.v1"#,
+    );
+
+    let report = workspace_skill_report(&root).unwrap();
+    let skill = &report.skills[0];
+
+    assert_eq!(skill.artifact_folders.len(), 1);
+    assert_eq!(skill.artifact_folders[0].id, "task-drafts");
+    assert_eq!(
+        skill.artifact_folders[0].path,
+        PathBuf::from(".agl/tasks/repo-change")
+    );
+    assert!(!skill.artifact_folders[0].exists);
+    assert!(
+        skill
+            .warnings
+            .contains(&"artifact_folder.task-drafts.missing".to_string())
+    );
+
+    let sync =
+        sync_workspace_skill_folders(&root, &SkillFolderSyncOptions { dry_run: false }).unwrap();
+    assert!(!sync.has_errors());
+    assert!(root.join(".agl/tasks/repo-change").is_dir());
+    assert!(sync.actions.iter().any(|action| {
+        action.folder_id == "task-drafts" && action.action == SkillFolderSyncActionKind::CreatedDir
+    }));
+    assert!(sync.warnings.is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn lock_refuses_unusable_component() {
     let root = temp_root("lock-refuses");
     init_git_repo(&root);
@@ -454,6 +502,37 @@ requestable_tools:
 context_budget_tokens: 256
 references:
   include: []
+guarantees:
+  - repository paths are checked
+---
+Body.
+"#
+        ),
+    )
+    .unwrap();
+}
+
+fn write_workspace_skill_with_folders(skill_dir: &Path, name: &str, folders_yaml: &str) {
+    fs::create_dir_all(skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: {name}
+description: Review repository changes.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools:
+  []
+requestable_tools:
+  []
+context_budget_tokens: 256
+references:
+  include: []
+{folders_yaml}
 guarantees:
   - repository paths are checked
 ---
