@@ -266,6 +266,7 @@ version = "1.0.0-alpha.10"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "sha2",
  "toml",
 ]

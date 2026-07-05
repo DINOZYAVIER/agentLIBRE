@@ -306,6 +306,37 @@ fn print_artifact_status_report(report: &ArtifactStatusReport) {
     println!("workspace_root={}", report.workspace_root.display());
     println!("manifest_path={}", report.manifest_path.display());
     println!("lock_path={}", report.lock_path.display());
+    for source in &report.sources {
+        println!(
+            "artifact_source id={} role={:?} kind={:?} state={:?} path={}",
+            source.id,
+            source.role,
+            source.kind,
+            source.state,
+            source.path.display()
+        );
+        if let Some(url) = &source.expected_url {
+            println!("artifact_source.expected_url id={} value={url}", source.id);
+        }
+        if let Some(url) = &source.actual_url {
+            println!("artifact_source.actual_url id={} value={url}", source.id);
+        }
+        if let Some(commit) = &source.actual_commit {
+            println!(
+                "artifact_source.actual_commit id={} value={commit}",
+                source.id
+            );
+        }
+        if let Some(tree) = &source.actual_tree {
+            println!("artifact_source.actual_tree id={} value={tree}", source.id);
+        }
+        for warning in &source.warnings {
+            println!("artifact_source.warning id={} {warning}", source.id);
+        }
+        for error in &source.errors {
+            println!("artifact_source.error id={} {error}", source.id);
+        }
+    }
     for artifact in &report.artifacts {
         println!(
             "artifact id={} source={} kind={:?} access={:?} state={} path={} contract_hash={}",
@@ -329,6 +360,14 @@ fn print_artifact_status_report(report: &ArtifactStatusReport) {
         for error in &artifact.errors {
             println!("artifact.error id={} {error}", artifact.id);
         }
+    }
+    for root in &report.undeclared {
+        println!(
+            "artifact.undeclared path={} suggested_kind={:?} suggested_target={}",
+            root.path.display(),
+            root.suggested_kind,
+            root.suggested_target.display()
+        );
     }
     for warning in &report.warnings {
         println!("warning={warning}");
@@ -369,16 +408,30 @@ fn print_artifact_lock_report(report: &ArtifactLockReport) {
     println!("dry_run={}", report.dry_run);
     println!("lock.wrote={}", report.wrote);
     println!("lock.version={}", report.lock.version);
+    println!("lock.locked_at_unix_ms={}", report.lock.locked_at_unix_ms);
     for artifact in report.lock.artifacts.values() {
         println!(
-            "lock.artifact id={} source={} path={} kind={:?} access={:?} contract_hash={}",
+            "lock.artifact id={} source={} source_kind={} path={} kind={:?} access={:?} contract_hash={}",
             artifact.id,
             artifact.source_id,
+            artifact
+                .source_kind
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|| "missing".to_string()),
             artifact.path.display(),
             artifact.kind,
             artifact.access,
             artifact.contract_hash
         );
+        if let Some(commit) = &artifact.source_commit {
+            println!(
+                "lock.artifact.source_commit id={} value={commit}",
+                artifact.id
+            );
+        }
+        if let Some(tree) = &artifact.source_tree {
+            println!("lock.artifact.source_tree id={} value={tree}", artifact.id);
+        }
     }
     for warning in &report.warnings {
         println!("warning={warning}");
