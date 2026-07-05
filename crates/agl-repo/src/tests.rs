@@ -177,6 +177,17 @@ fn artifact_status_reports_default_contracts() {
             && artifact.kind == ArtifactKind::Source
             && artifact.schema.as_deref() == Some("agl.task_spec_legacy.v1")
     }));
+    assert!(report.artifacts.iter().any(|artifact| {
+        artifact.id == "decision-docs"
+            && artifact.path.as_path() == std::path::Path::new(".agl/decision-docs")
+    }));
+    assert!(report.artifacts.iter().any(|artifact| {
+        artifact.id == "smoke" && artifact.path.as_path() == std::path::Path::new(".agl/smoke")
+    }));
+    assert!(report.artifacts.iter().any(|artifact| {
+        artifact.id == "handoffs"
+            && artifact.path.as_path() == std::path::Path::new(".agl/handoffs")
+    }));
     assert!(
         report
             .warnings
@@ -237,7 +248,522 @@ fn artifact_lock_writes_contract_hashes() {
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
     let locked = report.lock.artifacts.get("tasks").unwrap();
     assert_eq!(locked.source_id, "workspace");
+    assert_eq!(locked.source_role, Some(ArtifactSourceRole::Compatibility));
+    assert_eq!(locked.source_kind, Some(ArtifactSourceKind::Compatibility));
+    assert_eq!(locked.source_path, Some(PathBuf::from(".agl")));
     assert_eq!(locked.contract_hash.len(), 64);
+    assert_ne!(report.lock.locked_at_unix_ms, 0);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_lock_records_git_source_identity_and_detects_drift() {
+    let root = temp_root("artifact-lock-source-identity");
+    init_git_repo(&root);
+    let source = root.join(".agl/sources/core");
+    fs::create_dir_all(&source).unwrap();
+    init_git_repo(&source);
+    fs::write(source.join("README.md"), "core source\n").unwrap();
+    git(&source, &["add", "."]);
+    git_with_identity(&source, &["commit", "-m", "Add source"]);
+    let commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
+    let tree = git_output(&source, ["rev-parse", "HEAD^{tree}"]).unwrap();
+    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "local"
+
+[artifact_sources.core]
+role = "core"
+kind = "git"
+path = ".agl/sources/core"
+required = true
+provides = ["tasks"]
+
+[[artifact_sources.core.artifacts]]
+id = "tasks"
+kind = "source"
+path = ".agl/tasks"
+access = "read_write"
+provides = ["tasks"]
+schema = "agl.task_spec_legacy.v1"
+required = true
+shared = true
+conflict_policy = "identical"
+"#,
+    )
+    .unwrap();
+
+    let report = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    let locked = report.lock.artifacts.get("tasks").unwrap();
+    assert_eq!(locked.source_id, "core");
+    assert_eq!(locked.source_commit.as_deref(), Some(commit.trim()));
+    assert_eq!(locked.source_tree.as_deref(), Some(tree.trim()));
+
+    fs::write(source.join("README.md"), "core source changed\n").unwrap();
+    git(&source, &["add", "."]);
+    git_with_identity(&source, &["commit", "-m", "Change source"]);
+    let drift = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(drift.state, ArtifactReportState::Invalid);
+    assert!(
+        drift
+            .errors
+            .iter()
+            .any(|error| error == "artifact.tasks.source_commit_changed"),
+        "{:?}",
+        drift.errors
+    );
+
+    let refreshed = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    let refreshed_commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
+    assert!(refreshed.wrote);
+    assert!(refreshed.errors.is_empty(), "{:?}", refreshed.errors);
+    assert_eq!(
+        refreshed
+            .lock
+            .artifacts
+            .get("tasks")
+            .unwrap()
+            .source_commit
+            .as_deref(),
+        Some(refreshed_commit.trim())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
+    let root = temp_root("artifact-lock-legacy");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let report = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(report.wrote);
+    let lock_path = root.join(ARTIFACT_LOCK_PATH);
+    let lock = fs::read_to_string(&lock_path).unwrap();
+    let legacy_lock = lock
+        .lines()
+        .filter(|line| {
+            !line.trim_start().starts_with("source_role")
+                && !line.trim_start().starts_with("source_kind")
+                && !line.trim_start().starts_with("source_path")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&lock_path, legacy_lock).unwrap();
+
+    let legacy_status = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: Some("tasks".to_string()),
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        !legacy_status
+            .errors
+            .iter()
+            .any(|error| error.starts_with("artifact_lock_invalid")),
+        "{:?}",
+        legacy_status.errors
+    );
+    assert!(
+        legacy_status
+            .warnings
+            .iter()
+            .any(|warning| warning == "artifact.tasks.source_role_missing"),
+        "{:?}",
+        legacy_status.warnings
+    );
+
+    let refreshed = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(refreshed.wrote);
+    assert_eq!(
+        refreshed.lock.artifacts.get("tasks").unwrap().source_path,
+        Some(PathBuf::from(".agl"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_reports_undeclared_agl_roots() {
+    let root = temp_root("artifact-undeclared");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    fs::create_dir_all(root.join(".agl/mystery")).unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert!(report.undeclared.iter().any(|root| {
+        root.path.as_path() == std::path::Path::new(".agl/mystery")
+            && root.suggested_target.as_path() == std::path::Path::new(".agl/generated/mystery")
+    }));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("undeclared_artifact_root: .agl/mystery"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_does_not_report_declared_source_parent_as_undeclared() {
+    let root = temp_root("artifact-declared-source-root");
+    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+    fs::create_dir_all(root.join(".agl/sources/core")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "local"
+
+[artifact_sources.core]
+role = "core"
+kind = "local"
+path = ".agl/sources/core"
+required = true
+provides = ["tasks"]
+
+[[artifact_sources.core.artifacts]]
+id = "tasks"
+kind = "source"
+path = ".agl/tasks"
+access = "read_write"
+provides = ["tasks"]
+required = true
+"#,
+    )
+    .unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        !report
+            .undeclared
+            .iter()
+            .any(|root| root.path == std::path::Path::new(".agl/sources")),
+        "{:?}",
+        report.undeclared
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_reports_task_schema_failures() {
+    let root = temp_root("artifact-schema-invalid");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), false);
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: Some("tasks".to_string()),
+            strict: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactReportState::Invalid);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("schema_invalid")),
+        "{:?}",
+        report.errors
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_does_not_report_unrelated_stale_locks_when_scoped() {
+    let root = temp_root("artifact-scoped-stale-lock");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let report = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    let mut lock = report.lock;
+    let mut stale = lock.artifacts.get("tasks").unwrap().clone();
+    stale.id = "old".to_string();
+    stale.path = PathBuf::from(".agl/old");
+    lock.artifacts.insert("old".to_string(), stale);
+    fs::write(
+        root.join(ARTIFACT_LOCK_PATH),
+        toml::to_string(&lock).unwrap(),
+    )
+    .unwrap();
+
+    let scoped = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: Some("tasks".to_string()),
+            strict: true,
+        },
+    )
+    .unwrap();
+    assert!(
+        !scoped
+            .warnings
+            .iter()
+            .any(|warning| warning == "artifact_lock_stale: old"),
+        "{:?}",
+        scoped.warnings
+    );
+
+    let full = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        full.warnings
+            .iter()
+            .any(|warning| warning == "artifact_lock_stale: old"),
+        "{:?}",
+        full.warnings
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_path_handle_resolves_declared_writable_path() {
+    let root = temp_root("artifact-handle");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let handle = resolve_artifact_path_handle(
+        &root,
+        &ArtifactPathHandleRequest {
+            path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
+            access: ArtifactAccess::Write,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(handle.artifact_id, "tasks");
+    assert_eq!(handle.root, PathBuf::from(".agl/tasks"));
+    assert_eq!(
+        handle.path_in_artifact,
+        PathBuf::from("AGL-001/00_overview.md")
+    );
+
+    let err = resolve_artifact_path_handle(
+        &root,
+        &ArtifactPathHandleRequest {
+            path: PathBuf::from(".agl/skills/agl/skill/SKILL.md"),
+            access: ArtifactAccess::Write,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("does not permit"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_path_handle_does_not_treat_write_as_read() {
+    let root = temp_root("artifact-handle-access");
+    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "local"
+
+[artifact_sources.local]
+role = "local"
+kind = "local"
+path = ".agl"
+required = true
+
+[[artifact_sources.local.artifacts]]
+id = "tasks"
+kind = "source"
+path = ".agl/tasks"
+access = "write"
+required = true
+"#,
+    )
+    .unwrap();
+
+    let handle = resolve_artifact_path_handle(
+        &root,
+        &ArtifactPathHandleRequest {
+            path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
+            access: ArtifactAccess::Write,
+        },
+    )
+    .unwrap();
+    assert_eq!(handle.artifact_id, "tasks");
+
+    let err = resolve_artifact_path_handle(
+        &root,
+        &ArtifactPathHandleRequest {
+            path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
+            access: ArtifactAccess::Read,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("does not permit"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_detects_contract_hash_drift() {
+    let root = temp_root("artifact-contract-drift");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    let manifest_path = root.join(WORKSPACE_MANIFEST_PATH);
+    let content = fs::read_to_string(&manifest_path).unwrap();
+    fs::write(
+        &manifest_path,
+        content.replace("agl.task_spec_legacy.v1", "agl.task_spec_legacy.v2"),
+    )
+    .unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: Some("tasks".to_string()),
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactReportState::Invalid);
+    assert!(
+        report
+            .errors
+            .contains(&"artifact.tasks.contract_changed".to_string()),
+        "{:?}",
+        report.errors
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_detects_source_path_drift() {
+    let root = temp_root("artifact-source-path-drift");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let report = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+    let mut lock = report.lock;
+    lock.artifacts.get_mut("tasks").unwrap().source_path = Some(PathBuf::from(".agl/other"));
+    fs::write(
+        root.join(ARTIFACT_LOCK_PATH),
+        toml::to_string_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: Some("tasks".to_string()),
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        report
+            .errors
+            .contains(&"artifact.tasks.source_path_changed".to_string()),
+        "{:?}",
+        report.errors
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
