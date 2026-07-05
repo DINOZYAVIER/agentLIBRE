@@ -43,6 +43,12 @@ pub struct RepoStatusOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoComponentInitOptions {
+    pub component: String,
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoHooksOptions {
     pub dry_run: bool,
     pub force: bool,
@@ -138,6 +144,35 @@ pub enum ComponentState {
     Warning,
     Missing,
     Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepoComponentInitReport {
+    pub workspace_root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub component: String,
+    pub path: PathBuf,
+    pub dry_run: bool,
+    pub actions: Vec<RepoComponentInitAction>,
+    pub errors: Vec<String>,
+}
+
+impl RepoComponentInitReport {
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoComponentInitAction {
+    WouldAddSubmodule,
+    AddedSubmodule,
+    WouldUpdateSubmodule,
+    UpdatedSubmodule,
+    WouldCheckoutRev,
+    CheckedOutRev,
+    AlreadyInitialized,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

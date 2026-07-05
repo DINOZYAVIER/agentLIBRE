@@ -58,6 +58,7 @@ pub(crate) enum CronCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RepoCommand {
     Init(RepoInitOptions),
+    InitComponent(RepoComponentInitOptions),
     ImportProfile(RepoImportProfileOptions),
     Status(RepoStatusOptions),
     InstallHooks(RepoHooksOptions),
@@ -91,6 +92,7 @@ pub(crate) enum NotesCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SkillCommand {
+    Init(SkillInitOptions),
     List(SkillListOptions),
     Inspect(SkillInspectOptions),
     Status(SkillStatusOptions),
@@ -98,6 +100,13 @@ pub(crate) enum SkillCommand {
     Lock(SkillLockOptions),
     Trust(SkillTrustOptions),
     Revoke(SkillRevokeOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoComponentInitOptions {
+    pub(crate) component: String,
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,6 +162,12 @@ pub(crate) enum SkillListSourceArg {
     All,
     Builtin,
     Workspace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillInitOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

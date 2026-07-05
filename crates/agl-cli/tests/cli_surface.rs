@@ -804,7 +804,7 @@ fn init_then_status_reports_missing_skills_submodule_warning() {
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=warning");
     assert_contains(&stdout, "component.skills.warning=missing");
-    assert_contains(&stdout, "next_step=initialize .agl/skills submodule");
+    assert_contains(&stdout, "next_step=agl skill init");
 }
 
 #[test]

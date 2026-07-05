@@ -159,6 +159,8 @@ enum CronCommands {
 enum RepoCommands {
     /// Initialize the repo-local AgentLIBRE workspace.
     Init(RepoInitArgs),
+    /// Initialize a declared submodule component.
+    InitComponent(RepoComponentInitArgs),
     /// Apply an explicit workspace profile file.
     #[command(hide = true)]
     ImportProfile(RepoImportProfileArgs),
@@ -214,6 +216,8 @@ enum NotesCommands {
 
 #[derive(Debug, Subcommand)]
 enum SkillCommands {
+    /// Initialize the workspace skills submodule declared in .agl/workspace.toml.
+    Init(SkillInitArgs),
     /// List builtin and workspace skills.
     List(SkillListArgs),
     /// Inspect one skill by name.
@@ -284,6 +288,21 @@ struct RepoImportProfileArgs {
     /// Repair or replace AgentLIBRE-managed files.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct RepoComponentInitArgs {
+    /// Workspace component name to initialize.
+    #[arg(value_name = "NAME")]
+    component: String,
+
+    /// Print planned git operations without writing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -524,6 +543,17 @@ struct SkillListArgs {
     /// Maximum number of skills to print.
     #[arg(long, value_name = "N")]
     limit: Option<usize>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SkillInitArgs {
+    /// Print planned git operations without writing.
+    #[arg(long)]
+    dry_run: bool,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1053,6 +1083,9 @@ impl Cli {
             }
             Some(Commands::Repo { command }) => CliCommand::Repo(match command {
                 RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)),
+                RepoCommands::InitComponent(args) => {
+                    RepoCommand::InitComponent(repo_component_init_options(args))
+                }
                 RepoCommands::ImportProfile(args) => {
                     RepoCommand::ImportProfile(repo_import_profile_options(args))
                 }
@@ -1095,6 +1128,14 @@ fn repo_init_options(args: RepoInitArgs) -> RepoInitOptions {
         tasks_rev: args.tasks_rev,
         dry_run: args.dry_run,
         force: args.force,
+    }
+}
+
+fn repo_component_init_options(args: RepoComponentInitArgs) -> RepoComponentInitOptions {
+    RepoComponentInitOptions {
+        component: args.component,
+        dry_run: args.dry_run,
+        json: args.json,
     }
 }
 
@@ -1412,6 +1453,10 @@ fn notes_command(command: NotesCommands) -> Result<NotesCommand> {
 
 fn skill_command(command: SkillCommands) -> SkillCommand {
     match command {
+        SkillCommands::Init(args) => SkillCommand::Init(SkillInitOptions {
+            dry_run: args.dry_run,
+            json: args.json,
+        }),
         SkillCommands::List(args) => SkillCommand::List(SkillListOptions {
             json: args.json,
             source: args.source,
