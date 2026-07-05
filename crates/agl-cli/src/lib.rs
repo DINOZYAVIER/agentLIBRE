@@ -28,10 +28,12 @@ use agl_runtime::{
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
 use agl_skills::{
-    SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
-    SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillReport,
-    WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
-    trust_workspace_skill, workspace_skill_report, workspace_skill_report_with_trust,
+    SkillFolderSyncActionKind, SkillFolderSyncOptions as AglSkillFolderSyncOptions,
+    SkillFolderSyncReport, SkillLockOptions as AglSkillLockOptions, SkillLockReport,
+    SkillPermissions, SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport,
+    WorkspaceSkillReport, WorkspaceSkillStatus, builtin_registry, lock_workspace_skills,
+    revoke_workspace_skill, sync_workspace_skill_folders, trust_workspace_skill,
+    workspace_skill_report, workspace_skill_report_with_trust,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
@@ -48,8 +50,8 @@ use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, RunOptions,
-    ServeOptions, SkillCommand, SkillInitOptions, SkillInspectOptions, SkillListOptions,
-    SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
+    ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillInitOptions, SkillInspectOptions,
+    SkillListOptions, SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
     SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
@@ -598,6 +600,7 @@ fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result
         SkillCommand::Inspect(options) => run_skill_inspect(options, runtime),
         SkillCommand::Status(options) => run_skill_status(options, runtime),
         SkillCommand::Verify(options) => run_skill_verify(options),
+        SkillCommand::SyncFolders(options) => run_skill_sync_folders(options),
         SkillCommand::Lock(options) => run_skill_lock(options),
         SkillCommand::Trust(options) => run_skill_trust(options, runtime),
         SkillCommand::Revoke(options) => run_skill_revoke(options, runtime),
@@ -884,6 +887,25 @@ fn run_skill_verify(options: SkillVerifyOptions) -> Result<()> {
     Ok(())
 }
 
+fn run_skill_sync_folders(options: SkillFolderSyncOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "skill sync-folders", "starting command");
+    let report = sync_workspace_skill_folders(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglSkillFolderSyncOptions {
+            dry_run: options.dry_run,
+        },
+    )?;
+
+    crate::print_json_or(options.json, &report, || {
+        print_skill_folder_sync_report(&report)
+    })?;
+
+    if report.has_errors() {
+        bail!("workspace skill folder sync failed");
+    }
+    Ok(())
+}
+
 fn run_skill_lock(options: SkillLockOptions) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "skill lock", "starting command");
     let report = lock_workspace_skills(
@@ -1114,6 +1136,44 @@ fn print_workspace_skill_report(report: &WorkspaceSkillReport) {
     }
 }
 
+fn print_skill_folder_sync_report(report: &SkillFolderSyncReport) {
+    println!(
+        "state={}",
+        if report.errors.is_empty() {
+            "ok"
+        } else {
+            "error"
+        }
+    );
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("dry_run={}", report.dry_run);
+    for action in &report.actions {
+        println!(
+            "skill.folder_action skill={} folder={} path={} action={}",
+            action.skill,
+            action.folder_id,
+            action.path.display(),
+            skill_folder_sync_action(action.action)
+        );
+    }
+    for warning in &report.warnings {
+        println!("warning={warning}");
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+}
+
+fn skill_folder_sync_action(action: SkillFolderSyncActionKind) -> &'static str {
+    match action {
+        SkillFolderSyncActionKind::Exists => "exists",
+        SkillFolderSyncActionKind::SkippedReadOnly => "skipped_read_only",
+        SkillFolderSyncActionKind::SkippedSource => "skipped_source",
+        SkillFolderSyncActionKind::WouldCreateDir => "would_create_dir",
+        SkillFolderSyncActionKind::CreatedDir => "created_dir",
+    }
+}
+
 fn skill_report_state(state: agl_skills::SkillReportState) -> &'static str {
     match state {
         agl_skills::SkillReportState::Ok => "ok",
@@ -1224,6 +1284,28 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     if skill.notes_read || skill.notes_write {
         println!("skill.{name}.permissions.notes.read={}", skill.notes_read);
         println!("skill.{name}.permissions.notes.write={}", skill.notes_write);
+    }
+    for folder in &skill.artifact_folders {
+        println!(
+            "skill.{name}.folder id={} path={} kind={:?} access={:?} exists={}",
+            folder.id,
+            folder.path.display(),
+            folder.kind,
+            folder.access,
+            folder.exists
+        );
+        for value in &folder.provides {
+            println!("skill.{name}.folder.{}.provides={value}", folder.id);
+        }
+        if let Some(schema) = &folder.schema {
+            println!("skill.{name}.folder.{}.schema={schema}", folder.id);
+        }
+        for warning in &folder.warnings {
+            println!("skill.{name}.folder.{}.warning={warning}", folder.id);
+        }
+        for error in &folder.errors {
+            println!("skill.{name}.folder.{}.error={error}", folder.id);
+        }
     }
     for warning in &skill.warnings {
         println!("skill.{name}.warning={warning}");

@@ -99,6 +99,7 @@ pub(crate) enum SkillCommand {
     Inspect(SkillInspectOptions),
     Status(SkillStatusOptions),
     Verify(SkillVerifyOptions),
+    SyncFolders(SkillFolderSyncOptions),
     Lock(SkillLockOptions),
     Trust(SkillTrustOptions),
     Revoke(SkillRevokeOptions),
@@ -368,6 +369,12 @@ pub(crate) struct SkillStatusOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SkillVerifyOptions {
     pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkillFolderSyncOptions {
+    pub(crate) json: bool,
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

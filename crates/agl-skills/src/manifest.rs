@@ -232,7 +232,7 @@ struct RawSkillManifest {
     permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
-    #[serde(default)]
+    #[serde(default, alias = "artifact_folders", alias = "folders")]
     artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
 }
