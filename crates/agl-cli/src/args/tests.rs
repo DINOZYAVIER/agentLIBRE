@@ -271,6 +271,25 @@ fn parse_repo_status_hidden_alias() {
 }
 
 #[test]
+fn parse_repo_init_component_hidden_command() {
+    assert_command(
+        [
+            "agl",
+            "repo",
+            "init-component",
+            "tasks",
+            "--dry-run",
+            "--json",
+        ],
+        CliCommand::Repo(RepoCommand::InitComponent(RepoComponentInitOptions {
+            component: "tasks".to_string(),
+            dry_run: true,
+            json: true,
+        })),
+    );
+}
+
+#[test]
 fn parse_repo_export_profile_hidden_command() {
     assert_command(
         [
@@ -323,6 +342,13 @@ fn parse_install_hooks_command() {
 
 #[test]
 fn parse_skill_commands() {
+    assert_command(
+        ["agl", "skill", "init", "--dry-run", "--json"],
+        CliCommand::Skill(SkillCommand::Init(SkillInitOptions {
+            dry_run: true,
+            json: true,
+        })),
+    );
     assert_command(
         [
             "agl",

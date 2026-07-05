@@ -1,20 +1,23 @@
 use agl_repo::{
-    HookInstallReport, RepoExportProfileOptions as AglRepoExportProfileOptions,
-    RepoExportProfileReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
-    RepoInitOptions as AglRepoInitOptions, RepoInitReport,
-    RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport, export_repo_profile,
-    init_repo_workspace, install_repo_hooks, status_repo_workspace,
+    HookInstallReport, RepoComponentInitAction,
+    RepoComponentInitOptions as AglRepoComponentInitOptions, RepoComponentInitReport,
+    RepoExportProfileOptions as AglRepoExportProfileOptions, RepoExportProfileReport,
+    RepoHooksOptions as AglRepoHooksOptions, RepoInitAction, RepoInitOptions as AglRepoInitOptions,
+    RepoInitReport, RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
+    export_repo_profile, init_repo_component, init_repo_workspace, install_repo_hooks,
+    status_repo_workspace,
 };
 use anyhow::{Context, Result, bail};
 
 use crate::args::{
-    RepoCommand, RepoExportProfileOptions, RepoHooksOptions, RepoImportProfileOptions,
-    RepoInitOptions, RepoStatusOptions,
+    RepoCommand, RepoComponentInitOptions, RepoExportProfileOptions, RepoHooksOptions,
+    RepoImportProfileOptions, RepoInitOptions, RepoStatusOptions,
 };
 
 pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
     match command {
         RepoCommand::Init(options) => run_repo_init(options),
+        RepoCommand::InitComponent(options) => run_repo_init_component(options),
         RepoCommand::ImportProfile(options) => run_repo_import_profile(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
@@ -38,6 +41,24 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
         },
     )?;
     print_repo_init_report(&report);
+    Ok(())
+}
+
+fn run_repo_init_component(options: RepoComponentInitOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo init-component", "starting command");
+    let report = init_repo_component(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglRepoComponentInitOptions {
+            component: options.component,
+            dry_run: options.dry_run,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_repo_component_init_report(&report)
+    })?;
+    if report.has_errors() {
+        bail!("repo component initialization failed");
+    }
     Ok(())
 }
 
@@ -143,6 +164,21 @@ fn print_repo_status_report(report: &RepoStatusReport) {
     }
 }
 
+pub(crate) fn print_repo_component_init_report(report: &RepoComponentInitReport) {
+    println!("state={}", if report.has_errors() { "error" } else { "ok" });
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("manifest_path={}", report.manifest_path.display());
+    println!("component={}", report.component);
+    println!("path={}", report.path.display());
+    println!("dry_run={}", report.dry_run);
+    for action in &report.actions {
+        println!("action={}", repo_component_init_action(*action));
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+}
+
 fn print_repo_export_profile_report(report: &RepoExportProfileReport) {
     println!("profile.exported={}", report.wrote);
     println!("profile.path={}", report.profile_path.display());
@@ -199,6 +235,18 @@ fn print_hook_install_report(report: &HookInstallReport) {
     }
     for error in &report.errors {
         println!("error={error}");
+    }
+}
+
+fn repo_component_init_action(action: RepoComponentInitAction) -> &'static str {
+    match action {
+        RepoComponentInitAction::WouldAddSubmodule => "would_add_submodule",
+        RepoComponentInitAction::AddedSubmodule => "added_submodule",
+        RepoComponentInitAction::WouldUpdateSubmodule => "would_update_submodule",
+        RepoComponentInitAction::UpdatedSubmodule => "updated_submodule",
+        RepoComponentInitAction::WouldCheckoutRev => "would_checkout_rev",
+        RepoComponentInitAction::CheckedOutRev => "checked_out_rev",
+        RepoComponentInitAction::AlreadyInitialized => "already_initialized",
     }
 }
 
