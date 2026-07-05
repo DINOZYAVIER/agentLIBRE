@@ -168,10 +168,27 @@ enum RepoCommands {
     Status(RepoStatusArgs),
     /// Verify task spec files in the tasks component.
     VerifyTasks(TaskSpecVerifyArgs),
+    /// Inspect and materialize declared .agl artifact contracts.
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
     /// Install AgentLIBRE git hooks for this repository.
     InstallHooks(RepoHooksArgs),
     /// Export a portable workspace profile manifest.
     ExportProfile(RepoExportProfileArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ArtifactCommands {
+    /// Report declared .agl artifact status.
+    Status(ArtifactStatusArgs),
+    /// Verify declared .agl artifacts.
+    Verify(ArtifactStatusArgs),
+    /// Create missing declared artifact directories.
+    Sync(ArtifactSyncArgs),
+    /// Write the artifact contract lock file.
+    Lock(ArtifactLockArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +344,51 @@ struct TaskSpecVerifyArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactStatusArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Limit status to one artifact ID.
+    #[arg(long, value_name = "ID")]
+    artifact: Option<String>,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactSyncArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Print planned directory creation without writing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactLockArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Print the lock payload without writing.
+    #[arg(long)]
+    dry_run: bool,
 
     /// Treat warnings as failures.
     #[arg(long)]
@@ -1106,6 +1168,9 @@ impl Cli {
                 RepoCommands::VerifyTasks(args) => {
                     RepoCommand::VerifyTasks(task_spec_verify_options(args))
                 }
+                RepoCommands::Artifact { command } => {
+                    RepoCommand::Artifact(artifact_command(command))
+                }
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
                 }
@@ -1166,6 +1231,31 @@ fn repo_status_options(args: RepoStatusArgs) -> RepoStatusOptions {
 fn task_spec_verify_options(args: TaskSpecVerifyArgs) -> TaskSpecVerifyOptions {
     TaskSpecVerifyOptions {
         json: args.json,
+        strict: args.strict,
+    }
+}
+
+fn artifact_command(command: ArtifactCommands) -> ArtifactCommand {
+    match command {
+        ArtifactCommands::Status(args) => ArtifactCommand::Status(artifact_status_options(args)),
+        ArtifactCommands::Verify(args) => ArtifactCommand::Verify(artifact_status_options(args)),
+        ArtifactCommands::Sync(args) => ArtifactCommand::Sync(ArtifactSyncOptions {
+            json: args.json,
+            dry_run: args.dry_run,
+            strict: args.strict,
+        }),
+        ArtifactCommands::Lock(args) => ArtifactCommand::Lock(ArtifactLockOptions {
+            json: args.json,
+            dry_run: args.dry_run,
+            strict: args.strict,
+        }),
+    }
+}
+
+fn artifact_status_options(args: ArtifactStatusArgs) -> ArtifactStatusOptions {
+    ArtifactStatusOptions {
+        json: args.json,
+        artifact: args.artifact,
         strict: args.strict,
     }
 }
