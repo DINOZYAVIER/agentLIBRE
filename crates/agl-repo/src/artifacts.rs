@@ -230,7 +230,7 @@ pub fn lock_artifacts(
     };
 
     let mut wrote = false;
-    if errors.is_empty() && !(options.strict && !warnings.is_empty()) {
+    if errors.is_empty() && (!options.strict || warnings.is_empty()) {
         if options.dry_run {
             warnings.push("dry_run_no_lock_written".to_string());
         } else {

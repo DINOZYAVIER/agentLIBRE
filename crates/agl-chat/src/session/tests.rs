@@ -332,6 +332,44 @@ fn artifact_write_preflight_rejects_parent_traversal() {
 }
 
 #[test]
+fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths() {
+    let selected_skills = [SkillId::new("task-spec").unwrap()];
+    let agl_args = serde_json::json!({
+        "path": ".agl/tasks/example.md"
+    });
+
+    assert_eq!(
+        artifact_write_preflight_path_for_tool(
+            agl_tools::FS_EDIT_TOOL_ID,
+            &selected_skills,
+            &agl_args
+        )
+        .unwrap(),
+        Some(PathBuf::from(".agl/tasks/example.md"))
+    );
+    assert_eq!(
+        artifact_write_preflight_path_for_tool("skill.status", &selected_skills, &agl_args)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        artifact_write_preflight_path_for_tool(agl_tools::FS_EDIT_TOOL_ID, &[], &agl_args).unwrap(),
+        None
+    );
+    assert_eq!(
+        artifact_write_preflight_path_for_tool(
+            agl_tools::FS_EDIT_TOOL_ID,
+            &selected_skills,
+            &serde_json::json!({
+                "path": "README.md"
+            })
+        )
+        .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn selected_skill_hook_batches_use_declared_hook_events() {
     let skill_registry = agl_skills::builtin_registry().unwrap();
     let mut extension_registry = ToolCatalog::new();
