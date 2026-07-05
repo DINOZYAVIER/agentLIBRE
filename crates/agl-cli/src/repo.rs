@@ -4,14 +4,15 @@ use agl_repo::{
     RepoExportProfileOptions as AglRepoExportProfileOptions, RepoExportProfileReport,
     RepoHooksOptions as AglRepoHooksOptions, RepoInitAction, RepoInitOptions as AglRepoInitOptions,
     RepoInitReport, RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
+    TaskSpecVerifyOptions as AglTaskSpecVerifyOptions, TaskSpecVerifyReport, TaskSpecVerifyState,
     export_repo_profile, init_repo_component, init_repo_workspace, install_repo_hooks,
-    status_repo_workspace,
+    status_repo_workspace, verify_task_specs,
 };
 use anyhow::{Context, Result, bail};
 
 use crate::args::{
     RepoCommand, RepoComponentInitOptions, RepoExportProfileOptions, RepoHooksOptions,
-    RepoImportProfileOptions, RepoInitOptions, RepoStatusOptions,
+    RepoImportProfileOptions, RepoInitOptions, RepoStatusOptions, TaskSpecVerifyOptions,
 };
 
 pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
@@ -20,6 +21,7 @@ pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::InitComponent(options) => run_repo_init_component(options),
         RepoCommand::ImportProfile(options) => run_repo_import_profile(options),
         RepoCommand::Status(options) => run_repo_status(options),
+        RepoCommand::VerifyTasks(options) => run_repo_verify_tasks(options),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
         RepoCommand::ExportProfile(options) => run_repo_export_profile(options),
     }
@@ -95,6 +97,23 @@ fn run_repo_status(options: RepoStatusOptions) -> Result<()> {
 
     if report.should_fail(options.strict) {
         bail!("repo workspace status is not healthy");
+    }
+    Ok(())
+}
+
+fn run_repo_verify_tasks(options: TaskSpecVerifyOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo verify-tasks", "starting command");
+    let report = verify_task_specs(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglTaskSpecVerifyOptions {
+            strict: options.strict,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_task_spec_verify_report(&report)
+    })?;
+    if report.should_fail(options.strict) {
+        bail!("task spec verification failed");
     }
     Ok(())
 }
@@ -176,6 +195,49 @@ pub(crate) fn print_repo_component_init_report(report: &RepoComponentInitReport)
     }
     for error in &report.errors {
         println!("error={error}");
+    }
+}
+
+fn print_task_spec_verify_report(report: &TaskSpecVerifyReport) {
+    println!("state={}", task_spec_verify_state(report.state));
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("root={}", report.root.display());
+    if let Some(component) = &report.component {
+        crate::print_component_status(component);
+    }
+    for file in &report.files {
+        println!(
+            "task_spec path={} valid={}",
+            file.path.display(),
+            file.valid
+        );
+        for section in &file.missing_sections {
+            println!(
+                "task_spec.missing_section path={} section={}",
+                file.path.display(),
+                section
+            );
+        }
+        for warning in &file.warnings {
+            println!("task_spec.warning path={} {warning}", file.path.display());
+        }
+        for error in &file.errors {
+            println!("task_spec.error path={} {error}", file.path.display());
+        }
+    }
+    for warning in &report.warnings {
+        println!("warning={warning}");
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+}
+
+fn task_spec_verify_state(state: TaskSpecVerifyState) -> &'static str {
+    match state {
+        TaskSpecVerifyState::Ok => "ok",
+        TaskSpecVerifyState::Warning => "warning",
+        TaskSpecVerifyState::Invalid => "invalid",
     }
 }
 

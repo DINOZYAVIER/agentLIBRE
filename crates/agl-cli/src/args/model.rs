@@ -61,6 +61,7 @@ pub(crate) enum RepoCommand {
     InitComponent(RepoComponentInitOptions),
     ImportProfile(RepoImportProfileOptions),
     Status(RepoStatusOptions),
+    VerifyTasks(TaskSpecVerifyOptions),
     InstallHooks(RepoHooksOptions),
     ExportProfile(RepoExportProfileOptions),
 }
@@ -125,6 +126,12 @@ pub(crate) struct RepoInitOptions {
 pub(crate) struct RepoStatusOptions {
     pub(crate) json: bool,
     pub(crate) component: Option<String>,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TaskSpecVerifyOptions {
+    pub(crate) json: bool,
     pub(crate) strict: bool,
 }
 
