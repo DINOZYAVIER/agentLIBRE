@@ -545,6 +545,8 @@ mod tests {
     fn skill_tools_status_and_lock_dry_run_report_workspace_errors() {
         let root = temp_root("status-lock");
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".agl/skills")).unwrap();
         let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
 
         let status = tools

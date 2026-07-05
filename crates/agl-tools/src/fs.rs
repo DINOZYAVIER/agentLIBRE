@@ -6,7 +6,7 @@ use crate::{
     ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
     parse_tool_args as parse_args,
 };
-use agl_repo::{ArtifactAccess, ArtifactStatusOptions};
+use agl_repo::{ArtifactAccess, ArtifactPathHandleRequest};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
@@ -315,52 +315,14 @@ impl CoreTools {
             return Ok(());
         }
 
-        let report = agl_repo::status_artifacts(
+        agl_repo::resolve_artifact_path_handle(
             &self.root,
-            &ArtifactStatusOptions {
-                artifact: None,
-                strict: false,
+            &ArtifactPathHandleRequest {
+                path: relative.to_path_buf(),
+                access: ArtifactAccess::Write,
             },
         )
-        .context("failed to load artifact write policy")?;
-        let blocking_errors = report
-            .errors
-            .iter()
-            .filter(|error| artifact_policy_error_blocks_writes(error))
-            .cloned()
-            .collect::<Vec<_>>();
-        ensure!(
-            blocking_errors.is_empty(),
-            "artifact write policy is invalid: {}",
-            blocking_errors.join(", ")
-        );
-
-        let artifact = report
-            .artifacts
-            .iter()
-            .filter(|artifact| relative.starts_with(&artifact.path))
-            .max_by_key(|artifact| artifact.path.components().count());
-        let Some(artifact) = artifact else {
-            bail!(
-                "repository artifact write is not declared: {}",
-                relative.display()
-            );
-        };
-        ensure!(
-            matches!(
-                artifact.access,
-                ArtifactAccess::Write | ArtifactAccess::ReadWrite
-            ),
-            "repository artifact is not writable: {} ({})",
-            artifact.id,
-            artifact.path.display()
-        );
-        ensure!(
-            self.root.join(&artifact.path).is_dir(),
-            "repository artifact root is not a directory: {} ({})",
-            artifact.id,
-            artifact.path.display()
-        );
+        .context("failed to resolve artifact write handle")?;
 
         Ok(())
     }
@@ -475,15 +437,6 @@ fn is_agl_path(path: &Path) -> bool {
         path.components().next(),
         Some(Component::Normal(component)) if component == ".agl"
     )
-}
-
-fn artifact_policy_error_blocks_writes(error: &str) -> bool {
-    error.starts_with("workspace_manifest_invalid")
-        || error.contains("path_invalid")
-        || error.contains("path_conflict")
-        || error.contains("path_escape")
-        || error.contains("not_directory")
-        || error.contains("duplicate_id_conflict")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -638,8 +591,14 @@ mod tests {
     #[test]
     fn edit_allows_writable_artifact_paths() {
         let root = temp_root("edit-artifact-writable");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
         fs::create_dir_all(root.join(".agl/tasks")).unwrap();
-        fs::write(root.join(".agl/tasks/task.md"), "hello old\n").unwrap();
+        fs::write(
+            root.join(".agl/tasks/task.md"),
+            "# Problem\n\nold problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n",
+        )
+        .unwrap();
         let tools = CoreTools::new(&root).unwrap();
 
         let output = tools
@@ -652,13 +611,15 @@ mod tests {
         assert!(output.contains("status=edited"));
         assert_eq!(
             fs::read_to_string(root.join(".agl/tasks/task.md")).unwrap(),
-            "hello new\n"
+            "# Problem\n\nnew problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n"
         );
     }
 
     #[test]
     fn edit_rejects_read_only_artifact_paths() {
         let root = temp_root("edit-artifact-read-only");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
         fs::create_dir_all(root.join(".agl/skills")).unwrap();
         fs::write(root.join(".agl/skills/SKILL.md"), "hello old\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -670,12 +631,14 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(format!("{err:#}").contains("not writable"));
+        assert!(format!("{err:#}").contains("does not permit"));
     }
 
     #[test]
     fn edit_rejects_undeclared_artifact_paths() {
         let root = temp_root("edit-artifact-undeclared");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
         fs::create_dir_all(root.join(".agl/unknown")).unwrap();
         fs::write(root.join(".agl/unknown/file.md"), "hello old\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -693,6 +656,9 @@ mod tests {
     #[test]
     fn edit_rejects_artifact_root_that_is_not_directory() {
         let root = temp_root("edit-artifact-not-directory");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        let _ = fs::remove_dir_all(root.join(".agl/tasks"));
         fs::create_dir_all(root.join(".agl")).unwrap();
         fs::write(root.join(".agl/tasks"), "hello old\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -705,7 +671,7 @@ mod tests {
             .unwrap_err();
 
         let error = format!("{err:#}");
-        assert!(error.contains("artifact root is not a directory"));
+        assert!(error.contains("not_directory"));
         assert_eq!(
             fs::read_to_string(root.join(".agl/tasks")).unwrap(),
             "hello old\n"

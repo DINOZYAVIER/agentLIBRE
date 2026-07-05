@@ -250,7 +250,9 @@ pub struct ArtifactStatusReport {
     pub workspace_root: PathBuf,
     pub manifest_path: PathBuf,
     pub lock_path: PathBuf,
+    pub sources: Vec<ArtifactSourceStatus>,
     pub artifacts: Vec<ArtifactStatus>,
+    pub undeclared: Vec<UndeclaredArtifactRoot>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub next_steps: Vec<String>,
@@ -266,6 +268,8 @@ impl ArtifactStatusReport {
 pub struct ArtifactStatus {
     pub id: String,
     pub source_id: String,
+    pub source_role: ArtifactSourceRole,
+    pub source_kind: ArtifactSourceKind,
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub access: ArtifactAccess,
@@ -276,8 +280,77 @@ pub struct ArtifactStatus {
     pub state: ArtifactState,
     pub exists: bool,
     pub contract_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_contract_hash: Option<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ArtifactSourceStatus {
+    pub id: String,
+    pub role: ArtifactSourceRole,
+    pub kind: ArtifactSourceKind,
+    pub path: PathBuf,
+    pub required: bool,
+    pub exists: bool,
+    pub state: ArtifactSourceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_tree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_tree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracked_dirty: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untracked_suspicious: Option<bool>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSourceState {
+    Ok,
+    Missing,
+    Warning,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UndeclaredArtifactRoot {
+    pub path: PathBuf,
+    pub suggested_kind: ArtifactKind,
+    pub suggested_target: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactPathHandleRequest {
+    pub path: PathBuf,
+    pub access: ArtifactAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ArtifactHandle {
+    pub artifact_id: String,
+    pub source_id: String,
+    pub root: PathBuf,
+    pub relative_path: PathBuf,
+    pub path_in_artifact: PathBuf,
+    pub kind: ArtifactKind,
+    pub access: ArtifactAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub contract_hash: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -349,6 +422,8 @@ impl ArtifactLockReport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactLockFile {
+    #[serde(default)]
+    pub locked_at_unix_ms: u64,
     pub version: u32,
     pub artifacts: BTreeMap<String, LockedArtifact>,
 }
@@ -358,6 +433,20 @@ pub struct ArtifactLockFile {
 pub struct LockedArtifact {
     pub id: String,
     pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_role: Option<ArtifactSourceRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<ArtifactSourceKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_tree: Option<String>,
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub access: ArtifactAccess,
@@ -365,6 +454,8 @@ pub struct LockedArtifact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub contract_hash: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub materialized_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -519,6 +610,10 @@ pub struct ArtifactSource {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]

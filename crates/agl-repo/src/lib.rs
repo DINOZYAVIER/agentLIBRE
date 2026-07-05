@@ -9,7 +9,9 @@ mod artifacts;
 mod hooks;
 mod types;
 
-pub use artifacts::{lock_artifacts, status_artifacts, sync_artifacts};
+pub use artifacts::{
+    lock_artifacts, resolve_artifact_path_handle, status_artifacts, sync_artifacts,
+};
 pub use hooks::install_repo_hooks;
 pub use types::*;
 
@@ -918,7 +920,7 @@ pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn component_status(
+pub(crate) fn component_status(
     workspace_root: &Path,
     name: &str,
     component: &WorkspaceComponent,
