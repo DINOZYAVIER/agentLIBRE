@@ -108,6 +108,7 @@ fn status_after_init_warns_about_missing_skills_submodule() {
             .warnings
             .contains(&"component.skills.missing".to_string())
     );
+    assert!(report.next_steps.contains(&"agl skill init".to_string()));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -232,6 +233,114 @@ fn init_rejects_tasks_rev_without_tasks_url() {
     .unwrap_err();
 
     assert!(err.to_string().contains("--tasks-rev requires --tasks-url"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_component_dry_run_plans_submodule_add() {
+    let root = temp_root("component-init-dry-run");
+    init_git_repo(&root);
+    init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            tasks_url: Some("git@example.com:private/specs.git".to_string()),
+            tasks_rev: Some("main".to_string()),
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+
+    let report = init_repo_component(
+        &root,
+        &RepoComponentInitOptions {
+            component: "tasks".to_string(),
+            dry_run: true,
+        },
+    )
+    .unwrap();
+
+    assert!(!report.has_errors());
+    assert_eq!(
+        report.actions,
+        vec![
+            RepoComponentInitAction::WouldAddSubmodule,
+            RepoComponentInitAction::WouldCheckoutRev
+        ]
+    );
+    assert!(!root.join(".agl/tasks").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_component_adds_external_tasks_submodule() {
+    let source = temp_root("component-init-tasks-source");
+    init_git_repo(&source);
+    fs::write(source.join("README.md"), "private specs\n").unwrap();
+    git(&source, &["add", "."]);
+    git_with_identity(&source, &["commit", "-m", "Add specs"]);
+    let commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
+
+    let root = temp_root("component-init-tasks-root");
+    init_git_repo(&root);
+    init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            tasks_url: Some(source.to_str().unwrap().to_string()),
+            tasks_rev: Some(commit.trim().to_string()),
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+
+    let report = init_repo_component(
+        &root,
+        &RepoComponentInitOptions {
+            component: "tasks".to_string(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert!(!report.has_errors());
+    assert_eq!(
+        report.actions,
+        vec![
+            RepoComponentInitAction::AddedSubmodule,
+            RepoComponentInitAction::CheckedOutRev
+        ]
+    );
+    assert!(root.join(".agl/tasks/README.md").is_file());
+    let modules = fs::read_to_string(root.join(".gitmodules")).unwrap();
+    assert!(modules.contains("path = .agl/tasks"));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
+fn init_component_rejects_local_tasks_component() {
+    let root = temp_root("component-init-local-tasks");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let report = init_repo_component(
+        &root,
+        &RepoComponentInitOptions {
+            component: "tasks".to_string(),
+            dry_run: false,
+        },
+    )
+    .unwrap();
+
+    assert!(report.has_errors());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("component_not_submodule"))
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -154,13 +154,7 @@ pub fn status_repo_workspace(
         RepoStatusState::Ok
     };
 
-    let mut next_steps = Vec::new();
-    if warnings
-        .iter()
-        .any(|warning| warning.contains("missing") || warning.contains("not_submodule"))
-    {
-        next_steps.push("initialize .agl/skills submodule".to_string());
-    }
+    let mut next_steps = component_init_next_steps(&components);
     if !errors.is_empty() {
         next_steps.push("inspect agl status --json".to_string());
     }
@@ -173,6 +167,171 @@ pub fn status_repo_workspace(
         warnings,
         errors,
         next_steps,
+    })
+}
+
+fn component_init_next_steps(components: &[ComponentStatus]) -> Vec<String> {
+    let mut steps = BTreeSet::new();
+    for component in components {
+        if component.kind != ComponentKind::Submodule {
+            continue;
+        }
+        let needs_init = matches!(component.state, ComponentState::Missing)
+            || component.warnings.iter().any(|warning| {
+                matches!(
+                    warning.as_str(),
+                    "not_registered_submodule" | "gitlink_missing"
+                )
+            });
+        if !needs_init {
+            continue;
+        }
+        if component.name == "skills" {
+            steps.insert("agl skill init".to_string());
+        } else {
+            steps.insert(format!("agl repo init-component {}", component.name));
+        }
+    }
+    steps.into_iter().collect()
+}
+
+pub fn init_repo_component(
+    start: impl AsRef<Path>,
+    options: &RepoComponentInitOptions,
+) -> Result<RepoComponentInitReport> {
+    let workspace_root = resolve_repo_root(start)?;
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    let manifest = read_manifest(&manifest_path).with_context(|| {
+        format!(
+            "failed to read workspace manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let mut errors = Vec::new();
+    validate_manifest(&manifest, &mut errors);
+
+    let Some(component) = manifest.components.get(&options.component) else {
+        errors.push(format!("component_not_found: {}", options.component));
+        return Ok(component_init_error_report(
+            workspace_root,
+            manifest_path,
+            options,
+            PathBuf::new(),
+            errors,
+        ));
+    };
+    let component_path = component.path.clone();
+
+    if component.kind != ComponentKind::Submodule {
+        errors.push(format!(
+            "component_not_submodule: {} is {:?}",
+            options.component, component.kind
+        ));
+    }
+    if component.url.as_deref().is_none_or(str::is_empty) {
+        errors.push(format!("component_url_missing: {}", options.component));
+    }
+    if !errors.is_empty() {
+        return Ok(component_init_error_report(
+            workspace_root,
+            manifest_path,
+            options,
+            component_path,
+            errors,
+        ));
+    }
+
+    let mut actions = Vec::new();
+    let registered = submodule_registered(&workspace_root, &component.path);
+    let gitlink = gitlink_present(&workspace_root, &component.path);
+    let exists = workspace_root.join(&component.path).exists();
+
+    if registered || gitlink {
+        if options.dry_run {
+            actions.push(RepoComponentInitAction::WouldUpdateSubmodule);
+        } else {
+            git_run_with_file_protocol(
+                &workspace_root,
+                &[
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                    "--",
+                    &slash_path(&component.path),
+                ],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to initialize submodule {}",
+                    component.path.display()
+                )
+            })?;
+            actions.push(RepoComponentInitAction::UpdatedSubmodule);
+        }
+    } else if exists {
+        errors.push(format!(
+            "component_path_exists_not_submodule: {}",
+            component.path.display()
+        ));
+        return Ok(component_init_error_report(
+            workspace_root,
+            manifest_path,
+            options,
+            component_path,
+            errors,
+        ));
+    } else {
+        let url = component.url.as_deref().expect("url checked above");
+        if options.dry_run {
+            actions.push(RepoComponentInitAction::WouldAddSubmodule);
+        } else {
+            git_run_with_file_protocol(
+                &workspace_root,
+                &[
+                    "submodule",
+                    "add",
+                    "--name",
+                    &options.component,
+                    url,
+                    &slash_path(&component.path),
+                ],
+            )
+            .with_context(|| format!("failed to add submodule {}", component.path.display()))?;
+            actions.push(RepoComponentInitAction::AddedSubmodule);
+        }
+    }
+
+    if let Some(rev) = component.rev.as_deref().filter(|rev| !rev.is_empty()) {
+        if options.dry_run {
+            actions.push(RepoComponentInitAction::WouldCheckoutRev);
+        } else {
+            let submodule_root = workspace_root.join(&component.path);
+            git_run_with_file_protocol(&submodule_root, &["fetch", "--tags", "--quiet"])
+                .with_context(|| format!("failed to fetch {}", component.path.display()))?;
+            git_run(&submodule_root, &["checkout", "--quiet", rev]).with_context(|| {
+                format!(
+                    "failed to checkout rev {} in {}",
+                    rev,
+                    component.path.display()
+                )
+            })?;
+            actions.push(RepoComponentInitAction::CheckedOutRev);
+        }
+    }
+
+    if actions.is_empty() {
+        actions.push(RepoComponentInitAction::AlreadyInitialized);
+    }
+
+    Ok(RepoComponentInitReport {
+        workspace_root,
+        manifest_path,
+        component: options.component.clone(),
+        path: component_path,
+        dry_run: options.dry_run,
+        actions,
+        errors,
     })
 }
 
@@ -858,6 +1017,61 @@ fn gitlink_present(workspace_root: &Path, component_path: &Path) -> bool {
         return false;
     };
     output.lines().any(|line| line.starts_with("160000 "))
+}
+
+fn component_init_error_report(
+    workspace_root: PathBuf,
+    manifest_path: PathBuf,
+    options: &RepoComponentInitOptions,
+    path: PathBuf,
+    errors: Vec<String>,
+) -> RepoComponentInitReport {
+    RepoComponentInitReport {
+        workspace_root,
+        manifest_path,
+        component: options.component.clone(),
+        path,
+        dry_run: options.dry_run,
+        actions: Vec::new(),
+        errors,
+    }
+}
+
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn git_run(dir: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{}", stderr.trim());
+    }
+    Ok(())
+}
+
+fn git_run_with_file_protocol(dir: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("-c")
+        .arg("protocol.file.allow=always")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{}", stderr.trim());
+    }
+    Ok(())
 }
 
 fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> Result<String> {

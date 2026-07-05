@@ -20,7 +20,9 @@ use agl_daemon::{
     run_cron_skill_chat_turn, run_cron_tick,
 };
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
-use agl_repo::ComponentStatus;
+use agl_repo::{
+    ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
+};
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
@@ -46,9 +48,9 @@ use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, RunOptions,
-    ServeOptions, SkillCommand, SkillInspectOptions, SkillListOptions, SkillListSourceArg,
-    SkillLockOptions, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
-    SkillVerifyOptions, parse_cli, print_completion, print_usage,
+    ServeOptions, SkillCommand, SkillInitOptions, SkillInspectOptions, SkillListOptions,
+    SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
+    SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -591,6 +593,7 @@ fn cron_target_kind(kind: CronTargetKindArg) -> CronTargetKind {
 
 fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
+        SkillCommand::Init(options) => run_skill_init(options),
         SkillCommand::List(options) => run_skill_list(options, runtime),
         SkillCommand::Inspect(options) => run_skill_inspect(options, runtime),
         SkillCommand::Status(options) => run_skill_status(options, runtime),
@@ -599,6 +602,24 @@ fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result
         SkillCommand::Trust(options) => run_skill_trust(options, runtime),
         SkillCommand::Revoke(options) => run_skill_revoke(options, runtime),
     }
+}
+
+fn run_skill_init(options: SkillInitOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "skill init", "starting command");
+    let report = init_repo_component(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglRepoComponentInitOptions {
+            component: "skills".to_string(),
+            dry_run: options.dry_run,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        repo::print_repo_component_init_report(&report)
+    })?;
+    if report.has_errors() {
+        bail!("workspace skills initialization failed");
+    }
+    Ok(())
 }
 
 fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
