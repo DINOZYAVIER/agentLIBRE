@@ -45,6 +45,12 @@ Use the agentLIBRE manifest fields:
 - `context_budget_tokens`
 - `references.include`
 - `guarantees`
+- `artifacts` or `folders`
 
 Choose hooks that can actually run in the current host. Choose tools that the
 skill may need, but keep write tools out of read-only skills.
+
+Use `artifacts`/`folders` when a skill needs workspace paths under `.agl`.
+Declare `path`, `kind`, `access`, and any `create.when` situations explicitly.
+`create.when: artifact_write` prepares or validates the declared folder before
+an AgentLIBRE-owned `.agl` write; it is not a separate authorization grant.
