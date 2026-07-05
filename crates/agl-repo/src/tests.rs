@@ -173,7 +173,7 @@ fn artifact_status_reports_default_contracts() {
     assert!(report.lock_path.ends_with(ARTIFACT_LOCK_PATH));
     assert!(report.artifacts.iter().any(|artifact| {
         artifact.id == "tasks"
-            && artifact.path == PathBuf::from(".agl/tasks")
+            && artifact.path.as_path() == std::path::Path::new(".agl/tasks")
             && artifact.kind == ArtifactKind::Source
             && artifact.schema.as_deref() == Some("agl.task_spec_legacy.v1")
     }));

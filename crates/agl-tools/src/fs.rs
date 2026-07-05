@@ -355,6 +355,12 @@ impl CoreTools {
             artifact.id,
             artifact.path.display()
         );
+        ensure!(
+            self.root.join(&artifact.path).is_dir(),
+            "repository artifact root is not a directory: {} ({})",
+            artifact.id,
+            artifact.path.display()
+        );
 
         Ok(())
     }
@@ -476,6 +482,7 @@ fn artifact_policy_error_blocks_writes(error: &str) -> bool {
         || error.contains("path_invalid")
         || error.contains("path_conflict")
         || error.contains("path_escape")
+        || error.contains("not_directory")
         || error.contains("duplicate_id_conflict")
 }
 
@@ -681,6 +688,28 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("not declared"));
+    }
+
+    #[test]
+    fn edit_rejects_artifact_root_that_is_not_directory() {
+        let root = temp_root("edit-artifact-not-directory");
+        fs::create_dir_all(root.join(".agl")).unwrap();
+        fs::write(root.join(".agl/tasks"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_EDIT_TOOL_ID,
+                json!({"path": ".agl/tasks", "old_text": "old", "new_text": "new"}),
+            )
+            .unwrap_err();
+
+        let error = format!("{err:#}");
+        assert!(error.contains("artifact root is not a directory"));
+        assert_eq!(
+            fs::read_to_string(root.join(".agl/tasks")).unwrap(),
+            "hello old\n"
+        );
     }
 
     #[cfg(unix)]

@@ -218,10 +218,9 @@ impl InferenceSession {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
-        if tool_name != agl_tools::FS_EDIT_TOOL_ID || self.selected_skills.is_empty() {
-            return Ok(());
-        }
-        let Some(relative) = normalize_agl_artifact_write_path(arguments)? else {
+        let Some(relative) =
+            artifact_write_preflight_path_for_tool(tool_name, &self.selected_skills, arguments)?
+        else {
             return Ok(());
         };
         let report = prepare_workspace_skill_artifact_write(
@@ -1019,6 +1018,18 @@ fn normalize_agl_artifact_write_path(arguments: &serde_json::Value) -> Result<Op
         }
     }
     Ok(Some(normalized))
+}
+
+fn artifact_write_preflight_path_for_tool(
+    tool_name: &str,
+    selected_skills: &[SkillId],
+    arguments: &serde_json::Value,
+) -> Result<Option<PathBuf>> {
+    if tool_name != agl_tools::FS_EDIT_TOOL_ID || selected_skills.is_empty() {
+        return Ok(None);
+    }
+
+    normalize_agl_artifact_write_path(arguments)
 }
 
 fn write_skill_folder_prepare_evidence(
