@@ -156,6 +156,131 @@ fn status_after_init_warns_about_missing_skills_submodule() {
 }
 
 #[test]
+fn artifact_status_reports_default_contracts() {
+    let root = temp_root("artifact-status");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactReportState::Warning);
+    assert!(report.lock_path.ends_with(ARTIFACT_LOCK_PATH));
+    assert!(report.artifacts.iter().any(|artifact| {
+        artifact.id == "tasks"
+            && artifact.path == PathBuf::from(".agl/tasks")
+            && artifact.kind == ArtifactKind::Source
+            && artifact.schema.as_deref() == Some("agl.task_spec_legacy.v1")
+    }));
+    assert!(
+        report
+            .warnings
+            .contains(&"artifact_lock_missing".to_string())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_sync_creates_missing_declared_roots() {
+    let root = temp_root("artifact-sync");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    fs::remove_dir_all(root.join(".agl/tasks")).unwrap();
+
+    let report = sync_artifacts(
+        &root,
+        &ArtifactSyncOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert!(root.join(".agl/tasks").is_dir());
+    assert!(report.actions.iter().any(|action| {
+        action.artifact_id == "tasks" && action.action == ArtifactSyncActionKind::CreatedDir
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_lock_writes_contract_hashes() {
+    let root = temp_root("artifact-lock");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let report = lock_artifacts(
+        &root,
+        &ArtifactLockOptions {
+            dry_run: false,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert!(report.wrote);
+    assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
+    let locked = report.lock.artifacts.get("tasks").unwrap();
+    assert_eq!(locked.source_id, "workspace");
+    assert_eq!(locked.contract_hash.len(), 64);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_rejects_paths_outside_agl() {
+    let root = temp_root("artifact-invalid-path");
+    fs::create_dir_all(root.join(".agl")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "local"
+
+[artifact_sources.bad]
+role = "local"
+kind = "local"
+path = ".agl/sources/bad"
+
+[[artifact_sources.bad.artifacts]]
+id = "bad"
+kind = "source"
+path = "outside"
+access = "read"
+"#,
+    )
+    .unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactReportState::Invalid);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("artifact.bad.path_invalid"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_can_apply_local_workspace_profile_file() {
     let root = temp_root("profile-file");
     let profile_path = root.join("portable-profile.toml");
