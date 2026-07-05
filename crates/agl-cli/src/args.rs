@@ -246,6 +246,22 @@ struct RepoInitArgs {
     #[arg(long, value_name = "PATH")]
     profile_file: Option<PathBuf>,
 
+    /// Skills repository URL for the .agl/skills submodule.
+    #[arg(long, value_name = "URL")]
+    skills_url: Option<String>,
+
+    /// Skills repository revision to pin in the workspace manifest.
+    #[arg(long, value_name = "REV")]
+    skills_rev: Option<String>,
+
+    /// Task/spec repository URL for the .agl/tasks submodule.
+    #[arg(long, value_name = "URL")]
+    tasks_url: Option<String>,
+
+    /// Task/spec repository revision to pin in the workspace manifest.
+    #[arg(long, value_name = "REV", requires = "tasks_url")]
+    tasks_rev: Option<String>,
+
     /// Print planned changes without writing files.
     #[arg(long)]
     dry_run: bool,
@@ -1073,6 +1089,10 @@ fn repo_init_options(args: RepoInitArgs) -> RepoInitOptions {
     RepoInitOptions {
         profile: args.profile,
         profile_file: args.profile_file,
+        skills_url: args.skills_url,
+        skills_rev: args.skills_rev,
+        tasks_url: args.tasks_url,
+        tasks_rev: args.tasks_rev,
         dry_run: args.dry_run,
         force: args.force,
     }

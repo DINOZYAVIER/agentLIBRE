@@ -119,6 +119,10 @@ impl RepoTools {
                     .profile
                     .unwrap_or_else(|| agl_repo::DEFAULT_PROFILE.to_string()),
                 profile_file: args.profile_file.map(PathBuf::from),
+                skills_url: None,
+                skills_rev: None,
+                tasks_url: None,
+                tasks_rev: None,
                 dry_run: args.dry_run.unwrap_or(false),
                 force: args.force.unwrap_or(false),
             },
@@ -138,6 +142,10 @@ impl RepoTools {
             &RepoInitOptions {
                 profile: agl_repo::DEFAULT_PROFILE.to_string(),
                 profile_file: Some(PathBuf::from(args.profile_file)),
+                skills_url: None,
+                skills_rev: None,
+                tasks_url: None,
+                tasks_rev: None,
                 dry_run: args.dry_run.unwrap_or(false),
                 force: args.force.unwrap_or(false),
             },
