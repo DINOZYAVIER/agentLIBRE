@@ -44,6 +44,48 @@ fn git_with_identity(root: &Path, args: &[&str]) {
     git(root, &full_args);
 }
 
+fn write_task_spec(path: PathBuf, valid: bool) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let content = if valid {
+        r#"# Problem
+
+Problem statement.
+
+# Goal
+
+Goal statement.
+
+# Scope
+
+Scope statement.
+
+# Non-goals
+
+Non-goals statement.
+
+# Implementation
+
+Implementation steps.
+
+# Acceptance Criteria
+
+Acceptance criteria.
+
+# Verification
+
+Verification commands.
+"#
+    } else {
+        r#"# Problem
+
+Only a partial task spec.
+"#
+    };
+    fs::write(path, content).unwrap();
+}
+
 #[test]
 fn init_creates_manifest_and_local_component_dirs() {
     let root = temp_root("init");
@@ -340,6 +382,69 @@ fn init_component_rejects_local_tasks_component() {
             .errors
             .iter()
             .any(|error| error.contains("component_not_submodule"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_accepts_valid_markdown() {
+    let root = temp_root("verify-valid-task-spec");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), true);
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: true }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Ok);
+    assert!(!report.should_fail(true));
+    assert_eq!(report.files.len(), 1);
+    assert!(report.files[0].valid);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_reports_missing_sections_per_file() {
+    let root = temp_root("verify-invalid-task-spec");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), false);
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Invalid);
+    assert!(report.should_fail(false));
+    assert_eq!(report.files.len(), 1);
+    assert!(!report.files[0].valid);
+    assert!(
+        report.files[0]
+            .missing_sections
+            .contains(&"acceptance criteria".to_string())
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.starts_with("invalid_task_spec:"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_rejects_empty_tasks_component() {
+    let root = temp_root("verify-empty-task-specs");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Invalid);
+    assert!(
+        report
+            .errors
+            .contains(&"no_task_spec_markdown_files".to_string())
     );
 
     fs::remove_dir_all(root).unwrap();

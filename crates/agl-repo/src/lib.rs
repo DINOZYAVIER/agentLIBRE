@@ -335,6 +335,98 @@ pub fn init_repo_component(
     })
 }
 
+pub fn verify_task_specs(
+    start: impl AsRef<Path>,
+    options: &TaskSpecVerifyOptions,
+) -> Result<TaskSpecVerifyReport> {
+    let status = status_repo_workspace(
+        start,
+        &RepoStatusOptions {
+            component: Some("tasks".to_string()),
+            strict: options.strict,
+        },
+    )?;
+    let workspace_root = status.workspace_root;
+    let component = status.components.into_iter().next();
+    let root = component
+        .as_ref()
+        .map(|component| workspace_root.join(&component.path))
+        .unwrap_or_else(|| workspace_root.join(".agl/tasks"));
+    let warnings = status.warnings;
+    let mut errors = status.errors;
+
+    if component.is_none() {
+        errors.push("tasks_component_missing".to_string());
+    }
+
+    let files = if root.is_dir() {
+        let mut paths = Vec::new();
+        collect_markdown_files(&root, &mut paths)?;
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| task_spec_file_status(&workspace_root, &path))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if root.exists() && files.is_empty() {
+        errors.push("no_task_spec_markdown_files".to_string());
+    }
+    for file in &files {
+        if !file.errors.is_empty() || !file.valid {
+            errors.push(format!("invalid_task_spec: {}", file.path.display()));
+        }
+    }
+
+    let state = if !errors.is_empty() {
+        TaskSpecVerifyState::Invalid
+    } else if !warnings.is_empty() || files.iter().any(|file| !file.warnings.is_empty()) {
+        TaskSpecVerifyState::Warning
+    } else {
+        TaskSpecVerifyState::Ok
+    };
+
+    Ok(TaskSpecVerifyReport {
+        state,
+        workspace_root,
+        component,
+        root,
+        files,
+        warnings,
+        errors,
+    })
+}
+
+pub fn validate_task_spec_markdown(markdown: &str) -> TaskSpecValidation {
+    let lower = markdown.to_ascii_lowercase();
+    let required = [
+        ("problem", &["problem"][..]),
+        ("goal", &["goal"][..]),
+        ("scope", &["scope"][..]),
+        ("non-goals", &["non-goals", "non goals"][..]),
+        (
+            "implementation",
+            &["implementation", "implementation steps"][..],
+        ),
+        (
+            "acceptance criteria",
+            &["acceptance criteria", "acceptance"][..],
+        ),
+        (
+            "verification",
+            &["verification", "verification commands"][..],
+        ),
+    ];
+    let missing_sections = required
+        .into_iter()
+        .filter(|(_canonical, aliases)| !aliases.iter().any(|alias| lower.contains(alias)))
+        .map(|(canonical, _aliases)| canonical.to_string())
+        .collect();
+    TaskSpecValidation { missing_sections }
+}
+
 pub fn export_repo_profile(
     start: impl AsRef<Path>,
     options: &RepoExportProfileOptions,
@@ -1035,6 +1127,57 @@ fn component_init_error_report(
         actions: Vec::new(),
         errors,
     }
+}
+
+fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name == ".git" {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_markdown_files(&path, files)?;
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn task_spec_file_status(workspace_root: &Path, path: &Path) -> TaskSpecFileStatus {
+    let relative = relative_path(workspace_root, path).unwrap_or_else(|| path.to_path_buf());
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            let validation = validate_task_spec_markdown(&content);
+            TaskSpecFileStatus {
+                path: relative,
+                valid: validation.is_valid(),
+                missing_sections: validation.missing_sections,
+                warnings: Vec::new(),
+                errors: Vec::new(),
+            }
+        }
+        Err(err) => TaskSpecFileStatus {
+            path: relative,
+            valid: false,
+            missing_sections: Vec::new(),
+            warnings: Vec::new(),
+            errors: vec![format!("read_failed: {err}")],
+        },
+    }
+}
+
+fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let path = path.canonicalize().ok()?;
+    path.strip_prefix(root).ok().map(PathBuf::from)
 }
 
 fn slash_path(path: &Path) -> String {
