@@ -271,6 +271,17 @@ fn parse_repo_status_hidden_alias() {
 }
 
 #[test]
+fn parse_repo_verify_tasks_hidden_command() {
+    assert_command(
+        ["agl", "repo", "verify-tasks", "--json", "--strict"],
+        CliCommand::Repo(RepoCommand::VerifyTasks(TaskSpecVerifyOptions {
+            json: true,
+            strict: true,
+        })),
+    );
+}
+
+#[test]
 fn parse_repo_init_component_hidden_command() {
     assert_command(
         [

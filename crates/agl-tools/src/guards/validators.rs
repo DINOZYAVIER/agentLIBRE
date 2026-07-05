@@ -57,28 +57,15 @@ pub(crate) fn validate_task_spec(input: HookInput) -> HookResult {
             None,
         );
     };
-    let lower = markdown.to_ascii_lowercase();
-    let required = [
-        "problem",
-        "goal",
-        "scope",
-        "non-goals",
-        "acceptance criteria",
-        "verification",
-    ];
-    let missing = required
-        .iter()
-        .filter(|section| !lower.contains(**section))
-        .copied()
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
+    let validation = agl_repo::validate_task_spec_markdown(markdown);
+    if validation.is_valid() {
         pass(input.hook_id)
     } else {
         fail(
             input.hook_id,
             "task_spec_missing_sections",
             "task spec is missing required sections",
-            Some(missing.join(", ")),
+            Some(validation.missing_sections.join(", ")),
         )
     }
 }

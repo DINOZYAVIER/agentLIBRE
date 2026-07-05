@@ -132,6 +132,7 @@ fn task_spec_guard_requires_contract_sections() {
 # Goal
 # Scope
 # Non-goals
+# Implementation
 # Acceptance Criteria
 # Verification
 "#;

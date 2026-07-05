@@ -49,6 +49,11 @@ pub struct RepoComponentInitOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSpecVerifyOptions {
+    pub strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoHooksOptions {
     pub dry_run: bool,
     pub force: bool,
@@ -173,6 +178,51 @@ pub enum RepoComponentInitAction {
     WouldCheckoutRev,
     CheckedOutRev,
     AlreadyInitialized,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TaskSpecValidation {
+    pub missing_sections: Vec<String>,
+}
+
+impl TaskSpecValidation {
+    pub fn is_valid(&self) -> bool {
+        self.missing_sections.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TaskSpecVerifyReport {
+    pub state: TaskSpecVerifyState,
+    pub workspace_root: PathBuf,
+    pub component: Option<ComponentStatus>,
+    pub root: PathBuf,
+    pub files: Vec<TaskSpecFileStatus>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl TaskSpecVerifyReport {
+    pub fn should_fail(&self, strict: bool) -> bool {
+        !self.errors.is_empty() || (strict && !self.warnings.is_empty())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskSpecVerifyState {
+    Ok,
+    Warning,
+    Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TaskSpecFileStatus {
+    pub path: PathBuf,
+    pub valid: bool,
+    pub missing_sections: Vec<String>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

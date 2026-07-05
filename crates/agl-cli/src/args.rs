@@ -166,6 +166,8 @@ enum RepoCommands {
     ImportProfile(RepoImportProfileArgs),
     /// Report repo-local AgentLIBRE workspace status.
     Status(RepoStatusArgs),
+    /// Verify task spec files in the tasks component.
+    VerifyTasks(TaskSpecVerifyArgs),
     /// Install AgentLIBRE git hooks for this repository.
     InstallHooks(RepoHooksArgs),
     /// Export a portable workspace profile manifest.
@@ -314,6 +316,17 @@ struct RepoStatusArgs {
     /// Limit status to one component.
     #[arg(long, value_name = "NAME")]
     component: Option<String>,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct TaskSpecVerifyArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 
     /// Treat warnings as failures.
     #[arg(long)]
@@ -1090,6 +1103,9 @@ impl Cli {
                     RepoCommand::ImportProfile(repo_import_profile_options(args))
                 }
                 RepoCommands::Status(args) => RepoCommand::Status(repo_status_options(args)),
+                RepoCommands::VerifyTasks(args) => {
+                    RepoCommand::VerifyTasks(task_spec_verify_options(args))
+                }
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
                 }
@@ -1143,6 +1159,13 @@ fn repo_status_options(args: RepoStatusArgs) -> RepoStatusOptions {
     RepoStatusOptions {
         json: args.json,
         component: args.component,
+        strict: args.strict,
+    }
+}
+
+fn task_spec_verify_options(args: TaskSpecVerifyArgs) -> TaskSpecVerifyOptions {
+    TaskSpecVerifyOptions {
+        json: args.json,
         strict: args.strict,
     }
 }
