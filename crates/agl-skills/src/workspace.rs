@@ -14,6 +14,7 @@ use crate::{
     SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource, SkillTrustState,
     builtin_registry,
 };
+use agl_tools::SkillId;
 
 const SKILLS_COMPONENT: &str = "skills";
 const SKILLS_LOCK_PATH: &str = ".agl/skills.lock";
@@ -27,6 +28,13 @@ pub struct SkillLockOptions {
 pub struct SkillFolderSyncOptions {
     pub dry_run: bool,
     pub situation: SkillFolderCreateSituation,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SkillFolderPrepareOptions {
+    pub dry_run: bool,
+    pub situation: SkillFolderCreateSituation,
+    pub strict: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -92,11 +100,19 @@ pub struct SkillArtifactFolderStatus {
     pub kind: SkillArtifactKind,
     pub access: SkillArtifactAccess,
     pub create: Vec<SkillFolderCreateRule>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness: Vec<SkillArtifactFolderReadiness>,
     pub provides: Vec<String>,
     pub schema: Option<String>,
     pub exists: bool,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SkillArtifactFolderReadiness {
+    pub situation: SkillFolderCreateSituation,
+    pub action: SkillFolderSyncActionKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -137,6 +153,8 @@ pub struct SkillFolderSyncAction {
     pub skill: String,
     pub folder_id: String,
     pub path: PathBuf,
+    pub kind: SkillArtifactKind,
+    pub access: SkillArtifactAccess,
     pub action: SkillFolderSyncActionKind,
 }
 
@@ -151,6 +169,8 @@ pub enum SkillFolderSyncActionKind {
     WouldCreateDir,
     CreatedDir,
 }
+
+pub type SkillFolderPrepareReport = SkillFolderSyncReport;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -352,61 +372,104 @@ pub fn sync_workspace_skill_folders(
     options: &SkillFolderSyncOptions,
 ) -> Result<SkillFolderSyncReport> {
     let report = workspace_skill_report(start)?;
-    let mut actions = Vec::new();
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
+    let skill_indexes = report
+        .skills
+        .iter()
+        .enumerate()
+        .filter_map(|(index, skill)| skill.valid.then_some(index))
+        .collect::<Vec<_>>();
+    sync_skill_folder_indexes(&report, &skill_indexes, options, false, false)
+}
 
-    for skill in &report.skills {
-        if !skill.valid {
-            continue;
-        }
+pub fn prepare_workspace_skill_folders(
+    start: impl AsRef<Path>,
+    trust_store_path: impl AsRef<Path>,
+    selected_skills: &[SkillId],
+    options: &SkillFolderPrepareOptions,
+) -> Result<SkillFolderPrepareReport> {
+    let report = workspace_skill_report_with_trust(start, trust_store_path)?;
+    let mut errors = Vec::new();
+    let skill_indexes = selected_trusted_workspace_skill_indexes(
+        &report,
+        selected_skills,
+        "runtime_prepare",
+        &mut errors,
+    )?;
+    let sync = sync_skill_folder_indexes(
+        &report,
+        &skill_indexes,
+        &SkillFolderSyncOptions {
+            dry_run: options.dry_run,
+            situation: options.situation,
+        },
+        options.strict,
+        false,
+    )?;
+    let SkillFolderSyncReport {
+        workspace_root,
+        dry_run,
+        situation,
+        actions,
+        warnings,
+        errors: sync_errors,
+    } = sync;
+    errors.extend(sync_errors);
+    Ok(SkillFolderSyncReport {
+        workspace_root,
+        dry_run,
+        situation,
+        actions,
+        warnings,
+        errors,
+    })
+}
+
+pub fn prepare_workspace_skill_artifact_write(
+    start: impl AsRef<Path>,
+    trust_store_path: impl AsRef<Path>,
+    selected_skills: &[SkillId],
+    target_relative_path: impl AsRef<Path>,
+    options: &SkillFolderPrepareOptions,
+) -> Result<SkillFolderPrepareReport> {
+    let report = workspace_skill_report_with_trust(start, trust_store_path)?;
+    let target_relative_path = target_relative_path.as_ref();
+    let mut errors = Vec::new();
+    let skill_indexes = selected_trusted_workspace_skill_indexes(
+        &report,
+        selected_skills,
+        "artifact_write",
+        &mut errors,
+    )?;
+    let selected_names = selected_skill_names(&report, &skill_indexes);
+    let mut actions = Vec::new();
+    for skill_index in skill_indexes {
+        let skill = &report.skills[skill_index];
         let skill_name = skill.name.as_deref().unwrap_or("<invalid>");
         for folder in &skill.artifact_folders {
-            let path = report.workspace_root.join(&folder.path);
-            let action = if folder.exists {
-                SkillFolderSyncActionKind::Exists
-            } else if folder.access == SkillArtifactAccess::Read {
-                SkillFolderSyncActionKind::SkippedReadOnly
-            } else if folder.kind == SkillArtifactKind::Source {
-                SkillFolderSyncActionKind::SkippedSource
-            } else if folder.create.is_empty() {
-                SkillFolderSyncActionKind::SkippedNoCreateRule
-            } else if !folder
-                .create
-                .iter()
-                .any(|rule| rule.when == options.situation)
-            {
-                SkillFolderSyncActionKind::SkippedSituationMismatch
-            } else if options.dry_run {
-                SkillFolderSyncActionKind::WouldCreateDir
-            } else {
-                match fs::create_dir_all(&path) {
-                    Ok(()) => SkillFolderSyncActionKind::CreatedDir,
-                    Err(err) => {
-                        errors.push(format!(
-                            "skill.{skill_name}.artifact_folder.{}.create_failed: {}",
-                            folder.id, err
-                        ));
-                        continue;
-                    }
-                }
-            };
+            if !target_relative_path.starts_with(&folder.path) {
+                continue;
+            }
+            let action = apply_skill_folder_action(
+                &report.workspace_root,
+                skill_name,
+                folder,
+                &SkillFolderSyncOptions {
+                    dry_run: options.dry_run,
+                    situation: options.situation,
+                },
+                options.strict,
+                options.strict && !folder.exists,
+                &mut errors,
+            );
             actions.push(SkillFolderSyncAction {
                 skill: skill_name.to_string(),
                 folder_id: folder.id.clone(),
                 path: folder.path.clone(),
+                kind: folder.kind,
+                access: folder.access,
                 action,
             });
         }
-    }
-
-    if !options.dry_run {
-        let refreshed = workspace_skill_report(&report.workspace_root)?;
-        warnings.extend(skill_folder_warnings(&refreshed.skills));
-        errors.extend(skill_folder_errors(&refreshed.skills));
-    } else {
-        warnings.extend(skill_folder_warnings(&report.skills));
-        errors.extend(skill_folder_errors(&report.skills));
     }
 
     Ok(SkillFolderSyncReport {
@@ -414,9 +477,223 @@ pub fn sync_workspace_skill_folders(
         dry_run: options.dry_run,
         situation: options.situation,
         actions,
+        warnings: skill_folder_warnings(selected_skills_by_names(&report.skills, &selected_names)),
+        errors,
+    })
+}
+
+fn sync_skill_folder_indexes(
+    report: &WorkspaceSkillReport,
+    skill_indexes: &[usize],
+    options: &SkillFolderSyncOptions,
+    strict_matching_create: bool,
+    require_missing_create_rule: bool,
+) -> Result<SkillFolderSyncReport> {
+    let mut actions = Vec::new();
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    for skill in selected_skills_by_index(&report.skills, skill_indexes) {
+        let skill_name = skill.name.as_deref().unwrap_or("<invalid>");
+        for folder in &skill.artifact_folders {
+            let action = apply_skill_folder_action(
+                &report.workspace_root,
+                skill_name,
+                folder,
+                options,
+                strict_matching_create,
+                require_missing_create_rule,
+                &mut errors,
+            );
+            actions.push(SkillFolderSyncAction {
+                skill: skill_name.to_string(),
+                folder_id: folder.id.clone(),
+                path: folder.path.clone(),
+                kind: folder.kind,
+                access: folder.access,
+                action,
+            });
+        }
+    }
+
+    if !options.dry_run {
+        let refreshed = workspace_skill_report(&report.workspace_root)?;
+        warnings.extend(skill_folder_warnings(selected_skills_by_names(
+            &refreshed.skills,
+            &selected_skill_names(report, skill_indexes),
+        )));
+        errors.extend(skill_folder_errors(selected_skills_by_names(
+            &refreshed.skills,
+            &selected_skill_names(report, skill_indexes),
+        )));
+    } else {
+        warnings.extend(skill_folder_warnings(selected_skills_by_index(
+            &report.skills,
+            skill_indexes,
+        )));
+        errors.extend(skill_folder_errors(selected_skills_by_index(
+            &report.skills,
+            skill_indexes,
+        )));
+    }
+
+    Ok(SkillFolderSyncReport {
+        workspace_root: report.workspace_root.clone(),
+        dry_run: options.dry_run,
+        situation: options.situation,
+        actions,
         warnings,
         errors,
     })
+}
+
+fn selected_trusted_workspace_skill_indexes(
+    report: &WorkspaceSkillReport,
+    selected_skills: &[SkillId],
+    situation: &str,
+    errors: &mut Vec<String>,
+) -> Result<Vec<usize>> {
+    let builtins = builtin_registry()?;
+    let mut indexes = Vec::new();
+    for selected in selected_skills {
+        let Some(index) = report
+            .skills
+            .iter()
+            .position(|skill| skill.name.as_deref() == Some(selected.as_str()))
+        else {
+            continue;
+        };
+        let skill = &report.skills[index];
+        if skill.usable && skill.trust_state == SkillTrustState::TrustedLocal {
+            indexes.push(index);
+            continue;
+        }
+        if builtins.get(selected).is_some() {
+            continue;
+        }
+        errors.push(format!(
+            "skill.{}.folder_prepare.{situation}.not_trusted: {:?}",
+            selected, skill.trust_state
+        ));
+    }
+    Ok(indexes)
+}
+
+fn apply_skill_folder_action(
+    workspace_root: &Path,
+    skill_name: &str,
+    folder: &SkillArtifactFolderStatus,
+    options: &SkillFolderSyncOptions,
+    strict_matching_create: bool,
+    require_missing_create_rule: bool,
+    errors: &mut Vec<String>,
+) -> SkillFolderSyncActionKind {
+    let action = planned_skill_folder_action(folder, options.situation);
+    match action {
+        SkillFolderSyncActionKind::WouldCreateDir if !options.dry_run => {
+            let path = workspace_root.join(&folder.path);
+            match fs::create_dir_all(&path) {
+                Ok(()) => SkillFolderSyncActionKind::CreatedDir,
+                Err(err) => {
+                    errors.push(format!(
+                        "skill.{skill_name}.artifact_folder.{}.create_failed: {}",
+                        folder.id, err
+                    ));
+                    action
+                }
+            }
+        }
+        SkillFolderSyncActionKind::SkippedReadOnly | SkillFolderSyncActionKind::SkippedSource
+            if strict_matching_create && folder_has_create_situation(folder, options.situation) =>
+        {
+            errors.push(format!(
+                "skill.{skill_name}.artifact_folder.{}.not_creatable_for_{}",
+                folder.id,
+                skill_folder_create_situation_key(options.situation)
+            ));
+            action
+        }
+        SkillFolderSyncActionKind::SkippedNoCreateRule
+        | SkillFolderSyncActionKind::SkippedSituationMismatch
+            if require_missing_create_rule =>
+        {
+            errors.push(format!(
+                "skill.{skill_name}.artifact_folder.{}.missing_create_rule_for_{}",
+                folder.id,
+                skill_folder_create_situation_key(options.situation)
+            ));
+            action
+        }
+        _ => action,
+    }
+}
+
+fn planned_skill_folder_action(
+    folder: &SkillArtifactFolderStatus,
+    situation: SkillFolderCreateSituation,
+) -> SkillFolderSyncActionKind {
+    if folder.exists {
+        SkillFolderSyncActionKind::Exists
+    } else if folder.access == SkillArtifactAccess::Read {
+        SkillFolderSyncActionKind::SkippedReadOnly
+    } else if folder.kind == SkillArtifactKind::Source {
+        SkillFolderSyncActionKind::SkippedSource
+    } else if folder.create.is_empty() {
+        SkillFolderSyncActionKind::SkippedNoCreateRule
+    } else if !folder_has_create_situation(folder, situation) {
+        SkillFolderSyncActionKind::SkippedSituationMismatch
+    } else {
+        SkillFolderSyncActionKind::WouldCreateDir
+    }
+}
+
+fn folder_has_create_situation(
+    folder: &SkillArtifactFolderStatus,
+    situation: SkillFolderCreateSituation,
+) -> bool {
+    folder.create.iter().any(|rule| rule.when == situation)
+}
+
+fn folder_readiness(folder: &SkillArtifactFolderStatus) -> Vec<SkillArtifactFolderReadiness> {
+    [
+        SkillFolderCreateSituation::SkillSync,
+        SkillFolderCreateSituation::RuntimePrepare,
+        SkillFolderCreateSituation::ArtifactWrite,
+    ]
+    .into_iter()
+    .map(|situation| SkillArtifactFolderReadiness {
+        situation,
+        action: planned_skill_folder_action(folder, situation),
+    })
+    .collect()
+}
+
+fn selected_skill_names(report: &WorkspaceSkillReport, indexes: &[usize]) -> BTreeSet<String> {
+    indexes
+        .iter()
+        .filter_map(|index| report.skills.get(*index))
+        .filter_map(|skill| skill.name.clone())
+        .collect()
+}
+
+fn selected_skills_by_index<'a>(
+    skills: &'a [WorkspaceSkillStatus],
+    indexes: &[usize],
+) -> Vec<&'a WorkspaceSkillStatus> {
+    indexes
+        .iter()
+        .filter_map(|index| skills.get(*index))
+        .collect()
+}
+
+fn selected_skills_by_names<'a>(
+    skills: &'a [WorkspaceSkillStatus],
+    names: &BTreeSet<String>,
+) -> Vec<&'a WorkspaceSkillStatus> {
+    skills
+        .iter()
+        .filter(|skill| skill.name.as_ref().is_some_and(|name| names.contains(name)))
+        .collect()
 }
 
 pub fn trusted_workspace_registry(
@@ -852,12 +1129,17 @@ fn artifact_folder_statuses(
                 kind: artifact.kind,
                 access: artifact.access,
                 create: artifact.create.clone(),
+                readiness: Vec::new(),
                 provides: artifact.provides.clone(),
                 schema: artifact.schema.clone(),
                 exists,
                 warnings,
                 errors,
             }
+        })
+        .map(|mut status| {
+            status.readiness = folder_readiness(&status);
+            status
         })
         .collect()
 }
@@ -1370,9 +1652,11 @@ fn skill_error_keys(skill: &WorkspaceSkillStatus) -> Vec<String> {
         .collect()
 }
 
-fn skill_folder_warnings(skills: &[WorkspaceSkillStatus]) -> Vec<String> {
+fn skill_folder_warnings<'a>(
+    skills: impl IntoIterator<Item = &'a WorkspaceSkillStatus>,
+) -> Vec<String> {
     skills
-        .iter()
+        .into_iter()
         .flat_map(|skill| {
             let label = skill
                 .name
@@ -1388,9 +1672,11 @@ fn skill_folder_warnings(skills: &[WorkspaceSkillStatus]) -> Vec<String> {
         .collect()
 }
 
-fn skill_folder_errors(skills: &[WorkspaceSkillStatus]) -> Vec<String> {
+fn skill_folder_errors<'a>(
+    skills: impl IntoIterator<Item = &'a WorkspaceSkillStatus>,
+) -> Vec<String> {
     skills
-        .iter()
+        .into_iter()
         .flat_map(|skill| {
             let label = skill
                 .name
@@ -1475,6 +1761,14 @@ fn relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
 
 fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn skill_folder_create_situation_key(situation: SkillFolderCreateSituation) -> &'static str {
+    match situation {
+        SkillFolderCreateSituation::SkillSync => "skill_sync",
+        SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
+        SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
+    }
 }
 
 fn lock_timestamp() -> String {

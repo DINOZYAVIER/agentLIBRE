@@ -98,6 +98,14 @@ folders:
             .warnings
             .contains(&"artifact_folder.task-drafts.missing".to_string())
     );
+    assert!(skill.artifact_folders[0].readiness.iter().any(|readiness| {
+        readiness.situation == SkillFolderCreateSituation::SkillSync
+            && readiness.action == SkillFolderSyncActionKind::WouldCreateDir
+    }));
+    assert!(skill.artifact_folders[0].readiness.iter().any(|readiness| {
+        readiness.situation == SkillFolderCreateSituation::RuntimePrepare
+            && readiness.action == SkillFolderSyncActionKind::SkippedSituationMismatch
+    }));
 
     let sync = sync_workspace_skill_folders(
         &root,
@@ -313,6 +321,208 @@ fn trust_promotes_changes_and_revokes_locked_workspace_skill() {
 }
 
 #[test]
+fn runtime_prepare_creates_selected_trusted_skill_folders() {
+    let (root, source) = clean_skills_submodule_fixture_with_folders(
+        "runtime-prepare-folders",
+        "repo-change",
+        r#"
+folders:
+  - id: runtime-state
+    kind: state
+    path: .agl/state/repo-change
+    access: read_write
+    create:
+      - when: runtime_prepare"#,
+    );
+    lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let trust_store = root.join("state/skill-trust.toml");
+    trust_workspace_skill(
+        &root,
+        &trust_store,
+        "repo-change",
+        &SkillTrustOptions {
+            approve: true,
+            agentlibre_version: "test-version".to_string(),
+        },
+    )
+    .unwrap();
+
+    let report = prepare_workspace_skill_folders(
+        &root,
+        &trust_store,
+        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &SkillFolderPrepareOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::RuntimePrepare,
+            strict: true,
+        },
+    )
+    .unwrap();
+
+    assert!(!report.has_errors(), "{:?}", report.errors);
+    assert!(root.join(".agl/state/repo-change").is_dir());
+    assert!(report.actions.iter().any(|action| {
+        action.skill == "repo-change"
+            && action.folder_id == "runtime-state"
+            && action.kind == SkillArtifactKind::State
+            && action.access == SkillArtifactAccess::ReadWrite
+            && action.action == SkillFolderSyncActionKind::CreatedDir
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
+fn runtime_prepare_rejects_untrusted_selected_workspace_skill() {
+    let (root, source) = clean_skills_submodule_fixture_with_folders(
+        "runtime-prepare-untrusted",
+        "repo-change",
+        r#"
+folders:
+  - id: runtime-state
+    kind: state
+    path: .agl/state/repo-change
+    access: read_write
+    create:
+      - when: runtime_prepare"#,
+    );
+    lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let trust_store = root.join("state/skill-trust.toml");
+
+    let report = prepare_workspace_skill_folders(
+        &root,
+        &trust_store,
+        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &SkillFolderPrepareOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::RuntimePrepare,
+            strict: true,
+        },
+    )
+    .unwrap();
+
+    assert!(report.has_errors());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("not_trusted")),
+        "{:?}",
+        report.errors
+    );
+    assert!(!root.join(".agl/state/repo-change").exists());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
+fn artifact_write_prepare_creates_matching_selected_skill_folder() {
+    let (root, source) = clean_skills_submodule_fixture_with_folders(
+        "artifact-write-folders",
+        "repo-change",
+        r#"
+folders:
+  - id: task-drafts
+    kind: generated
+    path: .agl/tasks/repo-change
+    access: read_write
+    create:
+      - when: artifact_write"#,
+    );
+    lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let trust_store = root.join("state/skill-trust.toml");
+    trust_workspace_skill(
+        &root,
+        &trust_store,
+        "repo-change",
+        &SkillTrustOptions {
+            approve: true,
+            agentlibre_version: "test-version".to_string(),
+        },
+    )
+    .unwrap();
+
+    let report = prepare_workspace_skill_artifact_write(
+        &root,
+        &trust_store,
+        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        ".agl/tasks/repo-change/draft.md",
+        &SkillFolderPrepareOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::ArtifactWrite,
+            strict: true,
+        },
+    )
+    .unwrap();
+
+    assert!(!report.has_errors(), "{:?}", report.errors);
+    assert!(root.join(".agl/tasks/repo-change").is_dir());
+    assert!(report.actions.iter().any(|action| {
+        action.folder_id == "task-drafts" && action.action == SkillFolderSyncActionKind::CreatedDir
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
+fn artifact_write_prepare_rejects_missing_matching_create_rule() {
+    let (root, source) = clean_skills_submodule_fixture_with_folders(
+        "artifact-write-no-rule",
+        "repo-change",
+        r#"
+folders:
+  - id: task-drafts
+    kind: generated
+    path: .agl/tasks/repo-change
+    access: read_write
+    create:
+      - when: runtime_prepare"#,
+    );
+    lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let trust_store = root.join("state/skill-trust.toml");
+    trust_workspace_skill(
+        &root,
+        &trust_store,
+        "repo-change",
+        &SkillTrustOptions {
+            approve: true,
+            agentlibre_version: "test-version".to_string(),
+        },
+    )
+    .unwrap();
+
+    let report = prepare_workspace_skill_artifact_write(
+        &root,
+        &trust_store,
+        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        ".agl/tasks/repo-change/draft.md",
+        &SkillFolderPrepareOptions {
+            dry_run: false,
+            situation: SkillFolderCreateSituation::ArtifactWrite,
+            strict: true,
+        },
+    )
+    .unwrap();
+
+    assert!(report.has_errors());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("missing_create_rule_for_artifact_write")),
+        "{:?}",
+        report.errors
+    );
+    assert!(!root.join(".agl/tasks/repo-change").exists());
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
 fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
     let (root, source) = clean_skills_submodule_fixture_with_skill("same-name", "repo-review");
     lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
@@ -433,20 +643,43 @@ fn clean_skills_submodule_fixture_with_allowed_tools(
     clean_skills_submodule_fixture_with_routing(label, skill_name, allowed_tools, &[])
 }
 
+fn clean_skills_submodule_fixture_with_folders(
+    label: &str,
+    skill_name: &str,
+    folders_yaml: &str,
+) -> (PathBuf, PathBuf) {
+    clean_skills_submodule_fixture_with_writer(label, |source| {
+        write_workspace_skill_with_folders(
+            &source.join("agl").join(skill_name),
+            skill_name,
+            folders_yaml,
+        );
+    })
+}
+
 fn clean_skills_submodule_fixture_with_routing(
     label: &str,
     skill_name: &str,
     allowed_tools: &[&str],
     requestable_tools: &[&str],
 ) -> (PathBuf, PathBuf) {
+    clean_skills_submodule_fixture_with_writer(label, |source| {
+        write_workspace_skill(
+            &source.join("agl").join(skill_name),
+            skill_name,
+            allowed_tools,
+            requestable_tools,
+        );
+    })
+}
+
+fn clean_skills_submodule_fixture_with_writer(
+    label: &str,
+    write_source: impl FnOnce(&Path),
+) -> (PathBuf, PathBuf) {
     let source = temp_root(&format!("{label}-skills-source"));
     init_git_repo(&source);
-    write_workspace_skill(
-        &source.join("agl").join(skill_name),
-        skill_name,
-        allowed_tools,
-        requestable_tools,
-    );
+    write_source(&source);
     git_run(&source, ["add", "."]);
     git_run(
         &source,

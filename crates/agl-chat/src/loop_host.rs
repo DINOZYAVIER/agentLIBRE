@@ -128,6 +128,8 @@ impl AgentLoopHost for ChatLoopHost {
     }
 
     fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
+        self.session
+            .prepare_artifact_write_for_tool(&request.name, &request.arguments)?;
         let tool_id = ToolId::new(request.name.clone())
             .with_context(|| format!("tool id is invalid: {}", request.name))?;
         let output = self

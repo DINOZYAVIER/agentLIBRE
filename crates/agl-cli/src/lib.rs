@@ -1332,6 +1332,14 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
                 skill_folder_create_situation(rule.when)
             );
         }
+        for readiness in &folder.readiness {
+            println!(
+                "skill.{name}.folder.{}.ready.when={} action={}",
+                folder.id,
+                skill_folder_create_situation(readiness.situation),
+                skill_folder_sync_action(readiness.action)
+            );
+        }
         for warning in &folder.warnings {
             println!("skill.{name}.folder.{}.warning={warning}", folder.id);
         }
