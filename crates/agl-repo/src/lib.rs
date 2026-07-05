@@ -5,9 +5,11 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+mod artifacts;
 mod hooks;
 mod types;
 
+pub use artifacts::{lock_artifacts, status_artifacts, sync_artifacts};
 pub use hooks::install_repo_hooks;
 pub use types::*;
 
@@ -518,6 +520,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
             version: profile.version,
             profile: profile.name,
             components: profile.components,
+            artifact_sources: profile.artifact_sources,
         }
     } else {
         if options.profile != DEFAULT_PROFILE {
@@ -530,7 +533,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
     Ok(manifest)
 }
 
-fn default_manifest() -> WorkspaceManifest {
+pub(crate) fn default_manifest() -> WorkspaceManifest {
     WorkspaceManifest {
         version: 1,
         profile: DEFAULT_PROFILE.to_string(),
@@ -584,6 +587,7 @@ fn default_manifest() -> WorkspaceManifest {
                 },
             ),
         ]),
+        artifact_sources: artifacts::default_artifact_sources(),
     }
 }
 
@@ -662,6 +666,7 @@ fn profile_from_workspace_manifest(
         version: manifest.version,
         name: manifest.profile.clone(),
         components,
+        artifact_sources: manifest.artifact_sources.clone(),
         policy: WorkspaceProfilePolicy::default(),
         skill_pack,
     }
@@ -792,12 +797,12 @@ fn write_manifest_change(
     Ok(())
 }
 
-fn read_manifest(path: &Path) -> Result<WorkspaceManifest> {
+pub(crate) fn read_manifest(path: &Path) -> Result<WorkspaceManifest> {
     let content = fs::read_to_string(path)?;
     toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn is_not_found(err: &anyhow::Error) -> bool {
+pub(crate) fn is_not_found(err: &anyhow::Error) -> bool {
     err.downcast_ref::<std::io::Error>()
         .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
 }
@@ -845,6 +850,7 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
             version: profile.version,
             profile: profile.name.clone(),
             components: profile.components.clone(),
+            artifact_sources: profile.artifact_sources.clone(),
         },
         &mut errors,
     );
@@ -894,7 +900,7 @@ fn validate_skill_pack_matches_component(
     }
 }
 
-fn validate_component_path(path: &Path) -> Result<()> {
+pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         bail!("path cannot be empty");
     }

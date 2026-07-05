@@ -57,11 +57,42 @@ pub struct SkillHarness {
     pub context_budget_tokens: u32,
     pub reference_policy: SkillReferencePolicy,
     pub references: Vec<SkillReference>,
+    pub artifacts: Vec<SkillArtifactDeclaration>,
     pub guarantees: Vec<String>,
     pub body: String,
     pub source_path: String,
     pub manifest_sha256: String,
     pub tree_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillArtifactDeclaration {
+    pub id: String,
+    pub kind: SkillArtifactKind,
+    pub path: PathBuf,
+    pub access: SkillArtifactAccess,
+    #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillArtifactKind {
+    Source,
+    Generated,
+    State,
+    Cache,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillArtifactAccess {
+    Read,
+    Write,
+    ReadWrite,
 }
 
 impl SkillHarness {
@@ -201,6 +232,8 @@ struct RawSkillManifest {
     permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
+    #[serde(default)]
+    artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
 }
 
@@ -266,6 +299,9 @@ pub enum SkillManifestError {
     ContextBudgetZero,
     EmptyBody,
     ReferenceEscapesSkill {
+        path: String,
+    },
+    InvalidArtifactPath {
         path: String,
     },
 }
@@ -348,6 +384,9 @@ impl std::fmt::Display for SkillManifestError {
             Self::ReferenceEscapesSkill { path } => {
                 write!(f, "skill reference escapes the skill directory: {path}")
             }
+            Self::InvalidArtifactPath { path } => {
+                write!(f, "skill artifact path is invalid: {path}")
+            }
         }
     }
 }
@@ -408,6 +447,7 @@ fn parse_skill_text(
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
+        artifacts: raw.artifacts,
         guarantees: raw.guarantees,
         body: body.to_string(),
         source_path: manifest_asset.source_path.to_string(),
@@ -452,6 +492,7 @@ fn parse_workspace_text(
         context_budget_tokens: raw.context_budget_tokens,
         reference_policy,
         references,
+        artifacts: raw.artifacts,
         guarantees: raw.guarantees,
         body: body.to_string(),
         source_path: source_path.to_string(),
@@ -500,6 +541,7 @@ fn normalize_raw_manifest(
     raw.required_hooks =
         sort_unique_ids(std::mem::take(&mut raw.required_hooks), "required_hooks")?;
     raw.permissions = normalize_permissions(std::mem::take(&mut raw.permissions))?;
+    normalize_artifacts(&raw.artifacts)?;
     raw.guarantees = sort_unique_strings(std::mem::take(&mut raw.guarantees), "guarantees")?;
     Ok(())
 }
@@ -670,6 +712,50 @@ fn normalize_permissions(
         "permissions.memory.read",
     )?;
     Ok(permissions)
+}
+
+fn normalize_artifacts(artifacts: &[SkillArtifactDeclaration]) -> Result<(), SkillManifestError> {
+    let mut ids = BTreeSet::new();
+    for artifact in artifacts {
+        ensure_non_blank("artifacts.id", &artifact.id)?;
+        if !ids.insert(artifact.id.clone()) {
+            return Err(SkillManifestError::DuplicateValue {
+                field: "artifacts.id",
+                value: artifact.id.clone(),
+            });
+        }
+        validate_artifact_path(&artifact.path)?;
+        if artifact
+            .provides
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(SkillManifestError::BlankField {
+                field: "artifacts.provides",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact_path(path: &Path) -> Result<(), SkillManifestError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(SkillManifestError::InvalidArtifactPath {
+            path: path.display().to_string(),
+        });
+    }
+    let mut components = path.components();
+    match components.next() {
+        Some(std::path::Component::Normal(component)) if component == ".agl" => Ok(()),
+        _ => Err(SkillManifestError::InvalidArtifactPath {
+            path: path.display().to_string(),
+        }),
+    }
 }
 
 fn resolve_references(
@@ -1222,6 +1308,79 @@ Body.
             SkillManifestError::DuplicateValue {
                 field: "permissions.memory.read",
                 value: "user".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn frontmatter_parses_artifact_declarations() {
+        let skill = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools: []
+context_budget_tokens: 128
+references:
+  include: []
+artifacts:
+  - id: task-specs
+    kind: source
+    path: .agl/tasks
+    access: read_write
+    provides:
+      - tasks
+    schema: agl.task_spec_legacy.v1
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(skill.artifacts.len(), 1);
+        assert_eq!(skill.artifacts[0].id, "task-specs");
+        assert_eq!(skill.artifacts[0].path, PathBuf::from(".agl/tasks"));
+        assert_eq!(skill.artifacts[0].access, SkillArtifactAccess::ReadWrite);
+    }
+
+    #[test]
+    fn frontmatter_rejects_artifact_paths_outside_agl() {
+        let err = parse_fixture(
+            r#"---
+name: task-spec
+description: Write specs.
+version: 1
+source: builtin
+pack: agl
+required_hooks:
+  - task_spec.validate
+allowed_tools: []
+context_budget_tokens: 128
+references:
+  include: []
+artifacts:
+  - id: bad
+    kind: source
+    path: ../bad
+    access: read
+guarantees:
+  - specs are checked
+---
+Body.
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillManifestError::InvalidArtifactPath {
+                path: "../bad".to_string()
             }
         );
     }

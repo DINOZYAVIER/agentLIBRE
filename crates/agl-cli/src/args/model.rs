@@ -62,6 +62,7 @@ pub(crate) enum RepoCommand {
     ImportProfile(RepoImportProfileOptions),
     Status(RepoStatusOptions),
     VerifyTasks(TaskSpecVerifyOptions),
+    Artifact(ArtifactCommand),
     InstallHooks(RepoHooksOptions),
     ExportProfile(RepoExportProfileOptions),
 }
@@ -132,6 +133,35 @@ pub(crate) struct RepoStatusOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskSpecVerifyOptions {
     pub(crate) json: bool,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ArtifactCommand {
+    Status(ArtifactStatusOptions),
+    Verify(ArtifactStatusOptions),
+    Sync(ArtifactSyncOptions),
+    Lock(ArtifactLockOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactStatusOptions {
+    pub(crate) json: bool,
+    pub(crate) artifact: Option<String>,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactSyncOptions {
+    pub(crate) json: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactLockOptions {
+    pub(crate) json: bool,
+    pub(crate) dry_run: bool,
     pub(crate) strict: bool,
 }
 

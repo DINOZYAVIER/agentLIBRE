@@ -6,6 +6,7 @@ use crate::{
     ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
     parse_tool_args as parse_args,
 };
+use agl_repo::{ArtifactAccess, ArtifactStatusOptions};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::Value;
@@ -141,6 +142,8 @@ impl CoreTools {
             !args.old_text.is_empty(),
             "fs.edit old_text cannot be empty"
         );
+        let relative = normalize_repo_path(&args.path, false)?;
+        self.enforce_artifact_write_access(&relative)?;
         let path = self.resolve_existing_path(&args.path, PathKind::File, false)?;
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read UTF-8 file {}", path.display()))?;
@@ -306,6 +309,55 @@ impl CoreTools {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| ".".to_string())
     }
+
+    fn enforce_artifact_write_access(&self, relative: &Path) -> Result<()> {
+        if !is_agl_path(relative) {
+            return Ok(());
+        }
+
+        let report = agl_repo::status_artifacts(
+            &self.root,
+            &ArtifactStatusOptions {
+                artifact: None,
+                strict: false,
+            },
+        )
+        .context("failed to load artifact write policy")?;
+        let blocking_errors = report
+            .errors
+            .iter()
+            .filter(|error| artifact_policy_error_blocks_writes(error))
+            .cloned()
+            .collect::<Vec<_>>();
+        ensure!(
+            blocking_errors.is_empty(),
+            "artifact write policy is invalid: {}",
+            blocking_errors.join(", ")
+        );
+
+        let artifact = report
+            .artifacts
+            .iter()
+            .filter(|artifact| relative.starts_with(&artifact.path))
+            .max_by_key(|artifact| artifact.path.components().count());
+        let Some(artifact) = artifact else {
+            bail!(
+                "repository artifact write is not declared: {}",
+                relative.display()
+            );
+        };
+        ensure!(
+            matches!(
+                artifact.access,
+                ArtifactAccess::Write | ArtifactAccess::ReadWrite
+            ),
+            "repository artifact is not writable: {} ({})",
+            artifact.id,
+            artifact.path.display()
+        );
+
+        Ok(())
+    }
 }
 
 impl ToolHandler for CoreTools {
@@ -410,6 +462,21 @@ fn normalize_repo_path(raw: &str, allow_root: bool) -> Result<PathBuf> {
         "repository path must name a file or subdirectory"
     );
     Ok(normalized)
+}
+
+fn is_agl_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Normal(component)) if component == ".agl"
+    )
+}
+
+fn artifact_policy_error_blocks_writes(error: &str) -> bool {
+    error.starts_with("workspace_manifest_invalid")
+        || error.contains("path_invalid")
+        || error.contains("path_conflict")
+        || error.contains("path_escape")
+        || error.contains("duplicate_id_conflict")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -559,6 +626,61 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:#}").contains("found 2"));
+    }
+
+    #[test]
+    fn edit_allows_writable_artifact_paths() {
+        let root = temp_root("edit-artifact-writable");
+        fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+        fs::write(root.join(".agl/tasks/task.md"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_EDIT_TOOL_ID,
+                json!({"path": ".agl/tasks/task.md", "old_text": "old", "new_text": "new"}),
+            )
+            .unwrap();
+
+        assert!(output.contains("status=edited"));
+        assert_eq!(
+            fs::read_to_string(root.join(".agl/tasks/task.md")).unwrap(),
+            "hello new\n"
+        );
+    }
+
+    #[test]
+    fn edit_rejects_read_only_artifact_paths() {
+        let root = temp_root("edit-artifact-read-only");
+        fs::create_dir_all(root.join(".agl/skills")).unwrap();
+        fs::write(root.join(".agl/skills/SKILL.md"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_EDIT_TOOL_ID,
+                json!({"path": ".agl/skills/SKILL.md", "old_text": "old", "new_text": "new"}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not writable"));
+    }
+
+    #[test]
+    fn edit_rejects_undeclared_artifact_paths() {
+        let root = temp_root("edit-artifact-undeclared");
+        fs::create_dir_all(root.join(".agl/unknown")).unwrap();
+        fs::write(root.join(".agl/unknown/file.md"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_EDIT_TOOL_ID,
+                json!({"path": ".agl/unknown/file.md", "old_text": "old", "new_text": "new"}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not declared"));
     }
 
     #[cfg(unix)]

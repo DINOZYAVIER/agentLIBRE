@@ -1,4 +1,7 @@
 use agl_repo::{
+    ArtifactLockOptions as AglArtifactLockOptions, ArtifactLockReport, ArtifactReportState,
+    ArtifactState, ArtifactStatusOptions as AglArtifactStatusOptions, ArtifactStatusReport,
+    ArtifactSyncActionKind, ArtifactSyncOptions as AglArtifactSyncOptions, ArtifactSyncReport,
     HookInstallReport, RepoComponentInitAction,
     RepoComponentInitOptions as AglRepoComponentInitOptions, RepoComponentInitReport,
     RepoExportProfileOptions as AglRepoExportProfileOptions, RepoExportProfileReport,
@@ -6,13 +9,14 @@ use agl_repo::{
     RepoInitReport, RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
     TaskSpecVerifyOptions as AglTaskSpecVerifyOptions, TaskSpecVerifyReport, TaskSpecVerifyState,
     export_repo_profile, init_repo_component, init_repo_workspace, install_repo_hooks,
-    status_repo_workspace, verify_task_specs,
+    lock_artifacts, status_artifacts, status_repo_workspace, sync_artifacts, verify_task_specs,
 };
 use anyhow::{Context, Result, bail};
 
 use crate::args::{
-    RepoCommand, RepoComponentInitOptions, RepoExportProfileOptions, RepoHooksOptions,
-    RepoImportProfileOptions, RepoInitOptions, RepoStatusOptions, TaskSpecVerifyOptions,
+    ArtifactCommand, ArtifactLockOptions, ArtifactStatusOptions, ArtifactSyncOptions, RepoCommand,
+    RepoComponentInitOptions, RepoExportProfileOptions, RepoHooksOptions, RepoImportProfileOptions,
+    RepoInitOptions, RepoStatusOptions, TaskSpecVerifyOptions,
 };
 
 pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
@@ -22,6 +26,7 @@ pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::ImportProfile(options) => run_repo_import_profile(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::VerifyTasks(options) => run_repo_verify_tasks(options),
+        RepoCommand::Artifact(command) => run_repo_artifact(command),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
         RepoCommand::ExportProfile(options) => run_repo_export_profile(options),
     }
@@ -114,6 +119,69 @@ fn run_repo_verify_tasks(options: TaskSpecVerifyOptions) -> Result<()> {
     })?;
     if report.should_fail(options.strict) {
         bail!("task spec verification failed");
+    }
+    Ok(())
+}
+
+fn run_repo_artifact(command: ArtifactCommand) -> Result<()> {
+    match command {
+        ArtifactCommand::Status(options) => run_repo_artifact_status(options, false),
+        ArtifactCommand::Verify(options) => run_repo_artifact_status(options, true),
+        ArtifactCommand::Sync(options) => run_repo_artifact_sync(options),
+        ArtifactCommand::Lock(options) => run_repo_artifact_lock(options),
+    }
+}
+
+fn run_repo_artifact_status(options: ArtifactStatusOptions, verify: bool) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo artifact status", "starting command");
+    let report = status_artifacts(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglArtifactStatusOptions {
+            artifact: options.artifact,
+            strict: options.strict || verify,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_artifact_status_report(&report)
+    })?;
+    if report.should_fail(options.strict || verify) {
+        bail!("artifact verification failed");
+    }
+    Ok(())
+}
+
+fn run_repo_artifact_sync(options: ArtifactSyncOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo artifact sync", "starting command");
+    let report = sync_artifacts(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglArtifactSyncOptions {
+            dry_run: options.dry_run,
+            strict: options.strict,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_artifact_sync_report(&report)
+    })?;
+    if report.has_errors() {
+        bail!("artifact sync failed");
+    }
+    Ok(())
+}
+
+fn run_repo_artifact_lock(options: ArtifactLockOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo artifact lock", "starting command");
+    let report = lock_artifacts(
+        std::env::current_dir().context("failed to resolve current directory")?,
+        &AglArtifactLockOptions {
+            dry_run: options.dry_run,
+            strict: options.strict,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_artifact_lock_report(&report)
+    })?;
+    if report.has_errors() {
+        bail!("artifact lock failed");
     }
     Ok(())
 }
@@ -233,11 +301,123 @@ fn print_task_spec_verify_report(report: &TaskSpecVerifyReport) {
     }
 }
 
+fn print_artifact_status_report(report: &ArtifactStatusReport) {
+    println!("state={}", artifact_report_state(report.state));
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("manifest_path={}", report.manifest_path.display());
+    println!("lock_path={}", report.lock_path.display());
+    for artifact in &report.artifacts {
+        println!(
+            "artifact id={} source={} kind={:?} access={:?} state={} path={} contract_hash={}",
+            artifact.id,
+            artifact.source_id,
+            artifact.kind,
+            artifact.access,
+            artifact_state(artifact.state),
+            artifact.path.display(),
+            artifact.contract_hash
+        );
+        for provide in &artifact.provides {
+            println!("artifact.provides id={} value={provide}", artifact.id);
+        }
+        if let Some(schema) = &artifact.schema {
+            println!("artifact.schema id={} value={schema}", artifact.id);
+        }
+        for warning in &artifact.warnings {
+            println!("artifact.warning id={} {warning}", artifact.id);
+        }
+        for error in &artifact.errors {
+            println!("artifact.error id={} {error}", artifact.id);
+        }
+    }
+    for warning in &report.warnings {
+        println!("warning={warning}");
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+    for next_step in &report.next_steps {
+        println!("next_step={next_step}");
+    }
+}
+
+fn print_artifact_sync_report(report: &ArtifactSyncReport) {
+    println!("state={}", if report.has_errors() { "error" } else { "ok" });
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("manifest_path={}", report.manifest_path.display());
+    println!("dry_run={}", report.dry_run);
+    for action in &report.actions {
+        println!(
+            "artifact.action id={} path={} action={}",
+            action.artifact_id,
+            action.path.display(),
+            artifact_sync_action(action.action)
+        );
+    }
+    for warning in &report.warnings {
+        println!("warning={warning}");
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+}
+
+fn print_artifact_lock_report(report: &ArtifactLockReport) {
+    println!("state={}", if report.has_errors() { "error" } else { "ok" });
+    println!("workspace_root={}", report.workspace_root.display());
+    println!("lock_path={}", report.lock_path.display());
+    println!("dry_run={}", report.dry_run);
+    println!("lock.wrote={}", report.wrote);
+    println!("lock.version={}", report.lock.version);
+    for artifact in report.lock.artifacts.values() {
+        println!(
+            "lock.artifact id={} source={} path={} kind={:?} access={:?} contract_hash={}",
+            artifact.id,
+            artifact.source_id,
+            artifact.path.display(),
+            artifact.kind,
+            artifact.access,
+            artifact.contract_hash
+        );
+    }
+    for warning in &report.warnings {
+        println!("warning={warning}");
+    }
+    for error in &report.errors {
+        println!("error={error}");
+    }
+}
+
 fn task_spec_verify_state(state: TaskSpecVerifyState) -> &'static str {
     match state {
         TaskSpecVerifyState::Ok => "ok",
         TaskSpecVerifyState::Warning => "warning",
         TaskSpecVerifyState::Invalid => "invalid",
+    }
+}
+
+fn artifact_report_state(state: ArtifactReportState) -> &'static str {
+    match state {
+        ArtifactReportState::Ok => "ok",
+        ArtifactReportState::Warning => "warning",
+        ArtifactReportState::Invalid => "invalid",
+    }
+}
+
+fn artifact_state(state: ArtifactState) -> &'static str {
+    match state {
+        ArtifactState::Ok => "ok",
+        ArtifactState::Missing => "missing",
+        ArtifactState::Warning => "warning",
+        ArtifactState::Invalid => "invalid",
+    }
+}
+
+fn artifact_sync_action(action: ArtifactSyncActionKind) -> &'static str {
+    match action {
+        ArtifactSyncActionKind::Exists => "exists",
+        ArtifactSyncActionKind::WouldCreateDir => "would_create_dir",
+        ArtifactSyncActionKind::CreatedDir => "created_dir",
     }
 }
 
