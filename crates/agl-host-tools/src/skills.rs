@@ -266,6 +266,26 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
     for skill in &report.skills {
         output.push('\n');
         output.push_str(&render_workspace_skill_line(skill));
+        for folder in &skill.artifact_folders {
+            output.push_str(&format!(
+                "\nskill.{}.folder id={} path={} kind={:?} access={:?} exists={}",
+                skill.name.as_deref().unwrap_or("<invalid>"),
+                folder.id,
+                folder.path.display(),
+                folder.kind,
+                folder.access,
+                folder.exists
+            ));
+            for readiness in &folder.readiness {
+                output.push_str(&format!(
+                    "\nskill.{}.folder.{}.ready.when={} action={}",
+                    skill.name.as_deref().unwrap_or("<invalid>"),
+                    folder.id,
+                    skill_folder_create_situation(readiness.situation),
+                    skill_folder_sync_action(readiness.action)
+                ));
+            }
+        }
     }
     output
 }
@@ -356,6 +376,20 @@ fn skill_folder_create_situation(when: agl_skills::SkillFolderCreateSituation) -
         agl_skills::SkillFolderCreateSituation::SkillSync => "skill_sync",
         agl_skills::SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
         agl_skills::SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
+    }
+}
+
+fn skill_folder_sync_action(action: agl_skills::SkillFolderSyncActionKind) -> &'static str {
+    match action {
+        agl_skills::SkillFolderSyncActionKind::Exists => "exists",
+        agl_skills::SkillFolderSyncActionKind::SkippedReadOnly => "skipped_read_only",
+        agl_skills::SkillFolderSyncActionKind::SkippedSource => "skipped_source",
+        agl_skills::SkillFolderSyncActionKind::SkippedNoCreateRule => "skipped_no_create_rule",
+        agl_skills::SkillFolderSyncActionKind::SkippedSituationMismatch => {
+            "skipped_situation_mismatch"
+        }
+        agl_skills::SkillFolderSyncActionKind::WouldCreateDir => "would_create_dir",
+        agl_skills::SkillFolderSyncActionKind::CreatedDir => "created_dir",
     }
 }
 

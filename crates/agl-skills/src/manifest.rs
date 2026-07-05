@@ -86,18 +86,13 @@ pub struct SkillFolderCreateRule {
     pub when: SkillFolderCreateSituation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillFolderCreateSituation {
+    #[default]
     SkillSync,
     RuntimePrepare,
     ArtifactWrite,
-}
-
-impl Default for SkillFolderCreateSituation {
-    fn default() -> Self {
-        Self::SkillSync
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]

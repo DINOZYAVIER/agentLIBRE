@@ -307,6 +307,31 @@ fn selected_skill_ids_rejects_duplicates_across_config_and_cli() {
 }
 
 #[test]
+fn artifact_write_preflight_normalizes_only_agl_paths() {
+    let normal = normalize_agl_artifact_write_path(&serde_json::json!({
+        "path": "README.md"
+    }))
+    .unwrap();
+    assert_eq!(normal, None);
+
+    let agl = normalize_agl_artifact_write_path(&serde_json::json!({
+        "path": ".agl/tasks/example.md"
+    }))
+    .unwrap();
+    assert_eq!(agl, Some(PathBuf::from(".agl/tasks/example.md")));
+}
+
+#[test]
+fn artifact_write_preflight_rejects_parent_traversal() {
+    let err = normalize_agl_artifact_write_path(&serde_json::json!({
+        "path": ".agl/tasks/../secret.md"
+    }))
+    .unwrap_err();
+
+    assert!(err.to_string().contains("parent traversal"));
+}
+
+#[test]
 fn selected_skill_hook_batches_use_declared_hook_events() {
     let skill_registry = agl_skills::builtin_registry().unwrap();
     let mut extension_registry = ToolCatalog::new();

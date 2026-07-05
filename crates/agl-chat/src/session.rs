@@ -13,7 +13,10 @@ use agl_runtime::{
     render_runtime_capability_context,
 };
 use agl_skills::{
-    SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
+    SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
+    SkillFolderPrepareReport, SkillSource, build_verified_context_bundle,
+    prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
+    trusted_workspace_registry,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
@@ -43,6 +46,7 @@ pub struct InferenceSession {
     trust_store_path: PathBuf,
     config_skills: Vec<String>,
     option_skills: Vec<String>,
+    selected_skills: Vec<SkillId>,
     run_id: InferenceRunId,
     config_path: PathBuf,
     artifact_root: PathBuf,
@@ -136,6 +140,7 @@ impl InferenceSession {
             trust_store_path,
             config_skills,
             option_skills,
+            selected_skills: skill_context.selected_skills,
             run_id,
             config_path,
             artifact_root,
@@ -208,6 +213,45 @@ impl InferenceSession {
         &self.trust_store_path
     }
 
+    pub(crate) fn prepare_artifact_write_for_tool(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<()> {
+        if tool_name != agl_tools::FS_EDIT_TOOL_ID || self.selected_skills.is_empty() {
+            return Ok(());
+        }
+        let Some(relative) = normalize_agl_artifact_write_path(arguments)? else {
+            return Ok(());
+        };
+        let report = prepare_workspace_skill_artifact_write(
+            &self.workspace_root,
+            &self.trust_store_path,
+            &self.selected_skills,
+            &relative,
+            &SkillFolderPrepareOptions {
+                dry_run: false,
+                situation: SkillFolderCreateSituation::ArtifactWrite,
+                strict: true,
+            },
+        )
+        .context("failed to prepare selected skill artifact-write folders")?;
+        if !report.actions.is_empty() || report.has_errors() {
+            write_skill_folder_prepare_evidence(
+                &self.artifact_root,
+                &self.run_id,
+                "artifact-write",
+                &report,
+            )?;
+        }
+        ensure!(
+            !report.has_errors(),
+            "selected skill artifact-write preparation failed: {}",
+            report.errors.join(", ")
+        );
+        Ok(())
+    }
+
     pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
         if let Some(evidence) = &self.runtime_capability_evidence {
             write_runtime_capability_context_evidence(&self.artifact_root, &self.run_id, evidence)?;
@@ -251,6 +295,7 @@ impl InferenceSession {
         self.skill_hook_batches = skill_context.hook_batches;
         self.visible_tools = skill_context.visible_tools;
         self.permission_grants = skill_context.permission_grants;
+        self.selected_skills = skill_context.selected_skills;
         let runtime_capabilities = build_runtime_capability_context(
             &self.workspace_root,
             self.tool_mode,
@@ -446,6 +491,7 @@ pub(crate) struct ResolvedSkillContext {
     hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
     permission_grants: RuntimePermissionGrantSnapshot,
+    selected_skills: Vec<SkillId>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -592,6 +638,28 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {
+        let folder_prepare = prepare_workspace_skill_folders(
+            request.workspace_root,
+            request.trust_store_path,
+            &selected_skills,
+            &SkillFolderPrepareOptions {
+                dry_run: false,
+                situation: SkillFolderCreateSituation::RuntimePrepare,
+                strict: true,
+            },
+        )
+        .context("failed to prepare selected skill runtime folders")?;
+        write_skill_folder_prepare_evidence(
+            request.artifact_root,
+            request.run_id,
+            "runtime-prepare",
+            &folder_prepare,
+        )?;
+        ensure!(
+            !folder_prepare.has_errors(),
+            "selected skill runtime folder preparation failed: {}",
+            folder_prepare.errors.join(", ")
+        );
         let bundle =
             build_verified_context_bundle(&skill_registry, &tool_catalog, &selected_skills)
                 .context("failed to build verified skill context")?;
@@ -614,6 +682,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         hook_batches,
         visible_tools,
         permission_grants,
+        selected_skills,
     })
 }
 
@@ -914,6 +983,78 @@ fn tool_mode_allows_declaration(
     }
     mode.operation_ceiling()
         .is_some_and(|ceiling| ceiling.permits(declaration.operation_kind))
+}
+
+fn normalize_agl_artifact_write_path(arguments: &serde_json::Value) -> Result<Option<PathBuf>> {
+    let Some(raw) = arguments.get("path").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    if !raw.starts_with(".agl/") && raw != ".agl" {
+        return Ok(None);
+    }
+    ensure!(!raw.trim().is_empty(), "repository path cannot be blank");
+    ensure!(!raw.contains('\0'), "repository path contains NUL");
+    ensure!(
+        !raw.contains('\\'),
+        "repository path must use forward slashes"
+    );
+
+    let path = std::path::Path::new(raw);
+    ensure!(!path.is_absolute(), "repository path cannot be absolute");
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(segment) => {
+                ensure!(segment != ".git", "repository path cannot enter .git");
+                normalized.push(segment);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                bail!("repository path cannot contain parent traversal")
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                bail!("repository path cannot be absolute")
+            }
+        }
+    }
+    Ok(Some(normalized))
+}
+
+fn write_skill_folder_prepare_evidence(
+    artifact_root: &std::path::Path,
+    run_id: &InferenceRunId,
+    label: &str,
+    report: &SkillFolderPrepareReport,
+) -> Result<()> {
+    let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
+        .run_dir(run_id)
+        .join(format!("skill-folder-{label}.json"));
+    let parent = path.parent().with_context(|| {
+        format!(
+            "skill folder prepare evidence path has no parent: {}",
+            path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create skill folder prepare evidence directory {}",
+            parent.display()
+        )
+    })?;
+    let mut bytes = serde_json::to_vec_pretty(report).with_context(|| {
+        format!(
+            "failed to serialize skill folder prepare evidence {}",
+            path.display()
+        )
+    })?;
+    bytes.push(b'\n');
+    std::fs::write(&path, bytes).with_context(|| {
+        format!(
+            "failed to write skill folder prepare evidence {}",
+            path.display()
+        )
+    })
 }
 
 fn write_skill_context_evidence(
