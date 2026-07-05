@@ -153,8 +153,7 @@ kind = "ignored"
         &RepoInitOptions {
             profile: DEFAULT_PROFILE.to_string(),
             profile_file: Some(profile_path),
-            dry_run: false,
-            force: false,
+            ..RepoInitOptions::default()
         },
     )
     .unwrap();
@@ -176,6 +175,63 @@ kind = "ignored"
         change.path == Path::new(".agl/reviews")
             && change.action == RepoInitAction::DeclaredSubmodule
     }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_can_override_skills_and_externalize_tasks() {
+    let root = temp_root("init-external-artifacts");
+    let report = init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            skills_url: Some("git@example.com:agentlibre/skills.git".to_string()),
+            skills_rev: Some("v1".to_string()),
+            tasks_url: Some("git@example.com:private/specs.git".to_string()),
+            tasks_rev: Some("main".to_string()),
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+    let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+
+    let skills = &manifest.components["skills"];
+    assert_eq!(skills.kind, ComponentKind::Submodule);
+    assert_eq!(
+        skills.url.as_deref(),
+        Some("git@example.com:agentlibre/skills.git")
+    );
+    assert_eq!(skills.rev.as_deref(), Some("v1"));
+
+    let tasks = &manifest.components["tasks"];
+    assert_eq!(tasks.kind, ComponentKind::Submodule);
+    assert_eq!(
+        tasks.url.as_deref(),
+        Some("git@example.com:private/specs.git")
+    );
+    assert_eq!(tasks.rev.as_deref(), Some("main"));
+    assert_eq!(tasks.lock.as_deref(), Some(Path::new(".agl/tasks.lock")));
+    assert!(!root.join(".agl/tasks").exists());
+    assert!(report.changes.iter().any(|change| {
+        change.path == Path::new(".agl/tasks") && change.action == RepoInitAction::DeclaredSubmodule
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_rejects_tasks_rev_without_tasks_url() {
+    let root = temp_root("init-rejects-tasks-rev");
+    let err = init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            tasks_rev: Some("main".to_string()),
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("--tasks-rev requires --tasks-url"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -289,8 +345,7 @@ fn export_profile_round_trips_actual_skills_component_identity() {
         &RepoInitOptions {
             profile: DEFAULT_PROFILE.to_string(),
             profile_file: Some(out),
-            dry_run: false,
-            force: false,
+            ..RepoInitOptions::default()
         },
     )
     .unwrap();
@@ -360,8 +415,7 @@ kind = "ignored"
         &RepoInitOptions {
             profile: "requested-profile".to_string(),
             profile_file: Some(profile_path),
-            dry_run: false,
-            force: false,
+            ..RepoInitOptions::default()
         },
     )
     .unwrap_err();

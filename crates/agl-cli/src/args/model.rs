@@ -104,6 +104,10 @@ pub(crate) enum SkillCommand {
 pub(crate) struct RepoInitOptions {
     pub(crate) profile: String,
     pub(crate) profile_file: Option<PathBuf>,
+    pub(crate) skills_url: Option<String>,
+    pub(crate) skills_rev: Option<String>,
+    pub(crate) tasks_url: Option<String>,
+    pub(crate) tasks_rev: Option<String>,
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
 }
