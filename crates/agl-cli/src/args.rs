@@ -987,6 +987,10 @@ struct SkillFolderSyncArgs {
     /// Print planned folder changes without writing files.
     #[arg(long)]
     dry_run: bool,
+
+    /// Folder create situation to materialize.
+    #[arg(long, value_enum, default_value_t = SkillFolderSyncSituationArg::SkillSync)]
+    when: SkillFolderSyncSituationArg,
 }
 
 #[derive(Debug, Args)]
@@ -1602,6 +1606,7 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
         SkillCommands::SyncFolders(args) => SkillCommand::SyncFolders(SkillFolderSyncOptions {
             json: args.json,
             dry_run: args.dry_run,
+            when: args.when,
         }),
         SkillCommands::Lock(args) => SkillCommand::Lock(SkillLockOptions {
             json: args.json,

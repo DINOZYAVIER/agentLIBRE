@@ -28,12 +28,13 @@ use agl_runtime::{
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
 use agl_skills::{
-    SkillFolderSyncActionKind, SkillFolderSyncOptions as AglSkillFolderSyncOptions,
-    SkillFolderSyncReport, SkillLockOptions as AglSkillLockOptions, SkillLockReport,
-    SkillPermissions, SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport,
-    WorkspaceSkillReport, WorkspaceSkillStatus, builtin_registry, lock_workspace_skills,
-    revoke_workspace_skill, sync_workspace_skill_folders, trust_workspace_skill,
-    workspace_skill_report, workspace_skill_report_with_trust,
+    SkillFolderCreateSituation, SkillFolderSyncActionKind,
+    SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport,
+    SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
+    SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillReport,
+    WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
+    sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report,
+    workspace_skill_report_with_trust,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
@@ -50,9 +51,10 @@ use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, RunOptions,
-    ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillInitOptions, SkillInspectOptions,
-    SkillListOptions, SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
-    SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion, print_usage,
+    ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillFolderSyncSituationArg,
+    SkillInitOptions, SkillInspectOptions, SkillListOptions, SkillListSourceArg, SkillLockOptions,
+    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli,
+    print_completion, print_usage,
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
@@ -893,6 +895,7 @@ fn run_skill_sync_folders(options: SkillFolderSyncOptions) -> Result<()> {
         std::env::current_dir().context("failed to resolve current directory")?,
         &AglSkillFolderSyncOptions {
             dry_run: options.dry_run,
+            situation: skill_folder_sync_situation(options.when),
         },
     )?;
 
@@ -1147,6 +1150,10 @@ fn print_skill_folder_sync_report(report: &SkillFolderSyncReport) {
     );
     println!("workspace_root={}", report.workspace_root.display());
     println!("dry_run={}", report.dry_run);
+    println!(
+        "situation={}",
+        skill_folder_create_situation(report.situation)
+    );
     for action in &report.actions {
         println!(
             "skill.folder_action skill={} folder={} path={} action={}",
@@ -1169,8 +1176,26 @@ fn skill_folder_sync_action(action: SkillFolderSyncActionKind) -> &'static str {
         SkillFolderSyncActionKind::Exists => "exists",
         SkillFolderSyncActionKind::SkippedReadOnly => "skipped_read_only",
         SkillFolderSyncActionKind::SkippedSource => "skipped_source",
+        SkillFolderSyncActionKind::SkippedNoCreateRule => "skipped_no_create_rule",
+        SkillFolderSyncActionKind::SkippedSituationMismatch => "skipped_situation_mismatch",
         SkillFolderSyncActionKind::WouldCreateDir => "would_create_dir",
         SkillFolderSyncActionKind::CreatedDir => "created_dir",
+    }
+}
+
+fn skill_folder_sync_situation(when: SkillFolderSyncSituationArg) -> SkillFolderCreateSituation {
+    match when {
+        SkillFolderSyncSituationArg::SkillSync => SkillFolderCreateSituation::SkillSync,
+        SkillFolderSyncSituationArg::RuntimePrepare => SkillFolderCreateSituation::RuntimePrepare,
+        SkillFolderSyncSituationArg::ArtifactWrite => SkillFolderCreateSituation::ArtifactWrite,
+    }
+}
+
+fn skill_folder_create_situation(when: SkillFolderCreateSituation) -> &'static str {
+    match when {
+        SkillFolderCreateSituation::SkillSync => "skill_sync",
+        SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
+        SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
     }
 }
 
@@ -1299,6 +1324,13 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
         }
         if let Some(schema) = &folder.schema {
             println!("skill.{name}.folder.{}.schema={schema}", folder.id);
+        }
+        for rule in &folder.create {
+            println!(
+                "skill.{name}.folder.{}.create.when={}",
+                folder.id,
+                skill_folder_create_situation(rule.when)
+            );
         }
         for warning in &folder.warnings {
             println!("skill.{name}.folder.{}.warning={warning}", folder.id);
