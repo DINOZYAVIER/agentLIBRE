@@ -72,10 +72,32 @@ pub struct SkillArtifactDeclaration {
     pub kind: SkillArtifactKind,
     pub path: PathBuf,
     pub access: SkillArtifactAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub create: Vec<SkillFolderCreateRule>,
     #[serde(default)]
     pub provides: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillFolderCreateRule {
+    pub when: SkillFolderCreateSituation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillFolderCreateSituation {
+    SkillSync,
+    RuntimePrepare,
+    ArtifactWrite,
+}
+
+impl Default for SkillFolderCreateSituation {
+    fn default() -> Self {
+        Self::SkillSync
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -734,6 +756,16 @@ fn normalize_artifacts(artifacts: &[SkillArtifactDeclaration]) -> Result<(), Ski
                 field: "artifacts.provides",
             });
         }
+        let mut create_situations = BTreeSet::new();
+        for rule in &artifact.create {
+            let value = format!("{:?}", rule.when);
+            if !create_situations.insert(rule.when) {
+                return Err(SkillManifestError::DuplicateValue {
+                    field: "artifacts.create.when",
+                    value,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1329,9 +1361,12 @@ references:
   include: []
 artifacts:
   - id: task-specs
-    kind: source
-    path: .agl/tasks
+    kind: generated
+    path: .agl/tasks/generated
     access: read_write
+    create:
+      - when: skill_sync
+      - when: runtime_prepare
     provides:
       - tasks
     schema: agl.task_spec_legacy.v1
@@ -1345,8 +1380,16 @@ Body.
 
         assert_eq!(skill.artifacts.len(), 1);
         assert_eq!(skill.artifacts[0].id, "task-specs");
-        assert_eq!(skill.artifacts[0].path, PathBuf::from(".agl/tasks"));
+        assert_eq!(
+            skill.artifacts[0].path,
+            PathBuf::from(".agl/tasks/generated")
+        );
         assert_eq!(skill.artifacts[0].access, SkillArtifactAccess::ReadWrite);
+        assert_eq!(skill.artifacts[0].create.len(), 2);
+        assert_eq!(
+            skill.artifacts[0].create[0].when,
+            SkillFolderCreateSituation::SkillSync
+        );
     }
 
     #[test]

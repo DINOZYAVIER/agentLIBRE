@@ -375,6 +375,14 @@ pub(crate) struct SkillVerifyOptions {
 pub(crate) struct SkillFolderSyncOptions {
     pub(crate) json: bool,
     pub(crate) dry_run: bool,
+    pub(crate) when: SkillFolderSyncSituationArg,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SkillFolderSyncSituationArg {
+    SkillSync,
+    RuntimePrepare,
+    ArtifactWrite,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

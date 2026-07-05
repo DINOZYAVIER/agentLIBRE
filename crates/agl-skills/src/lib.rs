@@ -14,9 +14,9 @@ pub use context::{
 };
 pub use manifest::{
     MemoryPermissionScope, SkillArtifactAccess, SkillArtifactDeclaration, SkillArtifactKind,
-    SkillHarness, SkillManifestError, SkillMemoryPermissions, SkillNotesPermissions,
-    SkillPermissionRequestTemplate, SkillPermissions, SkillReference, SkillReferencePolicy,
-    SkillSource,
+    SkillFolderCreateRule, SkillFolderCreateSituation, SkillHarness, SkillManifestError,
+    SkillMemoryPermissions, SkillNotesPermissions, SkillPermissionRequestTemplate,
+    SkillPermissions, SkillReference, SkillReferencePolicy, SkillSource,
 };
 pub use pack::{
     SkillPackEntry, SkillPackManifest, SkillPackSubmodule, ValidatedSkillPack, validate_skill_pack,

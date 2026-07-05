@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RegisteredSkill, SkillArtifactAccess, SkillArtifactKind, SkillHarness, SkillRegistry,
-    SkillSource, SkillTrustState, builtin_registry,
+    RegisteredSkill, SkillArtifactAccess, SkillArtifactKind, SkillFolderCreateRule,
+    SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource, SkillTrustState,
+    builtin_registry,
 };
 
 const SKILLS_COMPONENT: &str = "skills";
@@ -25,6 +26,7 @@ pub struct SkillLockOptions {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillFolderSyncOptions {
     pub dry_run: bool,
+    pub situation: SkillFolderCreateSituation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -89,6 +91,7 @@ pub struct SkillArtifactFolderStatus {
     pub path: PathBuf,
     pub kind: SkillArtifactKind,
     pub access: SkillArtifactAccess,
+    pub create: Vec<SkillFolderCreateRule>,
     pub provides: Vec<String>,
     pub schema: Option<String>,
     pub exists: bool,
@@ -117,6 +120,7 @@ impl SkillLockReport {
 pub struct SkillFolderSyncReport {
     pub workspace_root: PathBuf,
     pub dry_run: bool,
+    pub situation: SkillFolderCreateSituation,
     pub actions: Vec<SkillFolderSyncAction>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
@@ -142,6 +146,8 @@ pub enum SkillFolderSyncActionKind {
     Exists,
     SkippedReadOnly,
     SkippedSource,
+    SkippedNoCreateRule,
+    SkippedSituationMismatch,
     WouldCreateDir,
     CreatedDir,
 }
@@ -363,6 +369,14 @@ pub fn sync_workspace_skill_folders(
                 SkillFolderSyncActionKind::SkippedReadOnly
             } else if folder.kind == SkillArtifactKind::Source {
                 SkillFolderSyncActionKind::SkippedSource
+            } else if folder.create.is_empty() {
+                SkillFolderSyncActionKind::SkippedNoCreateRule
+            } else if !folder
+                .create
+                .iter()
+                .any(|rule| rule.when == options.situation)
+            {
+                SkillFolderSyncActionKind::SkippedSituationMismatch
             } else if options.dry_run {
                 SkillFolderSyncActionKind::WouldCreateDir
             } else {
@@ -398,6 +412,7 @@ pub fn sync_workspace_skill_folders(
     Ok(SkillFolderSyncReport {
         workspace_root: report.workspace_root,
         dry_run: options.dry_run,
+        situation: options.situation,
         actions,
         warnings,
         errors,
@@ -836,6 +851,7 @@ fn artifact_folder_statuses(
                 path: artifact.path.clone(),
                 kind: artifact.kind,
                 access: artifact.access,
+                create: artifact.create.clone(),
                 provides: artifact.provides.clone(),
                 schema: artifact.schema.clone(),
                 exists,
@@ -1400,10 +1416,15 @@ fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
         next_steps.push("agl skill lock".to_string());
     }
     if report.skills.iter().any(|skill| {
-        skill
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("artifact_folder.") && warning.ends_with(".missing"))
+        skill.artifact_folders.iter().any(|folder| {
+            !folder.exists
+                && folder.access != SkillArtifactAccess::Read
+                && folder.kind != SkillArtifactKind::Source
+                && folder
+                    .create
+                    .iter()
+                    .any(|rule| rule.when == SkillFolderCreateSituation::SkillSync)
+        })
     }) {
         next_steps.push("agl skill sync-folders".to_string());
     }
