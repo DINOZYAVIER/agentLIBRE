@@ -25,11 +25,12 @@ pub use registry::{
     RegisteredSkill, SkillRegistry, SkillRegistryError, SkillTrustState, builtin_registry,
 };
 pub use workspace::{
-    LockedComponent, LockedSkill, SkillFolderSyncAction, SkillFolderSyncActionKind,
+    LockedComponent, LockedSkill, SkillArtifactFolderReadiness, SkillFolderPrepareOptions,
+    SkillFolderPrepareReport, SkillFolderSyncAction, SkillFolderSyncActionKind,
     SkillFolderSyncOptions, SkillFolderSyncReport, SkillLockOptions, SkillLockReport,
     SkillReportState, SkillTrustAction, SkillTrustOptions, SkillTrustStore, SkillTrustUpdateReport,
     SkillsLockFile, TrustedSkillRecord, WorkspaceSkillReport, WorkspaceSkillStatus,
-    lock_workspace_skills, revoke_workspace_skill, sync_workspace_skill_folders,
-    trust_workspace_skill, trusted_workspace_registry, workspace_skill_report,
-    workspace_skill_report_with_trust,
+    lock_workspace_skills, prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
+    revoke_workspace_skill, sync_workspace_skill_folders, trust_workspace_skill,
+    trusted_workspace_registry, workspace_skill_report, workspace_skill_report_with_trust,
 };
