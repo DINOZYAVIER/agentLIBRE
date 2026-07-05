@@ -254,7 +254,7 @@ pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
 }
 
 fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
-    if let Some(profile_file) = &options.profile_file {
+    let mut manifest = if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;
         if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
             bail!(
@@ -263,17 +263,20 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
                 options.profile
             );
         }
-        return Ok(WorkspaceManifest {
+        WorkspaceManifest {
             version: profile.version,
             profile: profile.name,
             components: profile.components,
-        });
-    }
+        }
+    } else {
+        if options.profile != DEFAULT_PROFILE {
+            bail!("unsupported repo workflow profile: {}", options.profile);
+        }
+        default_manifest()
+    };
 
-    if options.profile != DEFAULT_PROFILE {
-        bail!("unsupported repo workflow profile: {}", options.profile);
-    }
-    Ok(default_manifest())
+    apply_init_component_overrides(&mut manifest, options)?;
+    Ok(manifest)
 }
 
 fn default_manifest() -> WorkspaceManifest {
@@ -331,6 +334,61 @@ fn default_manifest() -> WorkspaceManifest {
             ),
         ]),
     }
+}
+
+fn apply_init_component_overrides(
+    manifest: &mut WorkspaceManifest,
+    options: &RepoInitOptions,
+) -> Result<()> {
+    if options.tasks_rev.is_some() && options.tasks_url.is_none() {
+        bail!("--tasks-rev requires --tasks-url");
+    }
+
+    if options.skills_url.is_some() || options.skills_rev.is_some() {
+        let skills = manifest
+            .components
+            .entry("skills".to_string())
+            .or_insert_with(|| WorkspaceComponent {
+                path: PathBuf::from(".agl/skills"),
+                kind: ComponentKind::Submodule,
+                url: None,
+                rev: None,
+                commit: None,
+                tree: None,
+                lock: Some(PathBuf::from(".agl/skills.lock")),
+            });
+        skills.kind = ComponentKind::Submodule;
+        skills.url = options.skills_url.clone().or_else(|| skills.url.clone());
+        skills.rev = options.skills_rev.clone().or_else(|| skills.rev.clone());
+        skills.commit = None;
+        skills.tree = None;
+        skills
+            .lock
+            .get_or_insert_with(|| PathBuf::from(".agl/skills.lock"));
+    }
+
+    if let Some(tasks_url) = &options.tasks_url {
+        let tasks = manifest
+            .components
+            .entry("tasks".to_string())
+            .or_insert_with(|| WorkspaceComponent {
+                path: PathBuf::from(".agl/tasks"),
+                kind: ComponentKind::Submodule,
+                url: None,
+                rev: None,
+                commit: None,
+                tree: None,
+                lock: Some(PathBuf::from(".agl/tasks.lock")),
+            });
+        tasks.kind = ComponentKind::Submodule;
+        tasks.url = Some(tasks_url.clone());
+        tasks.rev = options.tasks_rev.clone();
+        tasks.commit = None;
+        tasks.tree = None;
+        tasks.lock = Some(PathBuf::from(".agl/tasks.lock"));
+    }
+
+    Ok(())
 }
 
 fn profile_from_workspace_manifest(

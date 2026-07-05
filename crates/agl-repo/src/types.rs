@@ -13,6 +13,10 @@ pub const DEFAULT_SKILLS_REV: &str = "v0.1.0";
 pub struct RepoInitOptions {
     pub profile: String,
     pub profile_file: Option<PathBuf>,
+    pub skills_url: Option<String>,
+    pub skills_rev: Option<String>,
+    pub tasks_url: Option<String>,
+    pub tasks_rev: Option<String>,
     pub dry_run: bool,
     pub force: bool,
 }
@@ -22,6 +26,10 @@ impl Default for RepoInitOptions {
         Self {
             profile: DEFAULT_PROFILE.to_string(),
             profile_file: None,
+            skills_url: None,
+            skills_rev: None,
+            tasks_url: None,
+            tasks_rev: None,
             dry_run: false,
             force: false,
         }

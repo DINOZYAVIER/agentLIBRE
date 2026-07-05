@@ -29,6 +29,10 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: options.profile,
             profile_file: options.profile_file,
+            skills_url: options.skills_url,
+            skills_rev: options.skills_rev,
+            tasks_url: options.tasks_url,
+            tasks_rev: options.tasks_rev,
             dry_run: options.dry_run,
             force: options.force,
         },
@@ -44,6 +48,10 @@ fn run_repo_import_profile(options: RepoImportProfileOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: agl_repo::DEFAULT_PROFILE.to_string(),
             profile_file: Some(options.profile_file),
+            skills_url: None,
+            skills_rev: None,
+            tasks_url: None,
+            tasks_rev: None,
             dry_run: options.dry_run,
             force: options.force,
         },
