@@ -912,6 +912,108 @@ fn skill_lock_refuses_plain_workspace_skills_directory() {
 }
 
 #[test]
+fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
+    let (repo, _source, home) = submodule_workspace_with_skill(
+        "skill-status-duplicate-create",
+        "bad-dupe",
+        r#"---
+name: bad-dupe
+description: Bad duplicate folder create rule.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+requestable_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+folders:
+  - id: bad
+    kind: generated
+    path: .agl/tasks/bad
+    access: read_write
+    create:
+      - when: runtime_prepare
+      - when: runtime_prepare
+guarantees:
+  - duplicate create rule must fail
+---
+Bad body.
+"#,
+    );
+    let home_arg = home.path_string();
+
+    let output = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "status"]);
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    assert_contains(
+        &stdout,
+        "diagnostic severity=error scope=skill_manifest code=duplicate_value",
+    );
+    assert_contains(&stdout, "skill_path=.agl/skills/agl/bad-dupe");
+    assert!(
+        !stdout.contains("not_component_git_worktree"),
+        "submodule-backed invalid manifest should not rely on component noise:\n{stdout}"
+    );
+}
+
+#[test]
+fn skill_status_json_groups_invalid_artifact_path_diagnostic() {
+    let (repo, _source, home) = submodule_workspace_with_skill(
+        "skill-status-invalid-path",
+        "bad-path",
+        r#"---
+name: bad-path
+description: Bad folder path.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+requestable_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+folders:
+  - id: bad
+    kind: generated
+    path: ../outside
+    access: read_write
+    create:
+      - when: artifact_write
+guarantees:
+  - invalid path must fail
+---
+Bad body.
+"#,
+    );
+    let home_arg = home.path_string();
+
+    let output = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "skill", "status", "--json"],
+    );
+
+    assert_failure(&output);
+    let stdout = stdout(&output);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("invalid JSON: {err}\n{stdout}"));
+    let diagnostics = json["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics missing:\n{stdout}"));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["severity"] == "error"
+            && diagnostic["scope"] == "skill_manifest"
+            && diagnostic["code"] == "invalid_artifact_path"
+            && diagnostic["skill"] == ".agl/skills/agl/bad-path"
+    }));
+}
+
+#[test]
 fn skill_inspect_runtime_succeeds_for_builtin_skill() {
     let output = run_agl(&["skill", "inspect", "change", "--runtime"]);
 
@@ -1214,6 +1316,82 @@ fn run_agl_with_stdin(args: &[&str], input: &str) -> Output {
     child
         .wait_with_output()
         .expect("failed to wait for agl process")
+}
+
+fn submodule_workspace_with_skill(
+    label: &str,
+    skill_name: &str,
+    skill_md: &str,
+) -> (TempRepo, TempRepo, TempHome) {
+    let source = TempRepo::new(&format!("{label}-source"));
+    init_git_repo(source.path());
+    let skill_dir = source.path().join("agl").join(skill_name);
+    fs::create_dir_all(&skill_dir).unwrap_or_else(|err| {
+        panic!(
+            "failed to create source skill dir {}: {err}",
+            skill_dir.display()
+        )
+    });
+    fs::write(skill_dir.join("SKILL.md"), skill_md)
+        .unwrap_or_else(|err| panic!("failed to write source skill {skill_name}: {err}"));
+    git_run(source.path(), &["add", "."]);
+    git_run(
+        source.path(),
+        &[
+            "-c",
+            "user.name=AgentLIBRE Test",
+            "-c",
+            "user.email=agentlibre-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "add workspace skill",
+        ],
+    );
+
+    let repo = TempRepo::new(&format!("{label}-repo"));
+    init_git_repo(repo.path());
+    let home = TempHome::new(label);
+    let home_arg = home.path_string();
+    let source_arg = source.path().display().to_string();
+    let init = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "init", "--skills-url", &source_arg],
+    );
+    assert_success(&init);
+    git_run(
+        repo.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &source_arg,
+            ".agl/skills",
+        ],
+    );
+
+    (repo, source, home)
+}
+
+fn init_git_repo(root: &std::path::Path) {
+    let _ = fs::remove_dir_all(root.join(".git"));
+    git_run(root, &["init", "-q", "."]);
+}
+
+fn git_run(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git in {}: {err}", root.display()));
+    assert!(
+        output.status.success(),
+        "git failed in {}\nstdout:\n{}\nstderr:\n{}",
+        root.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_workspace_skill(repo: &std::path::Path, name: &str) {

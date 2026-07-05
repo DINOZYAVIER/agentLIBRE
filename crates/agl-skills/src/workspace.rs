@@ -44,6 +44,8 @@ pub struct WorkspaceSkillReport {
     pub component: Option<ComponentStatus>,
     pub lock_path: PathBuf,
     pub skills: Vec<WorkspaceSkillStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<WorkspaceSkillDiagnostic>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub next_steps: Vec<String>,
@@ -61,6 +63,42 @@ pub enum SkillReportState {
     Ok,
     Warning,
     Invalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkspaceSkillDiagnostic {
+    pub severity: WorkspaceSkillDiagnosticSeverity,
+    pub scope: WorkspaceSkillDiagnosticScope,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSkillDiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSkillDiagnosticScope {
+    Workspace,
+    Component,
+    Lock,
+    SkillManifest,
+    SkillArtifactFolder,
+    SkillTrust,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -335,24 +373,14 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         component,
         lock_path,
         skills,
+        diagnostics: Vec::new(),
         warnings,
         errors,
         next_steps: Vec::new(),
     };
     let empty_store = SkillTrustStore::default();
     apply_trust_store(&mut report, &empty_store);
-
-    report.state = if !report.errors.is_empty() {
-        SkillReportState::Invalid
-    } else if !report.warnings.is_empty()
-        || report.skills.iter().any(|skill| !skill.warnings.is_empty())
-    {
-        SkillReportState::Warning
-    } else {
-        SkillReportState::Ok
-    };
-
-    report.next_steps = workspace_skill_next_steps(&report);
+    refresh_workspace_skill_report_derived(&mut report);
 
     Ok(report)
 }
@@ -364,6 +392,7 @@ pub fn workspace_skill_report_with_trust(
     let mut report = workspace_skill_report(start)?;
     let store = read_trust_store(trust_store_path.as_ref())?;
     apply_trust_store(&mut report, &store);
+    refresh_workspace_skill_report_derived(&mut report);
     Ok(report)
 }
 
@@ -1627,6 +1656,276 @@ fn trust_identity_matches(left: &TrustedSkillRecord, right: &TrustedSkillRecord)
         && left.tree == right.tree
 }
 
+fn refresh_workspace_skill_report_derived(report: &mut WorkspaceSkillReport) {
+    report.state = if !report.errors.is_empty() {
+        SkillReportState::Invalid
+    } else if !report.warnings.is_empty()
+        || report.skills.iter().any(|skill| !skill.warnings.is_empty())
+    {
+        SkillReportState::Warning
+    } else {
+        SkillReportState::Ok
+    };
+    report.next_steps = workspace_skill_next_steps(report);
+    report.diagnostics = workspace_skill_diagnostics(report);
+}
+
+fn workspace_skill_diagnostics(report: &WorkspaceSkillReport) -> Vec<WorkspaceSkillDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if let Some(component) = &report.component {
+        for warning in &component.warnings {
+            diagnostics.push(component_diagnostic(
+                WorkspaceSkillDiagnosticSeverity::Warning,
+                component,
+                warning,
+            ));
+        }
+        for error in &component.errors {
+            diagnostics.push(component_diagnostic(
+                WorkspaceSkillDiagnosticSeverity::Error,
+                component,
+                error,
+            ));
+        }
+    }
+
+    for warning in &report.warnings {
+        append_report_diagnostic(
+            &mut diagnostics,
+            report,
+            WorkspaceSkillDiagnosticSeverity::Warning,
+            warning,
+        );
+    }
+    for error in &report.errors {
+        append_report_diagnostic(
+            &mut diagnostics,
+            report,
+            WorkspaceSkillDiagnosticSeverity::Error,
+            error,
+        );
+    }
+
+    for skill in &report.skills {
+        let label = skill_diagnostic_label(skill);
+        for warning in &skill.warnings {
+            if warning.starts_with("artifact_folder.") {
+                continue;
+            }
+            diagnostics.push(skill_diagnostic(
+                WorkspaceSkillDiagnosticSeverity::Warning,
+                WorkspaceSkillDiagnosticScope::SkillTrust,
+                skill,
+                &label,
+                warning,
+                skill_warning_code(warning),
+            ));
+        }
+        for error in &skill.errors {
+            if error.starts_with("artifact_folder.") {
+                continue;
+            }
+            diagnostics.push(skill_diagnostic(
+                WorkspaceSkillDiagnosticSeverity::Error,
+                WorkspaceSkillDiagnosticScope::SkillManifest,
+                skill,
+                &label,
+                error,
+                skill_manifest_error_code(error),
+            ));
+        }
+        for folder in &skill.artifact_folders {
+            for warning in &folder.warnings {
+                diagnostics.push(folder_diagnostic(
+                    WorkspaceSkillDiagnosticSeverity::Warning,
+                    skill,
+                    &label,
+                    folder,
+                    warning,
+                ));
+            }
+            for error in &folder.errors {
+                diagnostics.push(folder_diagnostic(
+                    WorkspaceSkillDiagnosticSeverity::Error,
+                    skill,
+                    &label,
+                    folder,
+                    error,
+                ));
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn append_report_diagnostic(
+    diagnostics: &mut Vec<WorkspaceSkillDiagnostic>,
+    report: &WorkspaceSkillReport,
+    severity: WorkspaceSkillDiagnosticSeverity,
+    message: &str,
+) {
+    if message.starts_with("component.") || message.starts_with("skill.") {
+        return;
+    }
+    if message.starts_with("skills_lock") {
+        diagnostics.push(WorkspaceSkillDiagnostic {
+            severity,
+            scope: WorkspaceSkillDiagnosticScope::Lock,
+            code: diagnostic_code(message),
+            message: message.to_string(),
+            component: None,
+            skill: None,
+            skill_path: None,
+            folder_id: None,
+            path: Some(report.lock_path.clone()),
+        });
+    } else if message == "skills_component_missing" {
+        diagnostics.push(WorkspaceSkillDiagnostic {
+            severity,
+            scope: WorkspaceSkillDiagnosticScope::Component,
+            code: message.to_string(),
+            message: message.to_string(),
+            component: Some(SKILLS_COMPONENT.to_string()),
+            skill: None,
+            skill_path: None,
+            folder_id: None,
+            path: None,
+        });
+    } else {
+        diagnostics.push(WorkspaceSkillDiagnostic {
+            severity,
+            scope: WorkspaceSkillDiagnosticScope::Workspace,
+            code: diagnostic_code(message),
+            message: message.to_string(),
+            component: None,
+            skill: None,
+            skill_path: None,
+            folder_id: None,
+            path: Some(report.workspace_root.clone()),
+        });
+    }
+}
+
+fn component_diagnostic(
+    severity: WorkspaceSkillDiagnosticSeverity,
+    component: &ComponentStatus,
+    message: &str,
+) -> WorkspaceSkillDiagnostic {
+    WorkspaceSkillDiagnostic {
+        severity,
+        scope: WorkspaceSkillDiagnosticScope::Component,
+        code: diagnostic_code(message),
+        message: message.to_string(),
+        component: Some(component.name.clone()),
+        skill: None,
+        skill_path: None,
+        folder_id: None,
+        path: Some(component.path.clone()),
+    }
+}
+
+fn skill_diagnostic(
+    severity: WorkspaceSkillDiagnosticSeverity,
+    scope: WorkspaceSkillDiagnosticScope,
+    skill: &WorkspaceSkillStatus,
+    label: &str,
+    message: &str,
+    code: String,
+) -> WorkspaceSkillDiagnostic {
+    WorkspaceSkillDiagnostic {
+        severity,
+        scope,
+        code,
+        message: message.to_string(),
+        component: None,
+        skill: Some(label.to_string()),
+        skill_path: Some(skill.path.clone()),
+        folder_id: None,
+        path: None,
+    }
+}
+
+fn folder_diagnostic(
+    severity: WorkspaceSkillDiagnosticSeverity,
+    skill: &WorkspaceSkillStatus,
+    label: &str,
+    folder: &SkillArtifactFolderStatus,
+    message: &str,
+) -> WorkspaceSkillDiagnostic {
+    WorkspaceSkillDiagnostic {
+        severity,
+        scope: WorkspaceSkillDiagnosticScope::SkillArtifactFolder,
+        code: diagnostic_code(message),
+        message: message.to_string(),
+        component: None,
+        skill: Some(label.to_string()),
+        skill_path: Some(skill.path.clone()),
+        folder_id: Some(folder.id.clone()),
+        path: Some(folder.path.clone()),
+    }
+}
+
+fn skill_diagnostic_label(skill: &WorkspaceSkillStatus) -> String {
+    skill
+        .name
+        .clone()
+        .unwrap_or_else(|| slash_path(&skill.path))
+}
+
+fn skill_error_key_label(skill: &WorkspaceSkillStatus) -> String {
+    skill
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", slash_path(&skill.path)))
+}
+
+fn skill_warning_code(message: &str) -> String {
+    match message {
+        "component_not_usable" => "component_not_usable".to_string(),
+        "shadowed_by_builtin" => "shadowed_by_builtin".to_string(),
+        "broadens_builtin_routing" => "broadens_builtin_routing".to_string(),
+        _ => diagnostic_code(message),
+    }
+}
+
+fn skill_manifest_error_code(message: &str) -> String {
+    if message.contains("duplicate value") {
+        "duplicate_value".to_string()
+    } else if message.contains("artifact path is invalid") {
+        "invalid_artifact_path".to_string()
+    } else if message.contains("missing field") {
+        "missing_field".to_string()
+    } else if message.contains("list `") && message.contains(" is empty") {
+        "empty_list".to_string()
+    } else if message.contains("duplicate_skill_name") {
+        "duplicate_skill_name".to_string()
+    } else {
+        "invalid_manifest".to_string()
+    }
+}
+
+fn diagnostic_code(message: &str) -> String {
+    let raw = message.split(':').next().unwrap_or(message).trim();
+    let mut code = String::new();
+    let mut last_was_separator = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            code.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            code.push('_');
+            last_was_separator = true;
+        }
+    }
+    let code = code.trim_matches('_').to_string();
+    if code.is_empty() {
+        "unknown".to_string()
+    } else {
+        code
+    }
+}
+
 fn component_git_usable(component: &ComponentStatus) -> bool {
     component.kind == ComponentKind::Submodule
         && component.exists
@@ -1641,10 +1940,7 @@ fn component_git_usable(component: &ComponentStatus) -> bool {
 }
 
 fn skill_error_keys(skill: &WorkspaceSkillStatus) -> Vec<String> {
-    let label = skill
-        .name
-        .clone()
-        .unwrap_or_else(|| skill.path.display().to_string());
+    let label = skill_error_key_label(skill);
     skill
         .errors
         .iter()

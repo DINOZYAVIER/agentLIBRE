@@ -62,6 +62,115 @@ Body.
 }
 
 #[test]
+fn invalid_submodule_skill_reports_manifest_diagnostic_without_component_noise() {
+    let (root, source) = clean_skills_submodule_fixture_with_invalid_skill(
+        "invalid-submodule-skill",
+        "bad-dupe",
+        r#"---
+name: bad-dupe
+description: Bad duplicate folder create rule.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+requestable_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+folders:
+  - id: bad
+    kind: generated
+    path: .agl/tasks/bad
+    access: read_write
+    create:
+      - when: runtime_prepare
+      - when: runtime_prepare
+guarantees:
+  - duplicate create rule must fail
+---
+Bad body.
+"#,
+    );
+
+    let report = workspace_skill_report(&root).unwrap();
+
+    assert_eq!(report.state, SkillReportState::Invalid);
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|error| error.contains("not_component_git_worktree")),
+        "{:?}",
+        report.errors
+    );
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == WorkspaceSkillDiagnosticSeverity::Error
+            && diagnostic.scope == WorkspaceSkillDiagnosticScope::SkillManifest
+            && diagnostic.code == "duplicate_value"
+            && diagnostic.skill_path == Some(PathBuf::from(".agl/skills/agl/bad-dupe"))
+    }));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.starts_with("skill.path:.agl/skills/agl/bad-dupe.")),
+        "{:?}",
+        report.errors
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
+fn invalid_submodule_skill_artifact_path_reports_manifest_diagnostic() {
+    let (root, source) = clean_skills_submodule_fixture_with_invalid_skill(
+        "invalid-artifact-path",
+        "bad-path",
+        r#"---
+name: bad-path
+description: Bad folder path.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+requestable_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+folders:
+  - id: bad
+    kind: generated
+    path: ../outside
+    access: read_write
+    create:
+      - when: artifact_write
+guarantees:
+  - invalid path must fail
+---
+Bad body.
+"#,
+    );
+
+    let report = workspace_skill_report(&root).unwrap();
+
+    assert_eq!(report.state, SkillReportState::Invalid);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == WorkspaceSkillDiagnosticSeverity::Error
+            && diagnostic.scope == WorkspaceSkillDiagnosticScope::SkillManifest
+            && diagnostic.code == "invalid_artifact_path"
+            && diagnostic.skill.as_deref() == Some(".agl/skills/agl/bad-path")
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
 fn workspace_status_reports_declared_skill_folders() {
     let root = temp_root("skill-folders");
     init_git_repo(&root);
@@ -654,6 +763,18 @@ fn clean_skills_submodule_fixture_with_folders(
             skill_name,
             folders_yaml,
         );
+    })
+}
+
+fn clean_skills_submodule_fixture_with_invalid_skill(
+    label: &str,
+    skill_name: &str,
+    skill_md: &str,
+) -> (PathBuf, PathBuf) {
+    clean_skills_submodule_fixture_with_writer(label, |source| {
+        let skill_dir = source.join("agl").join(skill_name);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
     })
 }
 
