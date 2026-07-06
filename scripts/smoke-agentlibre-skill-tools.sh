@@ -79,7 +79,7 @@ After the tool observation, do not call another tool. Answer with exactly: skill
     --artifact-root "$run_root" \
     --run-id "$run_id" \
     --workspace-root "$workspace" \
-    --skill tool-smoke \
+    --skill repo-status \
     --max-output-tokens "$max_output_tokens" \
     --prompt "$prompt" \
     >"$stdout_path"
@@ -95,10 +95,11 @@ request_tool_context "$request_1" >"$tool_context"
 latest_response="$(latest_response_file "$run_dir")"
 latest_content="$(json_content "$latest_response")"
 
-require_contains "$skill_context" '"skill_id": "tool-smoke"'
+require_contains "$skill_context" '"skill_id": "repo-status"'
 require_contains "$skill_context" '"fs.read"'
-require_not_contains "$skill_context" '"fs.list"'
-require_not_contains "$skill_context" '"fs.search"'
+require_contains "$skill_context" '"fs.list"'
+require_contains "$skill_context" '"fs.search"'
+require_contains "$skill_context" '"repo.status"'
 require_not_contains "$skill_context" '"fs.edit"'
 require_contains "$request_1" "<agentlibre_tool_context>"
 require_contains "$request_1" "fs.read"

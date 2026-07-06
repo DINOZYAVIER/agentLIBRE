@@ -633,14 +633,14 @@ folders:
 
 #[test]
 fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
-    let (root, source) = clean_skills_submodule_fixture_with_skill("same-name", "repo-review");
+    let (root, source) = clean_skills_submodule_fixture_with_skill("same-name", "repo-status");
     lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
     let trust_store = root.join("state/skill-trust.toml");
 
     let approval = trust_workspace_skill(
         &root,
         &trust_store,
-        "repo-review",
+        "repo-status",
         &SkillTrustOptions {
             approve: true,
             agentlibre_version: "test-version".to_string(),
@@ -657,8 +657,8 @@ fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
 
     let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
     let skill = registry
-        .get(&agl_tools::SkillId::new("repo-review").unwrap())
-        .expect("trusted workspace repo-review should be registered");
+        .get(&agl_tools::SkillId::new("repo-status").unwrap())
+        .expect("trusted workspace repo-status should be registered");
     assert_eq!(skill.harness.source, SkillSource::Workspace);
 
     fs::remove_dir_all(root).unwrap();
@@ -668,20 +668,20 @@ fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
 #[test]
 fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
     let (root, source) =
-        clean_skills_submodule_fixture_with_source("core-same-name", "repo-review", "core");
+        clean_skills_submodule_fixture_with_source("core-same-name", "repo-status", "core");
     let lock = lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
     let locked_skill = lock
         .lock
         .as_ref()
-        .and_then(|lock| lock.skills.iter().find(|skill| skill.name == "repo-review"))
-        .expect("repo-review should be locked");
+        .and_then(|lock| lock.skills.iter().find(|skill| skill.name == "repo-status"))
+        .expect("repo-status should be locked");
     assert_eq!(locked_skill.source, "core");
 
     let trust_store = root.join("state/skill-trust.toml");
     let approval = trust_workspace_skill(
         &root,
         &trust_store,
-        "repo-review",
+        "repo-status",
         &SkillTrustOptions {
             approve: true,
             agentlibre_version: "test-version".to_string(),
@@ -695,8 +695,8 @@ fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
     let skill = trusted
         .skills
         .iter()
-        .find(|skill| skill.name.as_deref() == Some("repo-review"))
-        .expect("repo-review should be reported");
+        .find(|skill| skill.name.as_deref() == Some("repo-status"))
+        .expect("repo-status should be reported");
     assert_eq!(skill.source.as_deref(), Some("core"));
     assert!(skill.shadowed_by_builtin);
     assert!(skill.overrides_builtin);
@@ -705,8 +705,8 @@ fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
 
     let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
     let skill = registry
-        .get(&agl_tools::SkillId::new("repo-review").unwrap())
-        .expect("trusted core repo-review should be registered");
+        .get(&agl_tools::SkillId::new("repo-status").unwrap())
+        .expect("trusted core repo-status should be registered");
     assert_eq!(skill.harness.source, SkillSource::Core);
 
     fs::remove_dir_all(root).unwrap();
@@ -717,7 +717,7 @@ fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
 fn same_name_workspace_skill_reports_routing_broadening() {
     let (root, source) = clean_skills_submodule_fixture_with_allowed_tools(
         "same-name-broad-routing",
-        "repo-review",
+        "repo-status",
         &["fs.edit"],
     );
     lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
@@ -736,7 +736,7 @@ fn same_name_workspace_skill_reports_routing_broadening() {
     let approval = trust_workspace_skill(
         &root,
         &trust_store,
-        "repo-review",
+        "repo-status",
         &SkillTrustOptions {
             approve: true,
             agentlibre_version: "test-version".to_string(),
