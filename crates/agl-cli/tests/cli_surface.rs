@@ -912,6 +912,54 @@ fn skill_lock_refuses_plain_workspace_skills_directory() {
 }
 
 #[test]
+fn skill_verify_reports_trusted_workspace_skill_as_usable() {
+    let (repo, _source, home) = submodule_workspace_with_skill(
+        "skill-verify-trust",
+        "repo-change",
+        r#"---
+name: repo-change
+description: Review repository changes.
+version: 1
+source: workspace
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+guarantees:
+  - repository paths are checked
+---
+Body.
+"#,
+    );
+    let home_arg = home.path_string();
+    let lock = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "lock"]);
+    assert_success(&lock);
+    let trust = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "skill",
+            "trust",
+            "repo-change",
+            "--yes",
+        ],
+    );
+    assert_success(&trust);
+
+    let verify = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "verify"]);
+
+    assert_success(&verify);
+    let stdout = stdout(&verify);
+    assert_contains(&stdout, "skill name=repo-change");
+    assert_contains(&stdout, "usable=true");
+    assert_contains(&stdout, "trust_state=TrustedLocal");
+}
+
+#[test]
 fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
     let (repo, _source, home) = submodule_workspace_with_skill(
         "skill-status-duplicate-create",
