@@ -1015,20 +1015,19 @@ Bad body.
 
 #[test]
 fn skill_inspect_runtime_succeeds_for_builtin_skill() {
-    let output = run_agl(&["skill", "inspect", "change", "--runtime"]);
+    let output = run_agl(&["skill", "inspect", "skill", "--runtime"]);
 
     assert_success_no_stderr(&output);
-    assert_contains(&stdout(&output), "skill name=change");
+    assert_contains(&stdout(&output), "skill name=skill");
     assert_contains(&stdout(&output), "usable=true");
 }
 
 #[test]
-fn skill_inspect_runtime_succeeds_for_expanded_repo_builtin_skill() {
+fn skill_inspect_runtime_rejects_non_core_private_skill_without_source() {
     let output = run_agl(&["skill", "inspect", "repo-review", "--runtime"]);
 
-    assert_success_no_stderr(&output);
-    assert_contains(&stdout(&output), "skill name=repo-review");
-    assert_contains(&stdout(&output), "usable=true");
+    assert_failure(&output);
+    assert_contains(&stderr(&output), "skill not found: repo-review");
 }
 
 #[test]

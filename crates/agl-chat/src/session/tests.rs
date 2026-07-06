@@ -371,7 +371,7 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
 
 #[test]
 fn selected_skill_hook_batches_use_declared_hook_events() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -400,7 +400,7 @@ fn selected_skill_hook_batches_use_declared_hook_events() {
 
 #[test]
 fn selected_skill_visible_tools_use_declared_tool_metadata() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -431,7 +431,7 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
 
 #[test]
 fn visible_tools_include_read_only_core_tools_without_skills() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -467,7 +467,7 @@ fn visible_tools_include_read_only_core_tools_without_skills() {
 
 #[test]
 fn visible_tools_include_edit_in_write_mode_without_skills() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -504,7 +504,7 @@ fn visible_tools_include_edit_in_write_mode_without_skills() {
 
 #[test]
 fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -543,7 +543,7 @@ fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
 
 #[test]
 fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();
@@ -582,7 +582,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
             granted_by_ref: "test".to_string(),
         })
         .unwrap();
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = InferenceRunId::new("manual-grant-test").unwrap();
 
@@ -632,7 +632,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
             granted_by_ref: "test".to_string(),
         })
         .unwrap();
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = InferenceRunId::new("manual-denied-test").unwrap();
 
@@ -674,7 +674,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
             granted_by_ref: "test".to_string(),
         })
         .unwrap();
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = InferenceRunId::new("manual-not-routed-test").unwrap();
 
@@ -712,7 +712,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
 
 #[test]
 fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
 
     let tools = selected_skill_visible_tools(
@@ -759,7 +759,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
             granted_by_ref: "test".to_string(),
         })
         .unwrap();
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let run_id = InferenceRunId::new("manual-cron-selected-test").unwrap();
 
@@ -796,6 +796,114 @@ fn full_tool_catalog() -> ToolCatalog {
     catalog
 }
 
+fn test_skill_registry() -> agl_skills::SkillRegistry {
+    let mut registry = agl_skills::builtin_registry().unwrap();
+    for skill in [
+        test_skill(
+            "task-spec",
+            &["repo_path.validate", "task_spec.validate"],
+            &["fs.edit", "fs.list", "fs.read", "fs.search"],
+            &[],
+            &[],
+            Vec::new(),
+        ),
+        test_skill(
+            "tool-smoke",
+            &["repo_path.validate"],
+            &["fs.read"],
+            &[],
+            &[],
+            Vec::new(),
+        ),
+        test_skill(
+            "notes-capture",
+            &["repo_path.validate"],
+            &["notes.add", "notes.link"],
+            &[],
+            &["notes.delete"],
+            Vec::new(),
+        ),
+        test_skill(
+            "cron-planner",
+            &["repo_path.validate"],
+            &[
+                "cron.preflight",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+            ],
+            &["cron.add", "matrix.outbox.enqueue"],
+            &["matrix.outbox.deliver"],
+            vec![agl_skills::SkillPermissionRequestTemplate {
+                id: "schedule-matrix-cron".to_string(),
+                tools: tool_ids(&["cron.add", "matrix.outbox.enqueue"]),
+                max_operation_kind: Some(agl_tools::ToolOperationKind::Write),
+                state_effects: vec![
+                    agl_tools::ToolStateEffect::StoreCron,
+                    agl_tools::ToolStateEffect::MatrixOutbox,
+                ],
+                default_duration: "one_turn".to_string(),
+                reason_template: "Schedule a Matrix notification cron job.".to_string(),
+            }],
+        ),
+    ] {
+        registry
+            .register(agl_skills::RegisteredSkill::trusted_builtin(skill))
+            .unwrap();
+    }
+    registry
+}
+
+fn test_skill(
+    id: &str,
+    required_hooks: &[&str],
+    allowed_tools: &[&str],
+    requestable_tools: &[&str],
+    denied_tools: &[&str],
+    permission_request_templates: Vec<agl_skills::SkillPermissionRequestTemplate>,
+) -> agl_skills::SkillHarness {
+    agl_skills::SkillHarness {
+        id: SkillId::new(id).unwrap(),
+        name: id.to_string(),
+        description: format!("Test-only {id} skill."),
+        version: 1,
+        source: agl_skills::SkillSource::Builtin,
+        pack: "test".to_string(),
+        required_hooks: hook_ids(required_hooks),
+        allowed_tools: tool_ids(allowed_tools),
+        requestable_tools: tool_ids(requestable_tools),
+        denied_tools: tool_ids(denied_tools),
+        permission_request_templates,
+        permissions: agl_skills::SkillPermissions::default(),
+        context_budget_tokens: 512,
+        reference_policy: agl_skills::SkillReferencePolicy {
+            include: Vec::new(),
+        },
+        references: Vec::new(),
+        artifacts: Vec::new(),
+        guarantees: vec!["test fixture is trusted by construction".to_string()],
+        body: format!("Use this test-only {id} skill."),
+        source_path: format!("test/{id}/SKILL.md"),
+        manifest_sha256: "0".repeat(64),
+        tree_sha256: "1".repeat(64),
+    }
+}
+
+fn hook_ids(values: &[&str]) -> Vec<HookId> {
+    values
+        .iter()
+        .map(|value| HookId::new(*value).unwrap())
+        .collect()
+}
+
+fn tool_ids(values: &[&str]) -> Vec<ToolId> {
+    values
+        .iter()
+        .map(|value| ToolId::new(*value).unwrap())
+        .collect()
+}
+
 fn temp_store_root(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -806,7 +914,7 @@ fn temp_store_root(label: &str) -> PathBuf {
 
 #[test]
 fn selected_tool_smoke_skill_exposes_only_declared_tool() {
-    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
     agl_tools::fs::register(&mut extension_registry).unwrap();

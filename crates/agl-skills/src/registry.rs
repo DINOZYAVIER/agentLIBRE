@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn builtin_registry_loads_trusted_core_skill() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let id = SkillId::new("task-spec").unwrap();
+        let id = SkillId::new("repo-status").unwrap();
         let skill = registry.resolve_for_context_injection(&id).unwrap();
 
         assert_eq!(skill.trust, SkillTrustState::TrustedByBinary);
@@ -327,38 +327,21 @@ mod tests {
                 .by_pack("agl")
                 .map(|skill| skill.harness.id.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "change",
-                "commit",
-                "commit-hygiene",
-                "cron-planner",
-                "memory-capture",
-                "notes-capture",
-                "repo-review",
-                "repo-status",
-                "review-pack",
-                "rust",
-                "security-review",
-                "skill",
-                "smoke-test",
-                "task-spec",
-                "test-triage",
-                "tool-smoke",
-            ]
+            vec!["repo-status", "skill"]
         );
     }
 
     #[test]
     fn registry_indexes_required_hooks() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let hook_id = HookId::new("task_spec.validate").unwrap();
+        let hook_id = HookId::new("skill_manifest.validate").unwrap();
 
         let skills = registry
             .requiring_hook(&hook_id)
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(skills, vec!["task-spec"]);
+        assert_eq!(skills, vec!["skill"]);
     }
 
     #[test]
@@ -371,31 +354,11 @@ mod tests {
             .map(|skill| skill.harness.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            skills,
-            vec![
-                "change",
-                "commit",
-                "commit-hygiene",
-                "cron-planner",
-                "memory-capture",
-                "notes-capture",
-                "repo-review",
-                "repo-status",
-                "review-pack",
-                "rust",
-                "security-review",
-                "skill",
-                "smoke-test",
-                "task-spec",
-                "test-triage",
-                "tool-smoke",
-            ]
-        );
+        assert_eq!(skills, vec!["repo-status", "skill"]);
     }
 
     #[test]
-    fn registry_indexes_requestable_and_denied_tools_separately() {
+    fn minimal_builtin_registry_has_no_requestable_or_denied_tools() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let cron_add = ToolId::new("cron.add").unwrap();
         let matrix_deliver = ToolId::new("matrix.outbox.deliver").unwrap();
@@ -412,14 +375,14 @@ mod tests {
                 .requesting_tool(&cron_add)
                 .map(|skill| skill.harness.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["cron-planner"]
+            Vec::<&str>::new()
         );
         assert_eq!(
             registry
                 .denying_tool(&matrix_deliver)
                 .map(|skill| skill.harness.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["cron-planner"]
+            Vec::<&str>::new()
         );
     }
 
@@ -470,16 +433,17 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let extensions = ToolCatalog::new();
         let err = registry
-            .verify_required_hooks(&SkillId::new("task-spec").unwrap(), &extensions)
+            .verify_required_hooks(&SkillId::new("skill").unwrap(), &extensions)
             .unwrap_err();
 
         assert_eq!(
             err,
             SkillRegistryError::MissingRequiredHooks {
-                id: "task-spec".to_string(),
+                id: "skill".to_string(),
                 hooks: vec![
                     HookId::new("repo_path.validate").unwrap(),
-                    HookId::new("task_spec.validate").unwrap(),
+                    HookId::new("secret_scan.validate").unwrap(),
+                    HookId::new("skill_manifest.validate").unwrap(),
                 ],
             }
         );
@@ -492,7 +456,7 @@ mod tests {
         extensions.register(core_guard_declaration()).unwrap();
 
         registry
-            .verify_required_hooks(&SkillId::new("task-spec").unwrap(), &extensions)
+            .verify_required_hooks(&SkillId::new("skill").unwrap(), &extensions)
             .unwrap();
     }
 
@@ -501,13 +465,13 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let extensions = ToolCatalog::new();
         let err = registry
-            .verify_allowed_tools(&SkillId::new("task-spec").unwrap(), &extensions)
+            .verify_allowed_tools(&SkillId::new("skill").unwrap(), &extensions)
             .unwrap_err();
 
         assert_eq!(
             err,
             SkillRegistryError::MissingAllowedTools {
-                id: "task-spec".to_string(),
+                id: "skill".to_string(),
                 tools: vec![
                     ToolId::new("fs.edit").unwrap(),
                     ToolId::new("fs.list").unwrap(),
@@ -531,7 +495,12 @@ mod tests {
             required: true,
         })
         .with_hook(HookDeclaration {
-            id: HookId::new("task_spec.validate").unwrap(),
+            id: HookId::new("secret_scan.validate").unwrap(),
+            event: HookEvent::ArtifactWrite,
+            required: true,
+        })
+        .with_hook(HookDeclaration {
+            id: HookId::new("skill_manifest.validate").unwrap(),
             event: HookEvent::ArtifactWrite,
             required: true,
         })

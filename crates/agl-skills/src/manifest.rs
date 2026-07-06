@@ -958,10 +958,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_builtin_task_spec_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("task-spec").unwrap()).unwrap();
+    fn parses_builtin_repo_status_skill() {
+        let skill = SkillHarness::parse_builtin(builtin_skill("repo-status").unwrap()).unwrap();
 
-        assert_eq!(skill.id.as_str(), "task-spec");
+        assert_eq!(skill.id.as_str(), "repo-status");
         assert_eq!(skill.source, SkillSource::Builtin);
         assert_eq!(skill.pack, "agl");
         assert_eq!(
@@ -970,7 +970,42 @@ mod tests {
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["repo_path.validate", "task_spec.validate"]
+            vec!["repo_path.validate", "verification.validate"]
+        );
+        assert_eq!(
+            skill
+                .allowed_tools
+                .iter()
+                .map(|tool| tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fs.list", "fs.read", "fs.search", "repo.status"]
+        );
+        assert!(skill.requestable_tools.is_empty());
+        assert!(skill.denied_tools.is_empty());
+        assert!(skill.permission_request_templates.is_empty());
+        assert!(skill.references.is_empty());
+        assert_eq!(skill.tree_sha256.len(), 64);
+        assert!(skill.body.contains("repository state picture"));
+    }
+
+    #[test]
+    fn parses_builtin_skill_authoring_skill() {
+        let skill = SkillHarness::parse_builtin(builtin_skill("skill").unwrap()).unwrap();
+
+        assert_eq!(skill.id.as_str(), "skill");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.pack, "agl");
+        assert_eq!(
+            skill
+                .required_hooks
+                .iter()
+                .map(|hook| hook.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "repo_path.validate",
+                "secret_scan.validate",
+                "skill_manifest.validate"
+            ]
         );
         assert_eq!(
             skill
@@ -980,61 +1015,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
         );
-        assert!(skill.requestable_tools.is_empty());
-        assert!(skill.denied_tools.is_empty());
-        assert!(skill.permission_request_templates.is_empty());
-        assert_eq!(skill.references[0].path, "references/task-spec-contract.md");
-        assert_eq!(skill.tree_sha256.len(), 64);
-        assert!(skill.body.contains("task spec"));
-    }
-
-    #[test]
-    fn parses_builtin_tool_smoke_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("tool-smoke").unwrap()).unwrap();
-
-        assert_eq!(skill.id.as_str(), "tool-smoke");
-        assert_eq!(skill.source, SkillSource::Builtin);
-        assert_eq!(skill.pack, "agl");
-        assert_eq!(
-            skill
-                .required_hooks
-                .iter()
-                .map(|hook| hook.as_str())
-                .collect::<Vec<_>>(),
-            vec!["repo_path.validate"]
-        );
-        assert_eq!(
-            skill
-                .allowed_tools
-                .iter()
-                .map(|tool| tool.as_str())
-                .collect::<Vec<_>>(),
-            vec!["fs.read"]
-        );
         assert!(skill.references.is_empty());
-        assert!(skill.body.contains("smoke tests"));
+        assert!(skill.body.contains("runtime skills"));
     }
 
     #[test]
-    fn parses_builtin_repo_review_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("repo-review").unwrap()).unwrap();
-
-        assert_eq!(skill.id.as_str(), "repo-review");
-        assert_eq!(skill.source, SkillSource::Builtin);
-        assert_eq!(skill.pack, "agl");
-        assert!(
-            skill
-                .required_hooks
-                .iter()
-                .any(|hook| hook.as_str() == "diff_scope.validate")
-        );
-        assert!(
-            skill
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == "fs.search")
-        );
-        assert!(skill.body.contains("review-first repository work"));
+    fn non_core_skills_are_not_embedded() {
+        assert!(builtin_skill("task-spec").is_none());
+        assert!(builtin_skill("tool-smoke").is_none());
+        assert!(builtin_skill("repo-review").is_none());
+        assert!(builtin_skill("change").is_none());
     }
 
     #[test]

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-const BUILTIN_SKILL_PACKS: &[&str] = &["agl", "dev"];
+const BUILTIN_SKILL_PACKS: &[&str] = &["agl"];
+const BUILTIN_AGL_SKILLS: &[&str] = &["repo-status", "skill"];
 
 #[derive(Clone, Copy)]
 enum AssetKind {
@@ -116,6 +117,9 @@ fn add_skills(
                 .and_then(|name| name.to_str())
                 .expect("skill directory must have a UTF-8 name");
             validate_name(name, "builtin skill directory");
+            if pack == "agl" && !BUILTIN_AGL_SKILLS.contains(&name) {
+                continue;
+            }
             let skill_md = skill_dir.join("SKILL.md");
             if !skill_md.is_file() {
                 panic!("builtin skill {} is missing SKILL.md", skill_dir.display());

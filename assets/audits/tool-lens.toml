@@ -54,29 +54,8 @@ version = 1
 "permissions.revoke" = "agl-tools/permissions"
 
 [skill_classifications]
-change = "filesystem_mutating"
-commit = "read_only_planning"
-"commit-hygiene" = "read_only_analysis"
-"cron-planner" = "read_only_planning"
-"memory-capture" = "memory_mutating_suggestion"
-"notes-capture" = "notes_mutating"
-"repo-review" = "read_only_analysis"
 "repo-status" = "read_only_analysis"
-"review-pack" = "filesystem_mutating"
-rust = "filesystem_mutating"
-"security-review" = "read_only_analysis"
 skill = "filesystem_mutating"
-"smoke-test" = "read_only_analysis"
-"task-spec" = "filesystem_mutating"
-"test-triage" = "read_only_analysis"
-"tool-smoke" = "read_only_smoke"
 
 [skill_risks]
-change = ["fs.edit can change repository files; keep repo_path, diff_scope, secret_scan, and verification hooks."]
-"cron-planner" = ["May propose cron jobs but must not execute or schedule until cron tools and permission grants exist."]
-"memory-capture" = ["memory.suggest creates pending suggestions; approval remains outside this skill."]
-"notes-capture" = ["notes.add and notes.link mutate local store; note creation must be explicit."]
-"review-pack" = ["fs.edit writes review artifacts; review_pack.validate must stay required."]
-rust = ["fs.edit can change workspace code; keep focused verification."]
 skill = ["fs.edit changes builtin skill assets; skill_manifest.validate must stay required."]
-"task-spec" = ["fs.edit writes task specs; task_spec.validate must stay required."]
