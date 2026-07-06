@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "snake_case")]
 pub enum SkillSource {
     Builtin,
+    Core,
+    Community,
+    Local,
     Workspace,
     User,
     ThirdParty,
@@ -21,10 +24,20 @@ impl SkillSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
+            Self::Core => "core",
+            Self::Community => "community",
+            Self::Local => "local",
             Self::Workspace => "workspace",
             Self::User => "user",
             Self::ThirdParty => "third_party",
         }
+    }
+
+    pub fn is_external_skill_source(self) -> bool {
+        matches!(
+            self,
+            Self::Core | Self::Community | Self::Local | Self::Workspace
+        )
     }
 }
 
@@ -393,9 +406,10 @@ impl std::fmt::Display for SkillManifestError {
             Self::BuiltinSourceMismatch => {
                 write!(f, "builtin skill manifest must use source=builtin")
             }
-            Self::WorkspaceSourceMismatch => {
-                write!(f, "workspace skill manifest must use source=workspace")
-            }
+            Self::WorkspaceSourceMismatch => write!(
+                f,
+                "external skill manifest must use source=workspace, core, community, or local"
+            ),
             Self::ContextBudgetZero => write!(f, "skill context budget must be greater than zero"),
             Self::EmptyBody => write!(f, "skill body cannot be empty"),
             Self::ReferenceEscapesSkill { path } => {
@@ -482,7 +496,7 @@ fn parse_workspace_text(
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
-    if raw.source != SkillSource::Workspace {
+    if !raw.source.is_external_skill_source() {
         return Err(SkillManifestError::WorkspaceSourceMismatch);
     }
 
@@ -1479,6 +1493,42 @@ Review changes.
         assert_eq!(skill.source_path, "agl/repo-change/SKILL.md");
         assert_eq!(skill.references[0].path, "references/policy.md");
         assert_eq!(skill.references[0].sha256.len(), 64);
+        assert_eq!(skill.tree_sha256, "tree-sha");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_core_skill_from_external_directory() {
+        let root = temp_root("core-skill");
+        let skill_dir = root.join("agl/repo-review");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: repo-review
+description: Review repository changes.
+version: 1
+source: core
+pack: agl
+required_hooks:
+  - repo_path.validate
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+guarantees:
+  - repository paths are checked
+---
+Body.
+"#,
+        )
+        .unwrap();
+
+        let skill = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap();
+
+        assert_eq!(skill.id.as_str(), "repo-review");
+        assert_eq!(skill.source, SkillSource::Core);
         assert_eq!(skill.tree_sha256, "tree-sha");
 
         fs::remove_dir_all(root).unwrap();

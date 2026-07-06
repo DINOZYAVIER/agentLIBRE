@@ -425,6 +425,15 @@ fn parse_skill_commands() {
         })),
     );
     assert_command(
+        ["agl", "skill", "list", "--source", "core"],
+        CliCommand::Skill(SkillCommand::List(SkillListOptions {
+            json: false,
+            source: SkillListSourceArg::Core,
+            trusted_only: false,
+            limit: None,
+        })),
+    );
+    assert_command(
         ["agl", "skill", "inspect", "repo-change", "--json"],
         CliCommand::Skill(SkillCommand::Inspect(SkillInspectOptions {
             name: "repo-change".to_string(),

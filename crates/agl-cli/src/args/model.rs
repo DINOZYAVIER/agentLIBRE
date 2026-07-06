@@ -199,6 +199,9 @@ pub(crate) struct SkillListOptions {
 pub(crate) enum SkillListSourceArg {
     All,
     Builtin,
+    Core,
+    Community,
+    Local,
     Workspace,
 }
 

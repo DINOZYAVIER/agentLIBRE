@@ -319,6 +319,7 @@ mod tests {
         agl_tools::cron::register(&mut tool_catalog).unwrap();
         agl_tools::fs::register(&mut tool_catalog).unwrap();
         agl_tools::matrix::register(&mut tool_catalog).unwrap();
+        agl_tools::permissions::register(&mut tool_catalog).unwrap();
 
         let bundle = build_verified_context_bundle(
             &registry,
@@ -330,7 +331,7 @@ mod tests {
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: cron.preflight, fs.read, fs.search")
+                .contains("directly_callable_tools: cron.preflight, fs.read, fs.search, permissions.request, permissions.status")
         );
         assert!(
             bundle
@@ -345,7 +346,13 @@ mod tests {
         assert!(bundle.content.contains("id: schedule-matrix-cron"));
         assert_eq!(
             bundle.evidence[0].allowed_tools,
-            vec!["cron.preflight", "fs.read", "fs.search"]
+            vec![
+                "cron.preflight",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status"
+            ]
         );
         assert_eq!(
             bundle.evidence[0].requestable_tools,
