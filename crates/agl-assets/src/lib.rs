@@ -99,6 +99,27 @@ mod tests {
     }
 
     #[test]
+    fn builtin_skills_are_embedded_from_core_repo_checkout() {
+        let skills = BUILTIN_SKILLS
+            .iter()
+            .map(|skill| skill.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(skills, vec!["repo-status", "skill"]);
+        for skill in BUILTIN_SKILLS {
+            assert!(
+                skill
+                    .skill_md
+                    .source_path
+                    .starts_with("assets/core-skills/"),
+                "{} must be embedded from assets/core-skills, got {}",
+                skill.id,
+                skill.skill_md.source_path
+            );
+        }
+    }
+
+    #[test]
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
         assert!(builtin_skill("missing").is_none());

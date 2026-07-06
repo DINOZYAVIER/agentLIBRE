@@ -1,3 +1,6 @@
 [submodule "vendor/llama.cpp"]
 	path = vendor/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp
+[submodule "assets/core-skills"]
+	path = assets/core-skills
+	url = https://github.com/DINOZYAVIER/agl-core-skills.git

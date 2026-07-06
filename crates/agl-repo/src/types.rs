@@ -8,7 +8,7 @@ pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
 pub const ARTIFACT_LOCK_PATH: &str = ".agl/artifact-lock.toml";
 pub const DEFAULT_PROFILE: &str = "repo-workflow";
 pub const DEFAULT_SKILLS_URL: &str = "https://github.com/DINOZYAVIER/agl-core-skills.git";
-pub const DEFAULT_SKILLS_REV: &str = "v0.1.1";
+pub const DEFAULT_SKILLS_REV: &str = "v0.1.2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoInitOptions {

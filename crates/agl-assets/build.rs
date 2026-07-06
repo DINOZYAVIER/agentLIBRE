@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const BUILTIN_SKILL_PACKS: &[&str] = &["agl"];
-const BUILTIN_AGL_SKILLS: &[&str] = &["repo-status", "skill"];
+const BUILTIN_CORE_SKILLS_DIR: &str = "core-skills";
 
 #[derive(Clone, Copy)]
 enum AssetKind {
@@ -52,13 +52,14 @@ fn main() {
         .and_then(Path::parent)
         .expect("agl-assets must live under crates/");
     let assets_root = repo_root.join("assets");
+    let builtin_skills_root = assets_root.join(BUILTIN_CORE_SKILLS_DIR);
     let mut assets = Vec::new();
     let mut skills = Vec::new();
 
     println!("cargo:rerun-if-changed={}", assets_root.display());
 
     add_system_prompt(&mut assets, repo_root, &assets_root);
-    add_skills(&mut assets, &mut skills, repo_root, &assets_root);
+    add_skills(&mut assets, &mut skills, repo_root, &builtin_skills_root);
     validate_unique_asset_ids(&assets);
     validate_unique_skill_ids(&skills);
     write_registry(&assets, &skills);
@@ -81,14 +82,16 @@ fn add_skills(
     assets: &mut Vec<Asset>,
     skills: &mut Vec<Skill>,
     repo_root: &Path,
-    assets_root: &Path,
+    skills_root: &Path,
 ) {
-    let skills_root = assets_root.join("skills");
-    if !skills_root.exists() {
-        return;
+    if !skills_root.is_dir() {
+        panic!(
+            "missing builtin core skills checkout {}; run `git submodule update --init assets/core-skills`",
+            skills_root.display()
+        );
     }
-    reject_symlink(&skills_root);
-    for pack_root in read_dir_sorted(&skills_root)
+    reject_symlink(skills_root);
+    for pack_root in read_dir_sorted(skills_root)
         .into_iter()
         .filter(|path| path.is_dir())
     {
@@ -117,9 +120,6 @@ fn add_skills(
                 .and_then(|name| name.to_str())
                 .expect("skill directory must have a UTF-8 name");
             validate_name(name, "builtin skill directory");
-            if pack == "agl" && !BUILTIN_AGL_SKILLS.contains(&name) {
-                continue;
-            }
             let skill_md = skill_dir.join("SKILL.md");
             if !skill_md.is_file() {
                 panic!("builtin skill {} is missing SKILL.md", skill_dir.display());
@@ -166,6 +166,12 @@ fn add_skills(
                 tree_sha256,
             });
         }
+    }
+    if skills.is_empty() {
+        panic!(
+            "builtin core skills checkout {} contains no skills",
+            skills_root.display()
+        );
     }
 }
 
