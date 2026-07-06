@@ -7,7 +7,7 @@ pub const AGL_DIR: &str = ".agl";
 pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
 pub const ARTIFACT_LOCK_PATH: &str = ".agl/artifact-lock.toml";
 pub const DEFAULT_PROFILE: &str = "repo-workflow";
-pub const DEFAULT_SKILLS_URL: &str = "git@github.com:agentlibre/agl-skills.git";
+pub const DEFAULT_SKILLS_URL: &str = "https://github.com/DINOZYAVIER/agl-core-skills.git";
 pub const DEFAULT_SKILLS_REV: &str = "v0.1.0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
