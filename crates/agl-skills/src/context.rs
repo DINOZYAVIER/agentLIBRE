@@ -260,40 +260,46 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use agl_tools::ToolCatalog;
+    use agl_tools::{ToolCatalog, ToolOperationKind, ToolStateEffect};
 
     use super::*;
+    use crate::{
+        RegisteredSkill, SkillHarness, SkillPermissionRequestTemplate, SkillPermissions,
+        SkillReferencePolicy, SkillSource,
+    };
 
     #[test]
-    fn verified_context_bundle_records_hashes_without_reference_text_in_evidence() {
+    fn verified_context_bundle_records_hashes_for_minimal_builtin_skill() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut tool_catalog = ToolCatalog::new();
         agl_tools::guards::register(&mut tool_catalog).unwrap();
         agl_tools::fs::register(&mut tool_catalog).unwrap();
+        agl_tools::repo::register(&mut tool_catalog).unwrap();
 
         let bundle = build_verified_context_bundle(
             &registry,
             &tool_catalog,
-            &[SkillId::new("task-spec").unwrap()],
+            &[SkillId::new("repo-status").unwrap()],
         )
         .unwrap();
 
         assert!(bundle.content.contains("Use this skill"));
-        assert!(bundle.content.contains("Task Spec Contract"));
+        assert!(bundle.content.contains("repository state picture"));
         assert_eq!(bundle.evidence.len(), 1);
-        assert_eq!(bundle.evidence[0].skill_id, "task-spec");
+        assert_eq!(bundle.evidence[0].skill_id, "repo-status");
+        assert_eq!(bundle.evidence[0].source, "builtin");
         assert_eq!(
             bundle.evidence[0].required_hooks,
-            vec!["repo_path.validate", "task_spec.validate"]
+            vec!["repo_path.validate", "verification.validate"]
         );
         assert_eq!(
             bundle.evidence[0].allowed_tools,
-            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+            vec!["fs.list", "fs.read", "fs.search", "repo.status"]
         );
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: fs.edit, fs.list, fs.read, fs.search")
+                .contains("directly_callable_tools: fs.list, fs.read, fs.search, repo.status")
         );
         assert!(bundle.content.contains("requestable_tools: []"));
         assert!(
@@ -304,16 +310,13 @@ mod tests {
         assert!(bundle.evidence[0].requestable_tools.is_empty());
         assert!(bundle.evidence[0].denied_tools.is_empty());
         assert!(bundle.evidence[0].permission_request_templates.is_empty());
-        assert_eq!(
-            bundle.evidence[0].included_references[0].path,
-            "references/task-spec-contract.md"
-        );
-        assert!(!format!("{:?}", bundle.evidence).contains("Task Spec Contract"));
+        assert!(bundle.evidence[0].included_references.is_empty());
+        assert!(!format!("{:?}", bundle.evidence).contains("repository state picture"));
     }
 
     #[test]
     fn context_distinguishes_callable_from_requestable_tools() {
-        let registry = SkillRegistry::from_builtin_assets().unwrap();
+        let registry = registry_with_requestable_fixture();
         let mut tool_catalog = ToolCatalog::new();
         agl_tools::guards::register(&mut tool_catalog).unwrap();
         agl_tools::cron::register(&mut tool_catalog).unwrap();
@@ -324,7 +327,7 @@ mod tests {
         let bundle = build_verified_context_bundle(
             &registry,
             &tool_catalog,
-            &[SkillId::new("cron-planner").unwrap()],
+            &[SkillId::new("requestable-test").unwrap()],
         )
         .unwrap();
 
@@ -366,5 +369,57 @@ mod tests {
             bundle.evidence[0].permission_request_templates[0].tools,
             vec!["cron.add", "matrix.outbox.enqueue"]
         );
+    }
+
+    fn registry_with_requestable_fixture() -> SkillRegistry {
+        let mut registry = SkillRegistry::new();
+        registry
+            .register(RegisteredSkill::trusted_builtin(SkillHarness {
+                id: SkillId::new("requestable-test").unwrap(),
+                name: "requestable-test".to_string(),
+                description: "Test-only requestable tool routing skill.".to_string(),
+                version: 1,
+                source: SkillSource::Builtin,
+                pack: "test".to_string(),
+                required_hooks: vec![HookId::new("repo_path.validate").unwrap()],
+                allowed_tools: tool_ids([
+                    "cron.preflight",
+                    "fs.read",
+                    "fs.search",
+                    "permissions.request",
+                    "permissions.status",
+                ]),
+                requestable_tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
+                denied_tools: tool_ids(["matrix.outbox.deliver"]),
+                permission_request_templates: vec![SkillPermissionRequestTemplate {
+                    id: "schedule-matrix-cron".to_string(),
+                    tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
+                    max_operation_kind: Some(ToolOperationKind::Write),
+                    state_effects: vec![ToolStateEffect::StoreCron, ToolStateEffect::MatrixOutbox],
+                    default_duration: "one_turn".to_string(),
+                    reason_template: "Schedule a Matrix notification cron job.".to_string(),
+                }],
+                permissions: SkillPermissions::default(),
+                context_budget_tokens: 512,
+                reference_policy: SkillReferencePolicy {
+                    include: Vec::new(),
+                },
+                references: Vec::new(),
+                artifacts: Vec::new(),
+                guarantees: vec!["test fixture is trusted by construction".to_string()],
+                body: "Use this skill to test requestable tool context rendering.".to_string(),
+                source_path: "test/requestable-test/SKILL.md".to_string(),
+                manifest_sha256: "0".repeat(64),
+                tree_sha256: "1".repeat(64),
+            }))
+            .unwrap();
+        registry
+    }
+
+    fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<ToolId> {
+        values
+            .into_iter()
+            .map(|value| ToolId::new(value).unwrap())
+            .collect()
     }
 }

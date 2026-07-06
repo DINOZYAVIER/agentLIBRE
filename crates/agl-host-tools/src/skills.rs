@@ -544,15 +544,16 @@ mod tests {
         let inspect = tools
             .dispatch(
                 agl_tools::SKILL_INSPECT_TOOL_ID,
-                json!({"id": "task-spec", "include_references": true}),
+                json!({"id": "skill", "include_references": true}),
             )
             .unwrap();
 
         assert!(list.contains("tool=skill.list"));
-        assert!(list.contains("skill id=task-spec"));
+        assert!(list.contains("skill id=skill"));
         assert!(inspect.contains("tool=skill.inspect"));
+        assert!(inspect.contains("skill id=skill"));
         assert!(inspect.contains("manifest_sha256="));
-        assert!(inspect.contains("reference path="));
+        assert!(!inspect.contains("reference path="));
 
         let _ = std::fs::remove_dir_all(root);
     }
