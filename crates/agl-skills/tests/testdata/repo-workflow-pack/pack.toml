@@ -6,7 +6,7 @@ agentlibre_version = ">=1.0.0-alpha.7"
 
 [submodule]
 path = ".agl/skills"
-url = "git@github.com:agentlibre/agl-skills.git"
+url = "https://github.com/DINOZYAVIER/agl-core-skills.git"
 rev = "v0.1.0"
 
 [[skills]]
