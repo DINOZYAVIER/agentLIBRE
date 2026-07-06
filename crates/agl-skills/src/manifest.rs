@@ -404,7 +404,10 @@ impl std::fmt::Display for SkillManifestError {
                 )
             }
             Self::BuiltinSourceMismatch => {
-                write!(f, "builtin skill manifest must use source=builtin")
+                write!(
+                    f,
+                    "builtin skill manifest must use source=builtin or source=core"
+                )
             }
             Self::WorkspaceSourceMismatch => write!(
                 f,
@@ -446,9 +449,10 @@ fn parse_skill_text(
             actual: raw.pack.clone(),
         });
     }
-    if raw.source != SkillSource::Builtin {
+    if !matches!(raw.source, SkillSource::Builtin | SkillSource::Core) {
         return Err(SkillManifestError::BuiltinSourceMismatch);
     }
+    raw.source = SkillSource::Builtin;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(
@@ -805,13 +809,9 @@ fn resolve_references(
     reference_assets: &[&'static BuiltinAsset],
     includes: &[String],
 ) -> Result<Vec<SkillReference>, SkillManifestError> {
-    let prefix = format!("assets/skills/{pack}/{name}/");
     let mut references_by_path = BTreeMap::new();
     for asset in reference_assets {
-        let relative_path = asset
-            .source_path
-            .strip_prefix(&prefix)
-            .unwrap_or(asset.source_path);
+        let relative_path = builtin_skill_relative_asset_path(asset.source_path, pack, name);
         references_by_path.insert(relative_path.to_string(), *asset);
     }
     let mut resolved = Vec::with_capacity(includes.len());
@@ -834,6 +834,18 @@ fn resolve_references(
         });
     }
     Ok(resolved)
+}
+
+fn builtin_skill_relative_asset_path<'a>(source_path: &'a str, pack: &str, name: &str) -> &'a str {
+    for prefix in [
+        format!("assets/core-skills/{pack}/{name}/"),
+        format!("assets/skills/{pack}/{name}/"),
+    ] {
+        if let Some(relative) = source_path.strip_prefix(&prefix) {
+            return relative;
+        }
+    }
+    source_path
 }
 
 fn resolve_workspace_references(
