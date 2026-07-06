@@ -34,8 +34,7 @@ use agl_skills::{
     SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillDiagnostic,
     WorkspaceSkillDiagnosticScope, WorkspaceSkillDiagnosticSeverity, WorkspaceSkillReport,
     WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
-    sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report,
-    workspace_skill_report_with_trust,
+    sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report_with_trust,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
@@ -602,7 +601,7 @@ fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result
         SkillCommand::List(options) => run_skill_list(options, runtime),
         SkillCommand::Inspect(options) => run_skill_inspect(options, runtime),
         SkillCommand::Status(options) => run_skill_status(options, runtime),
-        SkillCommand::Verify(options) => run_skill_verify(options),
+        SkillCommand::Verify(options) => run_skill_verify(options, runtime),
         SkillCommand::SyncFolders(options) => run_skill_sync_folders(options),
         SkillCommand::Lock(options) => run_skill_lock(options),
         SkillCommand::Trust(options) => run_skill_trust(options, runtime),
@@ -893,10 +892,11 @@ fn run_skill_status(options: SkillStatusOptions, runtime: &AgentLibreRuntimeConf
     Ok(())
 }
 
-fn run_skill_verify(options: SkillVerifyOptions) -> Result<()> {
+fn run_skill_verify(options: SkillVerifyOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "skill verify", "starting command");
-    let report = workspace_skill_report(
+    let report = workspace_skill_report_with_trust(
         std::env::current_dir().context("failed to resolve current directory")?,
+        skill_trust_store_path(runtime),
     )?;
 
     crate::print_json_or(options.json, &report, || {
