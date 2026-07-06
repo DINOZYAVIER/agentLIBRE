@@ -50,8 +50,11 @@ impl SkillTools {
         let args = parse_args::<ListArgs>(agl_tools::SKILL_LIST_TOOL_ID, arguments)?;
         let source = args.source.as_deref().unwrap_or("all");
         ensure!(
-            matches!(source, "all" | "builtin" | "workspace"),
-            "skill.list source must be all, builtin, or workspace"
+            matches!(
+                source,
+                "all" | "builtin" | "workspace" | "core" | "community" | "local"
+            ),
+            "skill.list source must be all, builtin, workspace, core, community, or local"
         );
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).min(DEFAULT_LIMIT);
         let trusted_only = args.trusted_only.unwrap_or(false);
@@ -73,7 +76,7 @@ impl SkillTools {
             workspace.state
         );
         let mut emitted = 0usize;
-        if source != "workspace" {
+        if source != "workspace" && source != "core" && source != "community" && source != "local" {
             for skill in registry.skills() {
                 if emitted >= limit {
                     break;
@@ -99,6 +102,9 @@ impl SkillTools {
             for skill in &workspace.skills {
                 if emitted >= limit {
                     break;
+                }
+                if !workspace_skill_source_matches(source, skill) {
+                    continue;
                 }
                 if trusted_only && !skill.usable {
                     continue;
@@ -297,8 +303,9 @@ fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillRep
 
 fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
     format!(
-        "skill id={} source=workspace usable={} trust={:?} valid={} broadens_builtin_routing={} folders={} allowed={} requestable={} denied={}",
+        "skill id={} source={} usable={} trust={:?} valid={} broadens_builtin_routing={} folders={} allowed={} requestable={} denied={}",
         workspace_skill_key(skill),
+        skill.source.as_deref().unwrap_or("unknown"),
         skill.usable,
         skill.trust_state,
         skill.valid,
@@ -308,6 +315,15 @@ fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
         skill.requestable_tools.join(","),
         skill.denied_tools.join(",")
     )
+}
+
+fn workspace_skill_source_matches(source: &str, skill: &WorkspaceSkillStatus) -> bool {
+    match source {
+        "all" | "workspace" => true,
+        "core" | "community" | "local" => skill.source.as_deref() == Some(source),
+        "builtin" => false,
+        _ => false,
+    }
 }
 
 fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {

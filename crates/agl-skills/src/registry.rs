@@ -32,7 +32,9 @@ impl SkillSource {
     pub fn default_trust_state(self) -> SkillTrustState {
         match self {
             Self::Builtin => SkillTrustState::TrustedByBinary,
-            Self::Workspace => SkillTrustState::Unknown,
+            Self::Core | Self::Community | Self::Local | Self::Workspace => {
+                SkillTrustState::Unknown
+            }
             Self::User | Self::ThirdParty => SkillTrustState::Unsupported,
         }
     }
@@ -56,6 +58,9 @@ impl RegisteredSkill {
         matches!(
             (self.trust, self.harness.source),
             (SkillTrustState::TrustedByBinary, SkillSource::Builtin)
+                | (SkillTrustState::TrustedLocal, SkillSource::Core)
+                | (SkillTrustState::TrustedLocal, SkillSource::Community)
+                | (SkillTrustState::TrustedLocal, SkillSource::Local)
                 | (SkillTrustState::TrustedLocal, SkillSource::Workspace)
         )
     }
@@ -422,6 +427,18 @@ mod tests {
     fn non_builtin_sources_default_to_non_injectable_states() {
         assert_eq!(
             SkillSource::Workspace.default_trust_state(),
+            SkillTrustState::Unknown
+        );
+        assert_eq!(
+            SkillSource::Core.default_trust_state(),
+            SkillTrustState::Unknown
+        );
+        assert_eq!(
+            SkillSource::Community.default_trust_state(),
+            SkillTrustState::Unknown
+        );
+        assert_eq!(
+            SkillSource::Local.default_trust_state(),
             SkillTrustState::Unknown
         );
         assert_eq!(

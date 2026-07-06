@@ -14,7 +14,7 @@ use agl_runtime::{
 };
 use agl_skills::{
     SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
-    SkillFolderPrepareReport, SkillSource, build_verified_context_bundle,
+    SkillFolderPrepareReport, build_verified_context_bundle,
     prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
     trusted_workspace_registry,
 };
@@ -591,7 +591,7 @@ fn ensure_memory_context_allowed_for_skills(
         .context("failed to load skill registry for memory context")?;
     for skill_id in selected_skills {
         let skill = skill_registry.resolve_for_context_injection(&skill_id)?;
-        if skill.harness.source == SkillSource::Workspace {
+        if skill.harness.source.is_external_skill_source() {
             ensure!(
                 skill
                     .harness
@@ -781,12 +781,19 @@ fn selected_skill_visible_tools_with_grants(
     tool_mode: ToolAccessMode,
     grant_snapshot: RuntimePermissionGrantSnapshot,
 ) -> Result<(Vec<VisibleTool>, RuntimePermissionGrantSnapshot)> {
-    let mut tool_ids = core_tool_ids()?;
+    let mut tool_ids = if selected_skills.is_empty() {
+        core_tool_ids()?
+    } else {
+        BTreeSet::new()
+    };
+    let mut denied_tool_ids = BTreeSet::new();
     for skill_id in selected_skills {
         skill_registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         tool_ids.extend(skill.harness.allowed_tools.iter().cloned());
+        denied_tool_ids.extend(skill.harness.denied_tools.iter().cloned());
     }
+    tool_ids.retain(|tool_id| !denied_tool_ids.contains(tool_id));
     let granted_tool_ids = grant_snapshot
         .admitted
         .iter()
@@ -917,6 +924,14 @@ fn evaluate_permission_grant(
     }
     if policy.denied_tools.contains(&tool_id) {
         return Err("denied_by_selected_skill".to_string());
+    }
+    if !policy.selected.is_empty()
+        && !policy
+            .allowed_or_requestable
+            .values()
+            .any(|tools| tools.contains(&tool_id))
+    {
+        return Err("not_routed_by_selected_skill".to_string());
     }
     if let Some(skill) = grant.scope.get("skill_id").and_then(|value| value.as_str()) {
         let skill_id =

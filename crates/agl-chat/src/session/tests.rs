@@ -420,18 +420,7 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.edit",
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.request",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
     );
     assert_eq!(
         tools[0].required_arguments,
@@ -574,17 +563,7 @@ fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.request",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.list", "fs.read", "fs.search"]
     );
 }
 
@@ -680,6 +659,128 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
+    let root = temp_store_root("grant-not-routed");
+    let store = AglStore::open_at(&root).unwrap();
+    store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: "cron.add".to_string(),
+            max_operation_kind: "write".to_string(),
+            state_effects: vec!["store_cron".to_string()],
+            scope: serde_json::json!({}),
+            duration: "one_turn".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let catalog = full_tool_catalog();
+    let run_id = InferenceRunId::new("manual-not-routed-test").unwrap();
+
+    let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
+        &skill_registry,
+        &catalog,
+        &[SkillId::new("tool-smoke").unwrap()],
+        ToolAccessMode::ReadOnly,
+        &root,
+        std::path::Path::new("/repo"),
+        &run_id,
+    )
+    .unwrap();
+
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fs.read"]
+    );
+    assert!(snapshot.granted_visible_tools().is_empty());
+    assert!(
+        snapshot
+            .ignored_grants()
+            .iter()
+            .any(|grant| grant.contains("cron.add:not_routed_by_selected_skill")),
+        "{:?}",
+        snapshot.ignored_grants()
+    );
+    assert_eq!(store.active_permission_grants().unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
+    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let catalog = full_tool_catalog();
+
+    let tools = selected_skill_visible_tools(
+        &skill_registry,
+        &catalog,
+        &[SkillId::new("cron-planner").unwrap()],
+        ToolAccessMode::ReadOnly,
+    )
+    .unwrap();
+
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "cron.preflight",
+            "fs.read",
+            "fs.search",
+            "permissions.request",
+            "permissions.status",
+        ]
+    );
+    assert!(!tools.iter().any(|tool| tool.name == "cron.add"));
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool.name == "matrix.outbox.enqueue")
+    );
+}
+
+#[test]
+fn selected_cron_planner_admits_requestable_tool_after_grant() {
+    let root = temp_store_root("grant-cron-selected");
+    let store = AglStore::open_at(&root).unwrap();
+    store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: "cron.add".to_string(),
+            max_operation_kind: "write".to_string(),
+            state_effects: vec!["store_cron".to_string()],
+            scope: serde_json::json!({}),
+            duration: "one_turn".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let skill_registry = agl_skills::builtin_registry().unwrap();
+    let catalog = full_tool_catalog();
+    let run_id = InferenceRunId::new("manual-cron-selected-test").unwrap();
+
+    let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
+        &skill_registry,
+        &catalog,
+        &[SkillId::new("cron-planner").unwrap()],
+        ToolAccessMode::ReadOnly,
+        &root,
+        std::path::Path::new("/repo"),
+        &run_id,
+    )
+    .unwrap();
+
+    assert!(tools.iter().any(|tool| tool.name == "cron.add"));
+    assert_eq!(snapshot.granted_visible_tools(), vec!["cron.add"]);
+    assert!(store.active_permission_grants().unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn full_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
     agl_tools::guards::register(&mut catalog).unwrap();
@@ -704,7 +805,7 @@ fn temp_store_root(label: &str) -> PathBuf {
 }
 
 #[test]
-fn selected_tool_smoke_skill_uses_read_only_core_tool_set() {
+fn selected_tool_smoke_skill_exposes_only_declared_tool() {
     let skill_registry = agl_skills::builtin_registry().unwrap();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
@@ -725,17 +826,7 @@ fn selected_tool_smoke_skill_uses_read_only_core_tool_set() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.request",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.read"]
     );
 }
 

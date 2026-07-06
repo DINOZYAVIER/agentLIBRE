@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::{SkillHarness, SkillSource};
+use crate::SkillHarness;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,8 +65,11 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
                 harness.name
             );
         }
-        if harness.source != SkillSource::Workspace {
-            bail!("pack skill must use source=workspace: {}", entry.name);
+        if !harness.source.is_external_skill_source() {
+            bail!(
+                "pack skill must use source=workspace, core, community, or local: {}",
+                entry.name
+            );
         }
         skills.push(harness);
     }
