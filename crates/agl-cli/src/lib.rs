@@ -656,10 +656,7 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
         options.source,
         SkillListSourceArg::All | SkillListSourceArg::Builtin
     );
-    let include_workspace = matches!(
-        options.source,
-        SkillListSourceArg::All | SkillListSourceArg::Workspace
-    );
+    let include_workspace = !matches!(options.source, SkillListSourceArg::Builtin);
     let mut emitted = 0usize;
 
     if options.json {
@@ -690,6 +687,9 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
             for skill in &workspace.skills {
                 if emitted >= limit {
                     break;
+                }
+                if !skill_list_matches_workspace_source(options.source, skill) {
+                    continue;
                 }
                 if options.trusted_only && !skill.usable {
                     continue;
@@ -744,6 +744,9 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                 if emitted >= limit {
                     break;
                 }
+                if !skill_list_matches_workspace_source(options.source, skill) {
+                    continue;
+                }
                 if options.trusted_only && !skill.usable {
                     continue;
                 }
@@ -766,7 +769,23 @@ fn skill_list_source_as_str(source: SkillListSourceArg) -> &'static str {
     match source {
         SkillListSourceArg::All => "all",
         SkillListSourceArg::Builtin => "builtin",
+        SkillListSourceArg::Core => "core",
+        SkillListSourceArg::Community => "community",
+        SkillListSourceArg::Local => "local",
         SkillListSourceArg::Workspace => "workspace",
+    }
+}
+
+fn skill_list_matches_workspace_source(
+    source: SkillListSourceArg,
+    skill: &WorkspaceSkillStatus,
+) -> bool {
+    match source {
+        SkillListSourceArg::All | SkillListSourceArg::Workspace => true,
+        SkillListSourceArg::Builtin => false,
+        SkillListSourceArg::Core => skill.source.as_deref() == Some("core"),
+        SkillListSourceArg::Community => skill.source.as_deref() == Some("community"),
+        SkillListSourceArg::Local => skill.source.as_deref() == Some("local"),
     }
 }
 

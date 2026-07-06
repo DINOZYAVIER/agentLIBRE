@@ -12,6 +12,8 @@ allowed_tools:
   - fs.read
   - fs.search
   - cron.preflight
+  - permissions.request
+  - permissions.status
 requestable_tools:
   - cron.add
   - matrix.outbox.enqueue

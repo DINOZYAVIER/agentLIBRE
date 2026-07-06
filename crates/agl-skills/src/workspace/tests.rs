@@ -666,6 +666,54 @@ fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
 }
 
 #[test]
+fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
+    let (root, source) =
+        clean_skills_submodule_fixture_with_source("core-same-name", "repo-review", "core");
+    let lock = lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let locked_skill = lock
+        .lock
+        .as_ref()
+        .and_then(|lock| lock.skills.iter().find(|skill| skill.name == "repo-review"))
+        .expect("repo-review should be locked");
+    assert_eq!(locked_skill.source, "core");
+
+    let trust_store = root.join("state/skill-trust.toml");
+    let approval = trust_workspace_skill(
+        &root,
+        &trust_store,
+        "repo-review",
+        &SkillTrustOptions {
+            approve: true,
+            agentlibre_version: "test-version".to_string(),
+        },
+    )
+    .unwrap();
+    assert!(!approval.has_errors());
+    assert_eq!(approval.record.as_ref().unwrap().source, "core");
+
+    let trusted = workspace_skill_report_with_trust(&root, &trust_store).unwrap();
+    let skill = trusted
+        .skills
+        .iter()
+        .find(|skill| skill.name.as_deref() == Some("repo-review"))
+        .expect("repo-review should be reported");
+    assert_eq!(skill.source.as_deref(), Some("core"));
+    assert!(skill.shadowed_by_builtin);
+    assert!(skill.overrides_builtin);
+    assert_eq!(skill.trust_state, SkillTrustState::TrustedLocal);
+    assert!(skill.usable);
+
+    let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
+    let skill = registry
+        .get(&agl_tools::SkillId::new("repo-review").unwrap())
+        .expect("trusted core repo-review should be registered");
+    assert_eq!(skill.harness.source, SkillSource::Core);
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
+#[test]
 fn same_name_workspace_skill_reports_routing_broadening() {
     let (root, source) = clean_skills_submodule_fixture_with_allowed_tools(
         "same-name-broad-routing",
@@ -742,6 +790,22 @@ fn clean_skills_submodule_fixture(label: &str) -> (PathBuf, PathBuf) {
 
 fn clean_skills_submodule_fixture_with_skill(label: &str, skill_name: &str) -> (PathBuf, PathBuf) {
     clean_skills_submodule_fixture_with_allowed_tools(label, skill_name, &[])
+}
+
+fn clean_skills_submodule_fixture_with_source(
+    label: &str,
+    skill_name: &str,
+    source_kind: &str,
+) -> (PathBuf, PathBuf) {
+    clean_skills_submodule_fixture_with_writer(label, |source| {
+        write_skill_with_source(
+            &source.join("agl").join(skill_name),
+            skill_name,
+            source_kind,
+            &[],
+            &[],
+        );
+    })
 }
 
 fn clean_skills_submodule_fixture_with_allowed_tools(
@@ -881,6 +945,22 @@ fn write_workspace_skill(
     allowed_tools: &[&str],
     requestable_tools: &[&str],
 ) {
+    write_skill_with_source(
+        skill_dir,
+        name,
+        "workspace",
+        allowed_tools,
+        requestable_tools,
+    );
+}
+
+fn write_skill_with_source(
+    skill_dir: &Path,
+    name: &str,
+    source_kind: &str,
+    allowed_tools: &[&str],
+    requestable_tools: &[&str],
+) {
     fs::create_dir_all(skill_dir).unwrap();
     let allowed_tools = render_yaml_string_list(allowed_tools);
     let requestable_tools = render_yaml_string_list(requestable_tools);
@@ -891,7 +971,7 @@ fn write_workspace_skill(
 name: {name}
 description: Review repository changes.
 version: 1
-source: workspace
+source: {source_kind}
 pack: agl
 required_hooks:
   - repo_path.validate

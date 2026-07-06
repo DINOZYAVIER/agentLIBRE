@@ -1355,13 +1355,17 @@ fn build_skills_lock(
         .iter()
         .filter_map(|skill| {
             let name = skill.name.clone()?;
+            let source = skill
+                .source
+                .clone()
+                .unwrap_or_else(|| SkillSource::Workspace.as_str().to_string());
             Some(LockedSkill {
                 locked_at: existing_timestamps
                     .get(&name)
                     .cloned()
                     .unwrap_or_else(|| locked_at.clone()),
                 name,
-                source: SkillSource::Workspace.as_str().to_string(),
+                source,
                 path: skill.path.clone(),
                 component: SKILLS_COMPONENT.to_string(),
             })
@@ -1532,9 +1536,10 @@ fn build_trust_record(
         .as_ref()
         .context("skills component is missing")?;
     let name = skill.name.clone().context("skill name is missing")?;
+    let source = skill.source.clone().context("skill source is missing")?;
     Ok(TrustedSkillRecord {
         skill_name: name,
-        source: SkillSource::Workspace.as_str().to_string(),
+        source,
         workspace_root: report.workspace_root.clone(),
         remote: component
             .actual_url
