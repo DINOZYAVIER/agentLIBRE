@@ -52,6 +52,77 @@ fn parses_gemma_scalar_arguments() {
 }
 
 #[test]
+fn parses_gemma_json_quoted_string_argument() {
+    assert_eq!(
+        parse_model_action(r#"<|tool_call>call:fs.read{path:"README.MD"}<tool_call|>"#),
+        ModelAction::ToolCall(ToolCall {
+            name: "fs.read".to_string(),
+            arguments: json!({"path": "README.MD"}),
+        })
+    );
+}
+
+#[test]
+fn parses_gemma_mixed_json_quoted_and_scalar_arguments() {
+    assert_eq!(
+        parse_model_action(
+            r#"<|tool_call>call:memory.search{query:"rust",limit:5,exact:false,after:null}<tool_call|>"#
+        ),
+        ModelAction::ToolCall(ToolCall {
+            name: "memory.search".to_string(),
+            arguments: json!({
+                "query": "rust",
+                "limit": 5,
+                "exact": false,
+                "after": null,
+            }),
+        })
+    );
+}
+
+#[test]
+fn parses_gemma_json_quoted_string_with_escaped_quote_and_comma() {
+    assert_eq!(
+        parse_model_action(r#"<|tool_call>call:fs.read{path:"notes/a,\"b,c.md"}<tool_call|>"#),
+        ModelAction::ToolCall(ToolCall {
+            name: "fs.read".to_string(),
+            arguments: json!({"path": "notes/a,\"b,c.md"}),
+        })
+    );
+}
+
+#[test]
+fn rejects_nested_gemma_json_object_argument() {
+    let action =
+        parse_model_action(r#"<|tool_call>call:fs.read{payload:{"path":"README.MD"}}<tool_call|>"#);
+
+    let ModelAction::MalformedToolCall(malformed) = action else {
+        panic!("expected malformed tool call");
+    };
+
+    assert_eq!(
+        malformed.classification,
+        MalformedToolJsonKind::InvalidShape
+    );
+    assert_eq!(malformed.repair, None);
+}
+
+#[test]
+fn rejects_nested_gemma_json_array_argument() {
+    let action = parse_model_action(r#"<|tool_call>call:fs.read{items:[1,2]}<tool_call|>"#);
+
+    let ModelAction::MalformedToolCall(malformed) = action else {
+        panic!("expected malformed tool call");
+    };
+
+    assert_eq!(
+        malformed.classification,
+        MalformedToolJsonKind::InvalidShape
+    );
+    assert_eq!(malformed.repair, None);
+}
+
+#[test]
 fn classifies_missing_gemma_terminator_without_json_repair() {
     let action = parse_model_action(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}"#);
 
