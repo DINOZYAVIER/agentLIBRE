@@ -198,6 +198,17 @@ fn parse_gemma_value(input: &str, offset: usize) -> Result<(Value, usize), Malfo
         ));
     }
 
+    if input.as_bytes()[offset] == b'"' {
+        let value_end = scan_json_string_end(input, offset)?;
+        let value = serde_json::from_str(&input[offset..value_end])
+            .map_err(|_| MalformedToolJsonKind::Syntax)?;
+        return Ok((value, value_end));
+    }
+
+    if matches!(input.as_bytes()[offset], b'{' | b'[') {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
     let value_end = input[offset..]
         .find(',')
         .map(|index| offset + index)
@@ -216,6 +227,29 @@ fn parse_gemma_value(input: &str, offset: usize) -> Result<(Value, usize), Malfo
         Value::Number(_) | Value::Bool(_) | Value::Null => Ok((value, value_end)),
         _ => Err(MalformedToolJsonKind::InvalidShape),
     }
+}
+
+fn scan_json_string_end(input: &str, offset: usize) -> Result<usize, MalformedToolJsonKind> {
+    let bytes = input.as_bytes();
+    if offset >= bytes.len() || bytes[offset] != b'"' {
+        return Err(MalformedToolJsonKind::InvalidShape);
+    }
+
+    let mut index = offset + 1;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return Ok(index + 1);
+        }
+        index += 1;
+    }
+
+    Err(MalformedToolJsonKind::Syntax)
 }
 
 fn skip_ascii_whitespace(input: &str, mut offset: usize) -> usize {
