@@ -1,15 +1,8 @@
-use std::env;
-use std::path::PathBuf;
-
 #[path = "../../build-support/llama_cpp.rs"]
 mod llama_cpp_build;
 
-use llama_cpp_build::LinkScope;
-
 fn main() {
-    let manifest_dir = PathBuf::from(
-        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by Cargo"),
-    );
+    let manifest_dir = llama_cpp_build::cargo_manifest_dir();
     let repo_root = llama_cpp_build::repo_root(&manifest_dir);
     let lib_dir = llama_cpp_build::lib_dir(&repo_root);
 
@@ -70,7 +63,7 @@ fn main() {
         "cargo:rustc-env=AGL_LLAMA_CPP_LIBRARY_DIR={}",
         lib_dir.display()
     );
-    llama_cpp_build::emit_link_search_and_rpaths(&lib_dir, LinkScope::AllTargets);
+    llama_cpp_build::emit_link_search_and_rpaths(&lib_dir);
     println!("cargo:rustc-link-lib=dylib=llama-common");
     println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml");

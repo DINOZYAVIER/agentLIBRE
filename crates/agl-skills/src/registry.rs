@@ -32,10 +32,7 @@ impl SkillSource {
     pub fn default_trust_state(self) -> SkillTrustState {
         match self {
             Self::Builtin => SkillTrustState::TrustedByBinary,
-            Self::Core | Self::Community | Self::Local | Self::Workspace => {
-                SkillTrustState::Unknown
-            }
-            Self::User | Self::ThirdParty => SkillTrustState::Unsupported,
+            Self::Core | Self::Community | Self::Local => SkillTrustState::Unknown,
         }
     }
 }
@@ -61,7 +58,6 @@ impl RegisteredSkill {
                 | (SkillTrustState::TrustedLocal, SkillSource::Core)
                 | (SkillTrustState::TrustedLocal, SkillSource::Community)
                 | (SkillTrustState::TrustedLocal, SkillSource::Local)
-                | (SkillTrustState::TrustedLocal, SkillSource::Workspace)
         )
     }
 }
@@ -389,10 +385,6 @@ mod tests {
     #[test]
     fn non_builtin_sources_default_to_non_injectable_states() {
         assert_eq!(
-            SkillSource::Workspace.default_trust_state(),
-            SkillTrustState::Unknown
-        );
-        assert_eq!(
             SkillSource::Core.default_trust_state(),
             SkillTrustState::Unknown
         );
@@ -403,10 +395,6 @@ mod tests {
         assert_eq!(
             SkillSource::Local.default_trust_state(),
             SkillTrustState::Unknown
-        );
-        assert_eq!(
-            SkillSource::ThirdParty.default_trust_state(),
-            SkillTrustState::Unsupported
         );
         assert!(!SkillTrustState::Unknown.permits_context_injection());
         assert!(!SkillTrustState::Unsupported.permits_context_injection());

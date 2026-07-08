@@ -1358,7 +1358,7 @@ fn build_skills_lock(
             let source = skill
                 .source
                 .clone()
-                .unwrap_or_else(|| SkillSource::Workspace.as_str().to_string());
+                .unwrap_or_else(|| SkillSource::Local.as_str().to_string());
             Some(LockedSkill {
                 locked_at: existing_timestamps
                     .get(&name)
