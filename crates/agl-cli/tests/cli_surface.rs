@@ -15,6 +15,12 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl");
+    assert_contains(&stdout, "Basics:");
+    assert_contains(
+        &stdout,
+        ".agl/workspace.toml lists the repo's AgentLIBRE folders",
+    );
+    assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "generate");
     assert_contains(&stdout, "init");
@@ -67,6 +73,10 @@ fn version_output_uses_public_alias() {
 fn command_help_exits_successfully_for_public_commands() {
     for args in [
         &["chat", "--help"][..],
+        &["completion", "--help"][..],
+        &["config", "--help"][..],
+        &["config", "paths", "--help"][..],
+        &["config", "init", "--help"][..],
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
@@ -74,9 +84,13 @@ fn command_help_exits_successfully_for_public_commands() {
         &["serve", "--help"][..],
         &["status", "--help"][..],
         &["skill", "--help"][..],
+        &["skill", "init", "--help"][..],
         &["skill", "list", "--help"][..],
         &["skill", "inspect", "--help"][..],
+        &["skill", "status", "--help"][..],
         &["skill", "verify", "--help"][..],
+        &["skill", "sync-folders", "--help"][..],
+        &["skill", "lock", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
         &["cron", "--help"][..],
@@ -111,6 +125,33 @@ fn command_help_exits_successfully_for_public_commands() {
         &["notes", "delete", "--help"][..],
         &["notes", "link", "--help"][..],
         &["notes", "remember", "--help"][..],
+    ] {
+        let output = run_agl(args);
+
+        assert_success_no_stderr(&output);
+        assert_contains(&stdout(&output), "Usage: agl");
+    }
+}
+
+#[test]
+fn command_help_exits_successfully_for_advanced_commands() {
+    for args in [
+        &["repo", "--help"][..],
+        &["repo", "init", "--help"][..],
+        &["repo", "init-component", "--help"][..],
+        &["repo", "import-profile", "--help"][..],
+        &["repo", "status", "--help"][..],
+        &["repo", "verify-tasks", "--help"][..],
+        &["repo", "artifact", "--help"][..],
+        &["repo", "artifact", "status", "--help"][..],
+        &["repo", "artifact", "verify", "--help"][..],
+        &["repo", "artifact", "sync", "--help"][..],
+        &["repo", "artifact", "lock", "--help"][..],
+        &["repo", "install-hooks", "--help"][..],
+        &["repo", "export-profile", "--help"][..],
+        &["daemon", "--help"][..],
+        &["daemon", "status", "--help"][..],
+        &["cron", "tick", "--help"][..],
     ] {
         let output = run_agl(args);
 
@@ -621,6 +662,12 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl repo");
+    assert_contains(&stdout, "Repo workspace:");
+    assert_contains(&stdout, "components list paths such as .agl/skills");
+    assert_contains(
+        &stdout,
+        "artifact_sources list the .agl folders agl is allowed to manage",
+    );
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "install-hooks");
@@ -628,6 +675,21 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
         !stdout.contains("import-profile"),
         "script-only import-profile command should stay hidden:\n{stdout}"
     );
+}
+
+#[test]
+fn skill_help_explains_workspace_skill_use() {
+    let output = run_agl(&["skill", "--help"]);
+
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "Skill use:");
+    assert_contains(&stdout, "SKILL.md lists the skill name");
+    assert_contains(
+        &stdout,
+        ".agl/skills.lock records the current workspace skill git commit",
+    );
+    assert_contains(&stdout, "state/skill-trust.toml approves that exact commit");
 }
 
 #[test]
