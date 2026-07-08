@@ -119,6 +119,7 @@ impl RepoTools {
                     .profile
                     .unwrap_or_else(|| agl_repo::DEFAULT_PROFILE.to_string()),
                 profile_file: args.profile_file.map(PathBuf::from),
+                artifact_sources: Vec::new(),
                 skills_url: None,
                 skills_rev: None,
                 tasks_url: None,
@@ -142,6 +143,7 @@ impl RepoTools {
             &RepoInitOptions {
                 profile: agl_repo::DEFAULT_PROFILE.to_string(),
                 profile_file: Some(PathBuf::from(args.profile_file)),
+                artifact_sources: Vec::new(),
                 skills_url: None,
                 skills_rev: None,
                 tasks_url: None,
