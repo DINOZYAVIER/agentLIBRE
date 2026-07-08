@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use agl_tools::SkillId;
@@ -19,6 +20,7 @@ macro_rules! cli_help {
 }
 
 mod help {
+    pub(super) const WELCOME: &str = cli_help!("welcome");
     pub(super) const AGL: &str = cli_help!("agl");
     pub(super) const CHAT: &str = cli_help!("chat");
     pub(super) const COMPLETION: &str = cli_help!("completion");
@@ -95,7 +97,7 @@ mod help {
     name = "agl",
     bin_name = "agl",
     version,
-    about = "agentLIBRE CLI - local-first agentic inference",
+    about = "agentLIBRE CLI - local-first agentic system",
     long_about = help::AGL
 )]
 struct Cli {
@@ -1926,10 +1928,25 @@ fn join_prompt(parts: Vec<String>) -> String {
 }
 
 pub(crate) fn print_usage(bin_name: &'static str) -> Result<()> {
+    print!("{}", welcome_text(should_color_welcome()));
+    println!();
+
     let mut command = Cli::command().name(bin_name).bin_name(bin_name);
     command.print_help().context("failed to print CLI help")?;
     println!();
     Ok(())
+}
+
+fn should_color_welcome() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+fn welcome_text(color: bool) -> String {
+    if color {
+        format!("\x1b[35m{}\x1b[0m", help::WELCOME)
+    } else {
+        help::WELCOME.to_string()
+    }
 }
 
 pub(crate) fn print_completion(shell: Shell) {
@@ -1946,7 +1963,7 @@ fn cli_display_name() -> &'static str {
     name = "agl",
     bin_name = "agl",
     version,
-    about = "agentLIBRE CLI - local-first agentic inference"
+    about = "agentLIBRE CLI - local-first agentic system"
 )]
 struct PublicCompletionCli {
     /// Override AGL_HOME for this invocation.
