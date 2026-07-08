@@ -148,10 +148,6 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub(crate) fn llama_free(ctx: *mut c_void);
     pub(crate) fn llama_model_get_vocab(model: *const c_void) -> *const c_void;
-    pub(crate) fn llama_model_chat_template(
-        model: *const c_void,
-        name: *const c_char,
-    ) -> *const c_char;
     pub(crate) fn llama_model_desc(model: *const c_void, buf: *mut c_char, buf_size: usize) -> i32;
     pub(crate) fn llama_n_ctx(ctx: *const c_void) -> u32;
     pub(crate) fn llama_get_memory(ctx: *const c_void) -> llama_memory_t;
@@ -165,14 +161,6 @@ unsafe extern "C" {
     pub(crate) fn llama_print_system_info() -> *const c_char;
     pub(crate) fn llama_supports_gpu_offload() -> bool;
 
-    pub(crate) fn llama_chat_apply_template(
-        tmpl: *const c_char,
-        chat: *const llama_chat_message,
-        n_msg: usize,
-        add_ass: bool,
-        buf: *mut c_char,
-        length: i32,
-    ) -> i32;
     pub(crate) fn agl_llama_common_chat_apply_template(
         model: *const c_void,
         chat: *const llama_chat_message,

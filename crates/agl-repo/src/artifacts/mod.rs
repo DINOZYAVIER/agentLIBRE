@@ -13,8 +13,7 @@ use anyhow::{Context, Result, ensure};
 
 pub(crate) use defaults::{default_artifact_sources, source_backed_artifact_source};
 use lock::{
-    artifact_contract_hash, artifact_lock_error_allows_refresh,
-    artifact_lock_warning_resolved_by_write, read_artifact_lock, unix_ms_now,
+    artifact_contract_hash, artifact_lock_error_allows_refresh, read_artifact_lock, unix_ms_now,
     validate_locked_artifact,
 };
 use path::{
@@ -304,13 +303,11 @@ pub fn lock_artifacts(
                     LockedArtifact {
                         id: artifact.id.clone(),
                         source_id: artifact.source_id.clone(),
-                        source_role: Some(artifact.source_role),
-                        source_kind: Some(artifact.source_kind),
-                        source_path: Some(
-                            source
-                                .map(|source| source.path.clone())
-                                .unwrap_or_else(PathBuf::new),
-                        ),
+                        source_role: artifact.source_role,
+                        source_kind: artifact.source_kind,
+                        source_path: source
+                            .map(|source| source.path.clone())
+                            .unwrap_or_else(PathBuf::new),
                         source_url: source
                             .and_then(|source| source.actual_url.clone())
                             .or_else(|| source.and_then(|source| source.expected_url.clone())),
@@ -363,9 +360,7 @@ pub fn lock_artifacts(
             })?;
             wrote = true;
             warnings.retain(|warning| {
-                warning != "artifact_lock_missing"
-                    && !warning.ends_with(".lock_entry_missing")
-                    && !artifact_lock_warning_resolved_by_write(warning)
+                warning != "artifact_lock_missing" && !warning.ends_with(".lock_entry_missing")
             });
         }
     } else {
