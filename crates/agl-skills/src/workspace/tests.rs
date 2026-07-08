@@ -945,13 +945,7 @@ fn write_workspace_skill(
     allowed_tools: &[&str],
     requestable_tools: &[&str],
 ) {
-    write_skill_with_source(
-        skill_dir,
-        name,
-        "local",
-        allowed_tools,
-        requestable_tools,
-    );
+    write_skill_with_source(skill_dir, name, "local", allowed_tools, requestable_tools);
 }
 
 fn write_skill_with_source(

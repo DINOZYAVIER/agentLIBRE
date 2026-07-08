@@ -601,51 +601,121 @@ fn apply_init_component_overrides(
         bail!("--tasks-rev requires --tasks-url");
     }
 
+    let mut overrides = options.artifact_sources.clone();
     if options.skills_url.is_some() || options.skills_rev.is_some() {
-        let skills = manifest
-            .components
-            .entry("skills".to_string())
-            .or_insert_with(|| WorkspaceComponent {
-                path: PathBuf::from(".agl/skills"),
-                kind: ComponentKind::Submodule,
-                url: None,
-                rev: None,
-                commit: None,
-                tree: None,
-                lock: Some(PathBuf::from(".agl/skills.lock")),
-            });
-        skills.kind = ComponentKind::Submodule;
-        skills.url = options.skills_url.clone().or_else(|| skills.url.clone());
-        skills.rev = options.skills_rev.clone().or_else(|| skills.rev.clone());
-        skills.commit = None;
-        skills.tree = None;
-        skills
-            .lock
-            .get_or_insert_with(|| PathBuf::from(".agl/skills.lock"));
+        let url = options
+            .skills_url
+            .clone()
+            .or_else(|| {
+                manifest
+                    .components
+                    .get("skills")
+                    .and_then(|component| component.url.clone())
+            })
+            .unwrap_or_else(|| DEFAULT_SKILLS_URL.to_string());
+        overrides.push(RepoArtifactSourceOverride {
+            name: "skills".to_string(),
+            url,
+            rev: options.skills_rev.clone().or_else(|| {
+                manifest
+                    .components
+                    .get("skills")
+                    .and_then(|component| component.rev.clone())
+            }),
+        });
     }
 
     if let Some(tasks_url) = &options.tasks_url {
-        let tasks = manifest
-            .components
-            .entry("tasks".to_string())
-            .or_insert_with(|| WorkspaceComponent {
-                path: PathBuf::from(".agl/tasks"),
-                kind: ComponentKind::Submodule,
-                url: None,
-                rev: None,
-                commit: None,
-                tree: None,
-                lock: Some(PathBuf::from(".agl/tasks.lock")),
-            });
-        tasks.kind = ComponentKind::Submodule;
-        tasks.url = Some(tasks_url.clone());
-        tasks.rev = options.tasks_rev.clone();
-        tasks.commit = None;
-        tasks.tree = None;
-        tasks.lock = Some(PathBuf::from(".agl/tasks.lock"));
+        overrides.push(RepoArtifactSourceOverride {
+            name: "tasks".to_string(),
+            url: tasks_url.clone(),
+            rev: options.tasks_rev.clone(),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for override_source in overrides {
+        if !seen.insert(override_source.name.clone()) {
+            bail!(
+                "artifact source specified more than once: {}",
+                override_source.name
+            );
+        }
+        apply_artifact_source_override(manifest, override_source)?;
     }
 
     Ok(())
+}
+
+fn apply_artifact_source_override(
+    manifest: &mut WorkspaceManifest,
+    override_source: RepoArtifactSourceOverride,
+) -> Result<()> {
+    validate_artifact_source_name(&override_source.name)?;
+
+    let path = manifest
+        .components
+        .get(&override_source.name)
+        .map(|component| component.path.clone())
+        .or_else(|| {
+            manifest
+                .artifact_sources
+                .get(&override_source.name)
+                .map(|source| source.path.clone())
+        })
+        .unwrap_or_else(|| default_artifact_component_path(&override_source.name));
+    let lock = default_artifact_component_lock(&override_source.name);
+
+    manifest.components.insert(
+        override_source.name.clone(),
+        WorkspaceComponent {
+            path: path.clone(),
+            kind: ComponentKind::Submodule,
+            url: Some(override_source.url.clone()),
+            rev: override_source.rev.clone(),
+            commit: None,
+            tree: None,
+            lock,
+        },
+    );
+
+    manifest.artifact_sources.insert(
+        override_source.name.clone(),
+        artifacts::source_backed_artifact_source(
+            &override_source.name,
+            path,
+            ArtifactSourceKind::Submodule,
+            Some(override_source.url),
+            override_source.rev,
+        ),
+    );
+
+    Ok(())
+}
+
+fn validate_artifact_source_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        bail!("artifact source name cannot be blank");
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!("artifact source name contains invalid characters: {name}");
+    }
+    Ok(())
+}
+
+fn default_artifact_component_path(name: &str) -> PathBuf {
+    PathBuf::from(format!(".agl/{name}"))
+}
+
+fn default_artifact_component_lock(name: &str) -> Option<PathBuf> {
+    match name {
+        "skills" => Some(PathBuf::from(".agl/skills.lock")),
+        "tasks" => Some(PathBuf::from(".agl/tasks.lock")),
+        _ => None,
+    }
 }
 
 fn profile_from_workspace_manifest(

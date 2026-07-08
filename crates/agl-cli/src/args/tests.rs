@@ -177,6 +177,7 @@ fn parse_init_command() {
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
+            artifact_sources: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,
@@ -201,6 +202,7 @@ fn parse_repo_init_hidden_alias() {
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: Some(PathBuf::from("profiles/custom.toml")),
+            artifact_sources: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,
@@ -229,10 +231,47 @@ fn parse_init_command_with_external_artifacts() {
         CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
+            artifact_sources: Vec::new(),
             skills_url: Some("git@example.com:agentlibre/skills.git".to_string()),
             skills_rev: Some("v1".to_string()),
             tasks_url: Some("git@example.com:private/specs.git".to_string()),
             tasks_rev: Some("main".to_string()),
+            dry_run: false,
+            force: false,
+        })),
+    );
+}
+
+#[test]
+fn parse_init_command_with_generic_artifact_sources() {
+    assert_command(
+        [
+            "agl",
+            "init",
+            "--artifact-source",
+            "tasks=rpi:/home/dinozyavier/git/agl-specs.git@main",
+            "--artifact-source",
+            "reviews=git@example.com:agentlibre/reviews.git",
+        ],
+        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+            profile: "repo-workflow".to_string(),
+            profile_file: None,
+            artifact_sources: vec![
+                RepoArtifactSourceOverride {
+                    name: "tasks".to_string(),
+                    url: "rpi:/home/dinozyavier/git/agl-specs.git".to_string(),
+                    rev: Some("main".to_string()),
+                },
+                RepoArtifactSourceOverride {
+                    name: "reviews".to_string(),
+                    url: "git@example.com:agentlibre/reviews.git".to_string(),
+                    rev: None,
+                },
+            ],
+            skills_url: None,
+            skills_rev: None,
+            tasks_url: None,
+            tasks_rev: None,
             dry_run: false,
             force: false,
         })),

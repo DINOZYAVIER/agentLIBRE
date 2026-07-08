@@ -175,7 +175,7 @@ fn artifact_status_reports_default_contracts() {
         artifact.id == "tasks"
             && artifact.path.as_path() == std::path::Path::new(".agl/tasks")
             && artifact.kind == ArtifactKind::Source
-            && artifact.schema.as_deref() == Some("agl.task_spec_legacy.v1")
+            && artifact.schema.as_deref() == Some("agl.task_spec.v1")
     }));
     assert!(report.artifacts.iter().any(|artifact| {
         artifact.id == "decision-docs"
@@ -187,6 +187,24 @@ fn artifact_status_reports_default_contracts() {
     assert!(report.artifacts.iter().any(|artifact| {
         artifact.id == "handoffs"
             && artifact.path.as_path() == std::path::Path::new(".agl/handoffs")
+    }));
+    assert!(report.sources.iter().any(|source| {
+        source.id == "skills"
+            && source.role == ArtifactSourceRole::Core
+            && source.kind == ArtifactSourceKind::Submodule
+    }));
+    assert!(report.sources.iter().any(|source| {
+        source.id == "tasks"
+            && source.role == ArtifactSourceRole::Planning
+            && source.kind == ArtifactSourceKind::Local
+    }));
+    assert!(report.artifacts.iter().any(|artifact| {
+        artifact.id == "state"
+            && artifact.source_role == ArtifactSourceRole::State
+            && artifact.provides.contains(&"notes".to_string())
+            && artifact.provides.contains(&"memory".to_string())
+            && artifact.provides.contains(&"matrix".to_string())
+            && artifact.provides.contains(&"cron".to_string())
     }));
     assert!(
         report
@@ -247,10 +265,10 @@ fn artifact_lock_writes_contract_hashes() {
     );
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
     let locked = report.lock.artifacts.get("tasks").unwrap();
-    assert_eq!(locked.source_id, "workspace");
-    assert_eq!(locked.source_role, Some(ArtifactSourceRole::Compatibility));
-    assert_eq!(locked.source_kind, Some(ArtifactSourceKind::Compatibility));
-    assert_eq!(locked.source_path, Some(PathBuf::from(".agl")));
+    assert_eq!(locked.source_id, "tasks");
+    assert_eq!(locked.source_role, Some(ArtifactSourceRole::Planning));
+    assert_eq!(locked.source_kind, Some(ArtifactSourceKind::Local));
+    assert_eq!(locked.source_path, Some(PathBuf::from(".agl/tasks")));
     assert_eq!(locked.contract_hash.len(), 64);
     assert_ne!(report.lock.locked_at_unix_ms, 0);
 
@@ -424,7 +442,7 @@ fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
     assert!(refreshed.wrote);
     assert_eq!(
         refreshed.lock.artifacts.get("tasks").unwrap().source_path,
-        Some(PathBuf::from(".agl"))
+        Some(PathBuf::from(".agl/tasks"))
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -703,7 +721,7 @@ fn artifact_status_detects_contract_hash_drift() {
     let content = fs::read_to_string(&manifest_path).unwrap();
     fs::write(
         &manifest_path,
-        content.replace("agl.task_spec_legacy.v1", "agl.task_spec_legacy.v2"),
+        content.replace("agl.task_spec.v1", "agl.task_spec.v2"),
     )
     .unwrap();
 
@@ -915,9 +933,74 @@ fn init_can_override_skills_and_externalize_tasks() {
     );
     assert_eq!(tasks.rev.as_deref(), Some("main"));
     assert_eq!(tasks.lock.as_deref(), Some(Path::new(".agl/tasks.lock")));
+    let tasks_source = &manifest.artifact_sources["tasks"];
+    assert_eq!(tasks_source.kind, ArtifactSourceKind::Submodule);
+    assert_eq!(
+        tasks_source.url.as_deref(),
+        Some("git@example.com:private/specs.git")
+    );
+    assert_eq!(tasks_source.rev.as_deref(), Some("main"));
     assert!(!root.join(".agl/tasks").exists());
     assert!(report.changes.iter().any(|change| {
         change.path == Path::new(".agl/tasks") && change.action == RepoInitAction::DeclaredSubmodule
+    }));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_accepts_generic_artifact_sources() {
+    let root = temp_root("init-generic-artifact-sources");
+    let report = init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            artifact_sources: vec![
+                RepoArtifactSourceOverride {
+                    name: "tasks".to_string(),
+                    url: "rpi:/home/dinozyavier/git/agl-specs.git".to_string(),
+                    rev: Some("main".to_string()),
+                },
+                RepoArtifactSourceOverride {
+                    name: "reviews".to_string(),
+                    url: "git@example.com:agentlibre/reviews.git".to_string(),
+                    rev: None,
+                },
+            ],
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+    let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+
+    let tasks = &manifest.components["tasks"];
+    assert_eq!(tasks.kind, ComponentKind::Submodule);
+    assert_eq!(
+        tasks.url.as_deref(),
+        Some("rpi:/home/dinozyavier/git/agl-specs.git")
+    );
+    assert_eq!(tasks.rev.as_deref(), Some("main"));
+    assert_eq!(
+        manifest.artifact_sources["tasks"].role,
+        ArtifactSourceRole::Planning
+    );
+    assert_eq!(
+        manifest.artifact_sources["tasks"].url.as_deref(),
+        Some("rpi:/home/dinozyavier/git/agl-specs.git")
+    );
+
+    let reviews = &manifest.components["reviews"];
+    assert_eq!(reviews.kind, ComponentKind::Submodule);
+    assert_eq!(
+        reviews.url.as_deref(),
+        Some("git@example.com:agentlibre/reviews.git")
+    );
+    assert_eq!(
+        manifest.artifact_sources["reviews"].role,
+        ArtifactSourceRole::Generated
+    );
+    assert!(report.changes.iter().any(|change| {
+        change.path == Path::new(".agl/reviews")
+            && change.action == RepoInitAction::DeclaredSubmodule
     }));
 
     fs::remove_dir_all(root).unwrap();

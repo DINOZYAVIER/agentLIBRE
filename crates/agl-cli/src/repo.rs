@@ -2,11 +2,12 @@ use agl_repo::{
     ArtifactLockOptions as AglArtifactLockOptions, ArtifactLockReport, ArtifactReportState,
     ArtifactState, ArtifactStatusOptions as AglArtifactStatusOptions, ArtifactStatusReport,
     ArtifactSyncActionKind, ArtifactSyncOptions as AglArtifactSyncOptions, ArtifactSyncReport,
-    HookInstallReport, RepoComponentInitAction,
-    RepoComponentInitOptions as AglRepoComponentInitOptions, RepoComponentInitReport,
-    RepoExportProfileOptions as AglRepoExportProfileOptions, RepoExportProfileReport,
-    RepoHooksOptions as AglRepoHooksOptions, RepoInitAction, RepoInitOptions as AglRepoInitOptions,
-    RepoInitReport, RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
+    HookInstallReport, RepoArtifactSourceOverride as AglRepoArtifactSourceOverride,
+    RepoComponentInitAction, RepoComponentInitOptions as AglRepoComponentInitOptions,
+    RepoComponentInitReport, RepoExportProfileOptions as AglRepoExportProfileOptions,
+    RepoExportProfileReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
+    RepoInitOptions as AglRepoInitOptions, RepoInitReport,
+    RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
     TaskSpecVerifyOptions as AglTaskSpecVerifyOptions, TaskSpecVerifyReport, TaskSpecVerifyState,
     export_repo_profile, init_repo_component, init_repo_workspace, install_repo_hooks,
     lock_artifacts, status_artifacts, status_repo_workspace, sync_artifacts, verify_task_specs,
@@ -39,6 +40,15 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: options.profile,
             profile_file: options.profile_file,
+            artifact_sources: options
+                .artifact_sources
+                .into_iter()
+                .map(|source| AglRepoArtifactSourceOverride {
+                    name: source.name,
+                    url: source.url,
+                    rev: source.rev,
+                })
+                .collect(),
             skills_url: options.skills_url,
             skills_rev: options.skills_rev,
             tasks_url: options.tasks_url,
@@ -76,6 +86,7 @@ fn run_repo_import_profile(options: RepoImportProfileOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: agl_repo::DEFAULT_PROFILE.to_string(),
             profile_file: Some(options.profile_file),
+            artifact_sources: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,

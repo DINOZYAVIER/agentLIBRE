@@ -271,6 +271,10 @@ struct RepoInitArgs {
     #[arg(long, value_name = "PATH")]
     profile_file: Option<PathBuf>,
 
+    /// Generic artifact source override as NAME=URL[@REV].
+    #[arg(long = "artifact-source", value_name = "NAME=URL[@REV]")]
+    artifact_sources: Vec<String>,
+
     /// Skills repository URL for the .agl/skills submodule.
     #[arg(long, value_name = "URL")]
     skills_url: Option<String>,
@@ -1158,7 +1162,7 @@ impl Cli {
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
             Some(Commands::Init(args)) => {
-                CliCommand::Repo(RepoCommand::Init(repo_init_options(args)))
+                CliCommand::Repo(RepoCommand::Init(repo_init_options(args)?))
             }
             Some(Commands::Infer(args)) => retired_infer_command(args.args)?,
             Some(Commands::Run(args) | Commands::Generate(args)) => {
@@ -1174,7 +1178,7 @@ impl Cli {
                 CliCommand::Repo(RepoCommand::InstallHooks(repo_hooks_options(args)))
             }
             Some(Commands::Repo { command }) => CliCommand::Repo(match command {
-                RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)),
+                RepoCommands::Init(args) => RepoCommand::Init(repo_init_options(args)?),
                 RepoCommands::InitComponent(args) => {
                     RepoCommand::InitComponent(repo_component_init_options(args))
                 }
@@ -1216,17 +1220,68 @@ impl Cli {
     }
 }
 
-fn repo_init_options(args: RepoInitArgs) -> RepoInitOptions {
-    RepoInitOptions {
+fn repo_init_options(args: RepoInitArgs) -> Result<RepoInitOptions> {
+    Ok(RepoInitOptions {
         profile: args.profile,
         profile_file: args.profile_file,
+        artifact_sources: args
+            .artifact_sources
+            .iter()
+            .map(|source| parse_repo_artifact_source(source))
+            .collect::<Result<Vec<_>>>()?,
         skills_url: args.skills_url,
         skills_rev: args.skills_rev,
         tasks_url: args.tasks_url,
         tasks_rev: args.tasks_rev,
         dry_run: args.dry_run,
         force: args.force,
+    })
+}
+
+fn parse_repo_artifact_source(input: &str) -> Result<RepoArtifactSourceOverride> {
+    let Some((name, source)) = input.split_once('=') else {
+        bail!("artifact source must be NAME=URL[@REV]: {input}");
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("artifact source name cannot be blank: {input}");
     }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        bail!("artifact source name contains invalid characters: {name}");
+    }
+
+    let source = source.trim();
+    if source.is_empty() {
+        bail!("artifact source URL cannot be blank: {input}");
+    }
+
+    let split_index = source.rfind('@').filter(|index| {
+        let boundary = source.rfind(['/', ':']).unwrap_or(0);
+        *index > boundary
+    });
+    let (url, rev) = if let Some(index) = split_index {
+        let (url, rev) = source.split_at(index);
+        let rev = rev.trim_start_matches('@').trim();
+        if rev.is_empty() {
+            bail!("artifact source revision cannot be blank: {input}");
+        }
+        (url.trim().to_string(), Some(rev.to_string()))
+    } else {
+        (source.to_string(), None)
+    };
+
+    if url.is_empty() {
+        bail!("artifact source URL cannot be blank: {input}");
+    }
+
+    Ok(RepoArtifactSourceOverride {
+        name: name.to_string(),
+        url,
+        rev,
+    })
 }
 
 fn repo_component_init_options(args: RepoComponentInitArgs) -> RepoComponentInitOptions {
