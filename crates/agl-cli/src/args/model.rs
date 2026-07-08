@@ -116,12 +116,20 @@ pub(crate) struct RepoComponentInitOptions {
 pub(crate) struct RepoInitOptions {
     pub(crate) profile: String,
     pub(crate) profile_file: Option<PathBuf>,
+    pub(crate) artifact_sources: Vec<RepoArtifactSourceOverride>,
     pub(crate) skills_url: Option<String>,
     pub(crate) skills_rev: Option<String>,
     pub(crate) tasks_url: Option<String>,
     pub(crate) tasks_rev: Option<String>,
     pub(crate) dry_run: bool,
     pub(crate) force: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RepoArtifactSourceOverride {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) rev: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

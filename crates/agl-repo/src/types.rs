@@ -14,6 +14,7 @@ pub const DEFAULT_SKILLS_REV: &str = "v0.1.2";
 pub struct RepoInitOptions {
     pub profile: String,
     pub profile_file: Option<PathBuf>,
+    pub artifact_sources: Vec<RepoArtifactSourceOverride>,
     pub skills_url: Option<String>,
     pub skills_rev: Option<String>,
     pub tasks_url: Option<String>,
@@ -27,6 +28,7 @@ impl Default for RepoInitOptions {
         Self {
             profile: DEFAULT_PROFILE.to_string(),
             profile_file: None,
+            artifact_sources: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,
@@ -35,6 +37,13 @@ impl Default for RepoInitOptions {
             force: false,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoArtifactSourceOverride {
+    pub name: String,
+    pub url: String,
+    pub rev: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
