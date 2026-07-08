@@ -1,4 +1,4 @@
-agentLIBRE CLI - local-first agentic inference
+agentLIBRE CLI - local-first agentic system
 
 Basics:
 - .agl/workspace.toml lists the repo's AgentLIBRE folders.
