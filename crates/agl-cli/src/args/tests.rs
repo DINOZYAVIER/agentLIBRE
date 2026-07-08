@@ -46,6 +46,15 @@ fn real_cli_commands_have_long_help() {
     assert_cli_help_tree_is_documented(&command, &mut path);
 }
 
+#[test]
+fn welcome_text_can_render_magenta() {
+    let text = welcome_text(true);
+
+    assert!(text.starts_with("\x1b[35m"));
+    assert!(text.ends_with("\x1b[0m"));
+    assert!(text.contains("▒▒████████▒▒███████ ███████████"));
+}
+
 fn assert_cli_help_tree_is_documented(command: &clap::Command, path: &mut Vec<String>) {
     for subcommand in command.get_subcommands() {
         let name = subcommand.get_name();

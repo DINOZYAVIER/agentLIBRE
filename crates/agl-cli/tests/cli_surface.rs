@@ -45,7 +45,13 @@ fn agl_no_arg_help_uses_public_alias() {
     let output = run_agl(&[]);
 
     assert_success_no_stderr(&output);
-    assert_contains(&stdout(&output), "Usage: agl");
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "▒▒████████▒▒███████ ███████████");
+    assert!(
+        !stdout.contains("\x1b[35m"),
+        "captured help output should not include ANSI color:\n{stdout}"
+    );
+    assert_contains(&stdout, "Usage: agl");
 }
 
 #[test]
