@@ -869,13 +869,13 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
         "builtin-only list should not print workspace warnings:\n{builtins_stdout}"
     );
 
-    let workspace = run_agl_in(repo.path(), &["skill", "list", "--source", "workspace"]);
-    assert_success(&workspace);
-    let workspace_stdout = stdout(&workspace);
-    assert_contains(&workspace_stdout, "skill name=repo-change");
+    let local = run_agl_in(repo.path(), &["skill", "list", "--source", "local"]);
+    assert_success(&local);
+    let local_stdout = stdout(&local);
+    assert_contains(&local_stdout, "skill name=repo-change");
     assert!(
-        !workspace_stdout.contains("source=builtin"),
-        "workspace-only list should not include builtin skills:\n{workspace_stdout}"
+        !local_stdout.contains("source=builtin"),
+        "local-only list should not include builtin skills:\n{local_stdout}"
     );
 }
 
@@ -920,7 +920,7 @@ fn skill_verify_reports_trusted_workspace_skill_as_usable() {
 name: repo-change
 description: Review repository changes.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -968,7 +968,7 @@ fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
 name: bad-dupe
 description: Bad duplicate folder create rule.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -1017,7 +1017,7 @@ fn skill_status_json_groups_invalid_artifact_path_diagnostic() {
 name: bad-path
 description: Bad folder path.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -1452,7 +1452,7 @@ fn write_workspace_skill(repo: &std::path::Path, name: &str) {
 name: {name}
 description: Review repository changes.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate

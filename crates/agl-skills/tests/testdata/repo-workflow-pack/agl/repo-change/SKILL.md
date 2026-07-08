@@ -2,7 +2,7 @@
 name: repo-change
 description: Synthetic workspace skill used to validate repo workflow pack parsing.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate

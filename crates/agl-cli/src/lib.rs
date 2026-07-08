@@ -771,7 +771,6 @@ fn skill_list_source_as_str(source: SkillListSourceArg) -> &'static str {
         SkillListSourceArg::Core => "core",
         SkillListSourceArg::Community => "community",
         SkillListSourceArg::Local => "local",
-        SkillListSourceArg::Workspace => "workspace",
     }
 }
 
@@ -780,7 +779,7 @@ fn skill_list_matches_workspace_source(
     skill: &WorkspaceSkillStatus,
 ) -> bool {
     match source {
-        SkillListSourceArg::All | SkillListSourceArg::Workspace => true,
+        SkillListSourceArg::All => true,
         SkillListSourceArg::Builtin => false,
         SkillListSourceArg::Core => skill.source.as_deref() == Some("core"),
         SkillListSourceArg::Community => skill.source.as_deref() == Some("community"),

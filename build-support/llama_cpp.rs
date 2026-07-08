@@ -13,9 +13,14 @@ const REQUIRED_LIBRARIES: [&str; 6] = [
     "libggml-vulkan.so",
 ];
 
-pub enum LinkScope {
-    AllTargets,
-    Bin(&'static str),
+pub fn cargo_manifest_dir() -> PathBuf {
+    PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by Cargo"),
+    )
+}
+
+pub fn repo_root_from_cargo_manifest_dir() -> PathBuf {
+    repo_root(&cargo_manifest_dir())
 }
 
 pub fn repo_root(manifest_dir: &Path) -> PathBuf {
@@ -56,6 +61,16 @@ pub fn emit_build_support_rerun(repo_root: &Path) {
     );
 }
 
+pub fn emit_llama_cpp_link_reruns(repo_root: &Path) {
+    emit_build_support_rerun(repo_root);
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo_root.join("vendor/llama.cpp").display()
+    );
+    println!("cargo:rerun-if-env-changed=AGL_LLAMA_CPP_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=CXX");
+}
+
 pub fn emit_llama_cpp_env_reruns() {
     for env_name in [
         "AGL_LLAMA_CPP_AUTO_BUILD",
@@ -73,16 +88,24 @@ pub fn emit_llama_cpp_env_reruns() {
     }
 }
 
-pub fn emit_link_search_and_rpaths(lib_dir: &Path, scope: LinkScope) {
+pub fn emit_link_search_and_rpaths(lib_dir: &Path) {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    emit_rpath(&scope, lib_dir);
+    emit_rpath(lib_dir);
     if let Some(cxx_runtime_dir) = cxx_runtime_library_dir() {
         println!(
             "cargo:rustc-link-search=native={}",
             cxx_runtime_dir.display()
         );
-        emit_rpath(&scope, &cxx_runtime_dir);
+        emit_rpath(&cxx_runtime_dir);
     }
+}
+
+pub fn emit_link_search_and_rpaths_from_env() {
+    let repo_root = repo_root_from_cargo_manifest_dir();
+    let lib_dir = lib_dir(&repo_root);
+
+    emit_llama_cpp_link_reruns(&repo_root);
+    emit_link_search_and_rpaths(&lib_dir);
 }
 
 pub fn run_llama_cpp_build(repo_root: &Path) {
@@ -93,18 +116,8 @@ pub fn run_llama_cpp_build(repo_root: &Path) {
     assert!(status.success(), "scripts/build-llama-cpp.sh failed");
 }
 
-fn emit_rpath(scope: &LinkScope, path: &Path) {
-    match scope {
-        LinkScope::AllTargets => {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
-        }
-        LinkScope::Bin(bin) => {
-            println!(
-                "cargo:rustc-link-arg-bin={bin}=-Wl,-rpath,{}",
-                path.display()
-            );
-        }
-    }
+fn emit_rpath(path: &Path) {
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
 }
 
 fn cxx_runtime_library_dir() -> Option<PathBuf> {
