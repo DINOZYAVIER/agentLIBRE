@@ -859,7 +859,7 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
 
     assert_success(&builtins);
     let builtins_stdout = stdout(&builtins);
-    assert_contains(&builtins_stdout, "source=builtin");
+    assert_contains(&builtins_stdout, "source=core");
     assert!(
         !builtins_stdout.contains("skill name=repo-change"),
         "builtin-only list should not include workspace skills:\n{builtins_stdout}"
@@ -869,13 +869,21 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
         "builtin-only list should not print workspace warnings:\n{builtins_stdout}"
     );
 
+    let core = run_agl_in(
+        repo.path(),
+        &["skill", "list", "--source", "core", "--limit", "1"],
+    );
+    assert_success(&core);
+    let core_stdout = stdout(&core);
+    assert_contains(&core_stdout, "source=core");
+
     let local = run_agl_in(repo.path(), &["skill", "list", "--source", "local"]);
     assert_success(&local);
     let local_stdout = stdout(&local);
     assert_contains(&local_stdout, "skill name=repo-change");
     assert!(
-        !local_stdout.contains("source=builtin"),
-        "local-only list should not include builtin skills:\n{local_stdout}"
+        !local_stdout.contains("source=core"),
+        "local-only list should not include embedded core skills:\n{local_stdout}"
     );
 }
 

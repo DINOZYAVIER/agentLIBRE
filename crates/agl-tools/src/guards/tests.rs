@@ -255,7 +255,7 @@ fn skill_manifest_guard_checks_agentlibre_fields() {
 name: change
 description: Make repo changes.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks: []
 allowed_tools: []
