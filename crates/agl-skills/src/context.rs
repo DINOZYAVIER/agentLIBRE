@@ -287,7 +287,7 @@ mod tests {
         assert!(bundle.content.contains("repository state picture"));
         assert_eq!(bundle.evidence.len(), 1);
         assert_eq!(bundle.evidence[0].skill_id, "repo-status");
-        assert_eq!(bundle.evidence[0].source, "builtin");
+        assert_eq!(bundle.evidence[0].source, "core");
         assert_eq!(
             bundle.evidence[0].required_hooks,
             vec!["repo_path.validate", "verification.validate"]
@@ -379,7 +379,7 @@ mod tests {
                 name: "requestable-test".to_string(),
                 description: "Test-only requestable tool routing skill.".to_string(),
                 version: 1,
-                source: SkillSource::Builtin,
+                source: SkillSource::Core,
                 pack: "test".to_string(),
                 required_hooks: vec![HookId::new("repo_path.validate").unwrap()],
                 allowed_tools: tool_ids([

@@ -76,7 +76,7 @@ impl SkillTools {
             workspace.state
         );
         let mut emitted = 0usize;
-        if source != "workspace" && source != "core" && source != "community" && source != "local" {
+        if source != "workspace" && source != "community" && source != "local" {
             for skill in registry.skills() {
                 if emitted >= limit {
                     break;
@@ -87,8 +87,9 @@ impl SkillTools {
                 emitted += 1;
                 output.push('\n');
                 output.push_str(&format!(
-                    "skill id={} source=builtin pack={} usable={} overridden_by_workspace={} allowed={} requestable={} denied={}",
+                    "skill id={} source={} pack={} usable={} overridden_by_workspace={} allowed={} requestable={} denied={}",
                     skill.harness.id,
+                    skill.harness.source.as_str(),
                     skill.harness.pack,
                     skill.permits_context_injection(),
                     workspace_overrides.contains(&skill.harness.name),
@@ -138,8 +139,9 @@ impl SkillTools {
             found = true;
             output.push('\n');
             output.push_str(&format!(
-                "skill id={} source=builtin pack={} version={} usable={} manifest_sha256={} tree_sha256={}",
+                "skill id={} source={} pack={} version={} usable={} manifest_sha256={} tree_sha256={}",
                 skill.harness.id,
+                skill.harness.source.as_str(),
                 skill.harness.pack,
                 skill.harness.version,
                 skill.permits_context_injection(),
@@ -550,8 +552,10 @@ mod tests {
 
         assert!(list.contains("tool=skill.list"));
         assert!(list.contains("skill id=skill"));
+        assert!(list.contains("source=core"));
         assert!(inspect.contains("tool=skill.inspect"));
         assert!(inspect.contains("skill id=skill"));
+        assert!(inspect.contains("source=core"));
         assert!(inspect.contains("manifest_sha256="));
         assert!(!inspect.contains("reference path="));
 

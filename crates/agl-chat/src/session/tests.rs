@@ -868,7 +868,7 @@ fn test_skill(
         name: id.to_string(),
         description: format!("Test-only {id} skill."),
         version: 1,
-        source: agl_skills::SkillSource::Builtin,
+        source: agl_skills::SkillSource::Core,
         pack: "test".to_string(),
         required_hooks: hook_ids(required_hooks),
         allowed_tools: tool_ids(allowed_tools),

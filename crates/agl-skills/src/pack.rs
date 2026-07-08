@@ -67,7 +67,7 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
         }
         if !harness.source.is_external_skill_source() {
             bail!(
-                "pack skill must use source=workspace, core, community, or local: {}",
+                "pack skill must use source=core, source=community, or source=local: {}",
                 entry.name
             );
         }

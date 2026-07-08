@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillSource {
-    Builtin,
     Core,
     Community,
     Local,
@@ -20,7 +19,6 @@ pub enum SkillSource {
 impl SkillSource {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Builtin => "builtin",
             Self::Core => "core",
             Self::Community => "community",
             Self::Local => "local",
@@ -159,10 +157,6 @@ impl SkillHarness {
             text,
         )
     }
-
-    pub fn is_trusted_source(&self) -> bool {
-        self.source == SkillSource::Builtin
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -239,7 +233,7 @@ struct RawSkillManifest {
     name: String,
     description: String,
     version: u64,
-    source: SkillSource,
+    source: RawSkillSource,
     pack: String,
     required_hooks: Vec<HookId>,
     allowed_tools: Vec<ToolId>,
@@ -256,6 +250,26 @@ struct RawSkillManifest {
     #[serde(default, alias = "artifact_folders", alias = "folders")]
     artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawSkillSource {
+    Builtin,
+    Core,
+    Community,
+    Local,
+}
+
+impl RawSkillSource {
+    fn canonical(self) -> Option<SkillSource> {
+        match self {
+            Self::Builtin => None,
+            Self::Core => Some(SkillSource::Core),
+            Self::Community => Some(SkillSource::Community),
+            Self::Local => Some(SkillSource::Local),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -395,10 +409,7 @@ impl std::fmt::Display for SkillManifestError {
                 )
             }
             Self::BuiltinSourceMismatch => {
-                write!(
-                    f,
-                    "builtin skill manifest must use source=builtin or source=core"
-                )
+                write!(f, "embedded core skill manifest must use source=core")
             }
             Self::ExternalSourceMismatch => write!(
                 f,
@@ -440,10 +451,10 @@ fn parse_skill_text(
             actual: raw.pack.clone(),
         });
     }
-    if !matches!(raw.source, SkillSource::Builtin | SkillSource::Core) {
+    if !matches!(raw.source, RawSkillSource::Builtin | RawSkillSource::Core) {
         return Err(SkillManifestError::BuiltinSourceMismatch);
     }
-    raw.source = SkillSource::Builtin;
+    let source = SkillSource::Core;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(
@@ -462,7 +473,7 @@ fn parse_skill_text(
         name: raw.name,
         description: raw.description,
         version: raw.version,
-        source: raw.source,
+        source,
         pack: expected_pack.to_string(),
         required_hooks: raw.required_hooks,
         allowed_tools: raw.allowed_tools,
@@ -491,9 +502,9 @@ fn parse_workspace_text(
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
-    if !raw.source.is_external_skill_source() {
+    let Some(source) = raw.source.canonical() else {
         return Err(SkillManifestError::ExternalSourceMismatch);
-    }
+    };
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
@@ -507,7 +518,7 @@ fn parse_workspace_text(
         name: raw.name,
         description: raw.description,
         version: raw.version,
-        source: raw.source,
+        source,
         pack: raw.pack,
         required_hooks: raw.required_hooks,
         allowed_tools: raw.allowed_tools,
@@ -965,7 +976,7 @@ mod tests {
         let skill = SkillHarness::parse_builtin(builtin_skill("repo-status").unwrap()).unwrap();
 
         assert_eq!(skill.id.as_str(), "repo-status");
-        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.source, SkillSource::Core);
         assert_eq!(skill.pack, "agl");
         assert_eq!(
             skill
@@ -996,7 +1007,7 @@ mod tests {
         let skill = SkillHarness::parse_builtin(builtin_skill("skill").unwrap()).unwrap();
 
         assert_eq!(skill.id.as_str(), "skill");
-        assert_eq!(skill.source, SkillSource::Builtin);
+        assert_eq!(skill.source, SkillSource::Core);
         assert_eq!(skill.pack, "agl");
         assert_eq!(
             skill
@@ -1037,7 +1048,7 @@ mod tests {
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1066,7 +1077,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - Bad Hook
@@ -1093,7 +1104,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1127,7 +1138,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1163,7 +1174,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1240,7 +1251,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1276,7 +1287,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1316,7 +1327,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1353,7 +1364,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
@@ -1401,7 +1412,7 @@ Body.
 name: task-spec
 description: Write specs.
 version: 1
-source: builtin
+source: core
 pack: agl
 required_hooks:
   - task_spec.validate
