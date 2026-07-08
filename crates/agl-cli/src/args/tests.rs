@@ -40,6 +40,30 @@ fn completion_surface_matches_visible_cli_commands() {
 }
 
 #[test]
+fn real_cli_commands_have_long_help() {
+    let command = Cli::command();
+    let mut path = vec![command.get_name().to_string()];
+    assert_cli_help_tree_is_documented(&command, &mut path);
+}
+
+fn assert_cli_help_tree_is_documented(command: &clap::Command, path: &mut Vec<String>) {
+    for subcommand in command.get_subcommands() {
+        let name = subcommand.get_name();
+        if name == "help" || matches!(name, "infer" | "setup" | "doctor" | "model") {
+            continue;
+        }
+        path.push(name.to_string());
+        assert!(
+            subcommand.get_long_about().is_some(),
+            "missing long help for {}",
+            path.join(" ")
+        );
+        assert_cli_help_tree_is_documented(subcommand, path);
+        path.pop();
+    }
+}
+
+#[test]
 fn parse_run_command_with_options() {
     assert_command(
         [

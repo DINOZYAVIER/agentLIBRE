@@ -12,12 +12,92 @@ pub(crate) use model::*;
 
 const CLI_DISPLAY_NAME: &str = "agl";
 
+macro_rules! cli_help {
+    ($path:literal) => {
+        include_str!(concat!("../../../assets/cli-help/", $path, ".md"))
+    };
+}
+
+mod help {
+    pub(super) const AGL: &str = cli_help!("agl");
+    pub(super) const CHAT: &str = cli_help!("chat");
+    pub(super) const COMPLETION: &str = cli_help!("completion");
+    pub(super) const CONFIG: &str = cli_help!("config");
+    pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
+    pub(super) const CONFIG_PATHS: &str = cli_help!("config/paths");
+    pub(super) const CRON: &str = cli_help!("cron");
+    pub(super) const CRON_ADD: &str = cli_help!("cron/add");
+    pub(super) const CRON_DELETE: &str = cli_help!("cron/delete");
+    pub(super) const CRON_DISABLE: &str = cli_help!("cron/disable");
+    pub(super) const CRON_ENABLE: &str = cli_help!("cron/enable");
+    pub(super) const CRON_HISTORY: &str = cli_help!("cron/history");
+    pub(super) const CRON_LIST: &str = cli_help!("cron/list");
+    pub(super) const CRON_RUN: &str = cli_help!("cron/run");
+    pub(super) const CRON_SHOW: &str = cli_help!("cron/show");
+    pub(super) const CRON_TICK: &str = cli_help!("cron/tick");
+    pub(super) const DAEMON: &str = cli_help!("daemon");
+    pub(super) const DAEMON_STATUS: &str = cli_help!("daemon/status");
+    pub(super) const GENERATE: &str = cli_help!("generate");
+    pub(super) const INIT: &str = cli_help!("init");
+    pub(super) const INSTALL_HOOKS: &str = cli_help!("install-hooks");
+    pub(super) const MEMORY: &str = cli_help!("memory");
+    pub(super) const MEMORY_ADD: &str = cli_help!("memory/add");
+    pub(super) const MEMORY_APPROVE: &str = cli_help!("memory/approve");
+    pub(super) const MEMORY_DELETE: &str = cli_help!("memory/delete");
+    pub(super) const MEMORY_LIST: &str = cli_help!("memory/list");
+    pub(super) const MEMORY_LIST_SUGGESTIONS: &str = cli_help!("memory/list-suggestions");
+    pub(super) const MEMORY_REJECT: &str = cli_help!("memory/reject");
+    pub(super) const MEMORY_SEARCH: &str = cli_help!("memory/search");
+    pub(super) const MEMORY_SHOW: &str = cli_help!("memory/show");
+    pub(super) const MEMORY_SUGGEST: &str = cli_help!("memory/suggest");
+    pub(super) const NOTES: &str = cli_help!("notes");
+    pub(super) const NOTES_ADD: &str = cli_help!("notes/add");
+    pub(super) const NOTES_DELETE: &str = cli_help!("notes/delete");
+    pub(super) const NOTES_LINK: &str = cli_help!("notes/link");
+    pub(super) const NOTES_LIST: &str = cli_help!("notes/list");
+    pub(super) const NOTES_REMEMBER: &str = cli_help!("notes/remember");
+    pub(super) const NOTES_SEARCH: &str = cli_help!("notes/search");
+    pub(super) const NOTES_SHOW: &str = cli_help!("notes/show");
+    pub(super) const NOTES_UPDATE: &str = cli_help!("notes/update");
+    pub(super) const REPO: &str = cli_help!("repo");
+    pub(super) const REPO_ARTIFACT: &str = cli_help!("repo/artifact");
+    pub(super) const REPO_ARTIFACT_LOCK: &str = cli_help!("repo/artifact/lock");
+    pub(super) const REPO_ARTIFACT_STATUS: &str = cli_help!("repo/artifact/status");
+    pub(super) const REPO_ARTIFACT_SYNC: &str = cli_help!("repo/artifact/sync");
+    pub(super) const REPO_ARTIFACT_VERIFY: &str = cli_help!("repo/artifact/verify");
+    pub(super) const REPO_EXPORT_PROFILE: &str = cli_help!("repo/export-profile");
+    pub(super) const REPO_IMPORT_PROFILE: &str = cli_help!("repo/import-profile");
+    pub(super) const REPO_INIT: &str = cli_help!("repo/init");
+    pub(super) const REPO_INIT_COMPONENT: &str = cli_help!("repo/init-component");
+    pub(super) const REPO_INSTALL_HOOKS: &str = cli_help!("repo/install-hooks");
+    pub(super) const REPO_STATUS: &str = cli_help!("repo/status");
+    pub(super) const REPO_VERIFY_TASKS: &str = cli_help!("repo/verify-tasks");
+    pub(super) const RUN: &str = cli_help!("run");
+    pub(super) const SERVE: &str = cli_help!("serve");
+    pub(super) const SKILL: &str = cli_help!("skill");
+    pub(super) const SKILL_INIT: &str = cli_help!("skill/init");
+    pub(super) const SKILL_INSPECT: &str = cli_help!("skill/inspect");
+    pub(super) const SKILL_LIST: &str = cli_help!("skill/list");
+    pub(super) const SKILL_LOCK: &str = cli_help!("skill/lock");
+    pub(super) const SKILL_REVOKE: &str = cli_help!("skill/revoke");
+    pub(super) const SKILL_STATUS: &str = cli_help!("skill/status");
+    pub(super) const SKILL_SYNC_FOLDERS: &str = cli_help!("skill/sync-folders");
+    pub(super) const SKILL_TRUST: &str = cli_help!("skill/trust");
+    pub(super) const SKILL_VERIFY: &str = cli_help!("skill/verify");
+    pub(super) const STATUS: &str = cli_help!("status");
+    pub(super) const STORE: &str = cli_help!("store");
+    pub(super) const STORE_EXPORT: &str = cli_help!("store/export");
+    pub(super) const STORE_MIGRATE: &str = cli_help!("store/migrate");
+    pub(super) const STORE_STATUS: &str = cli_help!("store/status");
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "agl",
     bin_name = "agl",
     version,
-    about = "agentLIBRE CLI - local-first agentic inference"
+    about = "agentLIBRE CLI - local-first agentic inference",
+    long_about = help::AGL
 )]
 struct Cli {
     /// Override AGL_HOME for this invocation.
@@ -35,66 +115,80 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Write shell completion scripts to stdout.
+    #[command(long_about = help::COMPLETION)]
     Completion {
         /// Shell to generate completions for.
         #[arg(value_enum, default_value_t = Shell::Bash)]
         shell: Shell,
     },
     /// Runtime configuration commands.
+    #[command(long_about = help::CONFIG)]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
     /// Inspect and export the local AgentLIBRE store.
+    #[command(long_about = help::STORE)]
     Store {
         #[command(subcommand)]
         command: StoreCommands,
     },
     /// Manage local scheduled AgentLIBRE jobs.
+    #[command(long_about = help::CRON)]
     Cron {
         #[command(subcommand)]
         command: CronCommands,
     },
     /// Manage local AgentLIBRE memory.
+    #[command(long_about = help::MEMORY)]
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
     },
     /// Manage local AgentLIBRE notes.
+    #[command(long_about = help::NOTES)]
     Notes {
         #[command(subcommand)]
         command: NotesCommands,
     },
     /// Initialize the repo-local AgentLIBRE workspace.
+    #[command(long_about = help::INIT)]
     Init(RepoInitArgs),
     /// Retired internal command name.
     #[command(hide = true, disable_help_flag = true)]
     Infer(ReservedCommandArgs),
     /// Run one prompt and print the final answer.
+    #[command(long_about = help::RUN)]
     Run(RunArgs),
     /// Alias for `run`.
+    #[command(long_about = help::GENERATE)]
     Generate(RunArgs),
     /// Start an interactive chat session.
+    #[command(long_about = help::CHAT)]
     Chat(ChatArgs),
     /// Run the local agent runtime daemon in the foreground.
+    #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
     /// Report repo-local AgentLIBRE workspace status.
+    #[command(long_about = help::STATUS)]
     Status(RepoStatusArgs),
     /// Inspect and verify AgentLIBRE skills.
+    #[command(long_about = help::SKILL)]
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
     /// Install AgentLIBRE git hooks for this repository.
+    #[command(long_about = help::INSTALL_HOOKS)]
     InstallHooks(RepoHooksArgs),
     /// Advanced repo workspace commands.
-    #[command(hide = true)]
+    #[command(hide = true, long_about = help::REPO)]
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
     },
     /// Advanced daemon commands.
-    #[command(hide = true)]
+    #[command(hide = true, long_about = help::DAEMON)]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
@@ -105,7 +199,7 @@ enum Commands {
     /// Planned public diagnostics command.
     #[command(hide = true)]
     Doctor(ReservedCommandArgs),
-    /// Planned public model lifecycle commands.
+    /// Planned public model commands.
     #[command(hide = true)]
     Model(ReservedCommandArgs),
 }
@@ -113,8 +207,10 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
     /// Print resolved config, data, state, cache, log, and session paths.
+    #[command(long_about = help::CONFIG_PATHS)]
     Paths,
     /// Write a default runtime config.
+    #[command(long_about = help::CONFIG_INIT)]
     Init {
         /// Overwrite an existing runtime config.
         #[arg(long)]
@@ -125,139 +221,188 @@ enum ConfigCommands {
 #[derive(Debug, Subcommand)]
 enum StoreCommands {
     /// Report local store health.
+    #[command(long_about = help::STORE_STATUS)]
     Status(StoreStatusArgs),
     /// Run local store migrations.
+    #[command(long_about = help::STORE_MIGRATE)]
     Migrate(StoreMigrateArgs),
     /// Export one store domain as JSONL records.
+    #[command(long_about = help::STORE_EXPORT)]
     Export(StoreExportArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum CronCommands {
     /// Add a scheduled job.
+    #[command(long_about = help::CRON_ADD)]
     Add(CronAddArgs),
     /// List scheduled jobs.
+    #[command(long_about = help::CRON_LIST)]
     List(CronListArgs),
     /// Show one scheduled job.
+    #[command(long_about = help::CRON_SHOW)]
     Show(CronShowArgs),
     /// Enable a scheduled job.
+    #[command(long_about = help::CRON_ENABLE)]
     Enable(CronEnableArgs),
     /// Disable a scheduled job.
+    #[command(long_about = help::CRON_DISABLE)]
     Disable(CronDisableArgs),
     /// Run a scheduled job once.
+    #[command(long_about = help::CRON_RUN)]
     Run(CronRunArgs),
     /// Run one scheduler tick.
-    #[command(hide = true)]
+    #[command(hide = true, long_about = help::CRON_TICK)]
     Tick(CronTickArgs),
     /// Show run history for one scheduled job.
+    #[command(long_about = help::CRON_HISTORY)]
     History(CronHistoryArgs),
     /// Tombstone a scheduled job.
+    #[command(long_about = help::CRON_DELETE)]
     Delete(CronDeleteArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum RepoCommands {
     /// Initialize the repo-local AgentLIBRE workspace.
+    #[command(long_about = help::REPO_INIT)]
     Init(RepoInitArgs),
     /// Initialize a declared submodule component.
+    #[command(long_about = help::REPO_INIT_COMPONENT)]
     InitComponent(RepoComponentInitArgs),
     /// Apply an explicit workspace profile file.
-    #[command(hide = true)]
+    #[command(hide = true, long_about = help::REPO_IMPORT_PROFILE)]
     ImportProfile(RepoImportProfileArgs),
     /// Report repo-local AgentLIBRE workspace status.
+    #[command(long_about = help::REPO_STATUS)]
     Status(RepoStatusArgs),
     /// Verify task spec files in the tasks component.
+    #[command(long_about = help::REPO_VERIFY_TASKS)]
     VerifyTasks(TaskSpecVerifyArgs),
-    /// Inspect and materialize declared .agl artifact contracts.
+    /// Inspect and create declared .agl artifacts.
+    #[command(long_about = help::REPO_ARTIFACT)]
     Artifact {
         #[command(subcommand)]
         command: ArtifactCommands,
     },
     /// Install AgentLIBRE git hooks for this repository.
+    #[command(long_about = help::REPO_INSTALL_HOOKS)]
     InstallHooks(RepoHooksArgs),
     /// Export a portable workspace profile manifest.
+    #[command(long_about = help::REPO_EXPORT_PROFILE)]
     ExportProfile(RepoExportProfileArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ArtifactCommands {
     /// Report declared .agl artifact status.
+    #[command(long_about = help::REPO_ARTIFACT_STATUS)]
     Status(ArtifactStatusArgs),
     /// Verify declared .agl artifacts.
+    #[command(long_about = help::REPO_ARTIFACT_VERIFY)]
     Verify(ArtifactStatusArgs),
     /// Create missing declared artifact directories.
+    #[command(long_about = help::REPO_ARTIFACT_SYNC)]
     Sync(ArtifactSyncArgs),
-    /// Write the artifact contract lock file.
+    /// Write the artifact lock file.
+    #[command(long_about = help::REPO_ARTIFACT_LOCK)]
     Lock(ArtifactLockArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum MemoryCommands {
     /// Add an explicit memory entry.
+    #[command(long_about = help::MEMORY_ADD)]
     Add(MemoryAddArgs),
     /// List memory entries in one scope.
+    #[command(long_about = help::MEMORY_LIST)]
     List(MemoryListArgs),
     /// Search memory entries in one scope.
+    #[command(long_about = help::MEMORY_SEARCH)]
     Search(MemorySearchArgs),
     /// Show one memory entry.
+    #[command(long_about = help::MEMORY_SHOW)]
     Show(MemoryShowArgs),
     /// Tombstone one memory entry.
+    #[command(long_about = help::MEMORY_DELETE)]
     Delete(MemoryDeleteArgs),
     /// Create a pending memory suggestion.
+    #[command(long_about = help::MEMORY_SUGGEST)]
     Suggest(MemorySuggestArgs),
     /// List memory suggestions.
+    #[command(long_about = help::MEMORY_LIST_SUGGESTIONS)]
     ListSuggestions(MemoryListSuggestionsArgs),
     /// Approve a pending memory suggestion.
+    #[command(long_about = help::MEMORY_APPROVE)]
     Approve(MemoryApproveArgs),
     /// Reject a pending memory suggestion.
+    #[command(long_about = help::MEMORY_REJECT)]
     Reject(MemoryRejectArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum NotesCommands {
     /// Add a note.
+    #[command(long_about = help::NOTES_ADD)]
     Add(NotesAddArgs),
     /// List notes.
+    #[command(long_about = help::NOTES_LIST)]
     List(NotesListArgs),
     /// Search notes.
+    #[command(long_about = help::NOTES_SEARCH)]
     Search(NotesSearchArgs),
     /// Show one note.
+    #[command(long_about = help::NOTES_SHOW)]
     Show(NotesShowArgs),
     /// Update a note.
+    #[command(long_about = help::NOTES_UPDATE)]
     Update(NotesUpdateArgs),
     /// Tombstone one note.
+    #[command(long_about = help::NOTES_DELETE)]
     Delete(NotesDeleteArgs),
     /// Link a note to another local reference.
+    #[command(long_about = help::NOTES_LINK)]
     Link(NotesLinkArgs),
     /// Promote a note into memory.
+    #[command(long_about = help::NOTES_REMEMBER)]
     Remember(NotesRememberArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum SkillCommands {
     /// Initialize the workspace skills submodule declared in .agl/workspace.toml.
+    #[command(long_about = help::SKILL_INIT)]
     Init(SkillInitArgs),
     /// List builtin and workspace skills.
+    #[command(long_about = help::SKILL_LIST)]
     List(SkillListArgs),
     /// Inspect one skill by name.
+    #[command(long_about = help::SKILL_INSPECT)]
     Inspect(SkillInspectArgs),
     /// Report workspace skill component and lock status.
+    #[command(long_about = help::SKILL_STATUS)]
     Status(SkillStatusArgs),
     /// Verify workspace skills and lock state.
+    #[command(long_about = help::SKILL_VERIFY)]
     Verify(SkillVerifyArgs),
     /// Create missing writable folders declared by workspace skills.
+    #[command(long_about = help::SKILL_SYNC_FOLDERS)]
     SyncFolders(SkillFolderSyncArgs),
     /// Write or preview .agl/skills.lock.
+    #[command(long_about = help::SKILL_LOCK)]
     Lock(SkillLockArgs),
     /// Locally approve a locked workspace skill identity.
+    #[command(long_about = help::SKILL_TRUST)]
     Trust(SkillTrustArgs),
     /// Revoke local approval for a workspace skill identity.
+    #[command(long_about = help::SKILL_REVOKE)]
     Revoke(SkillRevokeArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommands {
     /// Report local agent runtime daemon status.
+    #[command(long_about = help::DAEMON_STATUS)]
     Status(StatusArgs),
 }
 
@@ -992,7 +1137,7 @@ struct SkillFolderSyncArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Folder create situation to materialize.
+    /// Folder creation reason to run.
     #[arg(long, value_enum, default_value_t = SkillFolderSyncSituationArg::SkillSync)]
     when: SkillFolderSyncSituationArg,
 }
