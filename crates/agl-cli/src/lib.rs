@@ -653,7 +653,7 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
         .collect::<std::collections::BTreeSet<_>>();
     let include_builtin = matches!(
         options.source,
-        SkillListSourceArg::All | SkillListSourceArg::Builtin
+        SkillListSourceArg::All | SkillListSourceArg::Builtin | SkillListSourceArg::Core
     );
     let include_workspace = !matches!(options.source, SkillListSourceArg::Builtin);
     let mut emitted = 0usize;

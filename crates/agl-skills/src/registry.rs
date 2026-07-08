@@ -31,7 +31,6 @@ impl SkillTrustState {
 impl SkillSource {
     pub fn default_trust_state(self) -> SkillTrustState {
         match self {
-            Self::Builtin => SkillTrustState::TrustedByBinary,
             Self::Core | Self::Community | Self::Local => SkillTrustState::Unknown,
         }
     }
@@ -52,13 +51,7 @@ impl RegisteredSkill {
     }
 
     pub fn permits_context_injection(&self) -> bool {
-        matches!(
-            (self.trust, self.harness.source),
-            (SkillTrustState::TrustedByBinary, SkillSource::Builtin)
-                | (SkillTrustState::TrustedLocal, SkillSource::Core)
-                | (SkillTrustState::TrustedLocal, SkillSource::Community)
-                | (SkillTrustState::TrustedLocal, SkillSource::Local)
-        )
+        self.trust.permits_context_injection()
     }
 }
 
