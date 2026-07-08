@@ -202,7 +202,6 @@ pub(crate) enum SkillListSourceArg {
     Core,
     Community,
     Local,
-    Workspace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

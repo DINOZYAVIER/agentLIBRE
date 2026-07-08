@@ -15,9 +15,6 @@ pub enum SkillSource {
     Core,
     Community,
     Local,
-    Workspace,
-    User,
-    ThirdParty,
 }
 
 impl SkillSource {
@@ -27,17 +24,11 @@ impl SkillSource {
             Self::Core => "core",
             Self::Community => "community",
             Self::Local => "local",
-            Self::Workspace => "workspace",
-            Self::User => "user",
-            Self::ThirdParty => "third_party",
         }
     }
 
     pub fn is_external_skill_source(self) -> bool {
-        matches!(
-            self,
-            Self::Core | Self::Community | Self::Local | Self::Workspace
-        )
+        matches!(self, Self::Core | Self::Community | Self::Local)
     }
 }
 
@@ -325,7 +316,7 @@ pub enum SkillManifestError {
         actual: String,
     },
     BuiltinSourceMismatch,
-    WorkspaceSourceMismatch,
+    ExternalSourceMismatch,
     ContextBudgetZero,
     EmptyBody,
     ReferenceEscapesSkill {
@@ -409,9 +400,9 @@ impl std::fmt::Display for SkillManifestError {
                     "builtin skill manifest must use source=builtin or source=core"
                 )
             }
-            Self::WorkspaceSourceMismatch => write!(
+            Self::ExternalSourceMismatch => write!(
                 f,
-                "external skill manifest must use source=workspace, core, community, or local"
+                "external skill manifest must use source=core, source=community, or source=local"
             ),
             Self::ContextBudgetZero => write!(f, "skill context budget must be greater than zero"),
             Self::EmptyBody => write!(f, "skill body cannot be empty"),
@@ -501,7 +492,7 @@ fn parse_workspace_text(
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
     if !raw.source.is_external_skill_source() {
-        return Err(SkillManifestError::WorkspaceSourceMismatch);
+        return Err(SkillManifestError::ExternalSourceMismatch);
     }
 
     let reference_policy = normalize_references(&raw.references)?;
@@ -1458,8 +1449,8 @@ Body.
     }
 
     #[test]
-    fn parses_workspace_skill_from_directory() {
-        let root = temp_root("workspace-skill");
+    fn parses_local_skill_from_directory() {
+        let root = temp_root("local-skill");
         let skill_dir = root.join("agl/repo-change");
         fs::create_dir_all(skill_dir.join("references")).unwrap();
         fs::write(skill_dir.join("references/policy.md"), "Policy").unwrap();
@@ -1469,7 +1460,7 @@ Body.
 name: repo-change
 description: Review repository changes.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -1491,7 +1482,7 @@ Review changes.
         let skill = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap();
 
         assert_eq!(skill.id.as_str(), "repo-change");
-        assert_eq!(skill.source, SkillSource::Workspace);
+        assert_eq!(skill.source, SkillSource::Local);
         assert_eq!(skill.source_path, "agl/repo-change/SKILL.md");
         assert_eq!(skill.references[0].path, "references/policy.md");
         assert_eq!(skill.references[0].sha256.len(), 64);
@@ -1565,7 +1556,7 @@ Body.
 
         let err = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap_err();
 
-        assert_eq!(err, SkillManifestError::WorkspaceSourceMismatch);
+        assert_eq!(err, SkillManifestError::ExternalSourceMismatch);
 
         fs::remove_dir_all(root).unwrap();
     }

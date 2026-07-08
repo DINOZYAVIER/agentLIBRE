@@ -70,7 +70,7 @@ fn invalid_submodule_skill_reports_manifest_diagnostic_without_component_noise()
 name: bad-dupe
 description: Bad duplicate folder create rule.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -133,7 +133,7 @@ fn invalid_submodule_skill_artifact_path_reports_manifest_diagnostic() {
 name: bad-path
 description: Bad folder path.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -659,7 +659,7 @@ fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
     let skill = registry
         .get(&agl_tools::SkillId::new("repo-status").unwrap())
         .expect("trusted workspace repo-status should be registered");
-    assert_eq!(skill.harness.source, SkillSource::Workspace);
+    assert_eq!(skill.harness.source, SkillSource::Local);
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(source).unwrap();
@@ -948,7 +948,7 @@ fn write_workspace_skill(
     write_skill_with_source(
         skill_dir,
         name,
-        "workspace",
+        "local",
         allowed_tools,
         requestable_tools,
     );
@@ -1001,7 +1001,7 @@ fn write_workspace_skill_with_folders(skill_dir: &Path, name: &str, folders_yaml
 name: {name}
 description: Review repository changes.
 version: 1
-source: workspace
+source: local
 pack: agl
 required_hooks:
   - repo_path.validate

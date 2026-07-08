@@ -1,9 +1,9 @@
-mod backend;
+mod inference;
 mod load;
 mod model;
 mod prompt;
 
-pub use backend::{
+pub use inference::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig,
     MtpProbability, MtpRuntimeConfig, RuntimeSwitch,
 };

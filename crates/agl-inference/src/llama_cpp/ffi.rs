@@ -110,10 +110,10 @@ pub(crate) struct llama_chat_message {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct agl_llama_mtp_stats {
-    pub draft_calls: u64,
-    pub empty_drafts: u64,
-    pub drafted_tokens: u64,
-    pub accepted_tokens: u64,
+    pub(crate) draft_calls: u64,
+    pub(crate) empty_drafts: u64,
+    pub(crate) drafted_tokens: u64,
+    pub(crate) accepted_tokens: u64,
 }
 
 unsafe extern "C" {
