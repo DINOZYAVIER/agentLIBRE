@@ -902,6 +902,96 @@ kind = "ignored"
 }
 
 #[test]
+fn init_backfills_artifact_sources_for_legacy_profile_files() {
+    let root = temp_root("legacy-profile-artifacts");
+    let profile_path = root.join("legacy-profile.toml");
+    fs::write(
+        &profile_path,
+        r#"
+version = 1
+name = "legacy-repo-workflow"
+
+[components.skills]
+path = ".agl/core-skills"
+kind = "submodule"
+url = "git@example.com:agentlibre/core-skills.git"
+rev = "v1"
+lock = ".agl/skills.lock"
+
+[components.tasks]
+path = ".agl/specs"
+kind = "local"
+
+[components.reviews]
+path = ".agl/reviews"
+kind = "generated"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+    )
+    .unwrap();
+
+    init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            profile: DEFAULT_PROFILE.to_string(),
+            profile_file: Some(profile_path),
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+    let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+
+    assert_eq!(
+        manifest.artifact_sources["skills"].path,
+        PathBuf::from(".agl/core-skills")
+    );
+    assert_eq!(
+        manifest.artifact_sources["skills"].kind,
+        ArtifactSourceKind::Submodule
+    );
+    assert_eq!(
+        manifest.artifact_sources["skills"].url.as_deref(),
+        Some("git@example.com:agentlibre/core-skills.git")
+    );
+    assert_eq!(
+        manifest.artifact_sources["tasks"].path,
+        PathBuf::from(".agl/specs")
+    );
+    assert_eq!(
+        manifest.artifact_sources["tasks"].artifacts[0].path,
+        PathBuf::from(".agl/specs")
+    );
+
+    let artifact_status = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        artifact_status
+            .artifacts
+            .iter()
+            .any(|artifact| { artifact.id == "tasks" && artifact.path == Path::new(".agl/specs") })
+    );
+    assert!(
+        !artifact_status
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("undeclared_artifact_root: .agl/specs")),
+        "{:?}",
+        artifact_status.warnings
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_can_override_skills_and_externalize_tasks() {
     let root = temp_root("init-external-artifacts");
     let report = init_repo_workspace(
