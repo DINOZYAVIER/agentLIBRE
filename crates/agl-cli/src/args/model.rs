@@ -25,7 +25,7 @@ pub(crate) enum CliCommand {
     Skill(SkillCommand),
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
-    Infer(RunOptions),
+    Run(RunOptions),
     Chat(RunOptions),
 }
 
@@ -206,7 +206,6 @@ pub(crate) struct SkillListOptions {
 #[value(rename_all = "kebab-case")]
 pub(crate) enum SkillListSourceArg {
     All,
-    Builtin,
     Core,
     Community,
     Local,

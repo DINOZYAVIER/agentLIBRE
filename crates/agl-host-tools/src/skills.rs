@@ -50,11 +50,8 @@ impl SkillTools {
         let args = parse_args::<ListArgs>(agl_tools::SKILL_LIST_TOOL_ID, arguments)?;
         let source = args.source.as_deref().unwrap_or("all");
         ensure!(
-            matches!(
-                source,
-                "all" | "builtin" | "workspace" | "core" | "community" | "local"
-            ),
-            "skill.list source must be all, builtin, workspace, core, community, or local"
+            matches!(source, "all" | "workspace" | "core" | "community" | "local"),
+            "skill.list source must be all, workspace, core, community, or local"
         );
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).min(DEFAULT_LIMIT);
         let trusted_only = args.trusted_only.unwrap_or(false);
@@ -99,21 +96,19 @@ impl SkillTools {
                 ));
             }
         }
-        if source != "builtin" {
-            for skill in &workspace.skills {
-                if emitted >= limit {
-                    break;
-                }
-                if !workspace_skill_source_matches(source, skill) {
-                    continue;
-                }
-                if trusted_only && !skill.usable {
-                    continue;
-                }
-                emitted += 1;
-                output.push('\n');
-                output.push_str(&render_workspace_skill_line(skill));
+        for skill in &workspace.skills {
+            if emitted >= limit {
+                break;
             }
+            if !workspace_skill_source_matches(source, skill) {
+                continue;
+            }
+            if trusted_only && !skill.usable {
+                continue;
+            }
+            emitted += 1;
+            output.push('\n');
+            output.push_str(&render_workspace_skill_line(skill));
         }
         Ok(output)
     }
@@ -323,7 +318,6 @@ fn workspace_skill_source_matches(source: &str, skill: &WorkspaceSkillStatus) ->
     match source {
         "all" | "workspace" => true,
         "core" | "community" | "local" => skill.source.as_deref() == Some(source),
-        "builtin" => false,
         _ => false,
     }
 }
@@ -535,13 +529,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_tools_list_and_inspect_builtin_skills() {
+    fn skill_tools_list_and_inspect_core_skills() {
         let root = temp_root("list-inspect");
         std::fs::create_dir_all(&root).unwrap();
         let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
 
         let list = tools
-            .dispatch(agl_tools::SKILL_LIST_TOOL_ID, json!({"source": "builtin"}))
+            .dispatch(agl_tools::SKILL_LIST_TOOL_ID, json!({"source": "core"}))
             .unwrap();
         let inspect = tools
             .dispatch(

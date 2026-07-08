@@ -37,7 +37,6 @@ mod help {
     pub(super) const CRON_TICK: &str = cli_help!("cron/tick");
     pub(super) const DAEMON: &str = cli_help!("daemon");
     pub(super) const DAEMON_STATUS: &str = cli_help!("daemon/status");
-    pub(super) const GENERATE: &str = cli_help!("generate");
     pub(super) const INIT: &str = cli_help!("init");
     pub(super) const INSTALL_HOOKS: &str = cli_help!("install-hooks");
     pub(super) const MEMORY: &str = cli_help!("memory");
@@ -154,15 +153,9 @@ enum Commands {
     /// Initialize the repo-local AgentLIBRE workspace.
     #[command(long_about = help::INIT)]
     Init(RepoInitArgs),
-    /// Retired internal command name.
-    #[command(hide = true, disable_help_flag = true)]
-    Infer(ReservedCommandArgs),
     /// Run one prompt and print the final answer.
     #[command(long_about = help::RUN)]
     Run(RunArgs),
-    /// Alias for `run`.
-    #[command(long_about = help::GENERATE)]
-    Generate(RunArgs),
     /// Start an interactive chat session.
     #[command(long_about = help::CHAT)]
     Chat(ChatArgs),
@@ -193,15 +186,6 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommands,
     },
-    /// Planned public setup command.
-    #[command(hide = true)]
-    Setup(ReservedCommandArgs),
-    /// Planned public diagnostics command.
-    #[command(hide = true)]
-    Doctor(ReservedCommandArgs),
-    /// Planned public model commands.
-    #[command(hide = true)]
-    Model(ReservedCommandArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -373,7 +357,7 @@ enum SkillCommands {
     /// Initialize the workspace skills submodule declared in .agl/workspace.toml.
     #[command(long_about = help::SKILL_INIT)]
     Init(SkillInitArgs),
-    /// List builtin and workspace skills.
+    /// List core and workspace skills.
     #[command(long_about = help::SKILL_LIST)]
     List(SkillListArgs),
     /// Inspect one skill by name.
@@ -1205,7 +1189,7 @@ struct CommonRunArgs {
     #[arg(long, value_enum, default_value_t = ToolAccessMode::ReadOnly)]
     tool_mode: ToolAccessMode,
 
-    /// Builtin or trusted workspace skill id to inject for this turn/session.
+    /// Core or trusted workspace skill id to inject for this turn/session.
     #[arg(long = "skill", value_name = "ID")]
     skills: Vec<String>,
 
@@ -1263,12 +1247,6 @@ struct StatusArgs {
     socket: Option<PathBuf>,
 }
 
-#[derive(Debug, Args)]
-struct ReservedCommandArgs {
-    #[arg(value_name = "ARGS", num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
-}
-
 pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInvocation> {
     let args = args.into_iter().collect::<Vec<_>>();
     let display_name = cli_display_name();
@@ -1309,10 +1287,7 @@ impl Cli {
             Some(Commands::Init(args)) => {
                 CliCommand::Repo(RepoCommand::Init(repo_init_options(args)?))
             }
-            Some(Commands::Infer(args)) => retired_infer_command(args.args)?,
-            Some(Commands::Run(args) | Commands::Generate(args)) => {
-                CliCommand::Infer(run_options_from_args(args)?)
-            }
+            Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
             Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
             Some(Commands::Status(args)) => {
@@ -1349,13 +1324,10 @@ impl Cli {
                     socket_path: args.socket,
                 }),
             },
-            Some(Commands::Setup(args)) => unavailable_command("setup", args.args)?,
-            Some(Commands::Doctor(args)) => unavailable_command("doctor", args.args)?,
-            Some(Commands::Model(args)) => unavailable_command("model", args.args)?,
             None if self.prompt.is_empty() => CliCommand::Help {
                 bin_name: display_name,
             },
-            None => CliCommand::Infer(run_options_from_prompt(join_prompt(self.prompt))?),
+            None => top_level_prompt_command(self.prompt)?,
         };
 
         Ok(CliInvocation {
@@ -1935,26 +1907,18 @@ fn validate_skill_ids(values: Vec<String>) -> Result<Vec<String>> {
     Ok(values)
 }
 
-fn retired_infer_command(args: Vec<String>) -> Result<CliCommand> {
-    let attempted = if args.is_empty() {
-        "infer".to_string()
-    } else {
-        format!("infer {}", args.join(" "))
-    };
-    bail!(
-        "agl {attempted} is not part of the public CLI in this alpha. Use `agl run --config PATH PROMPT` instead."
-    );
-}
-
-fn unavailable_command(name: &str, args: Vec<String>) -> Result<CliCommand> {
-    let attempted = if args.is_empty() {
-        name.to_string()
-    } else {
-        format!("{name} {}", args.join(" "))
-    };
-    bail!(
-        "agl {attempted} is planned but not implemented in this alpha. Use `agl config paths` and `agl run --config PATH PROMPT` with a local GGUF config for now."
-    );
+fn top_level_prompt_command(parts: Vec<String>) -> Result<CliCommand> {
+    let first = parts.first().map(String::as_str);
+    if matches!(
+        first,
+        Some("infer" | "generate" | "setup" | "doctor" | "model")
+    ) {
+        let name = first.expect("checked by matches");
+        bail!("unknown command `{name}`. Use `agl run --prompt TEXT` for a one-shot prompt.");
+    }
+    Ok(CliCommand::Run(run_options_from_prompt(join_prompt(
+        parts,
+    ))?))
 }
 
 fn join_prompt(parts: Vec<String>) -> String {
@@ -2034,8 +1998,6 @@ enum PublicCompletionCommands {
     Init(RepoInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
-    /// Alias for `run`.
-    Generate(RunArgs),
     /// Start an interactive chat session.
     Chat(ChatArgs),
     /// Run the local agent runtime daemon in the foreground.

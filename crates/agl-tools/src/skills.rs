@@ -21,7 +21,7 @@ pub fn declaration() -> ToolProviderDeclaration {
     .expect("builtin skill provider declaration is valid")
     .with_tool(tool(
         SKILL_LIST_TOOL_ID,
-        "List builtin and workspace skills with trust and routing summaries.",
+        "List core and workspace skills with trust and routing summaries.",
         ToolCapability::Read,
         ToolOperationKind::Read,
         &[],

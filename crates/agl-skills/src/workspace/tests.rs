@@ -79,7 +79,7 @@ requestable_tools: []
 context_budget_tokens: 256
 references:
   include: []
-folders:
+artifacts:
   - id: bad
     kind: generated
     path: .agl/tasks/bad
@@ -142,7 +142,7 @@ requestable_tools: []
 context_budget_tokens: 256
 references:
   include: []
-folders:
+artifacts:
   - id: bad
     kind: generated
     path: ../outside
@@ -180,7 +180,7 @@ fn workspace_status_reports_declared_skill_folders() {
         &skill_dir,
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: task-drafts
     kind: generated
     path: .agl/tasks/repo-change
@@ -244,7 +244,7 @@ fn folder_sync_skips_missing_folders_without_create_rule() {
         &skill_dir,
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: task-drafts
     kind: generated
     path: .agl/tasks/repo-change
@@ -435,7 +435,7 @@ fn runtime_prepare_creates_selected_trusted_skill_folders() {
         "runtime-prepare-folders",
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: runtime-state
     kind: state
     path: .agl/state/repo-change
@@ -488,7 +488,7 @@ fn runtime_prepare_rejects_untrusted_selected_workspace_skill() {
         "runtime-prepare-untrusted",
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: runtime-state
     kind: state
     path: .agl/state/repo-change
@@ -532,7 +532,7 @@ fn artifact_write_prepare_creates_matching_selected_skill_folder() {
         "artifact-write-folders",
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: task-drafts
     kind: generated
     path: .agl/tasks/repo-change
@@ -582,7 +582,7 @@ fn artifact_write_prepare_rejects_missing_matching_create_rule() {
         "artifact-write-no-rule",
         "repo-change",
         r#"
-folders:
+artifacts:
   - id: task-drafts
     kind: generated
     path: .agl/tasks/repo-change

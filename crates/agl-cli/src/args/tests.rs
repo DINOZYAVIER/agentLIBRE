@@ -49,7 +49,7 @@ fn real_cli_commands_have_long_help() {
 fn assert_cli_help_tree_is_documented(command: &clap::Command, path: &mut Vec<String>) {
     for subcommand in command.get_subcommands() {
         let name = subcommand.get_name();
-        if name == "help" || matches!(name, "infer" | "setup" | "doctor" | "model") {
+        if name == "help" {
             continue;
         }
         path.push(name.to_string());
@@ -86,7 +86,7 @@ fn parse_run_command_with_options() {
             "--tool-mode",
             "write",
         ],
-        CliCommand::Infer(RunOptions {
+        CliCommand::Run(RunOptions {
             config: Some(PathBuf::from("local.toml")),
             artifact_root: Some(PathBuf::from("artifacts")),
             run_id: Some("manual-test".to_string()),
@@ -112,36 +112,11 @@ fn parse_run_rejects_invalid_skill_id() {
 }
 
 #[test]
-fn parse_retired_infer_command_rejects_with_run_guidance() {
-    let message = parse_error([
-        "agl",
-        "infer",
-        "--config",
-        "local.toml",
-        "--prompt",
-        "hello",
-    ]);
-    assert!(message.contains("agl infer"));
-    assert!(message.contains("Use `agl run --config PATH PROMPT`"));
-}
-
-#[test]
 fn parse_run_prompt_argument() {
     assert_command(
         ["agl", "run", "hello", "world"],
-        CliCommand::Infer(RunOptions {
+        CliCommand::Run(RunOptions {
             prompt: Some("hello world".to_string()),
-            ..RunOptions::default()
-        }),
-    );
-}
-
-#[test]
-fn parse_generate_alias() {
-    assert_command(
-        ["agl", "generate", "--prompt", "hello"],
-        CliCommand::Infer(RunOptions {
-            prompt: Some("hello".to_string()),
             ..RunOptions::default()
         }),
     );
@@ -151,7 +126,7 @@ fn parse_generate_alias() {
 fn parse_run_command_with_memory_context() {
     assert_command(
         ["agl", "run", "--memory", "--prompt", "hello"],
-        CliCommand::Infer(RunOptions {
+        CliCommand::Run(RunOptions {
             memory: true,
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
@@ -475,14 +450,14 @@ fn parse_skill_commands() {
             "list",
             "--json",
             "--source",
-            "builtin",
+            "core",
             "--trusted-only",
             "--limit",
             "5",
         ],
         CliCommand::Skill(SkillCommand::List(SkillListOptions {
             json: true,
-            source: SkillListSourceArg::Builtin,
+            source: SkillListSourceArg::Core,
             trusted_only: true,
             limit: Some(5),
         })),
@@ -866,11 +841,20 @@ fn parse_daemon_status_command_with_socket_override() {
 fn parse_bare_prompt_as_run() {
     assert_command(
         ["agl", "hello"],
-        CliCommand::Infer(RunOptions {
+        CliCommand::Run(RunOptions {
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
         }),
     );
+}
+
+#[test]
+fn removed_command_names_do_not_fall_through_to_bare_prompt() {
+    for command in ["infer", "generate", "setup", "doctor", "model"] {
+        let message = parse_error(["agl", command, "--help"]);
+        assert!(message.contains("unknown command"), "{message}");
+        assert!(message.contains("Use `agl run --prompt TEXT`"), "{message}");
+    }
 }
 
 #[test]
@@ -968,30 +952,6 @@ fn parse_completion_command() {
         ["agl", "completion", "bash"],
         CliCommand::Completion { shell: Shell::Bash },
     );
-}
-
-#[test]
-fn parse_reserved_setup_rejects_before_bare_prompt() {
-    assert_parse_error_contains(["agl", "setup"], "planned but not implemented");
-}
-
-#[test]
-fn parse_reserved_doctor_rejects_before_bare_prompt() {
-    assert_parse_error_contains(["agl", "doctor"], "planned but not implemented");
-}
-
-#[test]
-fn parse_reserved_model_rejects_subcommand_before_bare_prompt() {
-    let message = parse_error([
-        "agl",
-        "model",
-        "pull",
-        "owner/repo/model.gguf",
-        "--set-default",
-    ]);
-
-    assert!(message.contains("agl model pull"));
-    assert!(message.contains("planned but not implemented"));
 }
 
 #[test]

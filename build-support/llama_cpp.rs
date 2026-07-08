@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,6 +17,7 @@ pub fn cargo_manifest_dir() -> PathBuf {
     )
 }
 
+#[allow(dead_code)]
 pub fn repo_root_from_cargo_manifest_dir() -> PathBuf {
     repo_root(&cargo_manifest_dir())
 }
@@ -41,12 +40,14 @@ pub fn lib_dir(repo_root: &Path) -> PathBuf {
     build_dir(repo_root).join("bin")
 }
 
+#[allow(dead_code)]
 pub fn missing_required_library(lib_dir: &Path) -> Option<&'static str> {
     REQUIRED_LIBRARIES
         .into_iter()
         .find(|library| !lib_dir.join(library).is_file())
 }
 
+#[allow(dead_code)]
 pub fn env_flag(name: &str) -> bool {
     matches!(
         env::var(name).ok().as_deref(),
@@ -61,6 +62,7 @@ pub fn emit_build_support_rerun(repo_root: &Path) {
     );
 }
 
+#[allow(dead_code)]
 pub fn emit_llama_cpp_link_reruns(repo_root: &Path) {
     emit_build_support_rerun(repo_root);
     println!(
@@ -71,6 +73,7 @@ pub fn emit_llama_cpp_link_reruns(repo_root: &Path) {
     println!("cargo:rerun-if-env-changed=CXX");
 }
 
+#[allow(dead_code)]
 pub fn emit_llama_cpp_env_reruns() {
     for env_name in [
         "AGL_LLAMA_CPP_AUTO_BUILD",
@@ -100,6 +103,7 @@ pub fn emit_link_search_and_rpaths(lib_dir: &Path) {
     }
 }
 
+#[allow(dead_code)]
 pub fn emit_link_search_and_rpaths_from_env() {
     let repo_root = repo_root_from_cargo_manifest_dir();
     let lib_dir = lib_dir(&repo_root);
@@ -108,6 +112,7 @@ pub fn emit_link_search_and_rpaths_from_env() {
     emit_link_search_and_rpaths(&lib_dir);
 }
 
+#[allow(dead_code)]
 pub fn run_llama_cpp_build(repo_root: &Path) {
     let script = repo_root.join("scripts/build-llama-cpp.sh");
     let status = Command::new(&script)

@@ -187,7 +187,7 @@ enum CliRuntimeProfile {
 
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Infer(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
+        CliCommand::Run(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
         CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Store(_)
@@ -220,7 +220,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Serve(options) => run_serve(options, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
-        CliCommand::Infer(options) => run_infer(options, runtime),
+        CliCommand::Run(options) => run_one_shot(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
     }
 }
@@ -653,9 +653,9 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
         .collect::<std::collections::BTreeSet<_>>();
     let include_builtin = matches!(
         options.source,
-        SkillListSourceArg::All | SkillListSourceArg::Builtin | SkillListSourceArg::Core
+        SkillListSourceArg::All | SkillListSourceArg::Core
     );
-    let include_workspace = !matches!(options.source, SkillListSourceArg::Builtin);
+    let include_workspace = true;
     let mut emitted = 0usize;
 
     if options.json {
@@ -767,7 +767,6 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
 fn skill_list_source_as_str(source: SkillListSourceArg) -> &'static str {
     match source {
         SkillListSourceArg::All => "all",
-        SkillListSourceArg::Builtin => "builtin",
         SkillListSourceArg::Core => "core",
         SkillListSourceArg::Community => "community",
         SkillListSourceArg::Local => "local",
@@ -780,7 +779,6 @@ fn skill_list_matches_workspace_source(
 ) -> bool {
     match source {
         SkillListSourceArg::All => true,
-        SkillListSourceArg::Builtin => false,
         SkillListSourceArg::Core => skill.source.as_deref() == Some("core"),
         SkillListSourceArg::Community => skill.source.as_deref() == Some("community"),
         SkillListSourceArg::Local => skill.source.as_deref() == Some("local"),
@@ -1055,7 +1053,7 @@ fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
     }
 }
 
-fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+fn run_one_shot(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "run", "starting command");
     let prompt = options
         .prompt
@@ -1748,10 +1746,10 @@ mod tests {
             AgentLibreProcessMode::Batch
         );
 
-        let infer = CliCommand::Infer(RunOptions::default());
-        assert_eq!(cli_runtime_profile(&infer), CliRuntimeProfile::Interactive);
+        let run = CliCommand::Run(RunOptions::default());
+        assert_eq!(cli_runtime_profile(&run), CliRuntimeProfile::Interactive);
         assert_eq!(
-            process_mode_for_command(&infer),
+            process_mode_for_command(&run),
             AgentLibreProcessMode::Interactive
         );
     }
