@@ -509,7 +509,7 @@ pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
 }
 
 fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
-    let mut manifest = if let Some(profile_file) = &options.profile_file {
+    let manifest = if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;
         if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
             bail!(
@@ -531,7 +531,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
         default_manifest()
     };
 
-    backfill_legacy_artifact_sources(&mut manifest);
+    let mut manifest = manifest;
     apply_init_component_overrides(&mut manifest, options)?;
     Ok(manifest)
 }
@@ -646,42 +646,6 @@ fn apply_init_component_overrides(
     }
 
     Ok(())
-}
-
-fn backfill_legacy_artifact_sources(manifest: &mut WorkspaceManifest) {
-    if !manifest.artifact_sources.is_empty() {
-        return;
-    }
-
-    let mut sources = artifacts::default_artifact_sources();
-    for (name, component) in &manifest.components {
-        let Some(source) = sources.get_mut(name) else {
-            continue;
-        };
-        let old_path = source.path.clone();
-        source.kind = artifact_source_kind_from_component(component.kind);
-        source.path = component.path.clone();
-        source.url = component.url.clone();
-        source.rev = component.rev.clone();
-        source.commit = component.commit.clone();
-        source.tree = component.tree.clone();
-        for contract in &mut source.artifacts {
-            if contract.id == *name || contract.path == old_path {
-                contract.path = component.path.clone();
-            }
-        }
-    }
-    manifest.artifact_sources = sources;
-}
-
-fn artifact_source_kind_from_component(kind: ComponentKind) -> ArtifactSourceKind {
-    match kind {
-        ComponentKind::Local => ArtifactSourceKind::Local,
-        ComponentKind::Git => ArtifactSourceKind::Git,
-        ComponentKind::Submodule => ArtifactSourceKind::Submodule,
-        ComponentKind::Generated => ArtifactSourceKind::Generated,
-        ComponentKind::Ignored => ArtifactSourceKind::Ignored,
-    }
 }
 
 fn apply_artifact_source_override(
@@ -949,6 +913,9 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
     }
     if profile.components.is_empty() {
         bail!("workspace profile must define at least one component");
+    }
+    if profile.artifact_sources.is_empty() {
+        bail!("workspace profile must define artifact_sources");
     }
     if profile.policy.trust.import_local_trust {
         bail!("workspace profile must not import local trust");

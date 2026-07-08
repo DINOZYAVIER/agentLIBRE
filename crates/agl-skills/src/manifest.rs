@@ -1382,7 +1382,7 @@ artifacts:
       - when: runtime_prepare
     provides:
       - tasks
-    schema: agl.task_spec_legacy.v1
+    schema: agl.task_spec.v1
 guarantees:
   - specs are checked
 ---

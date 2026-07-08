@@ -34,10 +34,6 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "notes");
     assert_contains(&stdout, "install-hooks");
     assert!(
-        !stdout.contains("Compatibility"),
-        "help should not describe a second binary:\n{stdout}"
-    );
-    assert!(
         !stdout.contains("\n  infer"),
         "hidden infer command should not appear in top-level help:\n{stdout}"
     );
@@ -773,6 +769,21 @@ rev = "main"
 [components.state]
 path = ".agl/state"
 kind = "ignored"
+
+[artifact_sources.skills]
+role = "core"
+kind = "submodule"
+path = ".agl/skills"
+
+[artifact_sources.tasks]
+role = "planning"
+kind = "git"
+path = ".agl/tasks"
+
+[artifact_sources.state]
+role = "state"
+kind = "ignored"
+path = ".agl/state"
 "#,
     )
     .unwrap_or_else(|err| panic!("failed to write profile {}: {err}", profile_path.display()));

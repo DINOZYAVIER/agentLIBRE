@@ -362,6 +362,35 @@ kind = "local"
 [components.tasks]
 path = ".agl/tasks"
 kind = "local"
+
+[artifact_sources.skills]
+role = "community"
+kind = "local"
+path = ".agl/skills"
+required = true
+provides = ["skills"]
+
+[[artifact_sources.skills.artifacts]]
+id = "skills"
+kind = "source"
+path = ".agl/skills"
+access = "read"
+provides = ["skills"]
+
+[artifact_sources.tasks]
+role = "planning"
+kind = "local"
+path = ".agl/tasks"
+required = true
+provides = ["tasks"]
+
+[[artifact_sources.tasks.artifacts]]
+id = "tasks"
+kind = "source"
+path = ".agl/tasks"
+access = "read_write"
+provides = ["tasks"]
+schema = "agl.task_spec.v1"
 "#,
         )
         .unwrap();

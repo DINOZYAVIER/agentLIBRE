@@ -44,26 +44,14 @@ pub(super) fn validate_locked_artifact(
     if locked.source_id != resolved.source_id {
         errors.push("source_id_changed".to_string());
     }
-    match locked.source_role {
-        Some(role) if role != resolved.source.role => {
-            errors.push("source_role_changed".to_string())
-        }
-        Some(_) => {}
-        None => warnings.push("source_role_missing".to_string()),
+    if locked.source_role != resolved.source.role {
+        errors.push("source_role_changed".to_string());
     }
-    match locked.source_kind {
-        Some(kind) if kind != resolved.source.kind => {
-            errors.push("source_kind_changed".to_string())
-        }
-        Some(_) => {}
-        None => warnings.push("source_kind_missing".to_string()),
+    if locked.source_kind != resolved.source.kind {
+        errors.push("source_kind_changed".to_string());
     }
-    match &locked.source_path {
-        Some(path) if path != &resolved.source.path => {
-            errors.push("source_path_changed".to_string())
-        }
-        Some(_) => {}
-        None => warnings.push("source_path_missing".to_string()),
+    if locked.source_path != resolved.source.path {
+        errors.push("source_path_changed".to_string());
     }
     if locked.path != resolved.contract.path {
         errors.push("path_changed".to_string());
@@ -103,12 +91,6 @@ pub(super) fn artifact_lock_error_allows_refresh(error: &str) -> bool {
         || error.ends_with(".source_commit_changed")
         || error.ends_with(".source_tree_changed")
         || error.ends_with(".path_changed")
-}
-
-pub(super) fn artifact_lock_warning_resolved_by_write(warning: &str) -> bool {
-    warning.ends_with(".source_role_missing")
-        || warning.ends_with(".source_kind_missing")
-        || warning.ends_with(".source_path_missing")
 }
 
 pub(super) fn artifact_contract_hash(source_id: &str, contract: &ArtifactContract) -> String {
