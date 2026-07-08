@@ -5,7 +5,7 @@ local `agl-client` protocol. Matrix SDK, sync, login, and verification stay in
 this bridge crate; turn execution, sessions, tools, and model runtime stay in
 the daemon.
 
-This is an alpha bridge. It does not accept the old legacy `dyno` config shape.
+This is an alpha bridge. It only accepts the current Matrix config shape.
 Use the `!agl` command prefix unless `matrix.command_prefix` is changed.
 
 ## Setup

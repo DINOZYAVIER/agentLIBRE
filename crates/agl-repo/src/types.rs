@@ -442,12 +442,9 @@ pub struct ArtifactLockFile {
 pub struct LockedArtifact {
     pub id: String,
     pub source_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_role: Option<ArtifactSourceRole>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_kind: Option<ArtifactSourceKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path: Option<PathBuf>,
+    pub source_role: ArtifactSourceRole,
+    pub source_kind: ArtifactSourceKind,
+    pub source_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,7 +637,6 @@ pub enum ArtifactSourceRole {
     Planning,
     Generated,
     State,
-    Compatibility,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -651,7 +647,6 @@ pub enum ArtifactSourceKind {
     Local,
     Generated,
     Ignored,
-    Compatibility,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

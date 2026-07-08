@@ -24,7 +24,7 @@ fn artifact_source_status(
     let component_kind = match source.kind {
         ArtifactSourceKind::Git => ComponentKind::Git,
         ArtifactSourceKind::Submodule => ComponentKind::Submodule,
-        ArtifactSourceKind::Local | ArtifactSourceKind::Compatibility => ComponentKind::Local,
+        ArtifactSourceKind::Local => ComponentKind::Local,
         ArtifactSourceKind::Generated => ComponentKind::Generated,
         ArtifactSourceKind::Ignored => ComponentKind::Ignored,
     };

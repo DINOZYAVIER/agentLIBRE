@@ -422,13 +422,10 @@ fn print_artifact_lock_report(report: &ArtifactLockReport) {
     println!("lock.locked_at_unix_ms={}", report.lock.locked_at_unix_ms);
     for artifact in report.lock.artifacts.values() {
         println!(
-            "lock.artifact id={} source={} source_kind={} path={} kind={:?} access={:?} contract_hash={}",
+            "lock.artifact id={} source={} source_kind={:?} path={} kind={:?} access={:?} contract_hash={}",
             artifact.id,
             artifact.source_id,
-            artifact
-                .source_kind
-                .map(|kind| format!("{kind:?}"))
-                .unwrap_or_else(|| "missing".to_string()),
+            artifact.source_kind,
             artifact.path.display(),
             artifact.kind,
             artifact.access,

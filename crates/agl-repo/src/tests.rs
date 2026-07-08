@@ -266,9 +266,9 @@ fn artifact_lock_writes_contract_hashes() {
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
     let locked = report.lock.artifacts.get("tasks").unwrap();
     assert_eq!(locked.source_id, "tasks");
-    assert_eq!(locked.source_role, Some(ArtifactSourceRole::Planning));
-    assert_eq!(locked.source_kind, Some(ArtifactSourceKind::Local));
-    assert_eq!(locked.source_path, Some(PathBuf::from(".agl/tasks")));
+    assert_eq!(locked.source_role, ArtifactSourceRole::Planning);
+    assert_eq!(locked.source_kind, ArtifactSourceKind::Local);
+    assert_eq!(locked.source_path, PathBuf::from(".agl/tasks"));
     assert_eq!(locked.contract_hash.len(), 64);
     assert_ne!(report.lock.locked_at_unix_ms, 0);
 
@@ -311,7 +311,7 @@ kind = "source"
 path = ".agl/tasks"
 access = "read_write"
 provides = ["tasks"]
-schema = "agl.task_spec_legacy.v1"
+schema = "agl.task_spec.v1"
 required = true
 shared = true
 conflict_policy = "identical"
@@ -381,8 +381,8 @@ conflict_policy = "identical"
 }
 
 #[test]
-fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
-    let root = temp_root("artifact-lock-legacy");
+fn artifact_lock_rejects_entries_missing_source_identity() {
+    let root = temp_root("artifact-lock-missing-source-identity");
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
     let report = lock_artifacts(
         &root,
@@ -394,8 +394,8 @@ fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
     .unwrap();
     assert!(report.wrote);
     let lock_path = root.join(ARTIFACT_LOCK_PATH);
-    let lock = fs::read_to_string(&lock_path).unwrap();
-    let legacy_lock = lock
+    let incomplete_lock = fs::read_to_string(&lock_path)
+        .unwrap()
         .lines()
         .filter(|line| {
             !line.trim_start().starts_with("source_role")
@@ -404,9 +404,9 @@ fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(&lock_path, legacy_lock).unwrap();
+    fs::write(&lock_path, incomplete_lock).unwrap();
 
-    let legacy_status = status_artifacts(
+    let report = status_artifacts(
         &root,
         &ArtifactStatusOptions {
             artifact: Some("tasks".to_string()),
@@ -414,35 +414,14 @@ fn artifact_lock_accepts_legacy_entries_and_rewrites_source_identity() {
         },
     )
     .unwrap();
+
     assert!(
-        !legacy_status
+        report
             .errors
             .iter()
             .any(|error| error.starts_with("artifact_lock_invalid")),
         "{:?}",
-        legacy_status.errors
-    );
-    assert!(
-        legacy_status
-            .warnings
-            .iter()
-            .any(|warning| warning == "artifact.tasks.source_role_missing"),
-        "{:?}",
-        legacy_status.warnings
-    );
-
-    let refreshed = lock_artifacts(
-        &root,
-        &ArtifactLockOptions {
-            dry_run: false,
-            strict: false,
-        },
-    )
-    .unwrap();
-    assert!(refreshed.wrote);
-    assert_eq!(
-        refreshed.lock.artifacts.get("tasks").unwrap().source_path,
-        Some(PathBuf::from(".agl/tasks"))
+        report.errors
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -759,7 +738,7 @@ fn artifact_status_detects_source_path_drift() {
     )
     .unwrap();
     let mut lock = report.lock;
-    lock.artifacts.get_mut("tasks").unwrap().source_path = Some(PathBuf::from(".agl/other"));
+    lock.artifacts.get_mut("tasks").unwrap().source_path = PathBuf::from(".agl/other");
     fs::write(
         root.join(ARTIFACT_LOCK_PATH),
         toml::to_string_pretty(&lock).unwrap(),
@@ -866,6 +845,21 @@ rev = "main"
 [components.state]
 path = ".agl/state"
 kind = "ignored"
+
+[artifact_sources.skills]
+role = "core"
+kind = "submodule"
+path = ".agl/skills"
+
+[artifact_sources.tasks]
+role = "planning"
+kind = "git"
+path = ".agl/tasks"
+
+[artifact_sources.reviews]
+role = "generated"
+kind = "submodule"
+path = ".agl/reviews"
 "#,
     )
     .unwrap();
@@ -902,38 +896,30 @@ kind = "ignored"
 }
 
 #[test]
-fn init_backfills_artifact_sources_for_legacy_profile_files() {
-    let root = temp_root("legacy-profile-artifacts");
-    let profile_path = root.join("legacy-profile.toml");
+fn profile_file_requires_artifact_sources() {
+    let root = temp_root("profile-requires-artifact-sources");
+    let profile_path = root.join("profile.toml");
     fs::write(
         &profile_path,
         r#"
 version = 1
-name = "legacy-repo-workflow"
+name = "repo-workflow"
 
 [components.skills]
-path = ".agl/core-skills"
+path = ".agl/skills"
 kind = "submodule"
-url = "git@example.com:agentlibre/core-skills.git"
+url = "git@example.com:agentlibre/skills.git"
 rev = "v1"
 lock = ".agl/skills.lock"
 
 [components.tasks]
-path = ".agl/specs"
+path = ".agl/tasks"
 kind = "local"
-
-[components.reviews]
-path = ".agl/reviews"
-kind = "generated"
-
-[components.state]
-path = ".agl/state"
-kind = "ignored"
 "#,
     )
     .unwrap();
 
-    init_repo_workspace(
+    let err = init_repo_workspace(
         &root,
         &RepoInitOptions {
             profile: DEFAULT_PROFILE.to_string(),
@@ -941,52 +927,9 @@ kind = "ignored"
             ..RepoInitOptions::default()
         },
     )
-    .unwrap();
-    let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+    .unwrap_err();
 
-    assert_eq!(
-        manifest.artifact_sources["skills"].path,
-        PathBuf::from(".agl/core-skills")
-    );
-    assert_eq!(
-        manifest.artifact_sources["skills"].kind,
-        ArtifactSourceKind::Submodule
-    );
-    assert_eq!(
-        manifest.artifact_sources["skills"].url.as_deref(),
-        Some("git@example.com:agentlibre/core-skills.git")
-    );
-    assert_eq!(
-        manifest.artifact_sources["tasks"].path,
-        PathBuf::from(".agl/specs")
-    );
-    assert_eq!(
-        manifest.artifact_sources["tasks"].artifacts[0].path,
-        PathBuf::from(".agl/specs")
-    );
-
-    let artifact_status = status_artifacts(
-        &root,
-        &ArtifactStatusOptions {
-            artifact: None,
-            strict: false,
-        },
-    )
-    .unwrap();
-    assert!(
-        artifact_status
-            .artifacts
-            .iter()
-            .any(|artifact| { artifact.id == "tasks" && artifact.path == Path::new(".agl/specs") })
-    );
-    assert!(
-        !artifact_status
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("undeclared_artifact_root: .agl/specs")),
-        "{:?}",
-        artifact_status.warnings
-    );
+    assert!(err.to_string().contains("must define artifact_sources"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1424,6 +1367,11 @@ url = "git@example.com:agentlibre/agl-skills.git"
 rev = "v0.1.0"
 lock = ".agl/skills.lock"
 
+[artifact_sources.skills]
+role = "core"
+kind = "submodule"
+path = ".agl/skills"
+
 [skill_pack]
 component = "skills"
 path = ".agl/skills"
@@ -1454,6 +1402,11 @@ name = "actual-profile"
 [components.state]
 path = ".agl/state"
 kind = "ignored"
+
+[artifact_sources.state]
+role = "state"
+kind = "ignored"
+path = ".agl/state"
 "#,
     )
     .unwrap();

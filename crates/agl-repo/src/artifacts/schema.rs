@@ -19,22 +19,19 @@ pub(super) fn validate_artifact_schema(
     let absolute_root = workspace_root.join(root);
     let mut schema_errors = Vec::new();
     match schema {
-        "agl.task_spec.v1" | "agl.task_spec_legacy.v1" => {
+        "agl.task_spec.v1" => {
             validate_task_spec_schema(workspace_root, &absolute_root, &mut schema_errors)
         }
         "agl.review_pack.v1" => {
             validate_review_pack_schema(workspace_root, &absolute_root, &mut schema_errors)
         }
-        "agl.decision_doc.v1" | "agl.decision_doc_legacy.v1" => {
+        "agl.decision_doc.v1" => {
             validate_decision_doc_schema(workspace_root, &absolute_root, &mut schema_errors)
         }
         "agl.handoff_markdown.v1" => {
             validate_handoff_schema(workspace_root, &absolute_root, &mut schema_errors)
         }
-        "agl.smoke.v1"
-        | "agl.smoke_legacy.v1"
-        | "agl.skill_source.v1"
-        | "agl.skill_source_legacy.v1" => {}
+        "agl.smoke.v1" | "agl.skill_source.v1" => {}
         _ => warnings.push(format!("schema_validator_unknown: {schema}")),
     }
     if strict {
