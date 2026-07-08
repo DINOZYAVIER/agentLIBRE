@@ -241,13 +241,13 @@ struct RawSkillManifest {
     requestable_tools: Vec<ToolId>,
     #[serde(default)]
     denied_tools: Vec<ToolId>,
-    #[serde(default, alias = "permission_requests")]
+    #[serde(default)]
     permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     #[serde(default)]
     permissions: SkillPermissions,
     context_budget_tokens: u32,
     references: RawReferencePolicy,
-    #[serde(default, alias = "artifact_folders", alias = "folders")]
+    #[serde(default)]
     artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
 }
@@ -255,7 +255,6 @@ struct RawSkillManifest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RawSkillSource {
-    Builtin,
     Core,
     Community,
     Local,
@@ -264,7 +263,6 @@ enum RawSkillSource {
 impl RawSkillSource {
     fn canonical(self) -> Option<SkillSource> {
         match self {
-            Self::Builtin => None,
             Self::Core => Some(SkillSource::Core),
             Self::Community => Some(SkillSource::Community),
             Self::Local => Some(SkillSource::Local),
@@ -451,7 +449,7 @@ fn parse_skill_text(
             actual: raw.pack.clone(),
         });
     }
-    if !matches!(raw.source, RawSkillSource::Builtin | RawSkillSource::Core) {
+    if !matches!(raw.source, RawSkillSource::Core) {
         return Err(SkillManifestError::BuiltinSourceMismatch);
     }
     let source = SkillSource::Core;
@@ -839,10 +837,7 @@ fn resolve_references(
 }
 
 fn builtin_skill_relative_asset_path<'a>(source_path: &'a str, pack: &str, name: &str) -> &'a str {
-    for prefix in [
-        format!("assets/core-skills/{pack}/{name}/"),
-        format!("assets/skills/{pack}/{name}/"),
-    ] {
+    for prefix in [format!("assets/core-skills/{pack}/{name}/")] {
         if let Some(relative) = source_path.strip_prefix(&prefix) {
             return relative;
         }
@@ -1185,7 +1180,7 @@ requestable_tools:
   - matrix.outbox.enqueue
 denied_tools:
   - matrix.outbox.deliver
-permission_requests:
+permission_request_templates:
   - id: schedule-matrix-cron
     tools:
       - matrix.outbox.enqueue
@@ -1445,7 +1440,7 @@ Body.
         let manifest_asset = BuiltinAsset {
             id: "task-spec",
             kind: agl_assets::BuiltinAssetKind::Skill,
-            source_path: "assets/skills/agl/task-spec/SKILL.md",
+            source_path: "assets/core-skills/agl/task-spec/SKILL.md",
             sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             bytes: b"",
         };
@@ -1539,7 +1534,7 @@ Body.
     }
 
     #[test]
-    fn workspace_parser_rejects_builtin_source() {
+    fn workspace_parser_rejects_unknown_source() {
         let root = temp_root("workspace-source");
         let skill_dir = root.join("agl/repo-change");
         fs::create_dir_all(&skill_dir).unwrap();
@@ -1549,7 +1544,7 @@ Body.
 name: repo-change
 description: Review repository changes.
 version: 1
-source: builtin
+source: workspace
 pack: agl
 required_hooks:
   - repo_path.validate
@@ -1567,7 +1562,12 @@ Body.
 
         let err = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap_err();
 
-        assert_eq!(err, SkillManifestError::ExternalSourceMismatch);
+        match err {
+            SkillManifestError::InvalidYaml { message, .. } => {
+                assert!(message.contains("unknown variant `workspace`"), "{message}");
+            }
+            other => panic!("expected invalid YAML source error, got {other:?}"),
+        }
 
         fs::remove_dir_all(root).unwrap();
     }

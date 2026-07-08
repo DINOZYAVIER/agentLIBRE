@@ -9,7 +9,7 @@ const AGL_BIN: &str = env!("CARGO_BIN_EXE_agl");
 static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn agl_help_uses_public_alias_and_hides_infer() {
+fn agl_help_lists_public_commands() {
     let output = run_agl(&["--help"]);
 
     assert_success_no_stderr(&output);
@@ -22,7 +22,6 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     );
     assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
     assert_contains(&stdout, "run");
-    assert_contains(&stdout, "generate");
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "chat");
     assert_contains(&stdout, "serve");
@@ -33,10 +32,6 @@ fn agl_help_uses_public_alias_and_hides_infer() {
     assert_contains(&stdout, "memory");
     assert_contains(&stdout, "notes");
     assert_contains(&stdout, "install-hooks");
-    assert!(
-        !stdout.contains("\n  infer"),
-        "hidden infer command should not appear in top-level help:\n{stdout}"
-    );
     for hidden_command in ["repo", "daemon"] {
         assert!(
             !stdout.contains(&format!("\n  {hidden_command}")),
@@ -76,7 +71,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
-        &["generate", "--help"][..],
         &["serve", "--help"][..],
         &["status", "--help"][..],
         &["skill", "--help"][..],
@@ -648,7 +642,7 @@ fn run_help_describes_trusted_workspace_skills() {
 
     assert_success(&output);
     let stdout = stdout(&output);
-    assert_contains(&stdout, "Builtin or trusted workspace skill id");
+    assert_contains(&stdout, "Core or trusted workspace skill id");
 }
 
 #[test]
@@ -917,29 +911,29 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
     assert_success(&init);
     write_workspace_skill(repo.path(), "repo-change");
 
-    let builtins = run_agl_in(
+    let core_only = run_agl_in(
         repo.path(),
         &[
             "skill",
             "list",
             "--source",
-            "builtin",
+            "core",
             "--trusted-only",
             "--limit",
             "1",
         ],
     );
 
-    assert_success(&builtins);
-    let builtins_stdout = stdout(&builtins);
-    assert_contains(&builtins_stdout, "source=core");
+    assert_success(&core_only);
+    let core_only_stdout = stdout(&core_only);
+    assert_contains(&core_only_stdout, "source=core");
     assert!(
-        !builtins_stdout.contains("skill name=repo-change"),
-        "builtin-only list should not include workspace skills:\n{builtins_stdout}"
+        !core_only_stdout.contains("skill name=repo-change"),
+        "core-only list should not include local workspace skills:\n{core_only_stdout}"
     );
     assert!(
-        !builtins_stdout.contains("component_not_usable"),
-        "builtin-only list should not print workspace warnings:\n{builtins_stdout}"
+        !core_only_stdout.contains("component_not_usable"),
+        "core-only list should not print workspace warnings:\n{core_only_stdout}"
     );
 
     let core = run_agl_in(
@@ -1058,7 +1052,7 @@ requestable_tools: []
 context_budget_tokens: 256
 references:
   include: []
-folders:
+artifacts:
   - id: bad
     kind: generated
     path: .agl/tasks/bad
@@ -1107,7 +1101,7 @@ requestable_tools: []
 context_budget_tokens: 256
 references:
   include: []
-folders:
+artifacts:
   - id: bad
     kind: generated
     path: ../outside
@@ -1208,17 +1202,6 @@ fn daemon_status_without_daemon_reports_not_running_without_model_config() {
 }
 
 #[test]
-fn retired_infer_command_fails_with_run_guidance() {
-    let output = run_agl(&["infer", "--config", "local.toml", "--prompt", "hello"]);
-
-    assert_failure(&output);
-    assert_empty_stdout(&output);
-    let stderr = stderr(&output);
-    assert_contains(&stderr, "agl infer");
-    assert_contains(&stderr, "Use `agl run --config PATH PROMPT`");
-}
-
-#[test]
 fn completion_bash_emits_agl_completion_function() {
     let output = run_agl(&["completion", "bash"]);
 
@@ -1226,12 +1209,6 @@ fn completion_bash_emits_agl_completion_function() {
     let stdout = stdout(&output);
     assert_contains(&stdout, "_agl()");
     assert_contains(&stdout, "complete -F _agl");
-    for hidden_command in ["infer", "setup", "doctor", "model"] {
-        assert!(
-            !stdout.contains(hidden_command),
-            "completion should not expose hidden command {hidden_command:?}:\n{stdout}"
-        );
-    }
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
@@ -1295,21 +1272,24 @@ fn chat_new_session_conflict_fails_before_inference_path() {
 }
 
 #[test]
-fn reserved_future_commands_fail_before_bare_prompt_execution() {
+fn removed_command_names_fail_before_inference_path() {
     for args in [
+        &["infer", "--help"][..],
+        &["generate", "--help"][..],
         &["setup"][..],
         &["doctor"][..],
-        &["model", "pull", "owner/repo/model.gguf", "--set-default"][..],
+        &["model", "pull", "owner/repo/model.gguf"][..],
     ] {
         let output = run_agl(args);
 
         assert_failure(&output);
         assert_empty_stdout(&output);
         let stderr = stderr(&output);
-        assert_contains(&stderr, "planned but not implemented");
+        assert_contains(&stderr, "unknown command");
+        assert_contains(&stderr, "Use `agl run --prompt TEXT`");
         assert!(
             !stderr.contains("local inference config"),
-            "reserved command should not run inference path:\n{stderr}"
+            "removed command name should not run inference path:\n{stderr}"
         );
     }
 }
