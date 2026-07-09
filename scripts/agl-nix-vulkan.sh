@@ -13,6 +13,7 @@ Usage:
   scripts/agl-nix-vulkan.sh --build
   scripts/agl-nix-vulkan.sh --smoke-tools /path/to/local-inference.toml
   scripts/agl-nix-vulkan.sh --smoke-llama /path/to/local-inference.toml
+  scripts/agl-nix-vulkan.sh --smoke-multiturn /path/to/local-inference.toml
   scripts/agl-nix-vulkan.sh -- <command> [args...]
 
 Runs agentLIBRE local llama.cpp development commands inside a Nix shell with
@@ -94,6 +95,15 @@ smoke_llama() {
   AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-llama-cpp.sh"
 }
 
+smoke_multiturn() {
+  local config="${1:-}"
+  [[ -n "$config" ]] || {
+    echo "missing local inference config path" >&2
+    exit 2
+  }
+  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-multiturn-flows.sh"
+}
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -125,6 +135,10 @@ case "${1:-}" in
   --smoke-llama)
     shift
     smoke_llama "$@"
+    ;;
+  --smoke-multiturn)
+    shift
+    smoke_multiturn "$@"
     ;;
   --)
     shift
