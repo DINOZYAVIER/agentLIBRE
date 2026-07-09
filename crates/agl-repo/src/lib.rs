@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
 mod artifacts;
 mod hooks;
@@ -363,19 +364,18 @@ pub fn verify_task_specs(
         errors.push("tasks_component_missing".to_string());
     }
 
-    let files = if root.is_dir() {
-        let mut paths = Vec::new();
-        collect_markdown_files(&root, &mut paths)?;
-        paths.sort();
-        paths
-            .into_iter()
-            .map(|path| task_spec_file_status(&workspace_root, &path))
-            .collect::<Vec<_>>()
+    let discovery = if root.is_dir() {
+        collect_planned_task_overviews(&root)?
     } else {
-        Vec::new()
+        TaskSpecDiscovery::default()
     };
+    let files = discovery
+        .planned_overviews
+        .into_iter()
+        .map(|path| task_spec_file_status(&workspace_root, &path))
+        .collect::<Vec<_>>();
 
-    if root.exists() && files.is_empty() {
+    if root.exists() && discovery.task_directories == 0 {
         errors.push("no_task_spec_markdown_files".to_string());
     }
     for file in &files {
@@ -1316,26 +1316,84 @@ fn component_init_error_report(
     }
 }
 
-fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+#[derive(Debug, Default)]
+struct TaskSpecDiscovery {
+    task_directories: usize,
+    planned_overviews: Vec<PathBuf>,
+}
+
+#[derive(Deserialize)]
+struct TaskSpecFrontMatter {
+    status: String,
+}
+
+fn collect_planned_task_overviews(root: &Path) -> Result<TaskSpecDiscovery> {
+    let mut discovery = TaskSpecDiscovery::default();
+    for entry in fs::read_dir(root).with_context(|| format!("failed to read {}", root.display()))? {
         let entry = entry?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        if file_name == ".git" {
+        if !entry.file_type()?.is_dir() || !is_task_directory_name(&entry.file_name()) {
             continue;
         }
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_markdown_files(&path, files)?;
-        } else if file_type.is_file()
-            && path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            files.push(path);
+
+        discovery.task_directories += 1;
+        let overview = entry.path().join("00_overview.md");
+        match fs::read_to_string(&overview) {
+            Ok(content) => match task_spec_status(&content) {
+                Ok(status) if status == "planned" => {
+                    discovery.planned_overviews.push(overview);
+                }
+                Ok(_) => {}
+                Err(_) => discovery.planned_overviews.push(overview),
+            },
+            Err(_) => discovery.planned_overviews.push(overview),
         }
     }
-    Ok(())
+    discovery.planned_overviews.sort();
+    Ok(discovery)
+}
+
+fn is_task_directory_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    let Some(suffix) = name.strip_prefix("AGL-") else {
+        return false;
+    };
+    let number = suffix.split(['_', '-']).next().unwrap_or_default();
+    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn task_spec_status(markdown: &str) -> std::result::Result<String, String> {
+    let mut lines = markdown.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Err("task spec must start with YAML front matter".to_string());
+    }
+
+    let mut yaml = String::new();
+    let mut closed = false;
+    for line in &mut lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    if !closed {
+        return Err("task spec YAML front matter is not closed".to_string());
+    }
+
+    let front_matter = serde_yaml::from_str::<TaskSpecFrontMatter>(&yaml)
+        .map_err(|err| format!("task spec YAML front matter is invalid: {err}"))?;
+    if matches!(
+        front_matter.status.as_str(),
+        "planned" | "implemented" | "done" | "superseded"
+    ) {
+        Ok(front_matter.status)
+    } else {
+        Err(format!(
+            "unsupported task spec status `{}`",
+            front_matter.status
+        ))
+    }
 }
 
 fn task_spec_file_status(workspace_root: &Path, path: &Path) -> TaskSpecFileStatus {
@@ -1343,12 +1401,16 @@ fn task_spec_file_status(workspace_root: &Path, path: &Path) -> TaskSpecFileStat
     match fs::read_to_string(path) {
         Ok(content) => {
             let validation = validate_task_spec_markdown(&content);
+            let errors = task_spec_status(&content)
+                .err()
+                .into_iter()
+                .collect::<Vec<_>>();
             TaskSpecFileStatus {
                 path: relative,
-                valid: validation.is_valid(),
+                valid: validation.is_valid() && errors.is_empty(),
                 missing_sections: validation.missing_sections,
                 warnings: Vec::new(),
-                errors: Vec::new(),
+                errors,
             }
         }
         Err(err) => TaskSpecFileStatus {
