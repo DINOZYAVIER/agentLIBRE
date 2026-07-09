@@ -7,6 +7,7 @@ pub const AGL_DIR: &str = ".agl";
 pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
 pub const ARTIFACT_LOCK_PATH: &str = ".agl/artifact-lock.toml";
 pub const DEFAULT_PROFILE: &str = "repo-workflow";
+pub const DEFAULT_FUNCTION: &str = "gemma4-12b";
 pub const DEFAULT_SKILLS_URL: &str = "https://github.com/DINOZYAVIER/agl-core-skills.git";
 pub const DEFAULT_SKILLS_REV: &str = "v0.1.2";
 
@@ -503,9 +504,24 @@ pub enum HookInstallAction {
 pub struct WorkspaceManifest {
     pub version: u32,
     pub profile: String,
+    pub functions: WorkspaceFunctions,
     pub components: BTreeMap<String, WorkspaceComponent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_sources: BTreeMap<String, ArtifactSource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceFunctions {
+    pub default: String,
+}
+
+impl Default for WorkspaceFunctions {
+    fn default() -> Self {
+        Self {
+            default: DEFAULT_FUNCTION.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

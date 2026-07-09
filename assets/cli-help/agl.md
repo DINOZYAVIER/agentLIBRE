@@ -14,4 +14,5 @@ Common commands:
   agl status
   agl function list
   agl skill list --trusted-only
-  agl run --skill repo-status --prompt "Summarize this workspace"
+  agl run --prompt "Summarize this workspace"
+  agl inference run --config /path/to/local.toml --prompt "Reply once."

@@ -1,6 +1,6 @@
 use agl_functions::{FunctionSource, list_functions, workspace_functions_root};
 use agl_repo::{
-    RepoArtifactSourceOverride as AglRepoArtifactSourceOverride,
+    DEFAULT_FUNCTION, RepoArtifactSourceOverride as AglRepoArtifactSourceOverride,
     RepoInitOptions as AglRepoInitOptions, init_repo_workspace,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
@@ -24,6 +24,7 @@ pub(crate) fn run_init(options: RepoInitOptions, runtime: &AgentLibreRuntimeConf
         display_workspace_path(&workspace_root, &functions_root)
     );
     println!("bootstrap.functions_root.action={function_root_action}");
+    println!("bootstrap.default_function={DEFAULT_FUNCTION}");
 
     let builtin_functions = list_functions(&workspace_root, &runtime.paths.config_dir)?
         .into_iter()
@@ -32,15 +33,8 @@ pub(crate) fn run_init(options: RepoInitOptions, runtime: &AgentLibreRuntimeConf
     for function in &builtin_functions {
         println!("bootstrap.builtin_function={}", function.id);
     }
-    if let Some(function) = builtin_functions.first() {
-        println!("next_step=agl function status {}", function.id);
-        println!(
-            "next_step=agl run --function {} --prompt \"Reply with init-ok\"",
-            function.id
-        );
-    } else {
-        println!("next_step=agl function list");
-    }
+    println!("next_step=agl function status {DEFAULT_FUNCTION}");
+    println!("next_step=agl run --prompt \"Reply with init-ok\"");
 
     Ok(())
 }
