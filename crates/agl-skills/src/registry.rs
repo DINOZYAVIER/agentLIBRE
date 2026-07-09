@@ -199,7 +199,7 @@ impl SkillRegistry {
             .harness
             .required_hooks
             .iter()
-            .filter(|hook| !tool_catalog.has_hook(hook))
+            .filter(|hook| tool_catalog.trusted_hook(hook).is_none())
             .cloned()
             .collect::<Vec<_>>();
         if missing.is_empty() {
@@ -298,6 +298,7 @@ impl std::error::Error for SkillRegistryError {}
 mod tests {
     use agl_tools::{
         HookDeclaration, HookEvent, ToolCatalog, ToolProviderDeclaration, ToolProviderId,
+        ToolProviderTrust,
     };
 
     use super::*;
@@ -439,6 +440,31 @@ mod tests {
         registry
             .verify_required_hooks(&SkillId::new("skill").unwrap(), &extensions)
             .unwrap();
+    }
+
+    #[test]
+    fn untrusted_required_hooks_fail_preflight() {
+        let registry = SkillRegistry::from_builtin_assets().unwrap();
+        let mut extensions = ToolCatalog::new();
+        extensions
+            .register(core_guard_declaration().with_trust(ToolProviderTrust::Revoked))
+            .unwrap();
+
+        let err = registry
+            .verify_required_hooks(&SkillId::new("skill").unwrap(), &extensions)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SkillRegistryError::MissingRequiredHooks {
+                id: "skill".to_string(),
+                hooks: vec![
+                    HookId::new("repo_path.validate").unwrap(),
+                    HookId::new("secret_scan.validate").unwrap(),
+                    HookId::new("skill_manifest.validate").unwrap(),
+                ],
+            }
+        );
     }
 
     #[test]
