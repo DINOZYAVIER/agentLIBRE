@@ -521,6 +521,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
         WorkspaceManifest {
             version: profile.version,
             profile: profile.name,
+            functions: WorkspaceFunctions::default(),
             components: profile.components,
             artifact_sources: profile.artifact_sources,
         }
@@ -540,6 +541,7 @@ pub(crate) fn default_manifest() -> WorkspaceManifest {
     WorkspaceManifest {
         version: 1,
         profile: DEFAULT_PROFILE.to_string(),
+        functions: WorkspaceFunctions::default(),
         components: BTreeMap::from([
             (
                 "skills".to_string(),
@@ -832,6 +834,17 @@ fn write_manifest_change(
 ) -> Result<()> {
     let relative = PathBuf::from(WORKSPACE_MANIFEST_PATH);
     if manifest_path.exists() && !options.force {
+        if repair_manifest_function_default(manifest_path, options.dry_run)? {
+            changes.push(RepoInitChange {
+                path: relative,
+                action: if options.dry_run {
+                    RepoInitAction::WouldOverwriteFile
+                } else {
+                    RepoInitAction::OverwroteFile
+                },
+            });
+            return Ok(());
+        }
         changes.push(RepoInitChange {
             path: relative,
             action: RepoInitAction::Exists,
@@ -870,9 +883,83 @@ fn write_manifest_change(
     Ok(())
 }
 
+fn repair_manifest_function_default(manifest_path: &Path, dry_run: bool) -> Result<bool> {
+    let content = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut value: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    if manifest_value_has_valid_function_default(&value) {
+        return Ok(false);
+    }
+    if dry_run {
+        return Ok(true);
+    }
+    let table = value.as_table_mut().with_context(|| {
+        format!(
+            "workspace manifest root must be a TOML table: {}",
+            manifest_path.display()
+        )
+    })?;
+    let functions = table
+        .entry("functions".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !functions.is_table() {
+        *functions = toml::Value::Table(toml::map::Map::new());
+    }
+    functions
+        .as_table_mut()
+        .expect("functions table was just initialized")
+        .insert(
+            "default".to_string(),
+            toml::Value::String(DEFAULT_FUNCTION.to_string()),
+        );
+    let repaired =
+        toml::to_string_pretty(&value).context("failed to render repaired workspace manifest")?;
+    fs::write(manifest_path, repaired)
+        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    Ok(true)
+}
+
+fn manifest_value_has_valid_function_default(value: &toml::Value) -> bool {
+    value
+        .get("functions")
+        .and_then(|functions| functions.get("default"))
+        .and_then(toml::Value::as_str)
+        .is_some_and(is_valid_workspace_function_id)
+}
+
 pub(crate) fn read_manifest(path: &Path) -> Result<WorkspaceManifest> {
     let content = fs::read_to_string(path)?;
     toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+pub fn read_workspace_default_function(workspace_root: impl AsRef<Path>) -> Result<Option<String>> {
+    let workspace_root = workspace_root.as_ref();
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    let manifest = match read_manifest(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to read workspace manifest {}",
+                    manifest_path.display()
+                )
+            });
+        }
+    };
+    if manifest.functions.default.trim().is_empty() {
+        bail!(
+            "workspace default function cannot be empty; run agl init --force or edit .agl/workspace.toml"
+        );
+    }
+    if !is_valid_workspace_function_id(&manifest.functions.default) {
+        bail!(
+            "workspace default function has invalid id `{}`; run agl init --force or edit .agl/workspace.toml",
+            manifest.functions.default
+        );
+    }
+    Ok(Some(manifest.functions.default))
 }
 
 pub(crate) fn is_not_found(err: &anyhow::Error) -> bool {
@@ -890,6 +977,14 @@ fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
     if manifest.profile.trim().is_empty() {
         errors.push("profile_empty".to_string());
     }
+    if manifest.functions.default.trim().is_empty() {
+        errors.push("functions.default_empty".to_string());
+    } else if !is_valid_workspace_function_id(&manifest.functions.default) {
+        errors.push(format!(
+            "functions.default_invalid: {}",
+            manifest.functions.default
+        ));
+    }
     let mut paths = BTreeMap::<PathBuf, String>::new();
     for (name, component) in &manifest.components {
         if let Err(err) = validate_component_path(&component.path) {
@@ -902,6 +997,15 @@ fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
             ));
         }
     }
+}
+
+fn is_valid_workspace_function_id(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
 }
 
 fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
@@ -925,6 +1029,7 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
         &WorkspaceManifest {
             version: profile.version,
             profile: profile.name.clone(),
+            functions: WorkspaceFunctions::default(),
             components: profile.components.clone(),
             artifact_sources: profile.artifact_sources.clone(),
         },

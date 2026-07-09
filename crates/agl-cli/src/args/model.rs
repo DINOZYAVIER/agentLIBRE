@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use clap_complete::Shell;
 
-pub(crate) use agl_chat::DEFAULT_MAX_OUTPUT_TOKENS;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CliInvocation {
     pub(crate) command: CliCommand,
@@ -20,6 +18,7 @@ pub(crate) enum CliCommand {
     Cron(CronCommand),
     Store(StoreCommand),
     Function(FunctionCommand),
+    Inference(InferenceCommand),
     Init(RepoInitOptions),
     Memory(MemoryCommand),
     Notes(NotesCommand),
@@ -52,6 +51,13 @@ pub(crate) enum FunctionCommand {
     Status(FunctionStatusOptions),
     Init(FunctionInitOptions),
     Doctor(FunctionDoctorOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum InferenceCommand {
+    Run(RunOptions),
+    Chat(RunOptions),
+    Serve(ServeOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -537,7 +543,7 @@ pub(crate) struct CronDeleteOptions {
     pub(crate) json: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
@@ -594,8 +600,8 @@ pub(crate) struct ServeOptions {
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) run_id: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
-    pub(crate) max_output_tokens: u32,
-    pub(crate) tool_mode: ToolAccessMode,
+    pub(crate) max_output_tokens: Option<u32>,
+    pub(crate) tool_mode: Option<ToolAccessMode>,
     pub(crate) skills: Vec<String>,
     pub(crate) memory: bool,
 }
@@ -632,24 +638,4 @@ pub(crate) enum MemoryKindArg {
     Summary,
     Decision,
     WorkingNote,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            config: None,
-            function_ref: None,
-            artifact_root: None,
-            run_id: None,
-            workspace_root: None,
-            session_id: None,
-            no_history: false,
-            new_session: false,
-            max_output_tokens: None,
-            tool_mode: None,
-            skills: Vec::new(),
-            memory: false,
-            prompt: None,
-        }
-    }
 }

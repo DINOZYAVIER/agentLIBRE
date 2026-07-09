@@ -22,6 +22,7 @@ use agl_daemon::{
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
+    read_workspace_default_function,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
@@ -52,8 +53,8 @@ mod store;
 use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
-    CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, RunOptions,
-    ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillFolderSyncSituationArg,
+    CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, InferenceCommand,
+    RunOptions, ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillFolderSyncSituationArg,
     SkillInitOptions, SkillInspectOptions, SkillListOptions, SkillListSourceArg, SkillLockOptions,
     SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli,
     print_completion, print_usage,
@@ -191,7 +192,11 @@ enum CliRuntimeProfile {
 
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Run(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
+        CliCommand::Run(_)
+        | CliCommand::Chat(_)
+        | CliCommand::Inference(InferenceCommand::Run(_) | InferenceCommand::Chat(_)) => {
+            CliRuntimeProfile::Interactive
+        }
         CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Function(_)
@@ -203,6 +208,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Notes(_)
         | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
         CliCommand::Serve(_)
+        | CliCommand::Inference(InferenceCommand::Serve(_))
         | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
         | CliCommand::Completion { .. } => CliRuntimeProfile::FullBatch,
@@ -227,6 +233,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Repo(command) => run_repo(command),
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Serve(options) => run_serve(options, runtime),
+        CliCommand::Inference(command) => run_inference(command, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
         CliCommand::Run(options) => run_one_shot(options, runtime),
         CliCommand::Chat(options) => run_chat(options, runtime),
@@ -991,18 +998,51 @@ fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConf
     Ok(())
 }
 
-fn inference_options_from_serve_options(options: &ServeOptions) -> InferenceOptions {
-    InferenceOptions {
+fn inference_options_from_serve_options(
+    options: &ServeOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<InferenceOptions> {
+    let run_options = RunOptions {
+        config: options.config.clone(),
+        function_ref: options.function_ref.clone(),
+        workspace_root: options.workspace_root.clone(),
+        ..RunOptions::default()
+    };
+    let function = resolve_run_function_defaults(&run_options, runtime)?;
+    let max_output_tokens = options
+        .max_output_tokens
+        .or_else(|| {
+            function
+                .as_ref()
+                .and_then(|function| function.max_output_tokens)
+        })
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    let tool_mode = options
+        .tool_mode
+        .or_else(|| {
+            function
+                .as_ref()
+                .and_then(|function| function.tool_mode)
+                .map(args_tool_mode_from_function)
+        })
+        .unwrap_or(args::ToolAccessMode::ReadOnly);
+    let memory = options.memory
+        || function
+            .as_ref()
+            .map(|function| function.memory_enabled)
+            .unwrap_or(false);
+
+    Ok(InferenceOptions {
         config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
         run_id: options.run_id.clone(),
         workspace_root: options.workspace_root.clone(),
-        max_output_tokens: options.max_output_tokens,
-        tool_mode: chat_tool_mode(options.tool_mode),
+        max_output_tokens,
+        tool_mode: chat_tool_mode(tool_mode),
         skills: options.skills.clone(),
-        memory: options.memory,
-    }
+        memory,
+    })
 }
 
 fn print_cli_error(err: &anyhow::Error) {
@@ -1136,7 +1176,48 @@ fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
     }
 }
 
-fn run_one_shot(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+fn apply_workspace_default_function_to_run(
+    options: &mut RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    if options.function_ref.is_some() {
+        return Ok(());
+    }
+    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+    let function = read_workspace_default_function(&workspace_root)?
+        .unwrap_or_else(|| agl_repo::DEFAULT_FUNCTION.to_string());
+    options.function_ref = Some(function);
+    Ok(())
+}
+
+fn apply_workspace_default_function_to_serve(
+    options: &mut ServeOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<()> {
+    if options.function_ref.is_some() {
+        return Ok(());
+    }
+    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+    let function = read_workspace_default_function(&workspace_root)?
+        .unwrap_or_else(|| agl_repo::DEFAULT_FUNCTION.to_string());
+    options.function_ref = Some(function);
+    Ok(())
+}
+
+fn run_inference(command: InferenceCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    match command {
+        InferenceCommand::Run(options) => run_one_shot_raw(options, runtime),
+        InferenceCommand::Chat(options) => run_chat_raw(options, runtime),
+        InferenceCommand::Serve(options) => run_serve_raw(options, runtime),
+    }
+}
+
+fn run_one_shot(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    apply_workspace_default_function_to_run(&mut options, runtime)?;
+    run_one_shot_raw(options, runtime)
+}
+
+fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "run", "starting command");
     let prompt = options
         .prompt
@@ -1163,11 +1244,16 @@ fn run_one_shot(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     Ok(())
 }
 
-fn run_serve(options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+fn run_serve(mut options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    apply_workspace_default_function_to_serve(&mut options, runtime)?;
+    run_serve_raw(options, runtime)
+}
+
+fn run_serve_raw(options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "serve", "starting command");
     let mut daemon_options = DaemonOptions::new(
         &runtime.paths,
-        inference_options_from_serve_options(&options),
+        inference_options_from_serve_options(&options, runtime)?,
     );
     if let Some(socket_path) = options.socket_path {
         daemon_options.socket_path = socket_path;
@@ -1671,6 +1757,11 @@ fn print_skill_trust_update_report(report: &SkillTrustUpdateReport) {
 }
 
 fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    apply_workspace_default_function_to_run(&mut options, runtime)?;
+    run_chat_raw(options, runtime)
+}
+
+fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
     let run_id = options.run_id.clone().unwrap_or_else(default_run_id);
     options.run_id = Some(run_id.clone());
@@ -1837,8 +1928,8 @@ mod tests {
             artifact_root: None,
             run_id: None,
             workspace_root: None,
-            max_output_tokens: 256,
-            tool_mode: crate::args::ToolAccessMode::ReadOnly,
+            max_output_tokens: None,
+            tool_mode: None,
             skills: Vec::new(),
             memory: false,
         }
@@ -1859,6 +1950,11 @@ mod tests {
             process_mode_for_command(&serve),
             AgentLibreProcessMode::Batch
         );
+        let inference_serve = CliCommand::Inference(InferenceCommand::Serve(serve_options()));
+        assert_eq!(
+            cli_runtime_profile(&inference_serve),
+            CliRuntimeProfile::FullBatch
+        );
 
         let run = CliCommand::Run(RunOptions::default());
         assert_eq!(cli_runtime_profile(&run), CliRuntimeProfile::Interactive);
@@ -1866,6 +1962,123 @@ mod tests {
             process_mode_for_command(&run),
             AgentLibreProcessMode::Interactive
         );
+        let inference_run = CliCommand::Inference(InferenceCommand::Run(RunOptions::default()));
+        assert_eq!(
+            cli_runtime_profile(&inference_run),
+            CliRuntimeProfile::Interactive
+        );
+    }
+
+    #[test]
+    fn top_level_run_uses_workspace_default_function() {
+        let root =
+            std::env::temp_dir().join(format!("agl-cli-default-function-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".agl")).unwrap();
+        std::fs::write(
+            root.join(".agl/workspace.toml"),
+            r#"
+version = 1
+profile = "repo-workflow"
+
+[functions]
+default = "coding"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+        )
+        .unwrap();
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(root.join("home")),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+        };
+        let mut options = RunOptions {
+            workspace_root: Some(root.clone()),
+            ..RunOptions::default()
+        };
+
+        apply_workspace_default_function_to_run(&mut options, &runtime).unwrap();
+
+        assert_eq!(options.function_ref.as_deref(), Some("coding"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn top_level_run_uses_builtin_default_without_workspace_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-default-function-no-manifest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(root.join("home")),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+        };
+        let mut options = RunOptions {
+            workspace_root: Some(root.clone()),
+            ..RunOptions::default()
+        };
+
+        apply_workspace_default_function_to_run(&mut options, &runtime).unwrap();
+
+        assert_eq!(
+            options.function_ref.as_deref(),
+            Some(agl_repo::DEFAULT_FUNCTION)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn serve_inherits_function_runtime_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-serve-function-defaults-{}",
+            std::process::id()
+        ));
+        let function_root = root.join(".agl/functions/coding");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&function_root).unwrap();
+        std::fs::write(
+            function_root.join("FUNCTION.md"),
+            r#"---
+schema: agentfunction/v1
+id: coding
+title: Coding
+runtime:
+  tool_mode: write
+  max_output_tokens: 17
+memory:
+  read:
+    - user
+---
+"#,
+        )
+        .unwrap();
+        std::fs::write(function_root.join("SYSTEM.md"), "Code.\n").unwrap();
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(root.join("home")),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+        };
+        let options = ServeOptions {
+            function_ref: Some("coding".to_string()),
+            workspace_root: Some(root.clone()),
+            ..serve_options()
+        };
+
+        let inference = inference_options_from_serve_options(&options, &runtime).unwrap();
+
+        assert_eq!(inference.max_output_tokens, 17);
+        assert_eq!(inference.tool_mode, ChatToolAccessMode::Write);
+        assert!(inference.memory);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
