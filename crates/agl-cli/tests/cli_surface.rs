@@ -740,14 +740,52 @@ fn batch_logging_init_failure_is_quiet_without_panicking() {
 }
 
 #[test]
-fn init_and_repo_init_dry_run_are_equivalent() {
-    let repo = TempRepo::new("init-dry-run");
+fn init_dry_run_includes_local_bootstrap_steps() {
+    let repo = TempRepo::new("init-dry-run-bootstrap");
     let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
     let repo_init = run_agl_in(repo.path(), &["repo", "init", "--dry-run"]);
 
     assert_success_no_stderr(&init);
     assert_success_no_stderr(&repo_init);
-    assert_eq!(stdout(&init), stdout(&repo_init));
+    let init_stdout = stdout(&init);
+    let repo_stdout = stdout(&repo_init);
+    assert_contains(
+        &init_stdout,
+        "change path=.agl/workspace.toml action=would_write_file",
+    );
+    assert_contains(&init_stdout, "bootstrap.functions_root.path=.agl/functions");
+    assert_contains(
+        &init_stdout,
+        "bootstrap.functions_root.action=would_create_dir",
+    );
+    assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
+    assert_contains(&init_stdout, "next_step=agl run --function gemma4-12b");
+    assert!(
+        !repo_stdout.contains("bootstrap.functions_root"),
+        "repo init should remain manifest-only:\n{repo_stdout}"
+    );
+    assert!(
+        !repo.path().join(".agl/functions").exists(),
+        "dry-run bootstrap must not create functions root"
+    );
+}
+
+#[test]
+fn init_creates_functions_root_and_keeps_repo_init_manifest_behavior() {
+    let repo = TempRepo::new("init-bootstrap");
+    let init = run_agl_in(repo.path(), &["init"]);
+
+    assert_success_no_stderr(&init);
+    let init_stdout = stdout(&init);
+    assert_contains(&init_stdout, "state=initialized");
+    assert_contains(&init_stdout, "bootstrap.functions_root.action=created_dir");
+    assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
+    assert!(repo.path().join(".agl/workspace.toml").is_file());
+    assert!(repo.path().join(".agl/functions").is_dir());
+
+    let second = run_agl_in(repo.path(), &["init"]);
+    assert_success_no_stderr(&second);
+    assert_contains(&stdout(&second), "bootstrap.functions_root.action=exists");
 }
 
 #[test]

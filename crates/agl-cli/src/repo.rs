@@ -227,7 +227,7 @@ fn run_repo_export_profile(options: RepoExportProfileOptions) -> Result<()> {
     })
 }
 
-fn print_repo_init_report(report: &RepoInitReport) {
+pub(crate) fn print_repo_init_report(report: &RepoInitReport) {
     println!("state=initialized");
     println!("workspace_root={}", report.workspace_root.display());
     println!("manifest_path={}", report.manifest_path.display());

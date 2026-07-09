@@ -225,7 +225,7 @@ fn parse_run_command_with_function_ref() {
 fn parse_init_command() {
     assert_command(
         ["agl", "init", "--dry-run"],
-        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+        CliCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             artifact_sources: Vec::new(),
@@ -235,7 +235,7 @@ fn parse_init_command() {
             tasks_rev: None,
             dry_run: true,
             force: false,
-        })),
+        }),
     );
 }
 
@@ -279,7 +279,7 @@ fn parse_init_command_with_external_artifacts() {
             "--tasks-rev",
             "main",
         ],
-        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+        CliCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             artifact_sources: Vec::new(),
@@ -289,7 +289,7 @@ fn parse_init_command_with_external_artifacts() {
             tasks_rev: Some("main".to_string()),
             dry_run: false,
             force: false,
-        })),
+        }),
     );
 }
 
@@ -304,7 +304,7 @@ fn parse_init_command_with_generic_artifact_sources() {
             "--artifact-source",
             "reviews=git@example.com:agentlibre/reviews.git",
         ],
-        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
+        CliCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             artifact_sources: vec![
@@ -325,7 +325,7 @@ fn parse_init_command_with_generic_artifact_sources() {
             tasks_rev: None,
             dry_run: false,
             force: false,
-        })),
+        }),
     );
 }
 
