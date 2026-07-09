@@ -20,6 +20,7 @@ pub(crate) enum CliCommand {
     Cron(CronCommand),
     Store(StoreCommand),
     Function(FunctionCommand),
+    Init(RepoInitOptions),
     Memory(MemoryCommand),
     Notes(NotesCommand),
     Repo(RepoCommand),
