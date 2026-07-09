@@ -49,7 +49,11 @@ fn write_task_spec(path: PathBuf, valid: bool) {
         fs::create_dir_all(parent).unwrap();
     }
     let content = if valid {
-        r#"# Problem
+        r#"---
+status: planned
+---
+
+# Problem
 
 Problem statement.
 
@@ -78,7 +82,11 @@ Acceptance criteria.
 Verification commands.
 "#
     } else {
-        r#"# Problem
+        r#"---
+status: planned
+---
+
+# Problem
 
 Only a partial task spec.
 "#
@@ -1260,6 +1268,63 @@ fn verify_task_specs_reports_missing_sections_per_file() {
             .errors
             .iter()
             .any(|error| error.starts_with("invalid_task_spec:"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_checks_only_planned_task_overviews() {
+    let root = temp_root("verify-planned-task-overviews");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    fs::write(root.join(".agl/tasks/README.md"), "# Task index\n").unwrap();
+    fs::write(root.join(".agl/tasks/AGENTS.md"), "# Instructions\n").unwrap();
+    write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), true);
+    fs::write(
+        root.join(".agl/tasks/AGL-001/01_notes.md"),
+        "---\nstatus: planned\n---\n\n# Implementation Notes\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".agl/tasks/AGL-002")).unwrap();
+    fs::write(
+        root.join(".agl/tasks/AGL-002/00_overview.md"),
+        "---\nstatus: implemented\n---\n\n# Historical task\n",
+    )
+    .unwrap();
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Ok);
+    assert_eq!(report.files.len(), 1);
+    assert!(report.files[0].path.ends_with("AGL-001/00_overview.md"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_rejects_unsupported_task_status() {
+    let root = temp_root("verify-unsupported-task-status");
+    init_git_repo(&root);
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    let path = root.join(".agl/tasks/AGL-001/00_overview.md");
+    write_task_spec(path.clone(), true);
+    let content = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        content.replacen("status: planned", "status: backlog", 1),
+    )
+    .unwrap();
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Invalid);
+    assert_eq!(report.files.len(), 1);
+    assert!(
+        report.files[0]
+            .errors
+            .iter()
+            .any(|error| error.contains("unsupported task spec status `backlog`"))
     );
 
     fs::remove_dir_all(root).unwrap();
