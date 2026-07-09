@@ -7,8 +7,10 @@ pub struct TurnInput {
     pub context_messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,
     pub hook_batches: Vec<TurnHookBatch>,
+    pub hook_payload: serde_json::Value,
     pub request_index_start: usize,
     pub max_tool_calls: usize,
+    pub max_hook_repair_attempts: usize,
 }
 
 impl TurnInput {
@@ -19,8 +21,10 @@ impl TurnInput {
             context_messages: Vec::new(),
             visible_tools: Vec::new(),
             hook_batches: Vec::new(),
+            hook_payload: serde_json::Value::Object(serde_json::Map::new()),
             request_index_start: 0,
             max_tool_calls: 0,
+            max_hook_repair_attempts: 0,
         }
     }
 
@@ -49,8 +53,18 @@ impl TurnInput {
         self
     }
 
+    pub fn with_hook_payload(mut self, payload: serde_json::Value) -> Self {
+        self.hook_payload = payload;
+        self
+    }
+
     pub fn with_max_tool_calls(mut self, max_tool_calls: usize) -> Self {
         self.max_tool_calls = max_tool_calls;
+        self
+    }
+
+    pub fn with_max_hook_repair_attempts(mut self, max_hook_repair_attempts: usize) -> Self {
+        self.max_hook_repair_attempts = max_hook_repair_attempts;
         self
     }
 }

@@ -12,3 +12,8 @@ After editing a workspace skill:
   agl skill lock
   agl skill trust <name> --yes
   agl skill verify
+
+Runtime visibility:
+  agl run reloads skills on each invocation.
+  agl chat can refresh selected skill context with /reload.
+  Start a new chat after changing --config or [prompt].skills in a profile.

@@ -37,6 +37,7 @@ impl ToolAccessMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceOptions {
     pub config: Option<PathBuf>,
+    pub function_ref: Option<String>,
     pub artifact_root: Option<PathBuf>,
     pub run_id: Option<String>,
     pub workspace_root: Option<PathBuf>,
@@ -50,6 +51,7 @@ impl Default for InferenceOptions {
     fn default() -> Self {
         Self {
             config: None,
+            function_ref: None,
             artifact_root: None,
             run_id: None,
             workspace_root: None,

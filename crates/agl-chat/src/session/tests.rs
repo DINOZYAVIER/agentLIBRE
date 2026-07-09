@@ -25,6 +25,7 @@ fn build_request_uses_agentlibre_boundaries() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -60,6 +61,7 @@ fn build_request_prepends_configured_system_prompt() {
         },
         &config,
         Some("demo system"),
+        None,
         None,
         None,
         None,
@@ -101,6 +103,7 @@ fn build_request_prepends_skill_context_after_system_prompt() {
         Some("system"),
         None,
         None,
+        None,
         Some("skill context"),
     )
     .unwrap();
@@ -131,6 +134,7 @@ fn build_request_prepends_memory_context_before_skill_context() {
         },
         &config,
         Some("system"),
+        None,
         None,
         Some("memory context"),
         Some("skill context"),
@@ -178,6 +182,7 @@ fn build_request_injects_runtime_capabilities_before_tools() {
         &config,
         Some("system"),
         Some(&runtime_context.content),
+        None,
         Some("memory context"),
         Some("skill context"),
     )
@@ -245,6 +250,7 @@ fn build_request_injects_visible_tool_context_for_hermes() {
         Some("system"),
         None,
         None,
+        None,
         Some("skill context"),
     )
     .unwrap();
@@ -284,6 +290,7 @@ fn build_request_injects_visible_tool_context_for_gemma() {
         Some("system"),
         None,
         None,
+        None,
         Some("skill context"),
     )
     .unwrap();
@@ -299,11 +306,19 @@ fn build_request_injects_visible_tool_context_for_gemma() {
 }
 
 #[test]
-fn selected_skill_ids_rejects_duplicates_across_config_and_cli() {
-    let err =
-        selected_skill_ids(&["task-spec".to_string()], &["task-spec".to_string()]).unwrap_err();
+fn selected_skill_ids_deduplicates_across_config_function_and_cli() {
+    let selected = selected_skill_ids(
+        &["task-spec".to_string()],
+        &["task-spec".to_string(), "repo-status".to_string()],
+        &["repo-status".to_string()],
+    )
+    .unwrap();
 
-    assert!(err.to_string().contains("selected skill id is duplicated"));
+    let names = selected
+        .iter()
+        .map(|skill| skill.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["task-spec", "repo-status"]);
 }
 
 #[test]
@@ -949,7 +964,7 @@ fn resolves_default_paths_from_runtime_config() {
     let options = InferenceOptions::default();
 
     assert_eq!(
-        InferenceSession::resolve_config_path(&options, &runtime),
+        InferenceSession::resolve_config_path(&options, &runtime, None),
         PathBuf::from("/tmp/agl-home/config/inference/local.toml")
     );
     assert_eq!(

@@ -1,5 +1,12 @@
 # AGENTS.md
 
+## Alpha compatibility policy
+
+agentLIBRE is in alpha. Do not add backward-compatibility paths, legacy
+fallbacks, migration shims, or compatibility-preserving behavior unless the user
+explicitly asks for them in the current task. Prefer one clear breaking format
+over extra code that keeps obsolete formats alive.
+
 ## LLM-assisted commits
 
 LLM agents may prepare patches and draft commit messages, but they are tools,

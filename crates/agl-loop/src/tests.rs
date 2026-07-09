@@ -26,6 +26,7 @@ struct FakeHost {
     operations: Vec<String>,
     events: Vec<AgentEvent>,
     transitions: Vec<TurnTransitionRecord>,
+    model_requests: Vec<ModelRequest>,
     dispatches: Vec<ToolDispatchRequest>,
     hook_requests: Vec<HookBatchRequest>,
     turn_messages: Vec<TurnMessage>,
@@ -92,9 +93,10 @@ impl AgentLoopHost for FakeHost {
         }
     }
 
-    fn generate(&mut self, _request: ModelRequest) -> Result<ModelResponse> {
+    fn generate(&mut self, request: ModelRequest) -> Result<ModelResponse> {
         self.requests.push("generate");
         self.operations.push("generate".to_string());
+        self.model_requests.push(request);
         match self.model_results.remove(0) {
             FakeModelResult::Response(content) => Ok(ModelResponse { content }),
             FakeModelResult::Error(message) => Err(anyhow!(message)),
@@ -298,6 +300,65 @@ fn warning_turn_finish_hook_continues_and_records_warning() {
             ..
         }) if message_codes == &["answer.warning".to_string()]
     ));
+}
+
+#[test]
+fn repairs_answer_when_required_hook_requests_repair() {
+    let mut host = FakeHost::default()
+        .with_model_response("function=wrong")
+        .with_hook_result(hook_batch_result(
+            HookEvent::ArtifactWrite,
+            [hook_result(
+                "guard.artifact",
+                HookStatus::Repair,
+                &["runtime_identity_mismatch"],
+            )],
+        ))
+        .with_model_response("function=repo-analyst")
+        .with_hook_result(hook_batch_result(
+            HookEvent::ArtifactWrite,
+            [hook_result("guard.artifact", HookStatus::Pass, &[])],
+        ));
+    let input = TurnInput::user("what is loaded?")
+        .with_hook_batch(artifact_write_hook_batch())
+        .with_max_hook_repair_attempts(1);
+
+    let output = run_turn(&mut host, input).unwrap();
+
+    assert_eq!(
+        output,
+        TurnOutput::Answered {
+            answer: "function=repo-analyst".to_string()
+        }
+    );
+    assert_eq!(
+        host.request_kinds(),
+        ["generate", "run_hooks", "generate", "run_hooks"]
+    );
+    assert!(
+        host.transition_kinds()
+            .iter()
+            .any(|transition| *transition == "prepare_repair")
+    );
+    assert_eq!(
+        host.turn_messages,
+        vec![
+            TurnMessage::User {
+                content: "what is loaded?".to_string()
+            },
+            TurnMessage::Assistant {
+                content: "function=repo-analyst".to_string()
+            }
+        ]
+    );
+    assert!(host.model_requests[1].messages.iter().any(|message| {
+        matches!(
+            message,
+            TurnMessage::System { content }
+                if content.contains("runtime_identity_mismatch")
+                    && content.contains("hidden hook fix")
+        )
+    }));
 }
 
 #[test]

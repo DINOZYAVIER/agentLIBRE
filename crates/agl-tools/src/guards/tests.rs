@@ -24,6 +24,8 @@ fn declaration_exposes_core_guard_hooks() {
             COMMIT_MESSAGE_VALIDATE_HOOK_ID,
             SKILL_MANIFEST_VALIDATE_HOOK_ID,
             REVIEW_PACK_VALIDATE_HOOK_ID,
+            RUNTIME_IDENTITY_VALIDATE_HOOK_ID,
+            RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
         ]
     );
 }
@@ -121,6 +123,87 @@ fn repo_path_guard_accepts_markdown_without_repo_paths() {
             ))
             .status,
         HookStatus::Fail
+    );
+}
+
+#[test]
+fn repo_path_guard_accepts_chat_slash_commands() {
+    let guards = CoreGuards::new();
+
+    assert_eq!(
+        guards
+            .run_hook(input(
+                REPO_PATH_VALIDATE_HOOK_ID,
+                json!({"content": "Use `/reload`, `/session`, then `/exit`."})
+            ))
+            .status,
+        HookStatus::Pass
+    );
+    assert_eq!(
+        guards
+            .run_hook(input(
+                REPO_PATH_VALIDATE_HOOK_ID,
+                json!({"content": "Do not expose /home/user/agentLIBRE."})
+            ))
+            .status,
+        HookStatus::Fail
+    );
+}
+
+#[test]
+fn runtime_identity_validate_passes_without_claims_and_repairs_mismatch() {
+    let guards = CoreGuards::new();
+    let payload = runtime_identity_payload("No runtime ids claimed here.");
+
+    assert_eq!(
+        guards
+            .run_hook(input(RUNTIME_IDENTITY_VALIDATE_HOOK_ID, payload))
+            .status,
+        HookStatus::Pass
+    );
+
+    let result = guards.run_hook(input(
+        RUNTIME_IDENTITY_VALIDATE_HOOK_ID,
+        runtime_identity_payload("function=wrong; skills=repo-status; subagents=reviewer"),
+    ));
+
+    assert_eq!(result.status, HookStatus::Repair);
+    assert_eq!(result.messages[0].code, "runtime_identity_mismatch");
+    assert!(
+        result.messages[0]
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("function=repo-analyst")
+    );
+}
+
+#[test]
+fn runtime_identity_require_repairs_missing_claims_and_passes_exact_lists() {
+    let guards = CoreGuards::new();
+    let missing = guards.run_hook(input(
+        RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
+        runtime_identity_payload("function=repo-analyst"),
+    ));
+
+    assert_eq!(missing.status, HookStatus::Repair);
+    assert!(
+        missing
+            .messages
+            .iter()
+            .any(|message| message.code == "runtime_identity_missing")
+    );
+
+    assert_eq!(
+        guards
+            .run_hook(input(
+                RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
+                runtime_identity_payload(
+                    "function=repo-analyst; skills=repo-status; subagents=reviewer"
+                ),
+            ))
+            .status,
+        HookStatus::Pass
     );
 }
 
@@ -323,4 +406,27 @@ fn input(hook_id: &str, payload: serde_json::Value) -> HookInput {
         event: HookEvent::ArtifactWrite,
         payload,
     }
+}
+
+fn runtime_identity_payload(content: &str) -> serde_json::Value {
+    json!({
+        "content": content,
+        "runtime_identity": {
+            "function": {
+                "id": "repo-analyst",
+                "source": "explicit",
+                "path": "/tmp/repo-analyst/FUNCTION.md"
+            },
+            "model_profile": "local",
+            "skills": ["repo-status"],
+            "subagents": ["reviewer"],
+            "workspace_root": "/repo"
+        },
+        "identity_contract": {
+            "mode": "validate_claims",
+            "fields": ["function", "skills", "subagents"],
+            "repair": true,
+            "max_repair_attempts": 1
+        }
+    })
 }

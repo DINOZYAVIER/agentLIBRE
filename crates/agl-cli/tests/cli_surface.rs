@@ -26,6 +26,7 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "chat");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
+    assert_contains(&stdout, "function");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
     assert_contains(&stdout, "store");
@@ -79,6 +80,12 @@ fn command_help_exits_successfully_for_public_commands() {
         &["run", "--help"][..],
         &["serve", "--help"][..],
         &["status", "--help"][..],
+        &["function", "--help"][..],
+        &["function", "list", "--help"][..],
+        &["function", "show", "--help"][..],
+        &["function", "status", "--help"][..],
+        &["function", "init", "--help"][..],
+        &["function", "doctor", "--help"][..],
         &["skill", "--help"][..],
         &["skill", "init", "--help"][..],
         &["skill", "list", "--help"][..],
@@ -1240,6 +1247,122 @@ fn home_override_roots_config_paths_in_requested_home() {
         &format!("local_inference_config={home_arg}/config/inference/local.toml"),
     );
     assert_contains(&stdout, &format!("sessions_root={home_arg}/data/sessions"));
+}
+
+#[test]
+fn function_commands_manage_workspace_function_artifact() {
+    let repo = TempRepo::new("function-workspace");
+    let home = TempHome::new("function-workspace");
+    let home_arg = home.path_string();
+    let local_profile = home
+        .path()
+        .join("config")
+        .join("inference")
+        .join("local.toml");
+    fs::create_dir_all(local_profile.parent().unwrap()).unwrap();
+    fs::write(&local_profile, "").unwrap();
+
+    let init = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "function",
+            "init",
+            "coding",
+            "--workspace",
+        ],
+    );
+    assert_success_no_stderr(&init);
+    let init_stdout = stdout(&init);
+    assert_contains(&init_stdout, "state=ok");
+    assert_contains(&init_stdout, "function.id=coding");
+    assert_contains(&init_stdout, ".agl/functions/coding/FUNCTION.md");
+    assert_contains(&init_stdout, ".agl/functions/coding/SYSTEM.md");
+    let function_manifest =
+        fs::read_to_string(repo.path().join(".agl/functions/coding/FUNCTION.md"))
+            .expect("read generated function manifest");
+    assert!(
+        !function_manifest.contains("\nprompt:"),
+        "generated FUNCTION.md must use SYSTEM.md convention instead of prompt.system"
+    );
+
+    let status = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "status", "coding"],
+    );
+    assert_success_no_stderr(&status);
+    let status_stdout = stdout(&status);
+    assert_contains(&status_stdout, "state=ok");
+    assert_contains(&status_stdout, ".agl/functions/coding/SYSTEM.md");
+    assert_contains(
+        &status_stdout,
+        &format!("function.model.profile_path={}", local_profile.display()),
+    );
+
+    let list = run_agl_in(repo.path(), &["--home", &home_arg, "function", "list"]);
+    assert_success_no_stderr(&list);
+    assert_contains(&stdout(&list), "function id=coding source=workspace");
+
+    let show = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "show", "coding"],
+    );
+    assert_success_no_stderr(&show);
+    assert_contains(&stdout(&show), "function.runtime.tool_mode=read-only");
+    assert_contains(&stdout(&show), "function.system_path=");
+    assert_contains(&stdout(&show), "You are the `coding` agentFUNCTION.");
+
+    let doctor = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "function", "doctor", "coding"],
+    );
+    assert_success_no_stderr(&doctor);
+    assert_contains(&stdout(&doctor), "doctor.smoke_prompt=");
+    assert_contains(&stdout(&doctor), "next_step=agl run --function coding");
+}
+
+#[test]
+fn builtin_function_commands_expose_packaged_gemma4_functions() {
+    let home = TempHome::new("builtin-functions");
+    let home_arg = home.path_string();
+
+    let list = run_agl(&["--home", &home_arg, "function", "list"]);
+    assert_success_no_stderr(&list);
+    let list_stdout = stdout(&list);
+    assert_contains(
+        &list_stdout,
+        "function id=gemma4-12b source=builtin path=assets/functions/gemma4-12b/FUNCTION.md valid=true",
+    );
+    assert_contains(&list_stdout, "function id=gemma4-26b source=builtin");
+    assert_contains(&list_stdout, "function id=gemma4-31b source=builtin");
+
+    let status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-12b"]);
+    assert_success_no_stderr(&status);
+    let status_stdout = stdout(&status);
+    assert_contains(&status_stdout, "state=");
+    assert_contains(&status_stdout, "function.source=builtin");
+    assert_contains(
+        &status_stdout,
+        "function.model.config_path=assets/functions/gemma4-12b/inference.toml",
+    );
+    assert_contains(&status_stdout, "function.model.config_embedded=true");
+    assert_contains(
+        &status_stdout,
+        "function.model.path=/home/dinozyavier/.dyno/models/gemma-4-12b-it-qat/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+    );
+    assert_contains(&status_stdout, "function.model.exists=");
+
+    let show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-12b"]);
+    assert_success_no_stderr(&show);
+    let show_stdout = stdout(&show);
+    assert_contains(&show_stdout, "function.source=builtin");
+    assert_contains(
+        &show_stdout,
+        "You are an agentLIBRE function running on local Gemma4 12B.",
+    );
+    assert_contains(&show_stdout, "--- inference.toml ---");
+    assert_contains(&show_stdout, "tool_call_format = \"gemma_function_call\"");
 }
 
 #[test]

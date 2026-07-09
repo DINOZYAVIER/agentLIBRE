@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_config::{ModelConfig, ToolCallFormat, load_local_inference_config};
+use agl_config::{
+    ModelConfig, ToolCallFormat, load_local_inference_config, load_local_inference_config_from_str,
+};
+use agl_functions::{
+    IdentityContractMode, RuntimeFunction, RuntimeIdentityContract, resolve_runtime_function,
+    resolve_runtime_function_allow_missing_profile,
+};
 use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
@@ -22,6 +28,7 @@ use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
+use serde::Serialize;
 
 use crate::{InferenceOptions, ToolAccessMode};
 
@@ -36,12 +43,20 @@ pub struct InferenceSession {
     runtime_capability_context: Option<String>,
     runtime_capability_evidence: Option<agl_runtime::RuntimeCapabilityContextEvidence>,
     memory_context: Option<String>,
+    function_ref: Option<String>,
+    function_profile_required: bool,
+    runtime_function: Option<RuntimeFunction>,
+    function_context: Option<String>,
+    function_skills: Vec<String>,
+    runtime_identity: Option<RuntimeIdentityEvidence>,
+    identity_contract: Option<RuntimeIdentityContract>,
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
     permission_grants: RuntimePermissionGrantSnapshot,
     tool_mode: ToolAccessMode,
     store_root: PathBuf,
+    config_dir: PathBuf,
     workspace_root: PathBuf,
     trust_store_path: PathBuf,
     config_skills: Vec<String>,
@@ -52,13 +67,31 @@ pub struct InferenceSession {
     artifact_root: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct RuntimeIdentityEvidence {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function: Option<RuntimeIdentityFunction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_profile: Option<String>,
+    skills: Vec<String>,
+    subagents: Vec<String>,
+    workspace_root: PathBuf,
+    tool_mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct RuntimeIdentityFunction {
+    id: String,
+    source: String,
+    path: PathBuf,
+}
+
 impl InferenceSession {
     pub fn new(
         options: InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
         artifact_root_override: Option<PathBuf>,
     ) -> Result<Self> {
-        let config_path = Self::resolve_config_path(&options, runtime);
         let artifact_root = artifact_root_override
             .or(options
                 .artifact_root
@@ -66,6 +99,27 @@ impl InferenceSession {
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
         let store_root = runtime.paths.store_root();
+        let config_dir = runtime.paths.config_dir.clone();
+        let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
+        let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+        let function_profile_required =
+            options.config.is_none() && env::var_os(CONFIG_ENV).is_none();
+        let runtime_function = resolve_session_function(
+            options.function_ref.as_deref(),
+            &workspace_root,
+            &runtime.paths.config_dir,
+            function_profile_required,
+        )?;
+        let function_config_path = runtime_function
+            .as_ref()
+            .and_then(|function| function.inference_config_path.as_deref());
+        let function_embedded_config = runtime_function
+            .as_ref()
+            .and_then(|function| function.inference_config_toml.as_deref());
+        let use_function_embedded_config = options.config.is_none()
+            && env::var_os(CONFIG_ENV).is_none()
+            && function_embedded_config.is_some();
+        let config_path = Self::resolve_config_path(&options, runtime, function_config_path);
 
         tracing::info!(
             target: "agentlibre::app",
@@ -74,27 +128,49 @@ impl InferenceSession {
             "resolved inference session paths"
         );
 
-        if !config_path.is_file() {
+        if !use_function_embedded_config && !config_path.is_file() {
             bail!(
                 "local inference config not found: {}\nCreate this file or pass --config PATH.\nRun `agl config paths` to see default locations.\nModel setup/download commands are planned but not implemented in this alpha; point [backend].model at an existing local GGUF file.",
                 config_path.display()
             );
         }
 
-        let config = load_local_inference_config(&config_path).with_context(|| {
-            format!(
-                "failed to load local inference config {}",
-                config_path.display()
+        let config = if use_function_embedded_config {
+            load_local_inference_config_from_str(
+                &config_path.display().to_string(),
+                function_embedded_config.expect("checked above"),
             )
-        })?;
+            .with_context(|| {
+                format!(
+                    "failed to load function inference config {}",
+                    config_path.display()
+                )
+            })?
+        } else {
+            load_local_inference_config(&config_path).with_context(|| {
+                format!(
+                    "failed to load local inference config {}",
+                    config_path.display()
+                )
+            })?
+        };
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
-        let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
-        let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let tool_mode = options.tool_mode;
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
+        if let Some(function) = &runtime_function {
+            write_function_evidence(&artifact_root, &run_id, function)?;
+        }
+        let function_skills = runtime_function
+            .as_ref()
+            .map(|function| function.skills.clone())
+            .unwrap_or_default();
+        let function_context = runtime_function
+            .as_ref()
+            .map(|function| function.context.clone());
         let skill_context = resolve_skill_context(SkillContextRequest {
             config_skills: &config.prompt.skills,
+            function_skills: &function_skills,
             option_skills: &options.skills,
             tool_mode,
             artifact_root: &artifact_root,
@@ -103,6 +179,25 @@ impl InferenceSession {
             trust_store_path: &trust_store_path,
             store_root: &store_root,
         })?;
+        let runtime_identity = runtime_function.as_ref().map(|function| {
+            build_runtime_identity(
+                function,
+                &skill_context.selected_skills,
+                &workspace_root,
+                tool_mode,
+            )
+        });
+        let identity_contract = effective_identity_contract(runtime_function.as_ref());
+        if runtime_identity.is_some() || identity_contract.is_some() {
+            write_identity_evidence(
+                &artifact_root,
+                &run_id,
+                runtime_identity.as_ref(),
+                identity_contract.as_ref(),
+            )?;
+        }
+        let mut hook_batches = skill_context.hook_batches;
+        add_identity_hook_batch(&mut hook_batches, identity_contract.as_ref())?;
         let runtime_capabilities = build_runtime_capability_context(
             &workspace_root,
             tool_mode,
@@ -113,6 +208,7 @@ impl InferenceSession {
         let memory_context = resolve_memory_context(MemoryContextRequest {
             enabled: options.memory,
             config_skills: &config.prompt.skills,
+            function_skills: &function_skills,
             option_skills: &options.skills,
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
@@ -130,12 +226,20 @@ impl InferenceSession {
             runtime_capability_context: Some(runtime_capabilities.content),
             runtime_capability_evidence: Some(runtime_capabilities.evidence),
             memory_context,
+            function_ref: options.function_ref,
+            function_profile_required,
+            runtime_function,
+            function_context,
+            function_skills,
+            runtime_identity,
+            identity_contract,
             skill_context: skill_context.context,
-            skill_hook_batches: skill_context.hook_batches,
+            skill_hook_batches: hook_batches,
             visible_tools: skill_context.visible_tools,
             permission_grants: skill_context.permission_grants,
             tool_mode,
             store_root,
+            config_dir,
             workspace_root,
             trust_store_path,
             config_skills,
@@ -150,11 +254,13 @@ impl InferenceSession {
     pub fn resolve_config_path(
         options: &InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
+        function_config_path: Option<&std::path::Path>,
     ) -> PathBuf {
         options
             .config
             .clone()
             .or_else(|| env::var_os(CONFIG_ENV).map(PathBuf::from))
+            .or_else(|| function_config_path.map(Path::to_path_buf))
             .unwrap_or_else(|| runtime.paths.default_local_inference_config())
     }
 
@@ -191,6 +297,31 @@ impl InferenceSession {
 
     pub fn turn_hook_batches(&self) -> &[TurnHookBatch] {
         &self.skill_hook_batches
+    }
+
+    pub fn turn_hook_payload(&self) -> serde_json::Value {
+        let mut payload = serde_json::Map::new();
+        if let Some(identity) = &self.runtime_identity {
+            payload.insert(
+                "runtime_identity".to_string(),
+                serde_json::to_value(identity).expect("runtime identity serializes"),
+            );
+        }
+        if let Some(contract) = &self.identity_contract {
+            payload.insert(
+                "identity_contract".to_string(),
+                serde_json::to_value(contract).expect("identity contract serializes"),
+            );
+        }
+        serde_json::Value::Object(payload)
+    }
+
+    pub fn max_hook_repair_attempts(&self) -> usize {
+        self.identity_contract
+            .as_ref()
+            .filter(|contract| contract.repair)
+            .map(|contract| contract.max_repair_attempts as usize)
+            .unwrap_or(0)
     }
 
     pub fn turn_visible_tools(&self) -> &[VisibleTool] {
@@ -261,6 +392,7 @@ impl InferenceSession {
             &self.model_config,
             self.system_prompt.as_deref(),
             self.runtime_capability_context.as_deref(),
+            self.function_context.as_deref(),
             self.memory_context.as_deref(),
             self.skill_context.as_deref(),
         )?;
@@ -280,8 +412,22 @@ impl InferenceSession {
     }
 
     pub(crate) fn refresh_runtime_context(&mut self) -> Result<()> {
+        if let Some(reference) = &self.function_ref {
+            let function = resolve_session_function(
+                Some(reference),
+                &self.workspace_root,
+                &self.config_dir,
+                self.function_profile_required,
+            )?
+            .expect("function ref is set");
+            write_function_evidence(&self.artifact_root, &self.run_id, &function)?;
+            self.function_context = Some(function.context.clone());
+            self.function_skills = function.skills.clone();
+            self.runtime_function = Some(function);
+        }
         let skill_context = resolve_skill_context(SkillContextRequest {
             config_skills: &self.config_skills,
+            function_skills: &self.function_skills,
             option_skills: &self.option_skills,
             tool_mode: self.tool_mode,
             artifact_root: &self.artifact_root,
@@ -290,8 +436,27 @@ impl InferenceSession {
             trust_store_path: &self.trust_store_path,
             store_root: &self.store_root,
         })?;
+        self.runtime_identity = self.runtime_function.as_ref().map(|function| {
+            build_runtime_identity(
+                function,
+                &skill_context.selected_skills,
+                &self.workspace_root,
+                self.tool_mode,
+            )
+        });
+        self.identity_contract = effective_identity_contract(self.runtime_function.as_ref());
+        if self.runtime_identity.is_some() || self.identity_contract.is_some() {
+            write_identity_evidence(
+                &self.artifact_root,
+                &self.run_id,
+                self.runtime_identity.as_ref(),
+                self.identity_contract.as_ref(),
+            )?;
+        }
         self.skill_context = skill_context.context;
-        self.skill_hook_batches = skill_context.hook_batches;
+        let mut hook_batches = skill_context.hook_batches;
+        add_identity_hook_batch(&mut hook_batches, self.identity_contract.as_ref())?;
+        self.skill_hook_batches = hook_batches;
         self.visible_tools = skill_context.visible_tools;
         self.permission_grants = skill_context.permission_grants;
         self.selected_skills = skill_context.selected_skills;
@@ -312,12 +477,183 @@ fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &InferenceRu
         .join("agent-events.jsonl")
 }
 
+fn resolve_session_function(
+    reference: Option<&str>,
+    workspace_root: &Path,
+    config_dir: &Path,
+    require_profile: bool,
+) -> Result<Option<RuntimeFunction>> {
+    reference
+        .map(|reference| {
+            if require_profile {
+                resolve_runtime_function(reference, workspace_root, config_dir)
+            } else {
+                resolve_runtime_function_allow_missing_profile(
+                    reference,
+                    workspace_root,
+                    config_dir,
+                )
+            }
+            .with_context(|| format!("failed to resolve function `{reference}`"))
+        })
+        .transpose()
+}
+
+fn write_function_evidence(
+    artifact_root: &std::path::Path,
+    run_id: &InferenceRunId,
+    function: &RuntimeFunction,
+) -> Result<()> {
+    let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
+    std::fs::create_dir_all(&run_dir).with_context(|| {
+        format!(
+            "failed to create function evidence directory {}",
+            run_dir.display()
+        )
+    })?;
+
+    let resolution_path = run_dir.join("function-resolution.json");
+    let resolution_bytes = serde_json::to_vec_pretty(function).with_context(|| {
+        format!(
+            "failed to serialize function resolution evidence {}",
+            resolution_path.display()
+        )
+    })?;
+    std::fs::write(&resolution_path, resolution_bytes).with_context(|| {
+        format!(
+            "failed to write function resolution evidence {}",
+            resolution_path.display()
+        )
+    })?;
+
+    let context_path = run_dir.join("function-context.md");
+    std::fs::write(&context_path, function.context.as_bytes()).with_context(|| {
+        format!(
+            "failed to write function context evidence {}",
+            context_path.display()
+        )
+    })?;
+
+    let registry_path = run_dir.join("subagent-registry.json");
+    let registry_bytes = serde_json::to_vec_pretty(&function.subagents).with_context(|| {
+        format!(
+            "failed to serialize subagent registry evidence {}",
+            registry_path.display()
+        )
+    })?;
+    std::fs::write(&registry_path, registry_bytes).with_context(|| {
+        format!(
+            "failed to write subagent registry evidence {}",
+            registry_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn build_runtime_identity(
+    function: &RuntimeFunction,
+    selected_skills: &[SkillId],
+    workspace_root: &Path,
+    tool_mode: ToolAccessMode,
+) -> RuntimeIdentityEvidence {
+    RuntimeIdentityEvidence {
+        function: Some(RuntimeIdentityFunction {
+            id: function.id.clone(),
+            source: function.source.as_str().to_string(),
+            path: function.path.clone(),
+        }),
+        model_profile: function.model_profile.clone(),
+        skills: selected_skills
+            .iter()
+            .map(|skill| skill.as_str().to_string())
+            .collect(),
+        subagents: function
+            .subagents
+            .iter()
+            .map(|subagent| subagent.id.clone())
+            .collect(),
+        workspace_root: workspace_root.to_path_buf(),
+        tool_mode: tool_mode.as_str().to_string(),
+    }
+}
+
+fn effective_identity_contract(
+    function: Option<&RuntimeFunction>,
+) -> Option<RuntimeIdentityContract> {
+    let function = function?;
+    let contract = function
+        .identity_contract
+        .clone()
+        .unwrap_or_else(RuntimeIdentityContract::function_default);
+    contract.is_enabled().then_some(contract)
+}
+
+fn add_identity_hook_batch(
+    hook_batches: &mut Vec<TurnHookBatch>,
+    contract: Option<&RuntimeIdentityContract>,
+) -> Result<()> {
+    let Some(contract) = contract.filter(|contract| contract.is_enabled()) else {
+        return Ok(());
+    };
+    let hook_id = match contract.mode {
+        IdentityContractMode::Off => return Ok(()),
+        IdentityContractMode::ValidateClaims => {
+            agl_tools::guards::RUNTIME_IDENTITY_VALIDATE_HOOK_ID
+        }
+        IdentityContractMode::Require => agl_tools::guards::RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
+    };
+    let hook_id = HookId::new(hook_id)?;
+    if let Some(batch) = hook_batches
+        .iter_mut()
+        .find(|batch| batch.event == HookEvent::ArtifactWrite)
+    {
+        if !batch.required_hooks.iter().any(|hook| hook == &hook_id) {
+            batch.required_hooks.push(hook_id);
+        }
+    } else {
+        hook_batches.push(TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id));
+    }
+    Ok(())
+}
+
+fn write_identity_evidence(
+    artifact_root: &std::path::Path,
+    run_id: &InferenceRunId,
+    identity: Option<&RuntimeIdentityEvidence>,
+    contract: Option<&RuntimeIdentityContract>,
+) -> Result<()> {
+    let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
+    std::fs::create_dir_all(&run_dir).with_context(|| {
+        format!(
+            "failed to create runtime identity evidence directory {}",
+            run_dir.display()
+        )
+    })?;
+    if let Some(identity) = identity {
+        let path = run_dir.join("runtime-identity.json");
+        let bytes = serde_json::to_vec_pretty(identity)
+            .with_context(|| format!("failed to serialize runtime identity {}", path.display()))?;
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("failed to write runtime identity {}", path.display()))?;
+    }
+    if let Some(contract) = contract {
+        let path = run_dir.join("identity-contract.json");
+        let bytes = serde_json::to_vec_pretty(contract)
+            .with_context(|| format!("failed to serialize identity contract {}", path.display()))?;
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("failed to write identity contract {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn build_inference_request(
     run_id: InferenceRunId,
     request: ModelRequest,
     model_config: &ModelConfig,
     system_prompt: Option<&str>,
     runtime_capability_context: Option<&str>,
+    function_context: Option<&str>,
     memory_context: Option<&str>,
     skill_context: Option<&str>,
 ) -> Result<InferenceRequest> {
@@ -331,6 +667,11 @@ fn build_inference_request(
             )
             + usize::from(
                 runtime_capability_context
+                    .map(|context| !context.trim().is_empty())
+                    .unwrap_or(false),
+            )
+            + usize::from(
+                function_context
                     .map(|context| !context.trim().is_empty())
                     .unwrap_or(false),
             )
@@ -355,6 +696,11 @@ fn build_inference_request(
     {
         request_messages.push(TurnMessage::System {
             content: runtime_capability_context.to_string(),
+        });
+    }
+    if let Some(function_context) = function_context.filter(|context| !context.trim().is_empty()) {
+        request_messages.push(TurnMessage::System {
+            content: function_context.to_string(),
         });
     }
     if let Some(memory_context) = memory_context.filter(|context| !context.trim().is_empty()) {
@@ -533,6 +879,7 @@ struct IgnoredPermissionGrant {
 struct MemoryContextRequest<'a> {
     enabled: bool,
     config_skills: &'a [String],
+    function_skills: &'a [String],
     option_skills: &'a [String],
     workspace_root: &'a std::path::Path,
     trust_store_path: &'a std::path::Path,
@@ -543,6 +890,7 @@ struct MemoryContextRequest<'a> {
 
 struct SkillContextRequest<'a> {
     config_skills: &'a [String],
+    function_skills: &'a [String],
     option_skills: &'a [String],
     tool_mode: ToolAccessMode,
     artifact_root: &'a std::path::Path,
@@ -558,6 +906,7 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
     }
     ensure_memory_context_allowed_for_skills(
         request.config_skills,
+        request.function_skills,
         request.option_skills,
         request.workspace_root,
         request.trust_store_path,
@@ -579,11 +928,12 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
 
 fn ensure_memory_context_allowed_for_skills(
     config_skills: &[String],
+    function_skills: &[String],
     option_skills: &[String],
     workspace_root: &std::path::Path,
     trust_store_path: &std::path::Path,
 ) -> Result<()> {
-    let selected_skills = selected_skill_ids(config_skills, option_skills)?;
+    let selected_skills = selected_skill_ids(config_skills, function_skills, option_skills)?;
     if selected_skills.is_empty() {
         return Ok(());
     }
@@ -629,7 +979,11 @@ fn render_memory_context(entries: &[MemoryEntry]) -> String {
 }
 
 fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSkillContext> {
-    let selected_skills = selected_skill_ids(request.config_skills, request.option_skills)?;
+    let selected_skills = selected_skill_ids(
+        request.config_skills,
+        request.function_skills,
+        request.option_skills,
+    )?;
     let skill_registry =
         trusted_workspace_registry(request.workspace_root, request.trust_store_path)
             .context("failed to load skill registry")?;
@@ -685,17 +1039,24 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     })
 }
 
-fn selected_skill_ids(config_skills: &[String], option_skills: &[String]) -> Result<Vec<SkillId>> {
-    let mut selected = Vec::with_capacity(config_skills.len() + option_skills.len());
+fn selected_skill_ids(
+    config_skills: &[String],
+    function_skills: &[String],
+    option_skills: &[String],
+) -> Result<Vec<SkillId>> {
+    let mut selected =
+        Vec::with_capacity(config_skills.len() + function_skills.len() + option_skills.len());
     let mut seen = std::collections::BTreeSet::new();
-    for skill in config_skills.iter().chain(option_skills.iter()) {
+    for skill in config_skills
+        .iter()
+        .chain(function_skills.iter())
+        .chain(option_skills.iter())
+    {
         let id = SkillId::new(skill.clone())
             .with_context(|| format!("selected skill id is invalid: {skill}"))?;
-        ensure!(
-            seen.insert(id.clone()),
-            "selected skill id is duplicated: {id}"
-        );
-        selected.push(id);
+        if seen.insert(id.clone()) {
+            selected.push(id);
+        }
     }
     Ok(selected)
 }

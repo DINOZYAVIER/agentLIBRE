@@ -13,6 +13,9 @@ enum AssetKind {
     Skill,
     SkillReference,
     SkillAsset,
+    FunctionManifest,
+    FunctionSystemPrompt,
+    FunctionInferenceConfig,
 }
 
 impl AssetKind {
@@ -22,6 +25,9 @@ impl AssetKind {
             Self::Skill => "BuiltinAssetKind::Skill",
             Self::SkillReference => "BuiltinAssetKind::SkillReference",
             Self::SkillAsset => "BuiltinAssetKind::SkillAsset",
+            Self::FunctionManifest => "BuiltinAssetKind::FunctionManifest",
+            Self::FunctionSystemPrompt => "BuiltinAssetKind::FunctionSystemPrompt",
+            Self::FunctionInferenceConfig => "BuiltinAssetKind::FunctionInferenceConfig",
         }
     }
 }
@@ -43,6 +49,14 @@ struct Skill {
     tree_sha256: String,
 }
 
+struct Function {
+    id: String,
+    function_asset_index: usize,
+    system_prompt_asset_index: usize,
+    inference_config_asset_index: usize,
+    tree_sha256: String,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by Cargo"),
@@ -53,16 +67,25 @@ fn main() {
         .expect("agl-assets must live under crates/");
     let assets_root = repo_root.join("assets");
     let builtin_skills_root = assets_root.join(BUILTIN_CORE_SKILLS_DIR);
+    let builtin_functions_root = assets_root.join("functions");
     let mut assets = Vec::new();
     let mut skills = Vec::new();
+    let mut functions = Vec::new();
 
     println!("cargo:rerun-if-changed={}", assets_root.display());
 
     add_system_prompt(&mut assets, repo_root, &assets_root);
     add_skills(&mut assets, &mut skills, repo_root, &builtin_skills_root);
+    add_functions(
+        &mut assets,
+        &mut functions,
+        repo_root,
+        &builtin_functions_root,
+    );
     validate_unique_asset_ids(&assets);
     validate_unique_skill_ids(&skills);
-    write_registry(&assets, &skills);
+    validate_unique_function_ids(&functions);
+    write_registry(&assets, &skills, &functions);
 }
 
 fn add_system_prompt(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Path) {
@@ -175,6 +198,80 @@ fn add_skills(
     }
 }
 
+fn add_functions(
+    assets: &mut Vec<Asset>,
+    functions: &mut Vec<Function>,
+    repo_root: &Path,
+    functions_root: &Path,
+) {
+    if !functions_root.exists() {
+        return;
+    }
+    if !functions_root.is_dir() {
+        panic!(
+            "builtin functions root is not a directory: {}",
+            functions_root.display()
+        );
+    }
+    reject_symlink(functions_root);
+    for function_dir in read_dir_sorted(functions_root)
+        .into_iter()
+        .filter(|path| path.is_dir())
+    {
+        reject_symlink(&function_dir);
+        let id = function_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("function directory must have a UTF-8 name");
+        validate_name(id, "builtin function directory");
+
+        let function_md = function_dir.join("FUNCTION.md");
+        let system_prompt = function_dir.join("SYSTEM.md");
+        let inference_config = function_dir.join("inference.toml");
+        for required in [&function_md, &system_prompt, &inference_config] {
+            if !required.is_file() {
+                panic!("builtin function {} is missing {}", id, required.display());
+            }
+        }
+
+        let function_asset_index = assets.len();
+        assets.push(asset(
+            &format!("function:{id}/FUNCTION.md"),
+            AssetKind::FunctionManifest,
+            repo_root,
+            &function_md,
+        ));
+        let system_prompt_asset_index = assets.len();
+        assets.push(asset(
+            &format!("function:{id}/SYSTEM.md"),
+            AssetKind::FunctionSystemPrompt,
+            repo_root,
+            &system_prompt,
+        ));
+        let inference_config_asset_index = assets.len();
+        assets.push(asset(
+            &format!("function:{id}/inference.toml"),
+            AssetKind::FunctionInferenceConfig,
+            repo_root,
+            &inference_config,
+        ));
+
+        let tree_sha256 = function_tree_hash(
+            assets,
+            function_asset_index,
+            system_prompt_asset_index,
+            inference_config_asset_index,
+        );
+        functions.push(Function {
+            id: id.to_string(),
+            function_asset_index,
+            system_prompt_asset_index,
+            inference_config_asset_index,
+            tree_sha256,
+        });
+    }
+}
+
 fn add_resource_dir(
     assets: &mut Vec<Asset>,
     repo_root: &Path,
@@ -233,6 +330,27 @@ fn skill_tree_hash(
         .chain(asset_indices.iter())
     {
         let asset = &assets[*index];
+        hasher.update(asset.source_path.as_bytes());
+        hasher.update([0]);
+        hasher.update(asset.sha256.as_bytes());
+        hasher.update([0]);
+    }
+    hex(&hasher.finalize())
+}
+
+fn function_tree_hash(
+    assets: &[Asset],
+    function_asset_index: usize,
+    system_prompt_asset_index: usize,
+    inference_config_asset_index: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    for index in [
+        function_asset_index,
+        system_prompt_asset_index,
+        inference_config_asset_index,
+    ] {
+        let asset = &assets[index];
         hasher.update(asset.source_path.as_bytes());
         hasher.update([0]);
         hasher.update(asset.sha256.as_bytes());
@@ -328,7 +446,16 @@ fn validate_unique_skill_ids(skills: &[Skill]) {
     }
 }
 
-fn write_registry(assets: &[Asset], skills: &[Skill]) {
+fn validate_unique_function_ids(functions: &[Function]) {
+    let mut ids = std::collections::BTreeSet::new();
+    for function in functions {
+        if !ids.insert(function.id.as_str()) {
+            panic!("duplicate builtin function id {}", function.id);
+        }
+    }
+}
+
+fn write_registry(assets: &[Asset], skills: &[Skill], functions: &[Function]) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set by Cargo"));
     let destination = out_dir.join("builtin_assets.rs");
     let mut output = String::new();
@@ -372,6 +499,19 @@ fn write_registry(assets: &[Asset], skills: &[Skill]) {
             index,
             index,
             rust_string(&skill.tree_sha256),
+        ));
+    }
+    output.push_str("];\n");
+
+    output.push_str("pub static BUILTIN_FUNCTIONS: &[BuiltinFunction] = &[\n");
+    for function in functions {
+        output.push_str(&format!(
+            "    BuiltinFunction {{ id: {}, function_md: &ASSET_{}, system_prompt: &ASSET_{}, inference_config: &ASSET_{}, tree_sha256: {} }},\n",
+            rust_string(&function.id),
+            function.function_asset_index,
+            function.system_prompt_asset_index,
+            function.inference_config_asset_index,
+            rust_string(&function.tree_sha256),
         ));
     }
     output.push_str("];\n");
