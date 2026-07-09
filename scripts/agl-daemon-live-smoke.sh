@@ -7,6 +7,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 config="${1:-${AGL_SMOKE_CONFIG:-}}"
 [[ -n "$config" ]] || {
   echo "usage: scripts/agl-daemon-live-smoke.sh /path/to/local-inference.toml" >&2
+  echo "set AGL_SMOKE_SERVE_MODE=function|inference to select the daemon surface" >&2
   exit 2
 }
 
@@ -19,6 +20,20 @@ daemon_log="$home/daemon.log"
 prompt="${AGL_SMOKE_PROMPT:-Say 'daemon smoke ok' in one short sentence.}"
 max_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-64}"
 timeout_seconds="${AGL_SMOKE_TIMEOUT_SECONDS:-180}"
+serve_mode="${AGL_SMOKE_SERVE_MODE:-function}"
+
+case "$serve_mode" in
+  function)
+    serve_command=(serve)
+    ;;
+  inference)
+    serve_command=(inference serve)
+    ;;
+  *)
+    echo "unsupported AGL_SMOKE_SERVE_MODE: $serve_mode" >&2
+    exit 2
+    ;;
+esac
 
 cleanup() {
   if [[ -n "${daemon_pid:-}" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
@@ -33,7 +48,7 @@ cargo build -p agl-cli >/dev/null
 
 "$agl_bin" \
   --home "$home" \
-  serve \
+  "${serve_command[@]}" \
   --socket "$socket" \
   --config "$config" \
   --max-output-tokens "$max_tokens" \
@@ -41,7 +56,15 @@ cargo build -p agl-cli >/dev/null
 daemon_pid=$!
 
 deadline=$((SECONDS + timeout_seconds))
-until "$agl_bin" --home "$home" status --socket "$socket" | grep -q '^state=running$'; do
+while true; do
+  if ! status_output="$("$agl_bin" --home "$home" daemon status --socket "$socket" 2>&1)"; then
+    echo "daemon status probe failed" >&2
+    printf '%s\n' "$status_output" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$status_output" | grep -q '^state=running$'; then
+    break
+  fi
   if ! kill -0 "$daemon_pid" 2>/dev/null; then
     echo "daemon exited before becoming ready" >&2
     cat "$daemon_log" >&2 || true
@@ -140,3 +163,4 @@ PY
 
 echo "smoke_home=$home"
 echo "daemon_log=$daemon_log"
+echo "serve_mode=$serve_mode"
