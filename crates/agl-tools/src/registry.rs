@@ -74,6 +74,18 @@ impl ToolCatalog {
             .find(|hook| &hook.id == id)
     }
 
+    pub fn provider_for_hook(&self, id: &HookId) -> Option<&ToolProviderDeclaration> {
+        let provider_index = *self.hook_index.get(id)?;
+        self.providers.get(provider_index)
+    }
+
+    pub fn trusted_hook(&self, id: &HookId) -> Option<&HookDeclaration> {
+        self.provider_for_hook(id)?
+            .permits_execution()
+            .then(|| self.hook(id))
+            .flatten()
+    }
+
     pub fn tool(&self, id: &ToolId) -> Option<&ToolDeclaration> {
         let provider_index = *self.tool_index.get(id)?;
         self.providers[provider_index]
@@ -103,7 +115,7 @@ impl ToolCatalog {
                 .ok_or_else(|| ToolDispatchError::UnknownTool {
                     id: id.as_str().to_string(),
                 })?;
-        if provider.permits_tool_execution() {
+        if provider.permits_execution() {
             Ok(())
         } else {
             Err(ToolDispatchError::UntrustedProvider {
@@ -304,6 +316,11 @@ mod tests {
             catalog.hook(&hook_id).unwrap().event,
             HookEvent::ModelResponse
         );
+        assert_eq!(
+            catalog.provider_for_hook(&hook_id).unwrap().id.as_str(),
+            "core-tools"
+        );
+        assert_eq!(catalog.trusted_hook(&hook_id), catalog.hook(&hook_id));
         assert_eq!(catalog.tool(&tool_id).unwrap().description, "Read a file");
         assert_eq!(
             catalog.tool(&tool_id).unwrap().required_arguments,
@@ -344,6 +361,29 @@ mod tests {
                 id: "json.validate".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn catalog_does_not_expose_untrusted_hook_as_available() {
+        let hook_id = HookId::new("example.validate").unwrap();
+        let declaration = ToolProviderDeclaration::test_fixture(
+            ToolProviderId::new("example-provider").unwrap(),
+            "Example Provider",
+            "1",
+            ToolProviderTrust::Revoked,
+        )
+        .unwrap()
+        .with_hook(HookDeclaration {
+            id: hook_id.clone(),
+            event: HookEvent::ArtifactWrite,
+            required: true,
+        });
+        let mut catalog = ToolCatalog::new();
+
+        catalog.register(declaration).unwrap();
+
+        assert!(catalog.hook(&hook_id).is_some());
+        assert!(catalog.trusted_hook(&hook_id).is_none());
     }
 
     #[test]

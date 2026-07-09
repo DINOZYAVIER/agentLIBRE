@@ -1569,7 +1569,7 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
     let catalog =
         agl_tools::builtin_tool_catalog().context("failed to register builtin tool catalog")?;
     for hook in &harness.required_hooks {
-        if catalog.hook(hook).is_none() {
+        if catalog.trusted_hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);
         }
     }
