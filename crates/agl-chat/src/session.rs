@@ -1070,8 +1070,8 @@ fn selected_skill_hook_batches(
     for skill_id in selected_skills {
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         for hook_id in &skill.harness.required_hooks {
-            let hook = tool_catalog.hook(hook_id).with_context(|| {
-                format!("selected skill `{skill_id}` requires missing hook `{hook_id}`")
+            let hook = tool_catalog.trusted_hook(hook_id).with_context(|| {
+                format!("selected skill `{skill_id}` requires unavailable hook `{hook_id}`")
             })?;
             hooks_by_event
                 .entry(hook.event)

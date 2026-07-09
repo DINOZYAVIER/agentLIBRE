@@ -74,8 +74,8 @@ impl ToolProviderDeclaration {
         self
     }
 
-    pub fn permits_tool_execution(&self) -> bool {
-        self.trust.permits_tool_execution()
+    pub fn permits_execution(&self) -> bool {
+        self.trust.permits_execution()
     }
 
     pub fn validate(&self) -> Result<(), ToolProviderDeclarationError> {
@@ -118,17 +118,17 @@ pub enum ToolProviderTrust {
 }
 
 impl ToolProviderTrust {
-    pub fn permits_tool_execution(self) -> bool {
+    pub fn permits_execution(self) -> bool {
         matches!(self, Self::TrustedByBinary | Self::TrustedRegistered)
     }
 
     pub fn block_reason(self) -> &'static str {
         match self {
-            Self::TrustedByBinary | Self::TrustedRegistered => "tool provider is trusted",
-            Self::Unsupported => "tool provider state is unsupported",
-            Self::Unknown => "tool provider trust state is unknown",
-            Self::Changed => "tool provider declaration has changed",
-            Self::Revoked => "tool provider trust was revoked",
+            Self::TrustedByBinary | Self::TrustedRegistered => "provider is trusted",
+            Self::Unsupported => "provider state is unsupported",
+            Self::Unknown => "provider trust state is unknown",
+            Self::Changed => "provider declaration has changed",
+            Self::Revoked => "provider trust was revoked",
         }
     }
 }
