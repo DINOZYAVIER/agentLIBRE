@@ -1,6 +1,7 @@
 # Inference Profile Assets
 
-Repo assets must not contain host-specific model paths.
+Standalone profile assets in this directory must not contain host-specific
+model paths.
 
 Put local profiles under the runtime config directory instead:
 
@@ -14,3 +15,8 @@ Use `agl config paths` to confirm the active config root for the current
 
 Portable profile examples can live here only when they use placeholders or
 relative paths that are valid across machines.
+
+Default model/runtime selections should be packaged as agentFUNCTIONs under
+`assets/functions/<id>/` instead of standalone profile files. A function owns
+its `FUNCTION.md`, `SYSTEM.md`, and `inference.toml` as one inspectable unit;
+those function configs may describe the current local operational model layout.

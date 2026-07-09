@@ -14,6 +14,7 @@ This directory is the human-facing documentation map for agentLIBRE.
 - [CLI](components/cli.md) - command-line entrypoint and operator surface for `agl`.
 - [Runtime](components/runtime.md) - orchestration layer that connects config, skills, tools, inference, and evidence.
 - [Inference](components/inference.md) - local model execution through llama.cpp profiles and runtime metadata.
+- [Functions](components/functions.md) - agentFUNCTION specs that bind profiles, skills, tools, memory, and subagents.
 - [Skills](components/skills.md) - git-pinned trusted instruction packs that shape context and tool routing.
 - [Tools](components/tools.md) - explicitly callable runtime operations with permission and trust boundaries.
 - [Artifacts](components/artifacts.md) - workspace data under `.agl`, including locks, tasks, reviews, and generated state.

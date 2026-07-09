@@ -184,6 +184,11 @@ impl ChatService {
         self.loop_host.set_workspace_root(workspace_root)
     }
 
+    pub fn reload_runtime_context(&mut self) -> Result<usize> {
+        self.loop_host.refresh_runtime_context()?;
+        Ok(self.loop_host.session().turn_visible_tools().len())
+    }
+
     pub fn clear_context(&mut self) -> Result<usize> {
         let cleared_messages = self.messages.len();
         self.messages.clear();
@@ -232,6 +237,8 @@ impl ChatService {
             self.request_index,
             &self.messages,
             self.loop_host.session().turn_hook_batches(),
+            self.loop_host.session().turn_hook_payload(),
+            self.loop_host.session().max_hook_repair_attempts(),
             self.loop_host.session().turn_visible_tools(),
             input,
         );
@@ -312,13 +319,17 @@ pub fn build_turn_input(
     request_index: usize,
     context_messages: &[TurnMessage],
     hook_batches: &[TurnHookBatch],
+    hook_payload: serde_json::Value,
+    max_hook_repair_attempts: usize,
     visible_tools: &[VisibleTool],
     user_input: &str,
 ) -> TurnInput {
     let mut input = TurnInput::user(user_input.to_string())
         .with_turn_id(run_id.to_string())
         .with_context_messages(context_messages.to_vec())
-        .with_request_index_start(request_index);
+        .with_request_index_start(request_index)
+        .with_hook_payload(hook_payload)
+        .with_max_hook_repair_attempts(max_hook_repair_attempts);
     for hook_batch in hook_batches {
         input = input.with_hook_batch(hook_batch.clone());
     }
@@ -653,20 +664,34 @@ mod tests {
                 .require_argument("path"),
         ];
 
-        let input = build_turn_input("run-001", 7, &context, &hook_batches, &visible_tools, "new");
+        let input = build_turn_input(
+            "run-001",
+            7,
+            &context,
+            &hook_batches,
+            serde_json::json!({"runtime_identity": {"skills": []}}),
+            1,
+            &visible_tools,
+            "new",
+        );
 
         assert_eq!(input.turn_id, "run-001");
         assert_eq!(input.user_input, "new");
         assert_eq!(input.context_messages, context);
         assert_eq!(input.hook_batches, hook_batches);
+        assert_eq!(
+            input.hook_payload,
+            serde_json::json!({"runtime_identity": {"skills": []}})
+        );
         assert_eq!(input.request_index_start, 7);
         assert_eq!(input.visible_tools, visible_tools);
         assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
+        assert_eq!(input.max_hook_repair_attempts, 1);
     }
 
     #[test]
     fn build_turn_input_keeps_tools_disabled_without_visible_tools() {
-        let input = build_turn_input("run-001", 1, &[], &[], &[], "new");
+        let input = build_turn_input("run-001", 1, &[], &[], serde_json::json!({}), 0, &[], "new");
 
         assert!(input.visible_tools.is_empty());
         assert_eq!(input.max_tool_calls, 0);

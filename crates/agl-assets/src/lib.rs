@@ -4,6 +4,9 @@ pub enum BuiltinAssetKind {
     Skill,
     SkillReference,
     SkillAsset,
+    FunctionManifest,
+    FunctionSystemPrompt,
+    FunctionInferenceConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +34,15 @@ pub struct BuiltinSkill {
     pub tree_sha256: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinFunction {
+    pub id: &'static str,
+    pub function_md: &'static BuiltinAsset,
+    pub system_prompt: &'static BuiltinAsset,
+    pub inference_config: &'static BuiltinAsset,
+    pub tree_sha256: &'static str,
+}
+
 include!(concat!(env!("OUT_DIR"), "/builtin_assets.rs"));
 
 pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
@@ -39,6 +51,10 @@ pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
 
 pub fn builtin_skill(id: &str) -> Option<&'static BuiltinSkill> {
     BUILTIN_SKILLS.iter().find(|skill| skill.id == id)
+}
+
+pub fn builtin_function(id: &str) -> Option<&'static BuiltinFunction> {
+    BUILTIN_FUNCTIONS.iter().find(|function| function.id == id)
 }
 
 pub fn builtin_skills_by_pack(pack: &str) -> impl Iterator<Item = &'static BuiltinSkill> + '_ {
@@ -99,6 +115,40 @@ mod tests {
     }
 
     #[test]
+    fn builtin_functions_are_embedded_from_assets() {
+        let functions = BUILTIN_FUNCTIONS
+            .iter()
+            .map(|function| function.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(functions, vec!["gemma4-12b", "gemma4-26b", "gemma4-31b"]);
+        for function in BUILTIN_FUNCTIONS {
+            assert_eq!(function.tree_sha256.len(), 64);
+            assert_eq!(
+                function.function_md.kind,
+                BuiltinAssetKind::FunctionManifest
+            );
+            assert_eq!(
+                function.system_prompt.kind,
+                BuiltinAssetKind::FunctionSystemPrompt
+            );
+            assert_eq!(
+                function.inference_config.kind,
+                BuiltinAssetKind::FunctionInferenceConfig
+            );
+            assert!(
+                function
+                    .function_md
+                    .source_path
+                    .starts_with("assets/functions/"),
+                "{} must be embedded from assets/functions, got {}",
+                function.id,
+                function.function_md.source_path
+            );
+        }
+    }
+
+    #[test]
     fn builtin_skills_are_embedded_from_core_repo_checkout() {
         let skills = BUILTIN_SKILLS
             .iter()
@@ -123,6 +173,7 @@ mod tests {
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
         assert!(builtin_skill("missing").is_none());
+        assert!(builtin_function("missing").is_none());
         assert_eq!(builtin_skills_by_pack("missing").count(), 0);
     }
 

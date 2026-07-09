@@ -332,6 +332,30 @@ fn start_refuses_existing_chat_session() {
 }
 
 #[test]
+fn start_allows_precreated_artifact_run_directory() {
+    let root = temp_root("session-artifact-precreate");
+    let session_id = test_session_id();
+    std::fs::create_dir_all(
+        root.join(session_id.as_str())
+            .join("runs")
+            .join(TEST_RUN_ID),
+    )
+    .unwrap();
+
+    let store = ChatSessionStore::start(
+        &root,
+        session_id,
+        TEST_RUN_ID,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+    )
+    .unwrap();
+
+    assert!(store.session_dir().join("session.json").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn opens_existing_session_and_reads_replay_without_appending_start() {
     let root = temp_root("session-replay");
     let session_id = test_session_id();

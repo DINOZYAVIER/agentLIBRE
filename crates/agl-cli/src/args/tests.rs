@@ -97,14 +97,15 @@ fn parse_run_command_with_options() {
         ],
         CliCommand::Run(RunOptions {
             config: Some(PathBuf::from("local.toml")),
+            function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
             run_id: Some("manual-test".to_string()),
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
             session_id: None,
             no_history: false,
             new_session: false,
-            max_output_tokens: 32,
-            tool_mode: ToolAccessMode::Write,
+            max_output_tokens: Some(32),
+            tool_mode: Some(ToolAccessMode::Write),
             skills: vec!["task-spec".to_string()],
             memory: false,
             prompt: Some("hello".to_string()),
@@ -167,6 +168,7 @@ fn parse_serve_command_with_daemon_options() {
         CliCommand::Serve(ServeOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             config: Some(PathBuf::from("local.toml")),
+            function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
             run_id: None,
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
@@ -174,6 +176,47 @@ fn parse_serve_command_with_daemon_options() {
             tool_mode: ToolAccessMode::Write,
             skills: vec!["tool-smoke".to_string()],
             memory: false,
+        }),
+    );
+}
+
+#[test]
+fn parse_function_commands() {
+    assert_command(
+        ["agl", "function", "status", "coding", "--strict"],
+        CliCommand::Function(FunctionCommand::Status(FunctionStatusOptions {
+            reference: "coding".to_string(),
+            json: false,
+            strict: true,
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "function",
+            "init",
+            "coding",
+            "--workspace",
+            "--model-profile",
+            "local",
+        ],
+        CliCommand::Function(FunctionCommand::Init(FunctionInitOptions {
+            id: "coding".to_string(),
+            workspace: true,
+            model_profile: Some("local".to_string()),
+            json: false,
+        })),
+    );
+}
+
+#[test]
+fn parse_run_command_with_function_ref() {
+    assert_command(
+        ["agl", "run", "--function", "coding", "--prompt", "hello"],
+        CliCommand::Run(RunOptions {
+            function_ref: Some("coding".to_string()),
+            prompt: Some("hello".to_string()),
+            ..RunOptions::default()
         }),
     );
 }
@@ -931,6 +974,26 @@ fn parse_config_paths_command() {
     assert_command(
         ["agl", "config", "paths"],
         CliCommand::Config(ConfigCommand::Paths),
+    );
+}
+
+#[test]
+fn parse_config_status_command() {
+    assert_command(
+        [
+            "agl",
+            "config",
+            "status",
+            "--config",
+            "local.toml",
+            "--json",
+            "--strict",
+        ],
+        CliCommand::Config(ConfigCommand::Status(ConfigStatusOptions {
+            config: Some(PathBuf::from("local.toml")),
+            json: true,
+            strict: true,
+        })),
     );
 }
 

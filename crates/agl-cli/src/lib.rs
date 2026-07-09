@@ -5,7 +5,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatTurnStatus, InferenceOptions,
+    ChatOptions, ChatService, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions,
     ToolAccessMode as ChatToolAccessMode, chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
@@ -42,6 +42,7 @@ use anyhow::{Context, Result, bail};
 mod args;
 mod chat;
 mod config;
+mod function;
 mod memory;
 mod notes;
 mod repo;
@@ -58,6 +59,7 @@ use args::{
 };
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
+use function::run_function;
 use memory::run_memory;
 use notes::run_notes;
 use repo::run_repo;
@@ -190,6 +192,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         CliCommand::Run(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
         CliCommand::Config(_)
         | CliCommand::Cron(_)
+        | CliCommand::Function(_)
         | CliCommand::Store(_)
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
@@ -214,6 +217,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Config(command) => run_config(command, runtime),
         CliCommand::Cron(command) => run_cron(command, runtime),
         CliCommand::Store(command) => run_store(command, runtime),
+        CliCommand::Function(command) => run_function(command, runtime),
         CliCommand::Memory(command) => run_memory(command, runtime),
         CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),
@@ -986,6 +990,7 @@ fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConf
 fn inference_options_from_serve_options(options: &ServeOptions) -> InferenceOptions {
     InferenceOptions {
         config: options.config.clone(),
+        function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
         run_id: options.run_id.clone(),
         workspace_root: options.workspace_root.clone(),
@@ -1012,35 +1017,109 @@ fn skill_trust_store_path(runtime: &AgentLibreRuntimeConfig) -> PathBuf {
     runtime.paths.state_dir.join("skill-trust.toml")
 }
 
-fn inference_options_from_run_options(options: &RunOptions) -> InferenceOptions {
-    InferenceOptions {
+fn inference_options_from_run_options(
+    options: &RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<InferenceOptions> {
+    let function = resolve_run_function_defaults(options, runtime)?;
+    let max_output_tokens = options
+        .max_output_tokens
+        .or_else(|| {
+            function
+                .as_ref()
+                .and_then(|function| function.max_output_tokens)
+        })
+        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+    let tool_mode = options
+        .tool_mode
+        .or_else(|| {
+            function
+                .as_ref()
+                .and_then(|function| function.tool_mode)
+                .map(args_tool_mode_from_function)
+        })
+        .unwrap_or(args::ToolAccessMode::ReadOnly);
+    let memory = options.memory
+        || function
+            .as_ref()
+            .map(|function| function.memory_enabled)
+            .unwrap_or(false);
+
+    Ok(InferenceOptions {
         config: options.config.clone(),
+        function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
         run_id: options.run_id.clone(),
         workspace_root: options.workspace_root.clone(),
-        max_output_tokens: options.max_output_tokens,
-        tool_mode: chat_tool_mode(options.tool_mode),
+        max_output_tokens,
+        tool_mode: chat_tool_mode(tool_mode),
         skills: options.skills.clone(),
-        memory: options.memory,
-    }
+        memory,
+    })
 }
 
-fn chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
-    ChatOptions {
-        inference: inference_options_from_run_options(options),
+fn chat_options_from_run_options(
+    options: &RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<ChatOptions> {
+    Ok(ChatOptions {
+        inference: inference_options_from_run_options(options, runtime)?,
         workspace_root: options.workspace_root.clone(),
         session_id: options.session_id.clone(),
         no_history: options.no_history,
         new_session: options.new_session,
-    }
+    })
 }
 
-fn one_shot_chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
-    let mut chat_options = chat_options_from_run_options(options);
+fn one_shot_chat_options_from_run_options(
+    options: &RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<ChatOptions> {
+    let mut chat_options = chat_options_from_run_options(options, runtime)?;
     chat_options.session_id = None;
     chat_options.no_history = true;
     chat_options.new_session = true;
-    chat_options
+    Ok(chat_options)
+}
+
+fn resolve_run_function_defaults(
+    options: &RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<Option<agl_functions::RuntimeFunction>> {
+    options
+        .function_ref
+        .as_deref()
+        .map(|reference| {
+            let workspace_root =
+                runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+            let require_profile = options.config.is_none()
+                && std::env::var_os("AGL_LOCAL_INFERENCE_CONFIG").is_none();
+            if require_profile {
+                agl_functions::resolve_runtime_function(
+                    reference,
+                    &workspace_root,
+                    &runtime.paths.config_dir,
+                )
+            } else {
+                agl_functions::resolve_runtime_function_allow_missing_profile(
+                    reference,
+                    &workspace_root,
+                    &runtime.paths.config_dir,
+                )
+            }
+            .with_context(|| format!("failed to resolve function `{reference}`"))
+        })
+        .transpose()
+}
+
+fn args_tool_mode_from_function(mode: agl_functions::FunctionToolMode) -> args::ToolAccessMode {
+    match mode {
+        agl_functions::FunctionToolMode::ReadOnly => args::ToolAccessMode::ReadOnly,
+        agl_functions::FunctionToolMode::Write => args::ToolAccessMode::Write,
+        agl_functions::FunctionToolMode::Execute => args::ToolAccessMode::Execute,
+        agl_functions::FunctionToolMode::Approve => args::ToolAccessMode::Approve,
+        agl_functions::FunctionToolMode::Admin => args::ToolAccessMode::Admin,
+    }
 }
 
 fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
@@ -1059,9 +1138,9 @@ fn run_one_shot(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         .prompt
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
-    let tool_mode = options.tool_mode;
-    let mut chat_service =
-        ChatService::open(one_shot_chat_options_from_run_options(&options), runtime)?;
+    let chat_options = one_shot_chat_options_from_run_options(&options, runtime)?;
+    let tool_mode = chat_options.inference.tool_mode;
+    let mut chat_service = ChatService::open(chat_options, runtime)?;
     let summary = chat_service.summary();
     tracing::info!(
         target: "agentlibre::app",
@@ -1591,7 +1670,8 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
     let run_id = options.run_id.clone().unwrap_or_else(default_run_id);
     options.run_id = Some(run_id.clone());
-    let mut chat_service = ChatService::open(chat_options_from_run_options(&options), runtime)?;
+    let mut chat_service =
+        ChatService::open(chat_options_from_run_options(&options, runtime)?, runtime)?;
     let summary = chat_service.summary();
     let stdin = io::stdin();
 
@@ -1637,6 +1717,35 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
                 print_chat_session_summary(&chat_service);
+                continue;
+            }
+            ParsedChatInput::Command(ChatCommand::Reload) => {
+                match chat_service.reload_runtime_context() {
+                    Ok(visible_tools) => {
+                        tracing::info!(
+                            target: "agentlibre::app",
+                            session_id = %chat_service.session_id(),
+                            run_id = %chat_service.run_id(),
+                            workspace_root = %chat_service.workspace_root().display(),
+                            visible_tools,
+                            "chat runtime context reloaded"
+                        );
+                        println!("context_reloaded=true visible_tools={visible_tools}");
+                        println!("workspace_root={}", chat_service.workspace_root().display());
+                        println!("profile_reloaded=false");
+                        println!("profile_reload_next_step=start a new chat or run command");
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "agentlibre::app",
+                            session_id = %chat_service.session_id(),
+                            run_id = %chat_service.run_id(),
+                            error = %err,
+                            "chat runtime context reload failed"
+                        );
+                        println!("reload_error={err:#}");
+                    }
+                }
                 continue;
             }
             ParsedChatInput::Workspace(path) => {
@@ -1720,6 +1829,7 @@ mod tests {
         ServeOptions {
             socket_path: None,
             config: None,
+            function_ref: None,
             artifact_root: None,
             run_id: None,
             workspace_root: None,
@@ -1765,7 +1875,14 @@ mod tests {
             ..RunOptions::default()
         };
 
-        let chat_options = one_shot_chat_options_from_run_options(&options);
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home("/tmp/agl-home"),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+        };
+
+        let chat_options = one_shot_chat_options_from_run_options(&options, &runtime).unwrap();
 
         assert!(chat_options.no_history);
         assert!(chat_options.new_session);

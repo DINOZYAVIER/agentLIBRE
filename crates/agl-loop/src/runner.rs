@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_events::AgentEvent;
-use agl_tools::{HookBatchRequest, HookEvent};
+use agl_tools::{HookBatchRequest, HookBatchResult, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, ModelRequest, StopDetail, StopReason, TurnFailureOperation,
@@ -17,6 +17,8 @@ use crate::event_map::{event_for_record, malformed_kind};
 
 pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<TurnOutput> {
     let mut state = TurnState::new(input);
+    let mut hook_repair_attempts = 0usize;
+    let mut pending_repair_message: Option<String> = None;
     let user_input = state.input.user_input.clone();
     apply_emit(host, &mut state, TurnTransition::Start { user_input })?;
     let payload = context_prepare_payload(&state);
@@ -37,10 +39,14 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
         )?;
         let payload = model_request_payload(&state, request_index);
         run_hook_batch(host, &mut state, HookEvent::ModelRequest, payload)?;
+        let mut request_messages = state.messages.clone();
+        if let Some(message) = pending_repair_message.take() {
+            request_messages.push(TurnMessage::System { content: message });
+        }
         let response = match host.generate(ModelRequest {
             turn_id: state.input.turn_id.clone(),
             request_index,
-            messages: state.messages.clone(),
+            messages: request_messages,
             visible_tools: state.input.visible_tools.clone(),
         }) {
             Ok(response) => response,
@@ -70,7 +76,12 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
         match agl_actions::parse_model_action(&response.content) {
             ModelAction::Answer(answer) => {
                 apply_emit(host, &mut state, TurnTransition::ParseAnswer)?;
-                return finish_answer(host, &mut state, answer);
+                match finish_answer(host, &mut state, answer, &mut hook_repair_attempts)? {
+                    FinishAnswerOutcome::Answered(output) => return Ok(output),
+                    FinishAnswerOutcome::Repair { message } => {
+                        pending_repair_message = Some(message);
+                    }
+                }
             }
             ModelAction::ToolCall(tool_call) => {
                 emit_tool_call_parsed(host, &mut state, &tool_call)?;
@@ -216,7 +227,8 @@ fn finish_answer<H: AgentLoopHost>(
     host: &mut H,
     state: &mut TurnState,
     answer: String,
-) -> Result<TurnOutput> {
+    hook_repair_attempts: &mut usize,
+) -> Result<FinishAnswerOutcome> {
     apply_emit(
         host,
         state,
@@ -225,7 +237,15 @@ fn finish_answer<H: AgentLoopHost>(
         },
     )?;
     let payload = artifact_write_payload(state, &answer);
-    run_hook_batch(host, state, HookEvent::ArtifactWrite, payload)?;
+    if let HookBatchAction::Repair { message } = run_hook_batch_for_answer(
+        host,
+        state,
+        HookEvent::ArtifactWrite,
+        payload,
+        hook_repair_attempts,
+    )? {
+        return Ok(FinishAnswerOutcome::Repair { message });
+    }
     let payload = turn_finish_payload(state, answer.len());
     run_hook_batch(host, state, HookEvent::TurnFinish, payload)?;
     apply_emit(
@@ -240,7 +260,19 @@ fn finish_answer<H: AgentLoopHost>(
         content: answer.clone(),
     });
     host.record_turn_messages(&messages)?;
-    Ok(TurnOutput::Answered { answer })
+    Ok(FinishAnswerOutcome::Answered(TurnOutput::Answered {
+        answer,
+    }))
+}
+
+enum FinishAnswerOutcome {
+    Answered(TurnOutput),
+    Repair { message: String },
+}
+
+enum HookBatchAction {
+    Passed,
+    Repair { message: String },
 }
 
 fn run_hook_batch<H: AgentLoopHost>(
@@ -249,9 +281,35 @@ fn run_hook_batch<H: AgentLoopHost>(
     event: HookEvent,
     payload: serde_json::Value,
 ) -> Result<()> {
+    match run_hook_batch_inner(host, state, event, payload, None)? {
+        HookBatchAction::Passed => Ok(()),
+        HookBatchAction::Repair { .. } => Err(anyhow!(
+            "hook batch `{}` requested unsupported repair",
+            event.as_str()
+        )),
+    }
+}
+
+fn run_hook_batch_for_answer<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    event: HookEvent,
+    payload: serde_json::Value,
+    hook_repair_attempts: &mut usize,
+) -> Result<HookBatchAction> {
+    run_hook_batch_inner(host, state, event, payload, Some(hook_repair_attempts))
+}
+
+fn run_hook_batch_inner<H: AgentLoopHost>(
+    host: &mut H,
+    state: &mut TurnState,
+    event: HookEvent,
+    payload: serde_json::Value,
+    hook_repair_attempts: Option<&mut usize>,
+) -> Result<HookBatchAction> {
     let batch = hook_batch_for_event(&state.input, event);
     if batch.is_empty() {
-        return Ok(());
+        return Ok(HookBatchAction::Passed);
     }
 
     let prepared_summary = batch.summary();
@@ -277,9 +335,13 @@ fn run_hook_batch<H: AgentLoopHost>(
         payload,
     });
     let duration_ms = Some(elapsed_millis(started));
-    let summary = match result {
+    let (summary, hook_result_for_repair) = match result {
         Ok(result) if result.event == event => {
-            HookBatchSummary::from_batch_result(&batch, result, duration_ms)
+            let repair_result = result.clone();
+            (
+                HookBatchSummary::from_batch_result(&batch, result, duration_ms),
+                Some(repair_result),
+            )
         }
         Ok(result) => {
             let summary = HookBatchSummary::failed_without_results(
@@ -327,16 +389,47 @@ fn run_hook_batch<H: AgentLoopHost>(
     )?;
 
     match summary.outcome() {
-        HookBatchOutcome::Pass | HookBatchOutcome::Warn => Ok(()),
+        HookBatchOutcome::Pass | HookBatchOutcome::Warn => Ok(HookBatchAction::Passed),
         HookBatchOutcome::Repair => {
-            apply_emit(
-                host,
-                state,
-                TurnTransition::PrepareRepair {
-                    summary: summary.clone(),
-                    attempt: 1,
-                },
-            )?;
+            if let Some(attempts) = hook_repair_attempts
+                && *attempts < state.input.max_hook_repair_attempts
+            {
+                *attempts += 1;
+                let attempt = *attempts;
+                apply_emit(
+                    host,
+                    state,
+                    TurnTransition::PrepareRepair {
+                        summary: summary.clone(),
+                        attempt,
+                    },
+                )?;
+                let message =
+                    build_hook_repair_message(event, &summary, hook_result_for_repair.as_ref());
+                return Ok(HookBatchAction::Repair { message });
+            }
+            if state.input.max_hook_repair_attempts > 0 {
+                let exhausted_attempt = state.input.max_hook_repair_attempts + 1;
+                if exhausted_attempt > 0 {
+                    apply_emit(
+                        host,
+                        state,
+                        TurnTransition::PrepareRepair {
+                            summary: summary.clone(),
+                            attempt: exhausted_attempt,
+                        },
+                    )?;
+                }
+            } else {
+                apply_emit(
+                    host,
+                    state,
+                    TurnTransition::PrepareRepair {
+                        summary: summary.clone(),
+                        attempt: 1,
+                    },
+                )?;
+            }
             reject_hook_batch(
                 host,
                 state,
@@ -454,12 +547,14 @@ fn model_response_payload(
 }
 
 fn artifact_write_payload(state: &TurnState, answer: &str) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "turn_id": state.input.turn_id,
         "artifact_kind": "answer",
         "content": answer,
         "content_bytes": answer.len(),
-    })
+    });
+    merge_hook_payload(&mut payload, &state.input.hook_payload);
+    payload
 }
 
 fn turn_finish_payload(state: &TurnState, answer_bytes: usize) -> serde_json::Value {
@@ -471,6 +566,48 @@ fn turn_finish_payload(state: &TurnState, answer_bytes: usize) -> serde_json::Va
 
 fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn merge_hook_payload(payload: &mut serde_json::Value, extra: &serde_json::Value) {
+    let (Some(payload), Some(extra)) = (payload.as_object_mut(), extra.as_object()) else {
+        return;
+    };
+    for (key, value) in extra {
+        payload.insert(key.clone(), value.clone());
+    }
+}
+
+fn build_hook_repair_message(
+    event: HookEvent,
+    summary: &HookBatchSummary,
+    result: Option<&HookBatchResult>,
+) -> String {
+    let fixes = result
+        .into_iter()
+        .flat_map(|result| result.results.iter())
+        .flat_map(|result| result.messages.iter())
+        .filter_map(|message| message.fix.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let codes = summary.message_codes.join(", ");
+    let mut message = format!(
+        "The previous answer failed AgentLIBRE hook validation for `{}`.",
+        event.as_str()
+    );
+    if !codes.is_empty() {
+        message.push_str(" Message codes: ");
+        message.push_str(&codes);
+        message.push('.');
+    }
+    if !fixes.is_empty() {
+        message.push_str(" Required fix: ");
+        message.push_str(&fixes.join(" "));
+    }
+    message.push_str(
+        " Rewrite the answer. Do not invent runtime ids. Keep all other user-requested content.",
+    );
+    message
 }
 
 fn stop_turn<H: AgentLoopHost>(

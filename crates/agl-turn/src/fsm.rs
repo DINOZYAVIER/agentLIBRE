@@ -418,7 +418,9 @@ fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnP
     match (from, transition) {
         (Initialized, Start { .. }) => Some(Started),
         (Started, PrepareModelRequest { .. }) => Some(ModelRequestPrepared),
-        (ModelRequestPrepared | ObservationAppended, RequestModel { .. }) => Some(AwaitingModel),
+        (ModelRequestPrepared | ObservationAppended | AnswerReady, RequestModel { .. }) => {
+            Some(AwaitingModel)
+        }
         (AwaitingModel, ReceiveModelResponse { .. }) => Some(ModelResponded),
         (
             AwaitingModel,

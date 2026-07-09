@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::{HookId, HookInput, HookMessage, HookResult, HookStatus};
 
 pub(crate) fn validate_json(input: HookInput) -> HookResult {
@@ -275,6 +277,366 @@ pub(crate) fn validate_review_pack(input: HookInput) -> HookResult {
     }
 }
 
+pub(crate) fn validate_runtime_identity(input: HookInput, require_hook: bool) -> HookResult {
+    let Some(text) = payload_text(&input.payload) else {
+        return fail(
+            input.hook_id,
+            "runtime_identity_missing_text",
+            "runtime identity validation requires text, content, markdown, or artifact payload",
+            None,
+        );
+    };
+    let Some(identity) = input.payload.get("runtime_identity") else {
+        return fail(
+            input.hook_id,
+            "runtime_identity_unavailable",
+            "runtime identity evidence is unavailable",
+            None,
+        );
+    };
+
+    let contract = input.payload.get("identity_contract");
+    let fields = identity_contract_fields(contract);
+    let require_all_fields = require_hook || identity_contract_requires_all_fields(contract);
+    let repair = identity_contract_repair_enabled(contract);
+    let claims = extract_identity_claims(text);
+    let mut messages = Vec::new();
+    let mut unavailable = false;
+
+    for field in &fields {
+        match field.as_str() {
+            "function" | "model_profile" => {
+                let expected = expected_identity_scalar(identity, field);
+                let claim = claims.scalar(field);
+                collect_scalar_identity_messages(
+                    field,
+                    expected,
+                    claim,
+                    require_all_fields,
+                    &mut unavailable,
+                    &mut messages,
+                );
+            }
+            "skills" | "subagents" => {
+                let expected = expected_identity_list(identity, field);
+                let claim = claims.list(field);
+                collect_list_identity_messages(
+                    field,
+                    expected,
+                    claim,
+                    require_all_fields,
+                    &mut unavailable,
+                    &mut messages,
+                );
+            }
+            _ => messages.push(HookMessage {
+                code: "runtime_identity_unknown_field".to_string(),
+                message: format!("runtime identity field `{field}` is not supported"),
+                fix: None,
+            }),
+        }
+    }
+
+    if messages.is_empty() {
+        pass(input.hook_id)
+    } else {
+        let status = if repair && !unavailable {
+            HookStatus::Repair
+        } else {
+            HookStatus::Fail
+        };
+        let fix = expected_identity_fix(identity, &fields);
+        for message in &mut messages {
+            if message.fix.is_none() {
+                message.fix = Some(fix.clone());
+            }
+        }
+        HookResult {
+            hook_id: input.hook_id,
+            status,
+            messages,
+        }
+    }
+}
+
+#[derive(Default)]
+struct IdentityClaims {
+    function: Option<String>,
+    skills: Option<Vec<String>>,
+    subagents: Option<Vec<String>>,
+    model_profile: Option<String>,
+}
+
+impl IdentityClaims {
+    fn scalar(&self, field: &str) -> Option<&str> {
+        match field {
+            "function" => self.function.as_deref(),
+            "model_profile" => self.model_profile.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn list(&self, field: &str) -> Option<&[String]> {
+        match field {
+            "skills" => self.skills.as_deref(),
+            "subagents" => self.subagents.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+fn extract_identity_claims(text: &str) -> IdentityClaims {
+    let mut claims = IdentityClaims::default();
+    for segment in text.split(['\n', ';']) {
+        let Some((raw_key, raw_value)) = split_claim(segment) else {
+            continue;
+        };
+        let Some(field) = normalize_identity_claim_key(raw_key) else {
+            continue;
+        };
+        match field {
+            "function" => claims.function = clean_identity_scalar(raw_value),
+            "skills" => claims.skills = Some(clean_identity_list(raw_value)),
+            "subagents" => claims.subagents = Some(clean_identity_list(raw_value)),
+            "model_profile" => claims.model_profile = clean_identity_scalar(raw_value),
+            _ => {}
+        }
+    }
+    claims
+}
+
+fn split_claim(segment: &str) -> Option<(&str, &str)> {
+    segment
+        .split_once('=')
+        .or_else(|| segment.split_once(':'))
+        .filter(|(_, value)| !value.trim().is_empty())
+}
+
+fn normalize_identity_claim_key(raw: &str) -> Option<&'static str> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches(|ch: char| {
+            ch.is_ascii_digit() || matches!(ch, '.' | ')' | '-' | '*' | ' ')
+        })
+        .trim_matches(|ch| matches!(ch, '`' | '*' | '_' | ' '));
+    let lower = trimmed.to_ascii_lowercase().replace('_', " ");
+    let key = lower.strip_suffix(" id").unwrap_or(&lower).trim();
+    match key {
+        "function" => Some("function"),
+        "skill" | "skills" => Some("skills"),
+        "subagent" | "subagents" => Some("subagents"),
+        "model profile" | "model" | "profile" => Some("model_profile"),
+        _ => None,
+    }
+}
+
+fn clean_identity_scalar(raw: &str) -> Option<String> {
+    let value = clean_identity_token(raw);
+    (!value.is_empty()).then_some(value)
+}
+
+fn clean_identity_list(raw: &str) -> Vec<String> {
+    let separators: &[char] = if raw.contains(',') { &[','] } else { &[' '] };
+    raw.split(separators)
+        .map(clean_identity_token)
+        .filter(|value| !value.is_empty() && value != "and" && value != "и")
+        .collect()
+}
+
+fn clean_identity_token(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '"' | '\'' | ':' | '.' | '!' | '?' | '<' | '>' | '[' | ']' | '(' | ')' | ','
+            )
+        })
+        .to_string()
+}
+
+fn identity_contract_fields(contract: Option<&serde_json::Value>) -> Vec<String> {
+    let fields = contract
+        .and_then(|contract| contract.get("fields"))
+        .and_then(serde_json::Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if fields.is_empty() {
+        vec![
+            "function".to_string(),
+            "skills".to_string(),
+            "subagents".to_string(),
+        ]
+    } else {
+        fields
+    }
+}
+
+fn identity_contract_requires_all_fields(contract: Option<&serde_json::Value>) -> bool {
+    let mode_requires = contract
+        .and_then(|contract| contract.get("mode"))
+        .and_then(serde_json::Value::as_str)
+        == Some("require");
+    let explicit_requires = contract
+        .and_then(|contract| contract.get("require_all_fields"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    mode_requires || explicit_requires
+}
+
+fn identity_contract_repair_enabled(contract: Option<&serde_json::Value>) -> bool {
+    contract
+        .and_then(|contract| contract.get("repair"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn expected_identity_scalar<'a>(identity: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    match field {
+        "function" => identity
+            .get("function")
+            .and_then(|function| function.get("id"))
+            .and_then(serde_json::Value::as_str),
+        "model_profile" => identity
+            .get("model_profile")
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }
+}
+
+fn expected_identity_list(identity: &serde_json::Value, field: &str) -> Option<Vec<String>> {
+    identity
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+}
+
+fn collect_scalar_identity_messages(
+    field: &str,
+    expected: Option<&str>,
+    claim: Option<&str>,
+    require_all_fields: bool,
+    unavailable: &mut bool,
+    messages: &mut Vec<HookMessage>,
+) {
+    match (expected, claim) {
+        (None, Some(_)) => {
+            *unavailable = true;
+            messages.push(HookMessage {
+                code: "runtime_identity_unavailable".to_string(),
+                message: format!("runtime identity field `{field}` is unavailable"),
+                fix: None,
+            });
+        }
+        (None, None) if require_all_fields => {
+            *unavailable = true;
+            messages.push(HookMessage {
+                code: "runtime_identity_unavailable".to_string(),
+                message: format!("runtime identity field `{field}` is unavailable"),
+                fix: None,
+            });
+        }
+        (Some(_), None) if require_all_fields => messages.push(HookMessage {
+            code: "runtime_identity_missing".to_string(),
+            message: format!("answer must claim runtime identity field `{field}`"),
+            fix: None,
+        }),
+        (Some(expected), Some(claim)) if expected != claim => messages.push(HookMessage {
+            code: "runtime_identity_mismatch".to_string(),
+            message: format!(
+                "answer claimed `{field}={claim}` but runtime identity has `{field}={expected}`"
+            ),
+            fix: None,
+        }),
+        _ => {}
+    }
+}
+
+fn collect_list_identity_messages(
+    field: &str,
+    expected: Option<Vec<String>>,
+    claim: Option<&[String]>,
+    require_all_fields: bool,
+    unavailable: &mut bool,
+    messages: &mut Vec<HookMessage>,
+) {
+    match (expected, claim) {
+        (None, Some(_)) => {
+            *unavailable = true;
+            messages.push(HookMessage {
+                code: "runtime_identity_unavailable".to_string(),
+                message: format!("runtime identity field `{field}` is unavailable"),
+                fix: None,
+            });
+        }
+        (None, None) if require_all_fields => {
+            *unavailable = true;
+            messages.push(HookMessage {
+                code: "runtime_identity_unavailable".to_string(),
+                message: format!("runtime identity field `{field}` is unavailable"),
+                fix: None,
+            });
+        }
+        (Some(_), None) if require_all_fields => messages.push(HookMessage {
+            code: "runtime_identity_missing".to_string(),
+            message: format!("answer must claim runtime identity field `{field}`"),
+            fix: None,
+        }),
+        (Some(expected), Some(claim)) if string_set(&expected) != string_set(claim) => {
+            messages.push(HookMessage {
+                code: "runtime_identity_mismatch".to_string(),
+                message: format!(
+                    "answer claimed `{field}={}` but runtime identity has `{field}={}`",
+                    claim.join(","),
+                    expected.join(",")
+                ),
+                fix: None,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn string_set(values: &[String]) -> BTreeSet<String> {
+    values.iter().cloned().collect()
+}
+
+fn expected_identity_fix(identity: &serde_json::Value, fields: &[String]) -> String {
+    let mut parts = Vec::new();
+    for field in fields {
+        match field.as_str() {
+            "function" => {
+                if let Some(value) = expected_identity_scalar(identity, field) {
+                    parts.push(format!("function={value}"));
+                }
+            }
+            "skills" | "subagents" => {
+                if let Some(values) = expected_identity_list(identity, field) {
+                    parts.push(format!("{field}={}", values.join(",")));
+                }
+            }
+            "model_profile" => {
+                if let Some(value) = expected_identity_scalar(identity, field) {
+                    parts.push(format!("model_profile={value}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    format!("Use {}.", parts.join("; "))
+}
+
 fn contains_token_prefix(text: &str, prefix: &str, min_suffix_chars: usize) -> bool {
     let text_bytes = text.as_bytes();
     let prefix_bytes = prefix.as_bytes();
@@ -443,12 +805,20 @@ fn extract_markdown_repo_paths(content: &str) -> Vec<String> {
 }
 
 fn looks_like_repo_path(candidate: &str) -> bool {
-    !candidate.contains("://")
+    !is_known_chat_slash_command(candidate)
+        && !candidate.contains("://")
         && !candidate.starts_with('#')
         && !candidate.starts_with('@')
         && candidate
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+}
+
+fn is_known_chat_slash_command(candidate: &str) -> bool {
+    matches!(
+        candidate,
+        "/help" | "/session" | "/workspace" | "/reload" | "/clear" | "/exit" | "/quit"
+    )
 }
 
 fn validate_single_repo_path(path: &str) -> Result<(), &'static str> {
