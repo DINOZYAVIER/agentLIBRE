@@ -23,6 +23,21 @@ fn assert_parse_error_contains(args: impl IntoIterator<Item = &'static str>, nee
     );
 }
 
+fn serve_options_default() -> ServeOptions {
+    ServeOptions {
+        socket_path: None,
+        config: None,
+        function_ref: None,
+        artifact_root: None,
+        run_id: None,
+        workspace_root: None,
+        max_output_tokens: None,
+        tool_mode: None,
+        skills: Vec::new(),
+        memory: false,
+    }
+}
+
 fn visible_subcommand_names(command: clap::Command) -> Vec<String> {
     command
         .get_subcommands()
@@ -172,8 +187,8 @@ fn parse_serve_command_with_daemon_options() {
             artifact_root: Some(PathBuf::from("artifacts")),
             run_id: None,
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
-            max_output_tokens: 33,
-            tool_mode: ToolAccessMode::Write,
+            max_output_tokens: Some(33),
+            tool_mode: Some(ToolAccessMode::Write),
             skills: vec!["tool-smoke".to_string()],
             memory: false,
         }),
@@ -218,6 +233,57 @@ fn parse_run_command_with_function_ref() {
             prompt: Some("hello".to_string()),
             ..RunOptions::default()
         }),
+    );
+}
+
+#[test]
+fn parse_inference_commands_are_raw_without_function_refs() {
+    assert_command(
+        [
+            "agl",
+            "inference",
+            "run",
+            "--config",
+            "local.toml",
+            "--prompt",
+            "hello",
+        ],
+        CliCommand::Inference(InferenceCommand::Run(RunOptions {
+            config: Some(PathBuf::from("local.toml")),
+            function_ref: None,
+            prompt: Some("hello".to_string()),
+            ..RunOptions::default()
+        })),
+    );
+    assert_command(
+        ["agl", "inference", "chat", "--no-history"],
+        CliCommand::Inference(InferenceCommand::Chat(RunOptions {
+            no_history: true,
+            ..RunOptions::default()
+        })),
+    );
+    assert_command(
+        ["agl", "inference", "serve", "--config", "local.toml"],
+        CliCommand::Inference(InferenceCommand::Serve(ServeOptions {
+            config: Some(PathBuf::from("local.toml")),
+            ..serve_options_default()
+        })),
+    );
+}
+
+#[test]
+fn parse_inference_rejects_function_ref() {
+    assert_parse_error_contains(
+        [
+            "agl",
+            "inference",
+            "run",
+            "--function",
+            "coding",
+            "--prompt",
+            "hello",
+        ],
+        "unexpected argument",
     );
 }
 

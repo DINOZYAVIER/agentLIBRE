@@ -30,7 +30,8 @@ use crate::{
     ArtifactSource, ArtifactSourceStatus, ArtifactState, ArtifactStatus, ArtifactStatusOptions,
     ArtifactStatusReport, ArtifactSyncAction, ArtifactSyncActionKind, ArtifactSyncOptions,
     ArtifactSyncReport, DEFAULT_PROFILE, LockedArtifact, WORKSPACE_MANIFEST_PATH,
-    WorkspaceManifest, default_manifest, is_not_found, read_manifest, resolve_repo_root,
+    WorkspaceFunctions, WorkspaceManifest, default_manifest, is_not_found, read_manifest,
+    resolve_repo_root,
 };
 
 #[derive(Clone, Debug)]
@@ -397,6 +398,7 @@ fn artifact_manifest_or_compat(
             WorkspaceManifest {
                 version: 1,
                 profile: DEFAULT_PROFILE.to_string(),
+                functions: WorkspaceFunctions::default(),
                 components: BTreeMap::new(),
                 artifact_sources: default_artifact_sources(),
             },

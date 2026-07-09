@@ -100,8 +100,51 @@ fn init_creates_manifest_and_local_component_dirs() {
     assert!(!root.join(".agl/skills").exists());
 
     let manifest = fs::read_to_string(root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+    assert!(manifest.contains("[functions]"));
+    assert!(manifest.contains(&format!("default = \"{DEFAULT_FUNCTION}\"")));
     assert!(manifest.contains("kind = \"submodule\""));
     assert!(manifest.contains(DEFAULT_SKILLS_URL));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn init_repairs_missing_workspace_default_function() {
+    let root = temp_root("init-repair-default-function");
+    fs::create_dir_all(root.join(".agl")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[components.state]
+path = ".agl/state"
+kind = "ignored"
+"#,
+    )
+    .unwrap();
+
+    let dry_run = init_repo_workspace(
+        &root,
+        &RepoInitOptions {
+            dry_run: true,
+            ..RepoInitOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(dry_run.changes.iter().any(|change| {
+        change.path == Path::new(WORKSPACE_MANIFEST_PATH)
+            && change.action == RepoInitAction::WouldOverwriteFile
+    }));
+
+    let report = init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    assert!(report.changes.iter().any(|change| {
+        change.path == Path::new(WORKSPACE_MANIFEST_PATH)
+            && change.action == RepoInitAction::OverwroteFile
+    }));
+    let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
+    assert_eq!(manifest.functions.default, DEFAULT_FUNCTION);
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -294,6 +337,9 @@ fn artifact_lock_records_git_source_identity_and_detects_drift() {
 version = 1
 profile = "repo-workflow"
 
+[functions]
+default = "gemma4-12b"
+
 [components.tasks]
 path = ".agl/tasks"
 kind = "local"
@@ -466,6 +512,9 @@ fn artifact_status_does_not_report_declared_source_parent_as_undeclared() {
         r#"
 version = 1
 profile = "repo-workflow"
+
+[functions]
+default = "gemma4-12b"
 
 [components.tasks]
 path = ".agl/tasks"
@@ -641,6 +690,9 @@ fn artifact_path_handle_does_not_treat_write_as_read() {
 version = 1
 profile = "repo-workflow"
 
+[functions]
+default = "gemma4-12b"
+
 [components.tasks]
 path = ".agl/tasks"
 kind = "local"
@@ -775,6 +827,9 @@ fn artifact_status_rejects_paths_outside_agl() {
 version = 1
 profile = "repo-workflow"
 
+[functions]
+default = "gemma4-12b"
+
 [components.tasks]
 path = ".agl/tasks"
 kind = "local"
@@ -876,6 +931,7 @@ path = ".agl/reviews"
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
     assert_eq!(manifest.profile, "portable-repo-workflow");
+    assert_eq!(manifest.functions.default, DEFAULT_FUNCTION);
     assert_eq!(manifest.components["tasks"].kind, ComponentKind::Git);
     assert_eq!(
         manifest.components["reviews"].kind,

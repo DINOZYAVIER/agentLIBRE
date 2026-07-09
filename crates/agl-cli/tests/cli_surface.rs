@@ -27,6 +27,7 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
+    assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
     assert_contains(&stdout, "store");
@@ -86,6 +87,10 @@ fn command_help_exits_successfully_for_public_commands() {
         &["function", "status", "--help"][..],
         &["function", "init", "--help"][..],
         &["function", "doctor", "--help"][..],
+        &["inference", "--help"][..],
+        &["inference", "run", "--help"][..],
+        &["inference", "chat", "--help"][..],
+        &["inference", "serve", "--help"][..],
         &["skill", "--help"][..],
         &["skill", "init", "--help"][..],
         &["skill", "list", "--help"][..],
@@ -758,8 +763,9 @@ fn init_dry_run_includes_local_bootstrap_steps() {
         &init_stdout,
         "bootstrap.functions_root.action=would_create_dir",
     );
+    assert_contains(&init_stdout, "bootstrap.default_function=gemma4-12b");
     assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
-    assert_contains(&init_stdout, "next_step=agl run --function gemma4-12b");
+    assert_contains(&init_stdout, "next_step=agl run --prompt");
     assert!(
         !repo_stdout.contains("bootstrap.functions_root"),
         "repo init should remain manifest-only:\n{repo_stdout}"
@@ -779,8 +785,12 @@ fn init_creates_functions_root_and_keeps_repo_init_manifest_behavior() {
     let init_stdout = stdout(&init);
     assert_contains(&init_stdout, "state=initialized");
     assert_contains(&init_stdout, "bootstrap.functions_root.action=created_dir");
+    assert_contains(&init_stdout, "bootstrap.default_function=gemma4-12b");
     assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
     assert!(repo.path().join(".agl/workspace.toml").is_file());
+    let manifest = fs::read_to_string(repo.path().join(".agl/workspace.toml")).unwrap();
+    assert_contains(&manifest, "[functions]");
+    assert_contains(&manifest, "default = \"gemma4-12b\"");
     assert!(repo.path().join(".agl/functions").is_dir());
 
     let second = run_agl_in(repo.path(), &["init"]);
@@ -1479,7 +1489,7 @@ fn blank_bare_prompt_fails_before_inference_path() {
 fn missing_default_inference_config_points_to_next_steps() {
     let home = TempHome::new("missing-config");
     let home_arg = home.path_string();
-    let output = run_agl(&["--home", &home_arg, "run", "hello"]);
+    let output = run_agl(&["--home", &home_arg, "inference", "run", "hello"]);
 
     assert_failure(&output);
     let stderr = stderr(&output);
@@ -1531,6 +1541,7 @@ fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
         &[
             "--home",
             &home_arg,
+            "inference",
             "chat",
             "--config",
             &config_arg,

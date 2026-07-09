@@ -20,13 +20,23 @@ agl function status coding
 agl function doctor coding
 ```
 
-Top-level `agl init` creates the workspace function root and reports packaged
-builtin functions. Use `agl function init` only when creating a custom
-workspace or global function.
+Top-level `agl init` creates the workspace function root, writes the workspace
+default function policy, and reports packaged builtin functions:
 
-Run or chat with a function:
+```toml
+[functions]
+default = "gemma4-12b"
+```
+
+Use `agl function init` only when creating a custom workspace or global
+function.
+
+Run or chat through a function. The selected function is explicit when
+`--function` is present and otherwise comes from the workspace default:
 
 ```bash
+agl run --prompt "Summarize this repo."
+agl chat
 agl run --function coding --prompt "Summarize this repo."
 agl chat --function coding
 ```
@@ -43,12 +53,12 @@ model context, merges function skills with config `[prompt].skills` and CLI
 Inside chat, `/reload` refreshes the function manifest, system prompt, selected
 skills, visible tools, and subagent registry. Changing `model.config`,
 `model.profile`, `--config`, model paths, or backend settings still requires a
-new chat or run.
+new chat, run, or serve process.
 
 ## Goals
 
-- Give users one understandable object to choose before `agl run` or
-  `agl chat`.
+- Give users one understandable object to choose before top-level runtime
+  commands.
 - Keep low-level runtime and inference details in TOML configs while letting
   humans and LLMs maintain the higher-level system prompt in Markdown.
 - Make skills, subagents, tools, memory, and profile selection visible through
@@ -110,6 +120,20 @@ Workspace functions live under the repository workspace:
 .agl/functions/<id>/inference.toml
 ```
 
+Workspace default function policy lives in `.agl/workspace.toml`:
+
+```toml
+version = 1
+profile = "repo-workflow"
+
+[functions]
+default = "gemma4-12b"
+```
+
+The `[functions]` table is the canonical manifest shape. Do not add a
+top-level `default_function`; keeping function policy namespaced leaves room for
+future keys such as aliases, allow-lists, and identity requirements.
+
 Resolution order:
 
 1. Explicit path supplied on the CLI.
@@ -122,6 +146,47 @@ the binary by `agl-assets`.
 
 Function and subagent ids must be lowercase ASCII with letters, digits,
 hyphen, underscore, or dot. File resolution must reject path traversal.
+
+## Default Function Selection
+
+Function-backed runtime commands select a function before building model
+context. The default selection order is:
+
+1. `--function <id-or-path>` on the command line.
+2. `[functions].default` from the nearest `.agl/workspace.toml`.
+3. A global user default function, if a later config spec adds one.
+4. The packaged builtin default `gemma4-12b` only when no workspace manifest is
+   active.
+
+An initialized workspace must carry `[functions].default`. If
+`.agl/workspace.toml` exists but the default is missing, invalid, or points to a
+missing function, `agl run`, `agl chat`, and `agl serve` must fail with a repair
+hint instead of falling back to raw inference. `agl init` is responsible for
+writing or repairing the default; it should not copy builtin functions into the
+workspace unless a user asks for a custom function.
+
+Top-level runtime commands are function-first:
+
+- `agl run`, `agl chat`, and `agl serve` resolve a function by default.
+- `--config PATH` on those commands overrides the selected function's model
+  config for that invocation, but keeps function context, skills, tools,
+  subagents, memory policy, identity hooks, and evidence.
+- Direct model/config execution is available only through the low-level
+  inference namespace.
+
+Low-level inference commands keep the existing direct-config behavior for model
+debugging and backend smoke tests:
+
+```bash
+agl inference run --config /path/to/local.toml --prompt "Reply once."
+agl inference chat --config /path/to/local.toml
+agl inference serve --config /path/to/local.toml
+```
+
+The `agl inference ...` namespace does not inject `FUNCTION.md`/`SYSTEM.md`
+context and does not emit function resolution evidence. These commands should
+require an explicit profile source such as `--config`, a named low-level
+profile flag, or the active local inference config.
 
 ## Function Format
 
@@ -206,7 +271,7 @@ Recommended front matter fields:
   `model.profile` are mutually exclusive.
 - `runtime.tool_mode`: one of `read-only`, `write`, `execute`, `approve`,
   or `admin`.
-- `runtime.max_output_tokens`: default answer budget for run/chat.
+- `runtime.max_output_tokens`: default answer budget for runtime commands.
 - `skills.use`: skill ids to inject.
 - `subagents.use`: subagent ids under `subagents/<id>.md`.
 - `memory.read` and `memory.write`: memory scopes the function may use.
@@ -299,8 +364,8 @@ Resolution for `model.profile`:
 3. `local` maps to the existing local inference config.
 
 `model.config` and `model.profile` are mutually exclusive. `--config PATH` on
-`agl run` or `agl chat` overrides either one for that invocation. It does not
-disable the function's skills, subagents, or system prompt context.
+`agl run`, `agl chat`, or `agl serve` overrides either one for that invocation.
+It does not disable the function's skills, subagents, or system prompt context.
 
 Current builtin model functions:
 
@@ -310,18 +375,19 @@ Current builtin model functions:
 
 ## Runtime Semantics
 
-`agl run --function <id>` and `agl chat --function <id>` should:
+`agl run`, `agl chat`, and `agl serve` should:
 
-1. Resolve the function.
-2. Parse and validate front matter.
-3. Read and validate the required system prompt file.
-4. Resolve the function-owned inference config or named inference profile.
-5. Resolve selected skills.
-6. Resolve selected subagent artifacts.
-7. Render deterministic function context for the model.
-8. Add runtime identity validation hooks when `contracts.identity` enables
+1. Select the function from CLI override or workspace default.
+2. Resolve the function.
+3. Parse and validate front matter.
+4. Read and validate the required system prompt file.
+5. Resolve the function-owned inference config or named inference profile.
+6. Resolve selected skills.
+7. Resolve selected subagent artifacts.
+8. Render deterministic function context for the model.
+9. Add runtime identity validation hooks when `contracts.identity` enables
    them.
-9. Write resolution evidence into the run artifact directory.
+10. Write resolution evidence into the run artifact directory.
 
 CLI flags override or extend function defaults:
 
@@ -331,14 +397,15 @@ CLI flags override or extend function defaults:
 - Explicit deny rules remain deny rules even if another source allows the same
   tool.
 
-Inside `agl chat`, `/reload` should refresh the function manifest, system
-prompt, selected skills, visible tools, and subagent registry. Changing the
-selected inference config/profile, model path, backend runtime settings, or
-`--config` requires starting a new chat or run.
+Inside `agl chat`, `/reload` should refresh the selected or default function
+manifest, system prompt, selected skills, visible tools, and subagent registry.
+Changing the selected inference config/profile, model path, backend runtime
+settings, or `--config` requires starting a new chat, run, or serve process.
 
 If `/reload` changes the effective runtime identity, the next turn should use
 the refreshed `function-resolution.json`, `subagent-registry.json`, and
-identity hook payload. Profile changes still require a new chat or run.
+identity hook payload. Profile changes still require a new chat, run, or serve
+process.
 
 Subagents are advertised to the parent agent as available helpers. Actual
 subagent execution can be implemented after the MVP parser and context path are
@@ -356,11 +423,15 @@ agl function init <id> [--workspace] [--model-profile NAME]
 agl function doctor <id-or-path> [--json]
 ```
 
-Add function selection to existing runtime commands:
+Function selection belongs to top-level runtime commands:
 
 ```bash
+agl run --prompt "Summarize this repo."
+agl chat
+agl serve
 agl run --function coding --prompt "Summarize this repo."
 agl chat --function coding
+agl serve --function coding
 ```
 
 `list` should show id, title, source, path, and validation status.
@@ -371,12 +442,37 @@ path/content, and referenced subagents.
 `init` should create a minimal `FUNCTION.md`, `SYSTEM.md`, and a `subagents/`
 directory.
 
+`agl init` should initialize function defaults as part of workspace bootstrap:
+
+```bash
+agl init
+```
+
+Required `agl init` behavior:
+
+- Ensure `.agl/functions/` exists.
+- Write or update `.agl/workspace.toml` with `[functions] default =
+  "gemma4-12b"`.
+- Preserve existing non-function workspace manifest content.
+- In `--dry-run`, report the manifest update without writing it.
+- Print a next step that uses the default path, for example
+  `agl run --prompt "Reply with init-ok"`.
+
+Low-level direct inference is explicit:
+
+```bash
+agl inference run --config /path/to/local.toml --prompt "Reply once."
+agl inference chat --config /path/to/local.toml
+agl inference serve --config /path/to/local.toml
+```
+
 ## Evidence And Repair
 
-Every run/chat started with a function should emit these artifacts:
+Every function-backed runtime command should emit these artifacts:
 
 - `function-resolution.json`: selected function path, source, inference config
-  path, `SYSTEM.md` path, override flags, and validation status.
+  path, `SYSTEM.md` path, selection source, default function id when used,
+  override flags, and validation status.
 - `function-context.md`: rendered context that was sent to inference.
 - `subagent-registry.json`: selected subagent ids, paths, titles, and status.
 - `runtime-identity.json`: exact function, profile, skill, subagent, workspace,
@@ -468,12 +564,19 @@ fail malformed front matter and unsafe paths.
   `SYSTEM.md`, and body content in `FUNCTION.md`.
 - Resolution tests for explicit path, workspace function, global function, and
   `local` profile fallback.
+- Default selection tests for `--function`, `[functions].default`, missing
+  default, invalid default id, and builtin fallback outside a workspace.
 - CLI tests for `function list`, `show`, `status`, and `init`.
+- CLI tests proving `agl init` writes `[functions] default = "gemma4-12b"` and
+  dry-run reports the same planned change.
 - Snapshot or golden tests for rendered function context.
 - Chat tests proving `/reload` refreshes function context without recreating
   the model session.
-- Run/chat tests proving `--config` overrides `model.config` or
+- Run/chat/serve tests proving default commands resolve the workspace function.
+- Run/chat/serve tests proving `--config` overrides `model.config` or
   `model.profile` while preserving function skills and system prompt context.
+- Low-level `agl inference ...` tests proving direct-config commands do not
+  emit function evidence.
 
 ## Implementation Phases
 
@@ -481,10 +584,15 @@ fail malformed front matter and unsafe paths.
 2. Add `agl-functions` with parser, schema, registry, validator, renderer, and
    fixtures.
 3. Add `agl function list/show/status/init` and JSON output.
-4. Add `--function` to `agl run` and `agl chat`; emit resolution evidence.
-5. Wire `/reload` to refresh function context and subagent registry.
-6. Add `agl function doctor`.
-7. Add named inference profile manager commands.
-8. Build TUI/profile-manager views on the same APIs.
-9. Add real subagent invocation after function loading is observable and
+4. Extend `.agl/workspace.toml` with `[functions] default = "gemma4-12b"` from
+   `agl init`.
+5. Make `agl run`, `agl chat`, and `agl serve` resolve the default function
+   when `--function` is omitted.
+6. Move raw direct-config execution to `agl inference run`,
+   `agl inference chat`, and `agl inference serve`.
+7. Wire `/reload` to refresh function context and subagent registry.
+8. Add `agl function doctor`.
+9. Add named inference profile manager commands.
+10. Build TUI/profile-manager views on the same APIs.
+11. Add real subagent invocation after function loading is observable and
    stable.
