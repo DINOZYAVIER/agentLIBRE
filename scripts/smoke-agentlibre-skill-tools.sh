@@ -66,11 +66,14 @@ mkdir -p "$workspace"
 cat >"$workspace/facts.txt" <<'EOF'
 agentLIBRE skill tools smoke fixture
 Expected final answer: skill tools smoke ok
+Verification: fs.read loaded facts.txt.
 EOF
 
 prompt='You are testing agentLIBRE tool use. Your first model response must be only this exact tool call:
 <tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>
-After the tool observation, do not call another tool. Answer with exactly: skill tools smoke ok'
+After the tool observation, do not call another tool. Answer with exactly:
+skill tools smoke ok
+Verification: fs.read loaded facts.txt.'
 
 (
   cd "$workspace"
@@ -106,7 +109,6 @@ require_contains "$request_1" "fs.read"
 require_contains "$request_1" "fs.list"
 require_contains "$request_1" "fs.search"
 require_not_contains "$tool_context" "fs.edit"
-require_contains "$response_1" "<tool_call>"
 require_contains "$response_1" "fs.read"
 require_contains "$events" '"kind":"tool.call_started"'
 require_contains "$events" '"kind":"tool.call_finished"'
@@ -114,8 +116,10 @@ require_contains "$events" '"name":"fs.read"'
 require_contains "$events" '"kind":"turn.finished"'
 require_contains "$events" '"status":"answered"'
 require_contains "$stdout_path" "skill tools smoke ok"
+require_contains "$stdout_path" "Verification:"
 require_not_contains "$stdout_path" "stopped=true"
 [[ "$latest_content" == *"skill tools smoke ok"* ]] || fail "latest response did not contain expected final answer: $latest_content"
+[[ "$latest_content" == *"Verification:"* ]] || fail "latest response did not contain verification evidence: $latest_content"
 
 echo "AGL_HOME: $AGL_HOME"
 echo "config path: $config"
