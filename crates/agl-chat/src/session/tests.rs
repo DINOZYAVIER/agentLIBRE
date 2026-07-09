@@ -21,11 +21,7 @@ fn build_request_uses_agentlibre_boundaries() {
             visible_tools: Vec::new(),
         },
         &config,
-        None,
-        None,
-        None,
-        None,
-        None,
+        InferenceRequestContexts::default(),
     )
     .unwrap();
 
@@ -60,11 +56,10 @@ fn build_request_prepends_configured_system_prompt() {
             visible_tools: Vec::new(),
         },
         &config,
-        Some("demo system"),
-        None,
-        None,
-        None,
-        None,
+        InferenceRequestContexts {
+            system_prompt: Some("demo system"),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -100,11 +95,11 @@ fn build_request_prepends_skill_context_after_system_prompt() {
             visible_tools: Vec::new(),
         },
         &config,
-        Some("system"),
-        None,
-        None,
-        None,
-        Some("skill context"),
+        InferenceRequestContexts {
+            system_prompt: Some("system"),
+            skill_context: Some("skill context"),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -133,11 +128,12 @@ fn build_request_prepends_memory_context_before_skill_context() {
             visible_tools: Vec::new(),
         },
         &config,
-        Some("system"),
-        None,
-        None,
-        Some("memory context"),
-        Some("skill context"),
+        InferenceRequestContexts {
+            system_prompt: Some("system"),
+            memory_context: Some("memory context"),
+            skill_context: Some("skill context"),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -180,11 +176,13 @@ fn build_request_injects_runtime_capabilities_before_tools() {
             ],
         },
         &config,
-        Some("system"),
-        Some(&runtime_context.content),
-        None,
-        Some("memory context"),
-        Some("skill context"),
+        InferenceRequestContexts {
+            system_prompt: Some("system"),
+            runtime_capability_context: Some(&runtime_context.content),
+            memory_context: Some("memory context"),
+            skill_context: Some("skill context"),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -247,11 +245,11 @@ fn build_request_injects_visible_tool_context_for_hermes() {
             ],
         },
         &config,
-        Some("system"),
-        None,
-        None,
-        None,
-        Some("skill context"),
+        InferenceRequestContexts {
+            system_prompt: Some("system"),
+            skill_context: Some("skill context"),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -287,11 +285,11 @@ fn build_request_injects_visible_tool_context_for_gemma() {
             ],
         },
         &config,
-        Some("system"),
-        None,
-        None,
-        None,
-        Some("skill context"),
+        InferenceRequestContexts {
+            system_prompt: Some("system"),
+            skill_context: Some("skill context"),
+            ..Default::default()
+        },
     )
     .unwrap();
 

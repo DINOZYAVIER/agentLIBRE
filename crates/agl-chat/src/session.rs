@@ -390,11 +390,13 @@ impl InferenceSession {
             self.run_id.clone(),
             request,
             &self.model_config,
-            self.system_prompt.as_deref(),
-            self.runtime_capability_context.as_deref(),
-            self.function_context.as_deref(),
-            self.memory_context.as_deref(),
-            self.skill_context.as_deref(),
+            InferenceRequestContexts {
+                system_prompt: self.system_prompt.as_deref(),
+                runtime_capability_context: self.runtime_capability_context.as_deref(),
+                function_context: self.function_context.as_deref(),
+                memory_context: self.memory_context.as_deref(),
+                skill_context: self.skill_context.as_deref(),
+            },
         )?;
         self.backend.generate(request)
     }
@@ -651,64 +653,33 @@ fn build_inference_request(
     run_id: InferenceRunId,
     request: ModelRequest,
     model_config: &ModelConfig,
-    system_prompt: Option<&str>,
-    runtime_capability_context: Option<&str>,
-    function_context: Option<&str>,
-    memory_context: Option<&str>,
-    skill_context: Option<&str>,
+    contexts: InferenceRequestContexts<'_>,
 ) -> Result<InferenceRequest> {
     let request_index = request.request_index;
-    let mut request_messages = Vec::with_capacity(
-        request.messages.len()
-            + usize::from(
-                system_prompt
-                    .map(|prompt| !prompt.trim().is_empty())
-                    .unwrap_or(false),
-            )
-            + usize::from(
-                runtime_capability_context
-                    .map(|context| !context.trim().is_empty())
-                    .unwrap_or(false),
-            )
-            + usize::from(
-                function_context
-                    .map(|context| !context.trim().is_empty())
-                    .unwrap_or(false),
-            )
-            + usize::from(
-                memory_context
-                    .map(|context| !context.trim().is_empty())
-                    .unwrap_or(false),
-            )
-            + usize::from(
-                skill_context
-                    .map(|context| !context.trim().is_empty())
-                    .unwrap_or(false),
-            ),
-    );
-    if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+    let mut request_messages =
+        Vec::with_capacity(request.messages.len() + contexts.non_empty_count());
+    if let Some(system_prompt) = non_empty_context(contexts.system_prompt) {
         request_messages.push(TurnMessage::System {
             content: system_prompt.to_string(),
         });
     }
-    if let Some(runtime_capability_context) =
-        runtime_capability_context.filter(|context| !context.trim().is_empty())
+    if let Some(runtime_capability_context) = non_empty_context(contexts.runtime_capability_context)
     {
         request_messages.push(TurnMessage::System {
             content: runtime_capability_context.to_string(),
         });
     }
-    if let Some(function_context) = function_context.filter(|context| !context.trim().is_empty()) {
+    if let Some(function_context) = non_empty_context(contexts.function_context) {
         request_messages.push(TurnMessage::System {
             content: function_context.to_string(),
         });
     }
-    if let Some(memory_context) = memory_context.filter(|context| !context.trim().is_empty()) {
+    if let Some(memory_context) = non_empty_context(contexts.memory_context) {
         request_messages.push(TurnMessage::System {
             content: memory_context.to_string(),
         });
     }
-    if let Some(skill_context) = skill_context.filter(|context| !context.trim().is_empty()) {
+    if let Some(skill_context) = non_empty_context(contexts.skill_context) {
         request_messages.push(TurnMessage::System {
             content: skill_context.to_string(),
         });
@@ -750,6 +721,34 @@ fn build_runtime_capability_context(
         available_model_tools: &available_model_tools,
         char_cap: agl_runtime::DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP,
     })
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InferenceRequestContexts<'a> {
+    system_prompt: Option<&'a str>,
+    runtime_capability_context: Option<&'a str>,
+    function_context: Option<&'a str>,
+    memory_context: Option<&'a str>,
+    skill_context: Option<&'a str>,
+}
+
+impl InferenceRequestContexts<'_> {
+    fn non_empty_count(&self) -> usize {
+        [
+            self.system_prompt,
+            self.runtime_capability_context,
+            self.function_context,
+            self.memory_context,
+            self.skill_context,
+        ]
+        .into_iter()
+        .filter(|context| context.is_some_and(|content| !content.trim().is_empty()))
+        .count()
+    }
+}
+
+fn non_empty_context(context: Option<&str>) -> Option<&str> {
+    context.filter(|content| !content.trim().is_empty())
 }
 
 fn render_tool_context(tools: &[VisibleTool], format: ToolCallFormat) -> Result<String> {
