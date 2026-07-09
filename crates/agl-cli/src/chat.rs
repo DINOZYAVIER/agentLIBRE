@@ -3,6 +3,7 @@ Commands:
   /help
   /session
   /workspace [PATH]
+  /reload
   /clear
   /exit
   /quit
@@ -12,6 +13,7 @@ Commands:
 pub(crate) enum ChatCommand {
     Help,
     Session,
+    Reload,
     Clear,
     Exit,
 }
@@ -34,6 +36,7 @@ pub(crate) fn parse_chat_input(input: &str) -> ParsedChatInput<'_> {
     match input {
         "/help" => ParsedChatInput::Command(ChatCommand::Help),
         "/session" => ParsedChatInput::Command(ChatCommand::Session),
+        "/reload" => ParsedChatInput::Command(ChatCommand::Reload),
         "/workspace" => ParsedChatInput::Workspace(None),
         command if command.starts_with("/workspace ") => {
             let path = command["/workspace ".len()..].trim();
@@ -63,6 +66,10 @@ mod tests {
         assert_eq!(
             parse_chat_input("/session"),
             ParsedChatInput::Command(ChatCommand::Session)
+        );
+        assert_eq!(
+            parse_chat_input("/reload"),
+            ParsedChatInput::Command(ChatCommand::Reload)
         );
         assert_eq!(
             parse_chat_input("/workspace"),

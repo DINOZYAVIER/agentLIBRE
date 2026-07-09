@@ -19,6 +19,7 @@ pub(crate) enum CliCommand {
     Config(ConfigCommand),
     Cron(CronCommand),
     Store(StoreCommand),
+    Function(FunctionCommand),
     Memory(MemoryCommand),
     Notes(NotesCommand),
     Repo(RepoCommand),
@@ -32,6 +33,7 @@ pub(crate) enum CliCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ConfigCommand {
     Paths,
+    Status(ConfigStatusOptions),
     Init { force: bool },
 }
 
@@ -40,6 +42,15 @@ pub(crate) enum StoreCommand {
     Status(StoreStatusOptions),
     Migrate(StoreMigrateOptions),
     Export(StoreExportCliOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FunctionCommand {
+    List(FunctionListOptions),
+    Show(FunctionShowOptions),
+    Status(FunctionStatusOptions),
+    Init(FunctionInitOptions),
+    Doctor(FunctionDoctorOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -215,6 +226,13 @@ pub(crate) enum SkillListSourceArg {
 pub(crate) struct SkillInitOptions {
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConfigStatusOptions {
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) json: bool,
+    pub(crate) strict: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -521,23 +539,57 @@ pub(crate) struct CronDeleteOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
+    pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) run_id: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
     pub(crate) session_id: Option<String>,
     pub(crate) no_history: bool,
     pub(crate) new_session: bool,
-    pub(crate) max_output_tokens: u32,
-    pub(crate) tool_mode: ToolAccessMode,
+    pub(crate) max_output_tokens: Option<u32>,
+    pub(crate) tool_mode: Option<ToolAccessMode>,
     pub(crate) skills: Vec<String>,
     pub(crate) memory: bool,
     pub(crate) prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionListOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionShowOptions {
+    pub(crate) reference: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionStatusOptions {
+    pub(crate) reference: String,
+    pub(crate) json: bool,
+    pub(crate) strict: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionInitOptions {
+    pub(crate) id: String,
+    pub(crate) workspace: bool,
+    pub(crate) model_profile: Option<String>,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FunctionDoctorOptions {
+    pub(crate) reference: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServeOptions {
     pub(crate) socket_path: Option<PathBuf>,
     pub(crate) config: Option<PathBuf>,
+    pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
     pub(crate) run_id: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
@@ -581,30 +633,19 @@ pub(crate) enum MemoryKindArg {
     WorkingNote,
 }
 
-impl ToolAccessMode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::Write => "write",
-            Self::Execute => "execute",
-            Self::Approve => "approve",
-            Self::Admin => "admin",
-        }
-    }
-}
-
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
             config: None,
+            function_ref: None,
             artifact_root: None,
             run_id: None,
             workspace_root: None,
             session_id: None,
             no_history: false,
             new_session: false,
-            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            tool_mode: ToolAccessMode::ReadOnly,
+            max_output_tokens: None,
+            tool_mode: None,
             skills: Vec::new(),
             memory: false,
             prompt: None,

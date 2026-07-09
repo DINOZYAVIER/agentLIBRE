@@ -27,6 +27,13 @@ mod help {
     pub(super) const CONFIG: &str = cli_help!("config");
     pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
     pub(super) const CONFIG_PATHS: &str = cli_help!("config/paths");
+    pub(super) const CONFIG_STATUS: &str = cli_help!("config/status");
+    pub(super) const FUNCTION: &str = cli_help!("function");
+    pub(super) const FUNCTION_DOCTOR: &str = cli_help!("function/doctor");
+    pub(super) const FUNCTION_INIT: &str = cli_help!("function/init");
+    pub(super) const FUNCTION_LIST: &str = cli_help!("function/list");
+    pub(super) const FUNCTION_SHOW: &str = cli_help!("function/show");
+    pub(super) const FUNCTION_STATUS: &str = cli_help!("function/status");
     pub(super) const CRON: &str = cli_help!("cron");
     pub(super) const CRON_ADD: &str = cli_help!("cron/add");
     pub(super) const CRON_DELETE: &str = cli_help!("cron/delete");
@@ -134,6 +141,12 @@ enum Commands {
         #[command(subcommand)]
         command: StoreCommands,
     },
+    /// Inspect and create agentFUNCTION artifacts.
+    #[command(long_about = help::FUNCTION)]
+    Function {
+        #[command(subcommand)]
+        command: FunctionCommands,
+    },
     /// Manage local scheduled AgentLIBRE jobs.
     #[command(long_about = help::CRON)]
     Cron {
@@ -195,6 +208,9 @@ enum ConfigCommands {
     /// Print resolved config, data, state, cache, log, and session paths.
     #[command(long_about = help::CONFIG_PATHS)]
     Paths,
+    /// Report runtime config, local inference profile, logs, and repair hints.
+    #[command(long_about = help::CONFIG_STATUS)]
+    Status(ConfigStatusArgs),
     /// Write a default runtime config.
     #[command(long_about = help::CONFIG_INIT)]
     Init {
@@ -215,6 +231,25 @@ enum StoreCommands {
     /// Export one store domain as JSONL records.
     #[command(long_about = help::STORE_EXPORT)]
     Export(StoreExportArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum FunctionCommands {
+    /// List workspace and global agentFUNCTIONs.
+    #[command(long_about = help::FUNCTION_LIST)]
+    List(FunctionListArgs),
+    /// Show one resolved agentFUNCTION.
+    #[command(long_about = help::FUNCTION_SHOW)]
+    Show(FunctionShowArgs),
+    /// Validate one agentFUNCTION without running inference.
+    #[command(long_about = help::FUNCTION_STATUS)]
+    Status(FunctionStatusArgs),
+    /// Create a starter agentFUNCTION.
+    #[command(long_about = help::FUNCTION_INIT)]
+    Init(FunctionInitArgs),
+    /// Validate and print doctor hints for one agentFUNCTION.
+    #[command(long_about = help::FUNCTION_DOCTOR)]
+    Doctor(FunctionDoctorArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -432,6 +467,21 @@ struct RepoInitArgs {
 }
 
 #[derive(Debug, Args)]
+struct ConfigStatusArgs {
+    /// Local inference config TOML path to inspect.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Treat missing or invalid runtime/inference config as a failure.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
 struct RepoImportProfileArgs {
     /// Local workspace profile manifest to apply.
     #[arg(long, value_name = "PATH")]
@@ -589,6 +639,69 @@ struct StoreExportArgs {
     /// Overwrite an existing output file.
     #[arg(long)]
     force: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FunctionListArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FunctionShowArgs {
+    /// Function id or path to FUNCTION.md.
+    #[arg(value_name = "ID_OR_PATH")]
+    reference: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FunctionStatusArgs {
+    /// Function id or path to FUNCTION.md.
+    #[arg(value_name = "ID_OR_PATH")]
+    reference: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+
+    /// Treat warnings as failures.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct FunctionInitArgs {
+    /// Function id.
+    #[arg(value_name = "ID")]
+    id: String,
+
+    /// Create the function in the current workspace .agl directory.
+    #[arg(long)]
+    workspace: bool,
+
+    /// Named inference profile to reference.
+    #[arg(long = "model-profile", value_name = "ID")]
+    model_profile: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct FunctionDoctorArgs {
+    /// Function id or path to FUNCTION.md.
+    #[arg(value_name = "ID_OR_PATH")]
+    reference: String,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -1171,6 +1284,10 @@ struct CommonRunArgs {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// agentFUNCTION id or path to load for this turn/session.
+    #[arg(long = "function", value_name = "ID_OR_PATH")]
+    function_ref: Option<String>,
+
     /// Inference artifact root directory.
     #[arg(long, value_name = "DIR")]
     artifact_root: Option<PathBuf>,
@@ -1184,12 +1301,12 @@ struct CommonRunArgs {
     workspace_root: Option<PathBuf>,
 
     /// Maximum response tokens.
-    #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_OUTPUT_TOKENS)]
-    max_output_tokens: u32,
+    #[arg(long, value_name = "N")]
+    max_output_tokens: Option<u32>,
 
     /// Filesystem tool access mode.
-    #[arg(long, value_enum, default_value_t = ToolAccessMode::ReadOnly)]
-    tool_mode: ToolAccessMode,
+    #[arg(long, value_enum)]
+    tool_mode: Option<ToolAccessMode>,
 
     /// Core or trusted workspace skill id to inject for this turn/session.
     #[arg(long = "skill", value_name = "ID")]
@@ -1280,9 +1397,17 @@ impl Cli {
             Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
             Some(Commands::Config { command }) => CliCommand::Config(match command {
                 ConfigCommands::Paths => ConfigCommand::Paths,
+                ConfigCommands::Status(args) => ConfigCommand::Status(ConfigStatusOptions {
+                    config: args.config,
+                    json: args.json,
+                    strict: args.strict,
+                }),
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
             Some(Commands::Store { command }) => CliCommand::Store(store_command(command)),
+            Some(Commands::Function { command }) => {
+                CliCommand::Function(function_command(command)?)
+            }
             Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
@@ -1488,6 +1613,48 @@ fn store_command(command: StoreCommands) -> StoreCommand {
             json: args.json,
         }),
     }
+}
+
+fn function_command(command: FunctionCommands) -> Result<FunctionCommand> {
+    Ok(match command {
+        FunctionCommands::List(args) => {
+            FunctionCommand::List(FunctionListOptions { json: args.json })
+        }
+        FunctionCommands::Show(args) => {
+            validate_prompt(&args.reference)?;
+            FunctionCommand::Show(FunctionShowOptions {
+                reference: args.reference,
+                json: args.json,
+            })
+        }
+        FunctionCommands::Status(args) => {
+            validate_prompt(&args.reference)?;
+            FunctionCommand::Status(FunctionStatusOptions {
+                reference: args.reference,
+                json: args.json,
+                strict: args.strict,
+            })
+        }
+        FunctionCommands::Init(args) => {
+            agl_functions::validate_function_id("function id", &args.id)?;
+            if let Some(profile) = &args.model_profile {
+                agl_functions::validate_function_id("model profile", profile)?;
+            }
+            FunctionCommand::Init(FunctionInitOptions {
+                id: args.id,
+                workspace: args.workspace,
+                model_profile: args.model_profile,
+                json: args.json,
+            })
+        }
+        FunctionCommands::Doctor(args) => {
+            validate_prompt(&args.reference)?;
+            FunctionCommand::Doctor(FunctionDoctorOptions {
+                reference: args.reference,
+                json: args.json,
+            })
+        }
+    })
 }
 
 fn cron_command(command: CronCommands) -> Result<CronCommand> {
@@ -1841,11 +2008,17 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
         config: args.common.config,
+        function_ref: args.common.function_ref,
         artifact_root: args.common.artifact_root,
         run_id: args.common.run_id,
         workspace_root: args.common.workspace_root,
-        max_output_tokens: validate_max_output_tokens(args.common.max_output_tokens)?,
-        tool_mode: args.common.tool_mode,
+        max_output_tokens: args
+            .common
+            .max_output_tokens
+            .map(validate_max_output_tokens)
+            .transpose()?
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+        tool_mode: args.common.tool_mode.unwrap_or(ToolAccessMode::ReadOnly),
         skills: validate_skill_ids(args.common.skills)?,
         memory: args.common.memory,
     })
@@ -1854,13 +2027,17 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
 fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
     Ok(RunOptions {
         config: common.config,
+        function_ref: common.function_ref,
         artifact_root: common.artifact_root,
         run_id: common.run_id,
         workspace_root: common.workspace_root,
         session_id: None,
         no_history: false,
         new_session: false,
-        max_output_tokens: validate_max_output_tokens(common.max_output_tokens)?,
+        max_output_tokens: common
+            .max_output_tokens
+            .map(validate_max_output_tokens)
+            .transpose()?,
         tool_mode: common.tool_mode,
         skills: validate_skill_ids(common.skills)?,
         memory: common.memory,
@@ -1995,6 +2172,11 @@ enum PublicCompletionCommands {
     Store {
         #[command(subcommand)]
         command: StoreCommands,
+    },
+    /// Inspect and create agentFUNCTION artifacts.
+    Function {
+        #[command(subcommand)]
+        command: FunctionCommands,
     },
     /// Manage local scheduled AgentLIBRE jobs.
     Cron {

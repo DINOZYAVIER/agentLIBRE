@@ -520,14 +520,11 @@ impl ChatSessionEvent {
 }
 
 fn create_new_session_dir(path: &Path) -> Result<()> {
-    match std::fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!("chat session already exists: {}", path.display())
-        }
-        Err(err) => Err(err)
-            .with_context(|| format!("failed to create chat session directory {}", path.display())),
+    if path.join("session.json").exists() {
+        bail!("chat session already exists: {}", path.display());
     }
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("failed to create chat session directory {}", path.display()))
 }
 
 fn write_new_json<T>(path: &Path, value: &T) -> Result<()>

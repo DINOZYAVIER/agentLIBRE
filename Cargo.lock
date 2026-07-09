@@ -63,6 +63,7 @@ dependencies = [
  "agl-assets",
  "agl-config",
  "agl-events",
+ "agl-functions",
  "agl-host-tools",
  "agl-inference",
  "agl-loop",
@@ -75,6 +76,7 @@ dependencies = [
  "agl-tools",
  "agl-turn",
  "anyhow",
+ "serde",
  "serde_json",
  "tracing",
 ]
@@ -85,8 +87,10 @@ version = "1.0.0-alpha.10"
 dependencies = [
  "agl-chat",
  "agl-client",
+ "agl-config",
  "agl-cron",
  "agl-daemon",
+ "agl-functions",
  "agl-memory",
  "agl-notes",
  "agl-protocol",
@@ -153,6 +157,18 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agl-functions"
+version = "1.0.0-alpha.10"
+dependencies = [
+ "agl-assets",
+ "agl-config",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

@@ -15,6 +15,8 @@ pub const VERIFICATION_VALIDATE_HOOK_ID: &str = "verification.validate";
 pub const COMMIT_MESSAGE_VALIDATE_HOOK_ID: &str = "commit_message.validate";
 pub const SKILL_MANIFEST_VALIDATE_HOOK_ID: &str = "skill_manifest.validate";
 pub const REVIEW_PACK_VALIDATE_HOOK_ID: &str = "review_pack.validate";
+pub const RUNTIME_IDENTITY_VALIDATE_HOOK_ID: &str = "runtime.identity.validate";
+pub const RUNTIME_IDENTITY_REQUIRE_HOOK_ID: &str = "runtime.identity.require";
 
 #[derive(Clone, Debug)]
 pub struct CoreGuards {
@@ -49,6 +51,10 @@ impl CoreGuards {
             COMMIT_MESSAGE_VALIDATE_HOOK_ID => validators::validate_commit_message(input),
             SKILL_MANIFEST_VALIDATE_HOOK_ID => validators::validate_skill_manifest(input),
             REVIEW_PACK_VALIDATE_HOOK_ID => validators::validate_review_pack(input),
+            RUNTIME_IDENTITY_VALIDATE_HOOK_ID => {
+                validators::validate_runtime_identity(input, false)
+            }
+            RUNTIME_IDENTITY_REQUIRE_HOOK_ID => validators::validate_runtime_identity(input, true),
             _ => validators::fail(
                 input.hook_id,
                 "unknown_hook",
@@ -76,6 +82,8 @@ pub fn declaration() -> ToolProviderDeclaration {
         COMMIT_MESSAGE_VALIDATE_HOOK_ID,
         SKILL_MANIFEST_VALIDATE_HOOK_ID,
         REVIEW_PACK_VALIDATE_HOOK_ID,
+        RUNTIME_IDENTITY_VALIDATE_HOOK_ID,
+        RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
     ] {
         declaration = declaration.with_hook(hook(id, HookEvent::ArtifactWrite, true));
     }
