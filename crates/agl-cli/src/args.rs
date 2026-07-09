@@ -1411,9 +1411,7 @@ impl Cli {
             Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
-            Some(Commands::Init(args)) => {
-                CliCommand::Repo(RepoCommand::Init(repo_init_options(args)?))
-            }
+            Some(Commands::Init(args)) => CliCommand::Init(repo_init_options(args)?),
             Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
             Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),

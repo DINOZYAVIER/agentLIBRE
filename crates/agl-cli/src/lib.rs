@@ -43,6 +43,7 @@ mod args;
 mod chat;
 mod config;
 mod function;
+mod init;
 mod memory;
 mod notes;
 mod repo;
@@ -60,6 +61,7 @@ use args::{
 use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
 use function::run_function;
+use init::run_init;
 use memory::run_memory;
 use notes::run_notes;
 use repo::run_repo;
@@ -193,6 +195,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Function(_)
+        | CliCommand::Init(_)
         | CliCommand::Store(_)
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
@@ -218,6 +221,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Cron(command) => run_cron(command, runtime),
         CliCommand::Store(command) => run_store(command, runtime),
         CliCommand::Function(command) => run_function(command, runtime),
+        CliCommand::Init(options) => run_init(options, runtime),
         CliCommand::Memory(command) => run_memory(command, runtime),
         CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),

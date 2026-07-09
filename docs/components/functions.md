@@ -12,12 +12,17 @@ future work.
 Create and inspect function artifacts:
 
 ```bash
+agl init
 agl function init coding --workspace
 agl function list
 agl function show coding
 agl function status coding
 agl function doctor coding
 ```
+
+Top-level `agl init` creates the workspace function root and reports packaged
+builtin functions. Use `agl function init` only when creating a custom
+workspace or global function.
 
 Run or chat with a function:
 
