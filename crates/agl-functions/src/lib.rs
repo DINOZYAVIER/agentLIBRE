@@ -156,17 +156,17 @@ impl AgentFunctionFrontMatter {
             .and_then(|runtime| runtime.max_output_tokens)
     }
 
-    pub fn selected_skills(&self) -> Vec<String> {
+    pub fn selected_skills(&self) -> &[String] {
         self.skills
             .as_ref()
-            .map(|skills| skills.use_.clone())
+            .map(|skills| skills.use_.as_slice())
             .unwrap_or_default()
     }
 
-    pub fn selected_subagents(&self) -> Vec<String> {
+    pub fn selected_subagents(&self) -> &[String] {
         self.subagents
             .as_ref()
-            .map(|subagents| subagents.use_.clone())
+            .map(|subagents| subagents.use_.as_slice())
             .unwrap_or_default()
     }
 
@@ -968,7 +968,7 @@ pub fn function_status(
             Err(err) => report.errors.push(format!("{err:#}")),
         }
     }
-    report.skills = loaded.front_matter.selected_skills();
+    report.skills = loaded.front_matter.selected_skills().to_vec();
     report.subagents = loaded
         .subagents
         .iter()
@@ -1134,7 +1134,7 @@ fn runtime_function_from_loaded(
         inference_config_toml: loaded.inference_config_toml.clone(),
         tool_mode: loaded.front_matter.runtime_tool_mode(),
         max_output_tokens: loaded.front_matter.runtime_max_output_tokens(),
-        skills: loaded.front_matter.selected_skills(),
+        skills: loaded.front_matter.selected_skills().to_vec(),
         memory_enabled: loaded.front_matter.enables_memory_context(),
         system_prompt_path: loaded.system_prompt_path.clone(),
         identity_contract: loaded.front_matter.identity_contract(),
@@ -1246,7 +1246,7 @@ fn load_declared_subagents(
 ) -> Result<Vec<LoadedSubagent>> {
     let mut subagents = Vec::new();
     for subagent_id in front_matter.selected_subagents() {
-        validate_function_id("subagent id", &subagent_id)?;
+        validate_function_id("subagent id", subagent_id)?;
         let path = function_root
             .join("subagents")
             .join(format!("{subagent_id}.md"));
@@ -1261,7 +1261,7 @@ fn load_declared_subagents(
             .with_context(|| format!("failed to parse subagent {}", path.display()))?;
         front_matter.validate()?;
         ensure!(
-            front_matter.id == subagent_id,
+            front_matter.id == *subagent_id,
             "subagent id `{}` does not match declared id `{subagent_id}`",
             front_matter.id
         );

@@ -335,11 +335,7 @@ fn repairs_answer_when_required_hook_requests_repair() {
         host.request_kinds(),
         ["generate", "run_hooks", "generate", "run_hooks"]
     );
-    assert!(
-        host.transition_kinds()
-            .iter()
-            .any(|transition| *transition == "prepare_repair")
-    );
+    assert!(host.transition_kinds().contains(&"prepare_repair"));
     assert_eq!(
         host.turn_messages,
         vec![
