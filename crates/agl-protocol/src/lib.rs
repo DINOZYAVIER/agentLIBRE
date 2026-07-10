@@ -399,7 +399,7 @@ pub enum TranscriptEvent {
         message_id: MessageId,
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<String>,
+        data: Option<serde_json::Value>,
     },
     ModelAttemptLinked {
         run_id: RunId,
@@ -584,7 +584,7 @@ mod tests {
                         turn_id: turn_id(),
                         message_id: message_id(MESSAGE_ID_3),
                         name: "fs.read".to_string(),
-                        content: None,
+                        data: None,
                     },
                     TranscriptEvent::ModelAttemptLinked {
                         run_id: run_id(),

@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 use agl_functions::{
     FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionSource,
-    FunctionStatusReport, LoadedFunction, function_status, global_functions_root, list_functions,
-    load_function, resolve_function_reference, workspace_functions_root,
+    FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status,
+    global_functions_root, list_functions, load_function, resolve_function_reference,
+    workspace_functions_root,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail};
@@ -266,6 +267,8 @@ fn print_loaded_function(function: &LoadedFunction) {
     if let Some(max_output_tokens) = function.front_matter.runtime_max_output_tokens() {
         println!("function.runtime.max_output_tokens={max_output_tokens}");
     }
+    let tool_policy = function.front_matter.tool_policy();
+    print_function_tool_policy(tool_policy.as_ref());
     println!(
         "function.system_path={}",
         function.system_prompt_path.display()
@@ -330,6 +333,9 @@ fn print_function_status_report(report: &FunctionStatusReport) {
     if let Some(model_exists) = report.inference_model_exists {
         println!("function.model.exists={model_exists}");
     }
+    if report.id.is_some() {
+        print_function_tool_policy(report.tool_policy.as_ref());
+    }
     for skill in &report.skills {
         println!("function.skill={skill}");
     }
@@ -350,6 +356,32 @@ fn print_function_status_report(report: &FunctionStatusReport) {
     for next_step in &report.next_steps {
         println!("next_step={next_step}");
     }
+}
+
+fn print_function_tool_policy(policy: Option<&FunctionToolPolicy>) {
+    let Some(policy) = policy else {
+        println!("function.tools.policy=inherit");
+        return;
+    };
+    println!("function.tools.policy=explicit");
+    println!(
+        "function.tools.allow={}",
+        policy
+            .allow
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!(
+        "function.tools.deny={}",
+        policy
+            .deny
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 }
 
 fn function_template(id: &str, model_profile: Option<&str>) -> String {

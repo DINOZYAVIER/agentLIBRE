@@ -167,7 +167,7 @@ impl ChatService {
     pub fn clear_context(&mut self) -> Result<usize> {
         let cleared_messages = self.messages.len();
         self.messages.clear();
-        self.loop_host.session_mut().clear_context();
+        self.loop_host.clear_context()?;
         if let Some(history) = &mut self.chat_history {
             history.append_context_cleared()?;
         }
@@ -486,19 +486,19 @@ fn record_completed_turn_messages(
                     history.append_assistant_tool_call(envelope)?;
                 }
             }
-            TurnMessage::ToolObservation { name, content } => {
+            TurnMessage::ToolObservation { name, result } => {
                 let message_id = MessageId::generate();
-                log_message_metadata(
+                log_action_result_metadata(
                     "tool",
                     recording.session_id,
                     &message_id,
-                    content,
+                    result,
                     recording.runtime,
                 );
                 let envelope = loop_host.append_runtime_event(RuntimeEvent::ToolMessage {
                     message_id,
                     name: name.clone(),
-                    content: content.clone(),
+                    data: result.data.clone(),
                 })?;
                 if let Some(history) = chat_history.as_mut() {
                     history.append_tool_message(envelope)?;
@@ -535,7 +535,7 @@ pub fn stopped_turn_context_message(
     let available = render_available_tool_names(available_tools);
     let permission_recovery = if available_tools
         .iter()
-        .any(|tool| tool.name == "permissions.request")
+        .any(|tool| tool.id.as_str() == "permissions.request")
     {
         "request exact tool access with `permissions.request`, or answer with the CLI/daemon path"
     } else {
@@ -575,7 +575,7 @@ fn render_available_tool_names(tools: &[VisibleTool]) -> String {
     }
     tools
         .iter()
-        .map(|tool| format!("`{}`", tool.name))
+        .map(|tool| format!("`{}`", tool.id))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -608,10 +608,10 @@ pub fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
                     name: name.clone(),
                     arguments: arguments.clone(),
                 }),
-                RuntimeEvent::ToolMessage { name, content, .. } => {
+                RuntimeEvent::ToolMessage { name, data, .. } => {
                     messages.push(TurnMessage::ToolObservation {
                         name: name.clone(),
-                        content: content.clone(),
+                        result: agl_capabilities::ActionResult::new(data.clone()),
                     });
                 }
                 _ => {}
@@ -642,10 +642,33 @@ fn log_message_metadata(
     );
 }
 
+fn log_action_result_metadata(
+    role: &str,
+    session_id: &SessionId,
+    message_id: &MessageId,
+    result: &agl_capabilities::ActionResult,
+    runtime: &AgentLibreRuntimeConfig,
+) {
+    let data_bytes = serde_json::to_vec(&result.data)
+        .expect("serializing an action result JSON value cannot fail")
+        .len();
+    let data = runtime.logging.include_message_text.then_some(&result.data);
+    tracing::info!(
+        target: "agentlibre::app",
+        session_id = %session_id,
+        message_id = %message_id,
+        role,
+        data_bytes,
+        data = ?data,
+        "chat action result recorded"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use agl_capabilities::{CapabilityId, DispatchDenialCode};
     use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus};
     use agl_ids::{EventId, MessageId, RequestId, RunId, SessionId, TurnId};
     use agl_loop::AgentLoopHost;
@@ -673,6 +696,12 @@ mod tests {
 
     fn request_id() -> RequestId {
         RequestId::parse(TEST_REQUEST_ID).unwrap()
+    }
+
+    fn visible_tool(id: &str) -> VisibleTool {
+        let catalog = crate::tools::chat_extension_catalog().unwrap();
+        let id = agl_capabilities::CapabilityId::new(id).unwrap();
+        VisibleTool::from_declaration(catalog.action(&id).unwrap())
     }
 
     fn message_id(last_hex: char) -> MessageId {
@@ -838,6 +867,77 @@ tool_call_format = "hermes_json"
     }
 
     #[test]
+    fn active_turn_rejects_runtime_refresh_and_keeps_its_policy_snapshot() {
+        let mut chat = test_chat_service("frozen-policy");
+        let run_id = run_id();
+        let turn_id = turn_id();
+        let session_id = chat.service.session_id().clone();
+        chat.service
+            .loop_host
+            .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
+            .unwrap();
+        let policy_hash = chat.service.loop_host.active_policy_hash().unwrap().clone();
+
+        let reload_error = chat.service.loop_host.reload_runtime_context().unwrap_err();
+        let workspace_error = chat
+            .service
+            .loop_host
+            .set_workspace_root(chat.root.join("other"))
+            .unwrap_err();
+
+        assert!(reload_error.to_string().contains("active turn"));
+        assert!(workspace_error.to_string().contains("active turn"));
+        assert_eq!(
+            chat.service.loop_host.active_policy_hash(),
+            Some(&policy_hash)
+        );
+    }
+
+    #[test]
+    fn short_circuited_invalid_call_records_safe_denial_without_raw_name() {
+        let mut chat = test_chat_service("invalid-call-denial");
+        let run_id = run_id();
+        let turn_id = turn_id();
+        let session_id = chat.service.session_id().clone();
+        chat.service
+            .loop_host
+            .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
+            .unwrap();
+        let policy_hash = chat
+            .service
+            .loop_host
+            .active_policy_hash()
+            .unwrap()
+            .as_str()
+            .to_string();
+
+        let raw_name = "model-controlled-secret\ninvalid-capability";
+        AgentLoopHost::record_capability_denial(
+            &mut chat.service.loop_host,
+            CapabilityId::new(raw_name.to_string()).ok(),
+            DispatchDenialCode::InvalidArguments,
+        )
+        .unwrap();
+
+        let events = chat.service.loop_host.take_runtime_events().unwrap();
+        let denial = events
+            .iter()
+            .find_map(|event| match &event.payload {
+                SafeRuntimeEvent::CapabilityCallDenied {
+                    policy_hash,
+                    capability_id,
+                    reason_code,
+                } => Some((policy_hash, capability_id, reason_code)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(denial.0, &policy_hash);
+        assert_eq!(denial.1, &None);
+        assert_eq!(denial.2, DispatchDenialCode::InvalidArguments.as_str());
+        assert!(!serde_json::to_string(&events).unwrap().contains(raw_name));
+    }
+
+    #[test]
     fn failed_output_retains_runtime_events_and_ends_with_failed_terminal() {
         let mut chat = test_chat_service("failed-output");
         let run_id = run_id();
@@ -975,7 +1075,7 @@ tool_call_format = "hermes_json"
                     RuntimeEvent::ToolMessage {
                         message_id: message_id('7'),
                         name: "read_file".to_string(),
-                        content: "content".to_string(),
+                        data: serde_json::json!({"content": "content"}),
                     },
                 ),
             ],
@@ -996,7 +1096,9 @@ tool_call_format = "hermes_json"
                 },
                 TurnMessage::ToolObservation {
                     name: "read_file".to_string(),
-                    content: "content".to_string()
+                    result: agl_capabilities::ActionResult::new(
+                        serde_json::json!({"content": "content"})
+                    )
                 }
             ]
         );
@@ -1053,11 +1155,7 @@ tool_call_format = "hermes_json"
                 .with_required_hook(agl_loop::HookId::new("task_spec.validate").unwrap()),
         ];
 
-        let visible_tools = vec![
-            VisibleTool::new("fs.read")
-                .describe("Read a repository file")
-                .require_argument("path"),
-        ];
+        let visible_tools = vec![visible_tool("fs.read")];
 
         let input = build_turn_input(TurnInputSpec {
             run_id: &run_id,
@@ -1135,9 +1233,9 @@ tool_call_format = "hermes_json"
     #[test]
     fn stopped_turn_context_message_explains_no_tool_execution() {
         let visible_tools = vec![
-            VisibleTool::new("fs.list"),
-            VisibleTool::new("fs.read"),
-            VisibleTool::new("fs.search"),
+            visible_tool("fs.list"),
+            visible_tool("fs.read"),
+            visible_tool("fs.search"),
         ];
         for reason in [
             StopReason::ToolJsonUnrepairable,
@@ -1155,9 +1253,9 @@ tool_call_format = "hermes_json"
     #[test]
     fn hidden_tool_stop_message_names_rejected_tool_and_recovery() {
         let visible_tools = vec![
-            VisibleTool::new("fs.list"),
-            VisibleTool::new("fs.read"),
-            VisibleTool::new("fs.search"),
+            visible_tool("fs.list"),
+            visible_tool("fs.read"),
+            visible_tool("fs.search"),
         ];
         let message = stopped_turn_context_message(
             StopReason::HiddenTool,
@@ -1177,9 +1275,9 @@ tool_call_format = "hermes_json"
     #[test]
     fn hidden_tool_stop_message_mentions_permission_request_when_visible() {
         let visible_tools = vec![
-            VisibleTool::new("fs.list"),
-            VisibleTool::new("permissions.request"),
-            VisibleTool::new("permissions.status"),
+            visible_tool("fs.list"),
+            visible_tool("permissions.request"),
+            visible_tool("permissions.status"),
         ];
         let message = stopped_turn_context_message(
             StopReason::HiddenTool,

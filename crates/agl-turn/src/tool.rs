@@ -1,3 +1,4 @@
+use agl_capabilities::{ActionResult, CapabilityId};
 use agl_ids::{RunId, TurnId};
 use serde_json::Value;
 
@@ -5,11 +6,11 @@ use serde_json::Value;
 pub struct ToolDispatchRequest {
     pub run_id: RunId,
     pub turn_id: TurnId,
-    pub name: String,
+    pub capability_id: CapabilityId,
     pub arguments: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolDispatchResponse {
-    pub observation: String,
+    pub result: ActionResult,
 }

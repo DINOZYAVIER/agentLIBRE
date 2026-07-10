@@ -8,12 +8,12 @@ pub use envelope::{
     EventScopeBuilder, EventScopeError,
 };
 pub use payload::{
-    HookResultEvent, JsonMetadata, RuntimeEvent, RuntimeEventEnvelope, SafeRuntimeEvent,
-    SafeRuntimeEventEnvelope,
+    CapabilityExclusionEvent, HookResultEvent, JsonMetadata, RuntimeEvent, RuntimeEventEnvelope,
+    SafeRuntimeEvent, SafeRuntimeEventEnvelope,
 };
 pub use taxonomy::{
-    HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent, StopReasonEvent,
-    ToolJsonMalformedKind, TurnFinishStatus,
+    HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent, SafeParsedActionEvent,
+    StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
 };
 pub use writer::{EventAppender, RuntimeEventWriter};
 

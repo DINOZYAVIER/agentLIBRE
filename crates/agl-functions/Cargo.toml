@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 agl-assets.workspace = true
+agl-capabilities.workspace = true
 agl-config.workspace = true
 anyhow.workspace = true
 serde.workspace = true

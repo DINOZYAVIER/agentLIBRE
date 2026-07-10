@@ -1,4 +1,4 @@
-use agl_tools::{HookEvent, HookId, HookInput, HookMessage, HookResult, HookStatus};
+use agl_capabilities::{HookEvent, HookId, HookInput, HookMessage, HookResult, HookStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::process::{ProcessOutput, ScriptHookProcessError};

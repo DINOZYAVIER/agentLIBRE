@@ -81,7 +81,7 @@ pub enum ChatSessionTransition {
         turn_id: TurnId,
         message_id: MessageId,
         name: String,
-        content: String,
+        data: serde_json::Value,
     },
     ClearContext,
     FinishSession {

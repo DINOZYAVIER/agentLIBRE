@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::ids::HookId;
+use crate::HookId;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,34 +35,39 @@ pub enum HookStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookMessage {
     pub code: String,
     pub message: String,
     pub fix: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookInput {
     pub hook_id: HookId,
     pub event: HookEvent,
-    pub payload: serde_json::Value,
+    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookResult {
     pub hook_id: HookId,
     pub status: HookStatus,
     pub messages: Vec<HookMessage>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookBatchRequest {
     pub event: HookEvent,
     pub hooks: Vec<HookId>,
-    pub payload: serde_json::Value,
+    pub payload: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookBatchResult {
     pub event: HookEvent,
     pub results: Vec<HookResult>,

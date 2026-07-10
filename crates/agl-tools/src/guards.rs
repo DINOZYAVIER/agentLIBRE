@@ -1,7 +1,8 @@
-use crate::{
-    HookDeclaration, HookEvent, HookId, HookInput, HookResult, ToolCatalog, ToolCatalogError,
-    ToolProviderDeclaration, ToolProviderId,
+use agl_capabilities::{
+    HookDeclaration, HookEvent, HookId, HookInput, HookResult, ProviderDeclaration, ProviderId,
 };
+
+use crate::{ToolCatalog, ToolCatalogError};
 
 mod validators;
 
@@ -20,7 +21,7 @@ pub const RUNTIME_IDENTITY_REQUIRE_HOOK_ID: &str = "runtime.identity.require";
 
 #[derive(Clone, Debug)]
 pub struct CoreGuards {
-    declaration: ToolProviderDeclaration,
+    declaration: ProviderDeclaration,
 }
 
 impl Default for CoreGuards {
@@ -36,7 +37,7 @@ impl CoreGuards {
         Self::default()
     }
 
-    pub fn declaration(&self) -> &ToolProviderDeclaration {
+    pub fn declaration(&self) -> &ProviderDeclaration {
         &self.declaration
     }
 
@@ -65,9 +66,9 @@ impl CoreGuards {
     }
 }
 
-pub fn declaration() -> ToolProviderDeclaration {
-    let mut declaration = ToolProviderDeclaration::new(
-        ToolProviderId::new(PROVIDER_ID).expect("core guard provider id is valid"),
+pub fn declaration() -> ProviderDeclaration {
+    let mut declaration = ProviderDeclaration::builtin(
+        ProviderId::new(PROVIDER_ID).expect("core guard provider id is valid"),
         "Core Guards",
         env!("CARGO_PKG_VERSION"),
     )

@@ -1,5 +1,8 @@
 use crate::*;
-use agl_events::RuntimeEvent;
+use agl_capabilities::{
+    ActionDeclaration, ActionResult, CapabilityId, DispatchDenialCode, OperationKind,
+};
+use agl_events::{RuntimeEvent, SafeRuntimeEvent};
 use agl_ids::{RunId, TurnId};
 use anyhow::{Result, anyhow};
 use serde_json::json;
@@ -34,6 +37,7 @@ struct FakeHost {
     dispatches: Vec<ToolDispatchRequest>,
     hook_requests: Vec<HookBatchRequest>,
     turn_messages: Vec<TurnMessage>,
+    denials: Vec<(Option<CapabilityId>, DispatchDenialCode)>,
 }
 
 impl FakeHost {
@@ -87,6 +91,15 @@ impl FakeHost {
 }
 
 impl AgentLoopHost for FakeHost {
+    fn record_capability_denial(
+        &mut self,
+        capability_id: Option<CapabilityId>,
+        code: DispatchDenialCode,
+    ) -> Result<()> {
+        self.denials.push((capability_id, code));
+        Ok(())
+    }
+
     fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
         self.requests.push("run_hooks");
         self.operations
@@ -112,7 +125,9 @@ impl AgentLoopHost for FakeHost {
         self.operations.push("dispatch_tool".to_string());
         self.dispatches.push(request);
         match self.tool_results.remove(0) {
-            FakeToolResult::Observation(observation) => Ok(ToolDispatchResponse { observation }),
+            FakeToolResult::Observation(observation) => Ok(ToolDispatchResponse {
+                result: ActionResult::new(json!({"observation": observation})),
+            }),
             FakeToolResult::Error(message) => Err(anyhow!(message)),
         }
     }
@@ -148,7 +163,20 @@ fn turn_input(user_input: impl Into<String>) -> TurnInput {
 }
 
 fn read_file_tool() -> VisibleTool {
-    VisibleTool::new("read_file").require_argument("path")
+    let declaration = ActionDeclaration::new(
+        CapabilityId::new("read_file").unwrap(),
+        "Read a file",
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        OperationKind::Read,
+    )
+    .unwrap();
+    VisibleTool::from_declaration(&declaration)
 }
 
 fn tool_call(path: &str) -> String {
@@ -556,7 +584,7 @@ fn runs_one_tool_then_answers_with_observation() {
     );
     assert_eq!(host.dispatches[0].run_id, run_id());
     assert_eq!(host.dispatches[0].turn_id, turn_id());
-    assert_eq!(host.dispatches[0].name, "read_file");
+    assert_eq!(host.dispatches[0].capability_id.as_str(), "read_file");
     assert_eq!(host.dispatches[0].arguments, json!({"path": "README.MD"}));
     assert_eq!(
         host.turn_messages,
@@ -570,7 +598,7 @@ fn runs_one_tool_then_answers_with_observation() {
             },
             TurnMessage::ToolObservation {
                 name: "read_file".to_string(),
-                content: "agentLIBRE readme".to_string(),
+                result: ActionResult::new(json!({"observation": "agentLIBRE readme"})),
             },
             TurnMessage::Assistant {
                 content: "README says agentLIBRE.".to_string(),
@@ -702,6 +730,7 @@ fn stops_before_dispatch_when_tool_limit_is_reached() {
     );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
+    assert!(host.denials.is_empty());
     assert_eq!(
         host.event_kinds(),
         [
@@ -715,6 +744,40 @@ fn stops_before_dispatch_when_tool_limit_is_reached() {
             "turn.finished",
         ]
     );
+}
+
+#[test]
+fn invalid_model_controlled_capability_name_is_absent_from_safe_events() {
+    let secret_name = "SECRET invalid capability name";
+    let mut host = FakeHost::default().with_model_response(format!(
+        r#"<tool_call>{{"name":"{secret_name}","arguments":{{}}}}</tool_call>"#
+    ));
+    let input = turn_input("try hidden")
+        .with_visible_tool(read_file_tool())
+        .with_max_tool_calls(1);
+
+    let output = run_turn(&mut host, input).unwrap();
+
+    assert!(matches!(
+        output,
+        TurnOutput::Stopped {
+            reason: StopReason::HiddenTool,
+            ..
+        }
+    ));
+    assert!(host.dispatches.is_empty());
+    assert_eq!(
+        host.denials,
+        [(None, DispatchDenialCode::CapabilityNotEffective)]
+    );
+    let safe_json = host
+        .events
+        .iter()
+        .map(SafeRuntimeEvent::from)
+        .map(|event| serde_json::to_string(&event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!safe_json.contains(secret_name), "{safe_json}");
 }
 
 #[test]
@@ -739,6 +802,13 @@ fn rejects_hidden_tool_before_dispatch() {
     );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
+    assert_eq!(
+        host.denials,
+        [(
+            Some(CapabilityId::new("write_file").unwrap()),
+            DispatchDenialCode::CapabilityNotEffective,
+        )]
+    );
     assert_eq!(
         host.event_kinds(),
         [
@@ -771,12 +841,19 @@ fn validates_tool_args_before_dispatch() {
             reason: StopReason::InvalidToolArguments,
             detail: Some(StopDetail::InvalidToolArguments {
                 name: "read_file".to_string(),
-                message: "missing required argument `path`".to_string()
+                message: "action arguments failed schema validation; /: Additional properties are not allowed ('other' was unexpected); /: \"path\" is a required property".to_string()
             })
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);
     assert!(host.dispatches.is_empty());
+    assert_eq!(
+        host.denials,
+        [(
+            Some(CapabilityId::new("read_file").unwrap()),
+            DispatchDenialCode::InvalidArguments,
+        )]
+    );
     assert_eq!(
         host.event_kinds(),
         [

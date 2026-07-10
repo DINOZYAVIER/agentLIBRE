@@ -33,10 +33,11 @@ pub enum RenderedMessageRole {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderedTool {
     pub name: String,
     pub description: String,
-    pub required_arguments: Vec<String>,
+    pub input_schema: serde_json::Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,9 +61,9 @@ pub fn render_model_request(
         .visible_tools
         .iter()
         .map(|tool| RenderedTool {
-            name: tool.name.clone(),
+            name: tool.id.as_str().to_string(),
             description: tool.description.clone(),
-            required_arguments: tool.required_arguments.clone(),
+            input_schema: tool.input_schema.clone(),
         })
         .collect();
 
@@ -100,9 +101,9 @@ fn render_message(
         TurnMessage::AssistantToolCall { name, arguments } => {
             render_assistant_tool_call(name, arguments, tool_call_format)
         }
-        TurnMessage::ToolObservation { name, content } => Ok(rendered_text_message(
+        TurnMessage::ToolObservation { name, result } => Ok(rendered_text_message(
             RenderedMessageRole::Tool,
-            content.clone(),
+            result.render_observation(),
             Some(name.clone()),
         )),
     }

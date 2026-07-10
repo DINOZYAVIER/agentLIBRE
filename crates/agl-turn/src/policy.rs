@@ -1,7 +1,5 @@
+use crate::{StopDetail, StopReason, ToolDispatchRequest, TurnState};
 use agl_actions::ToolCall;
-use serde_json::Value;
-
-use crate::{StopDetail, StopReason, ToolDispatchRequest, TurnState, VisibleTool};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolCallDecision {
@@ -50,7 +48,7 @@ pub fn decide_tool_call(state: &TurnState, tool_call: &ToolCall) -> ToolCallDeci
         .input
         .visible_tools
         .iter()
-        .find(|tool| tool.name == tool_call.name)
+        .find(|tool| tool.id.as_str() == tool_call.name)
     else {
         return ToolCallDecision::Stop(ToolCallStop::HiddenTool {
             name: tool_call.name.clone(),
@@ -67,24 +65,17 @@ pub fn decide_tool_call(state: &TurnState, tool_call: &ToolCall) -> ToolCallDeci
     ToolCallDecision::Dispatch(ToolDispatchRequest {
         run_id: state.input.run_id.clone(),
         turn_id: state.input.turn_id.clone(),
-        name: tool_call.name.clone(),
+        capability_id: visible_tool.id.clone(),
         arguments: tool_call.arguments.clone(),
     })
 }
 
 fn validate_tool_arguments(
-    tool: &VisibleTool,
-    arguments: &Value,
+    tool: &crate::VisibleTool,
+    arguments: &serde_json::Value,
 ) -> std::result::Result<(), String> {
-    let Some(object) = arguments.as_object() else {
-        return Err("tool arguments must be an object".to_string());
-    };
-
-    for required in &tool.required_arguments {
-        if !object.contains_key(required) {
-            return Err(format!("missing required argument `{required}`"));
-        }
-    }
-
-    Ok(())
+    tool.compile_schema()
+        .map_err(|error| error.to_string())?
+        .validate(arguments)
+        .map_err(|error| error.to_string())
 }

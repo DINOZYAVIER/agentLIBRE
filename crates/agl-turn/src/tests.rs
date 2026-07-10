@@ -1,4 +1,5 @@
 use agl_actions::ToolCall;
+use agl_capabilities::{ActionDeclaration, ActionResult, CapabilityId, OperationKind};
 use agl_ids::{RunId, TurnId};
 use serde_json::json;
 
@@ -25,7 +26,20 @@ fn test_machine() -> TurnMachine {
 }
 
 fn read_file_tool() -> VisibleTool {
-    VisibleTool::new("read_file").require_argument("path")
+    let declaration = ActionDeclaration::new(
+        CapabilityId::new("read_file").unwrap(),
+        "Read a file",
+        json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        OperationKind::Read,
+    )
+    .unwrap();
+    VisibleTool::from_declaration(&declaration)
 }
 
 fn tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
@@ -151,7 +165,7 @@ fn hook_batch_summary_serializes_without_hook_message_content() {
 }
 
 #[test]
-fn policy_dispatches_visible_tool_with_required_arguments() {
+fn policy_dispatches_visible_tool_with_schema_validated_arguments() {
     let state = TurnState::new(
         test_input("read README")
             .with_visible_tool(read_file_tool())
@@ -168,7 +182,7 @@ fn policy_dispatches_visible_tool_with_required_arguments() {
         ToolCallDecision::Dispatch(ToolDispatchRequest {
             run_id: run_id(),
             turn_id: turn_id(),
-            name: "read_file".to_string(),
+            capability_id: CapabilityId::new("read_file").unwrap(),
             arguments: json!({"path": "README.MD"}),
         })
     );
@@ -224,18 +238,18 @@ fn policy_stops_invalid_tool_arguments_before_dispatch() {
         decision,
         ToolCallDecision::Stop(ToolCallStop::InvalidArguments {
             name: "read_file".to_string(),
-            message: "missing required argument `path`".to_string(),
+            message: "action arguments failed schema validation; /: Additional properties are not allowed ('other' was unexpected); /: \"path\" is a required property".to_string(),
         })
     );
 }
 
 #[test]
-fn append_tool_observation_records_assistant_tool_pair() {
+fn append_tool_result_records_assistant_tool_pair() {
     let mut state = TurnState::new(test_input("read README"));
 
-    state.append_tool_observation(
+    state.append_tool_result(
         tool_call("read_file", json!({"path": "README.MD"})),
-        "agentLIBRE readme".to_string(),
+        ActionResult::new(json!({"text": "agentLIBRE readme"})),
     );
 
     assert_eq!(state.tool_call_count, 1);
@@ -251,7 +265,7 @@ fn append_tool_observation_records_assistant_tool_pair() {
         state.messages[2],
         TurnMessage::ToolObservation {
             name: "read_file".to_string(),
-            content: "agentLIBRE readme".to_string(),
+            result: ActionResult::new(json!({"text": "agentLIBRE readme"})),
         }
     );
 }
@@ -371,7 +385,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
         &mut machine,
         TurnTransition::FinishToolCall {
             name: "read_file".to_string(),
-            observation: "readme".to_string(),
+            result: ActionResult::new(json!({"text": "readme"})),
         },
     );
 
@@ -380,7 +394,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
             &mut machine,
             TurnTransition::AppendObservation {
                 name: "read_file".to_string(),
-                observation: "readme".to_string(),
+                result: ActionResult::new(json!({"text": "readme"})),
             },
         ),
         TurnPhase::ObservationAppended
