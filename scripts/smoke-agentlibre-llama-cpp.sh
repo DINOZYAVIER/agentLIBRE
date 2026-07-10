@@ -70,7 +70,7 @@ inference_log="$AGL_HOME/state/logs/inference.log"
 session_transcript="$AGL_HOME/data/sessions/$chat_session_id/transcript.jsonl"
 mkdir -p "$artifact_root"
 
-"$agl_bin" run \
+"$agl_bin" inference run \
   --config "$config" \
   --run-id "$infer_run_id" \
   --max-output-tokens 32 \
@@ -80,17 +80,19 @@ mkdir -p "$artifact_root"
 infer_response="$(attempt_file "$infer_root" "$infer_run_id" 1 response.json)"
 infer_runtime_log="$(attempt_file "$infer_root" "$infer_run_id" 1 runtime.log)"
 infer_events="$(events_file "$infer_root" "$infer_run_id")"
+infer_function_evidence="$infer_root/inference-runs/$infer_run_id/function-resolution.json"
 infer_content="$(json_content "$infer_response")"
 [[ "$infer_content" == "agentLIBRE ok" ]] || fail "infer returned: $infer_content"
 require_contains "$infer_events" '"backend":"llama_cpp"'
 require_contains "$infer_runtime_log" "selected_device = $device"
 require_contains "$infer_runtime_log" "load_tensors: offloaded"
+[[ ! -e "$infer_function_evidence" ]] || fail "raw inference run wrote function evidence"
 
 printf '%s\n%s\n%s\n' \
   "Reply with one short sentence." \
   "Reply with another short sentence." \
   "/exit" \
-  | "$agl_bin" chat \
+  | "$agl_bin" inference chat \
       --config "$config" \
       --run-id "$chat_run_id" \
       --session-id "$chat_session_id" \
@@ -102,6 +104,7 @@ chat_response_2="$(attempt_file "$chat_root" "$chat_run_id" 2 response.json)"
 chat_runtime_log_1="$(attempt_file "$chat_root" "$chat_run_id" 1 runtime.log)"
 chat_runtime_log_2="$(attempt_file "$chat_root" "$chat_run_id" 2 runtime.log)"
 chat_events="$(events_file "$chat_root" "$chat_run_id")"
+chat_function_evidence="$chat_root/inference-runs/$chat_run_id/function-resolution.json"
 
 reject_generated_continuation "$chat_response_1"
 reject_generated_continuation "$chat_response_2"
@@ -116,6 +119,7 @@ require_contains "$session_transcript" '"kind":"user_message"'
 require_contains "$session_transcript" '"kind":"assistant_message"'
 require_contains "$app_log" "chat session started"
 require_contains "$inference_log" "llama.cpp inference attempt succeeded"
+[[ ! -e "$chat_function_evidence" ]] || fail "raw inference chat wrote function evidence"
 
 echo "AGL_HOME: $AGL_HOME"
 echo "config path: $config"
