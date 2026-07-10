@@ -1,21 +1,21 @@
 pub mod cron;
 pub mod fs;
 pub mod guards;
-mod hook;
-mod ids;
 pub mod matrix;
 pub mod matrix_delivery;
 pub mod memory;
 pub mod notes;
 pub mod permissions;
-mod provider;
 mod registry;
 pub mod repo;
 pub mod skills;
 pub mod store;
 #[cfg(test)]
 mod test_support;
-mod tool;
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use serde_json::Value;
 
 pub use cron::{
     CRON_ADD_TOOL_ID, CRON_DELETE_TOOL_ID, CRON_DISABLE_TOOL_ID, CRON_ENABLE_TOOL_ID,
@@ -23,10 +23,6 @@ pub use cron::{
     CRON_SHOW_TOOL_ID, CRON_TICK_TOOL_ID, CRON_UPDATE_TOOL_ID, CronTools,
 };
 pub use fs::{CoreTools, FS_EDIT_TOOL_ID, FS_LIST_TOOL_ID, FS_READ_TOOL_ID, FS_SEARCH_TOOL_ID};
-pub use hook::{
-    HookBatchRequest, HookBatchResult, HookEvent, HookInput, HookMessage, HookResult, HookStatus,
-};
-pub use ids::{HookId, IdKind, SkillId, ToolId, ToolProviderId, ToolProviderIdError};
 pub use matrix::{MATRIX_OUTBOX_ENQUEUE_TOOL_ID, MATRIX_OUTBOX_STATUS_TOOL_ID, MatrixTools};
 pub use matrix_delivery::MATRIX_OUTBOX_DELIVER_TOOL_ID;
 pub use memory::{
@@ -41,11 +37,10 @@ pub use permissions::{
     PERMISSIONS_GRANT_TOOL_ID, PERMISSIONS_REQUEST_TOOL_ID, PERMISSIONS_REVOKE_TOOL_ID,
     PERMISSIONS_STATUS_TOOL_ID, PermissionRuntimeStatus, PermissionTools,
 };
-pub use provider::{
-    HookDeclaration, ToolCapability, ToolDeclaration, ToolOperationKind, ToolProviderDeclaration,
-    ToolProviderDeclarationError, ToolProviderSource, ToolProviderTrust, ToolStateEffect,
+pub use registry::{
+    HandlerCoverageError, ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime,
+    verify_handler_coverage,
 };
-pub use registry::{ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime};
 pub use repo::{
     REPO_EXPORT_PROFILE_TOOL_ID, REPO_HOOKS_STATUS_TOOL_ID, REPO_IMPORT_PROFILE_TOOL_ID,
     REPO_INIT_TOOL_ID, REPO_INSTALL_HOOKS_TOOL_ID, REPO_STATUS_TOOL_ID, RepoTools,
@@ -55,9 +50,12 @@ pub use skills::{
     SKILL_STATUS_TOOL_ID, SKILL_TRUST_TOOL_ID, SKILL_VERIFY_TOOL_ID,
 };
 pub use store::{STORE_EXPORT_TOOL_ID, STORE_MIGRATE_TOOL_ID, STORE_STATUS_TOOL_ID, StoreTools};
-pub use tool::{ToolHandler, ToolInput, ToolOutput};
-
-pub(crate) use tool::parse_tool_args;
+pub(crate) fn parse_action_args<T>(capability: &str, arguments: Value) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_value(arguments).with_context(|| format!("{capability} arguments are invalid"))
+}
 
 pub fn builtin_tool_catalog() -> Result<ToolCatalog, ToolCatalogError> {
     let mut catalog = ToolCatalog::new();

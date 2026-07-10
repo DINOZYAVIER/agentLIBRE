@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use agl_tools::{SkillId, ToolCatalog, ToolId, ToolOperationKind, ToolStateEffect};
+use agl_capabilities::{CapabilityId, OperationKind, SkillId, StateEffect};
+use agl_tools::ToolCatalog;
 use serde::Deserialize;
 
 use crate::SkillRegistry;
@@ -11,7 +12,7 @@ const TOOL_LENS_AUDIT: &str = include_str!("../../../assets/audits/tool-lens.tom
 #[serde(deny_unknown_fields)]
 struct ToolLensAudit {
     version: u32,
-    tool_policy_owners: BTreeMap<ToolId, String>,
+    tool_policy_owners: BTreeMap<CapabilityId, String>,
     #[serde(default)]
     missing_tools: Vec<MissingTool>,
     skill_classifications: BTreeMap<SkillId, String>,
@@ -22,9 +23,9 @@ struct ToolLensAudit {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MissingTool {
-    id: ToolId,
+    id: CapabilityId,
     domain: String,
-    operation_kind: ToolOperationKind,
+    operation_kind: OperationKind,
     target_task: String,
     reason: String,
 }
@@ -36,7 +37,7 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
     let actual_tools = catalog
         .providers()
         .iter()
-        .flat_map(|provider| provider.tools.iter().map(|tool| tool.id.clone()))
+        .flat_map(|provider| provider.actions.iter().map(|action| action.id.clone()))
         .collect::<BTreeSet<_>>();
 
     assert_eq!(audit.version, 1);
@@ -50,17 +51,17 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
     );
 
     for provider in catalog.providers() {
-        for tool in &provider.tools {
-            let policy_owner = audit.tool_policy_owners.get(&tool.id).unwrap();
+        for action in &provider.actions {
+            let policy_owner = audit.tool_policy_owners.get(&action.id).unwrap();
             assert!(
                 !policy_owner.trim().is_empty(),
                 "{} must name a policy owner",
-                tool.id
+                action.id
             );
             assert!(
                 !provider.id.as_str().trim().is_empty(),
                 "{} must come from a named provider",
-                tool.id
+                action.id
             );
         }
     }
@@ -108,7 +109,7 @@ fn tool_lens_audit_fixture_covers_builtin_skills() {
             )
         {
             catalog
-                .tool(tool)
+                .action(tool)
                 .unwrap_or_else(|| panic!("{} references unknown tool {tool}", skill.id));
         }
         let classification = audit.skill_classifications.get(&skill.id).unwrap();
@@ -143,7 +144,7 @@ fn tool_lens_missing_tools_are_future_work_not_current_tools() {
     let current_tools = catalog
         .providers()
         .iter()
-        .flat_map(|provider| provider.tools.iter().map(|tool| tool.id.clone()))
+        .flat_map(|provider| provider.actions.iter().map(|action| action.id.clone()))
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
 
@@ -174,7 +175,7 @@ fn tool_lens_missing_tools_are_future_work_not_current_tools() {
             missing.id
         );
         assert!(
-            !matches!(missing.operation_kind, ToolOperationKind::Read)
+            !matches!(missing.operation_kind, OperationKind::Read)
                 || missing.id.as_str().contains(".status")
                 || missing.id.as_str().contains(".list")
                 || missing.id.as_str().contains(".show")
@@ -193,14 +194,14 @@ fn read_audit() -> ToolLensAudit {
 }
 
 fn state_effects_for_skill<'a>(
-    tools: impl IntoIterator<Item = &'a ToolId>,
+    tools: impl IntoIterator<Item = &'a CapabilityId>,
     catalog: &ToolCatalog,
-) -> Vec<ToolStateEffect> {
+) -> Vec<StateEffect> {
     tools
         .into_iter()
         .flat_map(|tool_id| {
             catalog
-                .tool(tool_id)
+                .action(tool_id)
                 .unwrap_or_else(|| panic!("missing audited tool {tool_id}"))
                 .state_effects
                 .iter()

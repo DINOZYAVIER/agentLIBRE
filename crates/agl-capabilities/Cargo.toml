@@ -1,13 +1,14 @@
 [package]
-name = "agl-hooks"
+name = "agl-capabilities"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-capabilities.workspace = true
-anyhow.workspace = true
+agl-ids.workspace = true
+jsonschema.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

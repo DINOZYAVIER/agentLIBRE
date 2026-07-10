@@ -42,9 +42,8 @@ pub(crate) fn temp_root(label: &str) -> TempRoot {
     TempRoot::new(label)
 }
 
-pub(crate) fn value_for(output: &str, prefix: &str) -> Option<String> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(prefix))
-        .map(str::to_string)
+pub(crate) fn migrated_temp_root(label: &str) -> TempRoot {
+    let root = temp_root(label);
+    agl_store::AglStore::migrate_at(&root).unwrap();
+    root
 }

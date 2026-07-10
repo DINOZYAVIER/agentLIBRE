@@ -2,39 +2,9 @@ use std::path::PathBuf;
 
 use agl_ids::SessionId;
 
+pub use agl_capabilities::ToolAccessMode;
+
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ToolAccessMode {
-    #[default]
-    ReadOnly,
-    Write,
-    Execute,
-    Approve,
-    Admin,
-}
-
-impl ToolAccessMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ReadOnly => "read-only",
-            Self::Write => "write",
-            Self::Execute => "execute",
-            Self::Approve => "approve",
-            Self::Admin => "admin",
-        }
-    }
-
-    pub fn operation_ceiling(self) -> Option<agl_tools::ToolOperationKind> {
-        match self {
-            Self::ReadOnly => None,
-            Self::Write => Some(agl_tools::ToolOperationKind::Write),
-            Self::Execute => Some(agl_tools::ToolOperationKind::Execute),
-            Self::Approve => Some(agl_tools::ToolOperationKind::Approve),
-            Self::Admin => Some(agl_tools::ToolOperationKind::Admin),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceOptions {

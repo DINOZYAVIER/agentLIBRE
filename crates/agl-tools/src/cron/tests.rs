@@ -1,12 +1,12 @@
 use serde_json::json;
 
-use crate::test_support::{temp_root, value_for};
+use crate::test_support::migrated_temp_root;
 
 use super::*;
 
 #[test]
 fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
-    let root = temp_root("lifecycle");
+    let root = migrated_temp_root("lifecycle");
     let tools = CronTools::new(&root);
 
     let preflight = tools
@@ -22,7 +22,7 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
             }),
         )
         .unwrap();
-    assert!(preflight.contains("status=ok"));
+    assert_eq!(preflight["status"], "ok");
 
     let add = tools
         .dispatch(
@@ -37,15 +37,16 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
             }),
         )
         .unwrap();
-    let job_id = value_for(&add, "job_id=").unwrap();
-    assert!(add.contains("status=created"));
+    let job_id = add["job_id"].as_str().unwrap();
+    assert_eq!(add["status"], "created");
 
     let list = tools.dispatch(CRON_LIST_TOOL_ID, json!({})).unwrap();
     let show = tools
         .dispatch(CRON_SHOW_TOOL_ID, json!({"id": job_id}))
         .unwrap();
-    assert!(list.contains("jobs=1"));
-    assert!(show.contains("target=builtin:store-status"));
+    assert_eq!(list["job_count"], 1);
+    assert_eq!(show["job"]["target_kind"], "builtin");
+    assert_eq!(show["job"]["target_ref"], "store-status");
 
     let updated = tools
         .dispatch(
@@ -53,7 +54,7 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
             json!({"id": job_id, "name": "Store status tick"}),
         )
         .unwrap();
-    assert!(updated.contains("status=updated"));
+    assert_eq!(updated["status"], "updated");
 
     let manual_run = tools
         .dispatch(
@@ -61,7 +62,7 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
             json!({"job_id": job_id, "status": "succeeded"}),
         )
         .unwrap();
-    assert!(manual_run.contains("status=succeeded"));
+    assert_eq!(manual_run["status"], "succeeded");
 
     let tick = tools
         .dispatch(CRON_TICK_TOOL_ID, json!({"unix_seconds": 60}))
@@ -73,10 +74,10 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
         .dispatch(CRON_HISTORY_TOOL_ID, json!({"job_id": job_id}))
         .unwrap();
 
-    assert!(tick.contains("recorded_runs=1"));
-    assert!(tick.contains("notifications=1"));
-    assert!(replay.contains("replayed_runs=1"));
-    assert!(history.contains("runs="));
+    assert_eq!(tick["recorded_run_count"], 1);
+    assert_eq!(tick["notification_count"], 1);
+    assert_eq!(replay["replayed_run_count"], 1);
+    assert!(history["runs"].is_array());
 
     let disabled = tools
         .dispatch(CRON_DISABLE_TOOL_ID, json!({"id": job_id}))
@@ -88,7 +89,36 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
         .dispatch(CRON_DELETE_TOOL_ID, json!({"id": job_id}))
         .unwrap();
 
-    assert!(disabled.contains("enabled=false"));
-    assert!(enabled.contains("enabled=true"));
-    assert!(deleted.contains("status=deleted"));
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(enabled["enabled"], true);
+    assert_eq!(deleted["status"], "deleted");
+}
+
+#[test]
+fn cron_declarations_expose_closed_schemas_and_structured_results() {
+    let declaration = declaration();
+    for action in &declaration.actions {
+        assert_eq!(action.input_schema["additionalProperties"], false);
+    }
+
+    let add = declaration
+        .actions
+        .iter()
+        .find(|action| action.id.as_str() == CRON_ADD_TOOL_ID)
+        .unwrap();
+    let required = add.input_schema["required"].as_array().unwrap();
+    for field in ["name", "target_kind", "target_ref", "schedule_expr"] {
+        assert!(required.iter().any(|value| value == field));
+    }
+    assert!(
+        add.compile_schema()
+            .unwrap()
+            .validate(&json!({
+                "name": "invalid",
+                "target_kind": "shell",
+                "target_ref": "noop",
+                "schedule_expr": "* * * * *"
+            }))
+            .is_err()
+    );
 }

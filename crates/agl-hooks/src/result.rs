@@ -1,4 +1,4 @@
-use agl_tools::{HookId, HookMessage, HookResult, HookStatus};
+use agl_capabilities::{HookId, HookMessage, HookResult, HookStatus};
 
 pub(crate) fn fail(hook_id: HookId, code: &str, message: &str, fix: Option<String>) -> HookResult {
     HookResult {

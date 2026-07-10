@@ -1,7 +1,8 @@
 use serde_json::json;
 
+use agl_capabilities::HookStatus;
+
 use super::*;
-use crate::HookStatus;
 
 #[test]
 fn declaration_exposes_core_guard_hooks() {

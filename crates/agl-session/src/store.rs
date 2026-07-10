@@ -300,12 +300,12 @@ impl ChatSessionStore {
     }
 
     pub fn append_tool_message(&mut self, envelope: RuntimeEventEnvelope) -> Result<()> {
-        let (message_id, name, content) = match &envelope.payload {
+        let (message_id, name, data) = match &envelope.payload {
             RuntimeEvent::ToolMessage {
                 message_id,
                 name,
-                content,
-            } => (message_id.clone(), name.clone(), content.clone()),
+                data,
+            } => (message_id.clone(), name.clone(), data.clone()),
             _ => bail!("expected tool_message runtime transcript envelope"),
         };
         let (run_id, turn_id) = self.runtime_identity(&envelope)?;
@@ -314,7 +314,7 @@ impl ChatSessionStore {
             turn_id,
             message_id,
             name,
-            content,
+            data,
         })?;
         self.append_runtime_envelope(envelope)
     }

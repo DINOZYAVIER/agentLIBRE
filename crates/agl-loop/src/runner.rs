@@ -1,8 +1,10 @@
 use std::time::Instant;
 
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
+use agl_capabilities::{
+    CapabilityId, DispatchDenialCode, HookBatchRequest, HookBatchResult, HookEvent,
+};
 use agl_events::RuntimeEvent;
-use agl_tools::{HookBatchRequest, HookBatchResult, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, ModelRequest, StopDetail, StopReason, TurnFailureOperation,
@@ -107,16 +109,18 @@ fn handle_tool_call<H: AgentLoopHost>(
     let dispatch_request = match decide_tool_call(state, &tool_call) {
         ToolCallDecision::Dispatch(dispatch_request) => dispatch_request,
         ToolCallDecision::Stop(stop) => {
+            record_capability_denial(host, &stop)?;
             emit_tool_call_stop(host, state, &stop)?;
             return stop_turn(host, state, stop.reason(), Some(stop.detail())).map(Some);
         }
     };
+    let capability_name = dispatch_request.capability_id.as_str().to_owned();
 
     apply_emit(
         host,
         state,
         TurnTransition::ValidateToolArgs {
-            name: dispatch_request.name.clone(),
+            name: capability_name.clone(),
             arguments: dispatch_request.arguments.clone(),
         },
     )?;
@@ -124,7 +128,7 @@ fn handle_tool_call<H: AgentLoopHost>(
         host,
         state,
         TurnTransition::StartToolCall {
-            name: dispatch_request.name.clone(),
+            name: capability_name.clone(),
             arguments: dispatch_request.arguments.clone(),
         },
     )?;
@@ -136,33 +140,46 @@ fn handle_tool_call<H: AgentLoopHost>(
                 host,
                 state,
                 TurnFailureOperation::ToolDispatch {
-                    name: dispatch_request.name.clone(),
+                    name: capability_name.clone(),
                 },
                 message,
             )?;
-            return Err(err)
-                .with_context(|| format!("tool dispatch `{}` failed", dispatch_request.name));
+            return Err(err).with_context(|| format!("tool dispatch `{capability_name}` failed"));
         }
     };
     apply_emit(
         host,
         state,
         TurnTransition::FinishToolCall {
-            name: dispatch_request.name.clone(),
-            observation: response.observation.clone(),
+            name: capability_name.clone(),
+            result: response.result.clone(),
         },
     )?;
     apply_emit(
         host,
         state,
         TurnTransition::AppendObservation {
-            name: dispatch_request.name.clone(),
-            observation: response.observation.clone(),
+            name: capability_name,
+            result: response.result.clone(),
         },
     )?;
-    state.append_tool_observation(tool_call, response.observation);
+    state.append_tool_result(tool_call, response.result);
 
     Ok(None)
+}
+
+fn record_capability_denial<H: AgentLoopHost>(host: &mut H, stop: &ToolCallStop) -> Result<()> {
+    match stop {
+        ToolCallStop::HiddenTool { name } => host.record_capability_denial(
+            CapabilityId::new(name.clone()).ok(),
+            DispatchDenialCode::CapabilityNotEffective,
+        ),
+        ToolCallStop::InvalidArguments { name, .. } => host.record_capability_denial(
+            CapabilityId::new(name.clone()).ok(),
+            DispatchDenialCode::InvalidArguments,
+        ),
+        ToolCallStop::ToolLimitReached { .. } => Ok(()),
+    }
 }
 
 fn handle_malformed_tool_call<H: AgentLoopHost>(

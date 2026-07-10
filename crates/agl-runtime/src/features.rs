@@ -2,10 +2,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP: usize = 1800;
+pub const DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP: usize = 1800;
 
+/// Informational product-surface metadata; this is not an executable capability declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeCapability {
+pub struct RuntimeFeature {
     pub id: &'static str,
     pub title: &'static str,
     pub summary: &'static str,
@@ -17,7 +18,7 @@ pub struct RuntimeCapability {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeCapabilityRenderOptions<'a> {
+pub struct RuntimeFeatureRenderOptions<'a> {
     pub version: &'a str,
     pub workspace_root: Option<&'a Path>,
     pub tool_mode: &'a str,
@@ -26,8 +27,8 @@ pub struct RuntimeCapabilityRenderOptions<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeCapabilityContextEvidence {
-    pub capability_ids: Vec<String>,
+pub struct RuntimeFeatureContextEvidence {
+    pub feature_ids: Vec<String>,
     pub tool_mode: String,
     pub rendered_chars: usize,
     pub budget_cap_chars: usize,
@@ -36,14 +37,14 @@ pub struct RuntimeCapabilityContextEvidence {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RenderedRuntimeCapabilityContext {
+pub struct RenderedRuntimeFeatureContext {
     pub content: String,
-    pub evidence: RuntimeCapabilityContextEvidence,
+    pub evidence: RuntimeFeatureContextEvidence,
 }
 
-pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
+pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
     &[
-        RuntimeCapability {
+        RuntimeFeature {
             id: "cron",
             title: "Cron jobs",
             summary: "schedule builtin/trusted-skill jobs via store/daemon",
@@ -59,7 +60,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["agl-store", "agl-daemon for scheduled execution"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "memory",
             title: "Memory",
             summary: "scoped memory suggestions/approval/search",
@@ -75,7 +76,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["agl-store"],
             model_tools: &["memory.suggest"],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "notes",
             title: "Notes",
             summary: "SQLite notes, tombstone audit, explicit memory promotion",
@@ -91,7 +92,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["agl-store"],
             model_tools: &["notes.add", "notes.search"],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "store",
             title: "Store",
             summary: "SQLite migrations/idempotency/status/known-domain JSONL export",
@@ -101,7 +102,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["local data dir"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "skills",
             title: "Skills",
             summary: "git-verified skills with local trust/revoke",
@@ -118,7 +119,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["clean pinned .agl/skills git component for workspace skills"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "repo",
             title: "Repo workspace",
             summary: "workspace init/status/hooks/profile",
@@ -134,7 +135,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["workspace root"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "matrix",
             title: "Matrix",
             summary: "encrypted room/user boundary and outbox",
@@ -144,7 +145,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["configured Matrix bridge"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "daemon",
             title: "Daemon",
             summary: "scheduler and bridge runtime",
@@ -154,7 +155,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["local socket"],
             model_tools: &[],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "permissions",
             title: "Permissions",
             summary: "inspect current grants and request exact tool access",
@@ -164,7 +165,7 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
             requires: &["agl-store for durable request/grant evidence"],
             model_tools: &["permissions.status", "permissions.request"],
         },
-        RuntimeCapability {
+        RuntimeFeature {
             id: "filesystem_tools",
             title: "Filesystem tools",
             summary: "only listed repository fs tools are callable",
@@ -177,16 +178,16 @@ pub fn first_party_runtime_capabilities() -> &'static [RuntimeCapability] {
     ]
 }
 
-pub fn render_runtime_capability_context(
-    options: RuntimeCapabilityRenderOptions<'_>,
-) -> RenderedRuntimeCapabilityContext {
-    let capabilities = first_party_runtime_capabilities();
+pub fn render_runtime_feature_context(
+    options: RuntimeFeatureRenderOptions<'_>,
+) -> RenderedRuntimeFeatureContext {
+    let features = first_party_runtime_features();
     let cap = if options.char_cap == 0 {
-        DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP
+        DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP
     } else {
         options.char_cap
     };
-    let mut selected = capabilities.iter().collect::<Vec<_>>();
+    let mut selected = features.iter().collect::<Vec<_>>();
     let mut content = render_context(&selected, &options);
     let mut truncated = false;
 
@@ -194,7 +195,7 @@ pub fn render_runtime_capability_context(
         truncated = true;
         if let Some(index) = selected
             .iter()
-            .rposition(|capability| !matches!(capability.id, "cron" | "filesystem_tools"))
+            .rposition(|feature| !matches!(feature.id, "cron" | "filesystem_tools"))
         {
             selected.remove(index);
             content = render_context(&selected, &options);
@@ -203,36 +204,36 @@ pub fn render_runtime_capability_context(
         }
     }
 
-    let capability_ids = selected
+    let feature_ids = selected
         .iter()
-        .map(|capability| capability.id.to_string())
+        .map(|feature| feature.id.to_string())
         .collect::<Vec<_>>();
     let rendered_chars = content.chars().count();
-    RenderedRuntimeCapabilityContext {
+    RenderedRuntimeFeatureContext {
         content,
-        evidence: RuntimeCapabilityContextEvidence {
-            capability_ids,
+        evidence: RuntimeFeatureContextEvidence {
+            feature_ids,
             tool_mode: options.tool_mode.to_string(),
             rendered_chars,
             budget_cap_chars: cap,
             truncated,
-            registry_hash: runtime_capability_registry_hash(capabilities),
+            registry_hash: runtime_feature_registry_hash(features),
         },
     }
 }
 
-pub fn runtime_capability_registry_hash(capabilities: &[RuntimeCapability]) -> String {
+pub fn runtime_feature_registry_hash(features: &[RuntimeFeature]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
-    for capability in capabilities {
-        hash_bytes(&mut hash, capability.id.as_bytes());
-        hash_bytes(&mut hash, capability.title.as_bytes());
-        hash_bytes(&mut hash, capability.summary.as_bytes());
+    for feature in features {
+        hash_bytes(&mut hash, feature.id.as_bytes());
+        hash_bytes(&mut hash, feature.title.as_bytes());
+        hash_bytes(&mut hash, feature.summary.as_bytes());
         for field in [
-            capability.read_only_actions,
-            capability.write_actions,
-            capability.commands,
-            capability.requires,
-            capability.model_tools,
+            feature.read_only_actions,
+            feature.write_actions,
+            feature.commands,
+            feature.requires,
+            feature.model_tools,
         ] {
             for value in field {
                 hash_bytes(&mut hash, value.as_bytes());
@@ -243,11 +244,11 @@ pub fn runtime_capability_registry_hash(capabilities: &[RuntimeCapability]) -> S
 }
 
 fn render_context(
-    capabilities: &[&RuntimeCapability],
-    options: &RuntimeCapabilityRenderOptions<'_>,
+    features: &[&RuntimeFeature],
+    options: &RuntimeFeatureRenderOptions<'_>,
 ) -> String {
     let mut content = String::new();
-    content.push_str("<agentlibre_runtime_capabilities>\n");
+    content.push_str("<agentlibre_runtime_features>\n");
     content.push_str("version: agl ");
     content.push_str(options.version);
     content.push('\n');
@@ -265,30 +266,28 @@ fn render_context(
     } else {
         content.push_str(&options.available_model_tools.join(", "));
     }
-    content.push_str("\n\nCapabilities:\n");
-    for capability in capabilities {
+    content.push_str("\n\nInformational runtime features:\n");
+    for feature in features {
         content.push_str("- ");
-        content.push_str(capability.id);
+        content.push_str(feature.id);
         content.push_str(": ");
-        content.push_str(capability.summary);
-        if !capability.read_only_actions.is_empty() {
+        content.push_str(feature.summary);
+        if !feature.read_only_actions.is_empty() {
             content.push_str("; read-only: ");
-            content.push_str(&capability.read_only_actions.join(", "));
+            content.push_str(&feature.read_only_actions.join(", "));
         }
-        if !capability.write_actions.is_empty() {
+        if !feature.write_actions.is_empty() {
             content.push_str("; write: ");
-            content.push_str(&capability.write_actions.join(", "));
+            content.push_str(&feature.write_actions.join(", "));
         }
         content.push_str(".\n");
     }
     if options.tool_mode == "read-only" {
         content.push_str("Read-only mode: do not offer to schedule, run, send, lock, trust, revoke, or write. If permissions.request is listed, request exact tools; otherwise explain the CLI/daemon path.\n");
     }
-    content.push_str("Boundary: capability IDs are not tool names. Do not call cron, matrix, skills, repo, store, memory, notes, permissions, or daemon unless that exact name appears in agentlibre_tool_context.\n");
-    content.push_str(
-        "Policy: capabilities are not permissions; call only model_tools/tool_context.\n",
-    );
-    content.push_str("</agentlibre_runtime_capabilities>\n");
+    content.push_str("Information only: runtime feature IDs describe available product surfaces; they are not executable capability IDs, tool names, or permissions.\n");
+    content.push_str("Invocation boundary: call only exact names listed in model_tools/tool_context. Do not call cron, matrix, skills, repo, store, memory, notes, permissions, or daemon unless that exact name appears there.\n");
+    content.push_str("</agentlibre_runtime_features>\n");
     content
 }
 
@@ -307,12 +306,12 @@ mod tests {
 
     #[test]
     fn registry_contains_personal_agent_wave_surfaces() {
-        let capabilities = first_party_runtime_capabilities();
+        let features = first_party_runtime_features();
         let by_id = |id: &str| {
-            capabilities
+            features
                 .iter()
-                .find(|capability| capability.id == id)
-                .unwrap_or_else(|| panic!("missing capability {id}"))
+                .find(|feature| feature.id == id)
+                .unwrap_or_else(|| panic!("missing feature {id}"))
         };
 
         assert!(by_id("cron").commands.contains(&"agl cron run"));
@@ -324,21 +323,17 @@ mod tests {
     }
 
     #[test]
-    fn rendered_context_separates_capabilities_from_permissions() {
+    fn rendered_context_is_explicitly_informational() {
         let tool_names = ["fs.list", "fs.read", "fs.search"];
-        let rendered = render_runtime_capability_context(RuntimeCapabilityRenderOptions {
+        let rendered = render_runtime_feature_context(RuntimeFeatureRenderOptions {
             version: "1.0.0-alpha.test",
             workspace_root: Some(Path::new("/repo")),
             tool_mode: "read-only",
             available_model_tools: &tool_names,
-            char_cap: DEFAULT_RUNTIME_CAPABILITY_CONTEXT_CHAR_CAP,
+            char_cap: DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP,
         });
 
-        assert!(
-            rendered
-                .content
-                .contains("<agentlibre_runtime_capabilities>")
-        );
+        assert!(rendered.content.contains("<agentlibre_runtime_features>"));
         assert!(rendered.content.contains("version: agl 1.0.0-alpha.test"));
         assert!(rendered.content.contains("workspace: /repo"));
         assert!(rendered.content.contains("tool_mode: read-only"));
@@ -354,16 +349,9 @@ mod tests {
                 .contains("read-only: list, show, history, preflight")
         );
         assert!(rendered.content.contains("write: add, delete, run, tick"));
-        assert!(
-            rendered
-                .content
-                .contains("capabilities are not permissions")
-        );
-        assert!(
-            rendered
-                .content
-                .contains("capability IDs are not tool names")
-        );
+        assert!(rendered.content.contains("Informational runtime features:"));
+        assert!(rendered.content.contains("Information only:"));
+        assert!(rendered.content.contains("not executable capability IDs"));
         assert!(
             rendered
                 .content
@@ -374,12 +362,7 @@ mod tests {
                 .content
                 .contains("Read-only mode: do not offer to schedule")
         );
-        assert!(
-            rendered
-                .evidence
-                .capability_ids
-                .contains(&"cron".to_string())
-        );
+        assert!(rendered.evidence.feature_ids.contains(&"cron".to_string()));
         assert_eq!(rendered.evidence.tool_mode, "read-only");
         assert!(!rendered.evidence.registry_hash.is_empty());
     }

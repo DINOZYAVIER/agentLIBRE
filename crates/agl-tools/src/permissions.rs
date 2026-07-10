@@ -1,15 +1,16 @@
 use std::path::{Path, PathBuf};
 
+use agl_capabilities::{
+    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    ActionVisibility, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
+};
 use agl_store::{AglStore, PermissionGrantDraft, PermissionRequestDraft, PermissionRequestRecord};
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::{
-    ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
-    parse_tool_args as parse_args,
-};
+use crate::{ToolCatalog, ToolCatalogError, parse_action_args as parse_args};
 
 pub const PROVIDER_ID: &str = "permission-tools";
 pub const PERMISSIONS_STATUS_TOOL_ID: &str = "permissions.status";
@@ -57,7 +58,7 @@ impl PermissionTools {
         self
     }
 
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
+    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
             PERMISSIONS_STATUS_TOOL_ID => self.status(arguments),
             PERMISSIONS_REQUEST_TOOL_ID => self.request(arguments),
@@ -67,59 +68,64 @@ impl PermissionTools {
         }
     }
 
-    fn status(&self, arguments: Value) -> Result<String> {
+    fn status(&self, arguments: Value) -> Result<Value> {
         parse_args::<StatusArgs>(PERMISSIONS_STATUS_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let pending = store.pending_permission_requests()?;
         let active = store.active_permission_grants()?;
-        let mut output = format!(
-            "tool=permissions.status\ncurrent_mode={}\nvisible_tools={}\ndynamic_grants={}\ngranted_visible_tools={}\nignored_grants={}\npending_requests={}\nactive_grants={}\ndefault_duration=one_turn",
-            self.runtime_status.current_mode,
-            self.runtime_status.visible_tools.join(","),
-            self.runtime_status.dynamic_grants,
-            self.runtime_status.granted_visible_tools.join(","),
-            self.runtime_status.ignored_grants.join(","),
-            pending.len(),
-            active.len()
-        );
-        for request in pending {
-            output.push('\n');
-            output.push_str(&format!(
-                "request id={} tools={} max_operation_kind={} duration={} status={}",
-                request.id,
-                request.requested_tools.join(","),
-                request.max_operation_kind,
-                request.duration,
-                request.status.as_str()
-            ));
-        }
-        for grant in active {
-            output.push('\n');
-            output.push_str(&format!(
-                "grant id={} tool={} max_operation_kind={} duration={} status={}",
-                grant.id,
-                grant.tool_id,
-                grant.max_operation_kind,
-                grant.duration,
-                grant.status.as_str()
-            ));
-        }
-        Ok(output)
+        let pending_requests = pending
+            .into_iter()
+            .map(|request| {
+                json!({
+                    "request_id": request.id,
+                    "tools": request.requested_tools,
+                    "max_operation_kind": request.max_operation_kind,
+                    "duration": request.duration,
+                    "status": request.status.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let active_grants = active
+            .into_iter()
+            .map(|grant| {
+                json!({
+                    "grant_id": grant.id,
+                    "tool_id": grant.tool_id,
+                    "max_operation_kind": grant.max_operation_kind,
+                    "duration": grant.duration,
+                    "status": grant.status.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "tool": PERMISSIONS_STATUS_TOOL_ID,
+            "status": "ok",
+            "current_mode": self.runtime_status.current_mode,
+            "visible_tools": self.runtime_status.visible_tools,
+            "dynamic_grants": self.runtime_status.dynamic_grants,
+            "granted_visible_tools": self.runtime_status.granted_visible_tools,
+            "ignored_grants": self.runtime_status.ignored_grants,
+            "pending_request_count": pending_requests.len(),
+            "active_grant_count": active_grants.len(),
+            "default_duration": "one_turn",
+            "pending_requests": pending_requests,
+            "active_grants": active_grants,
+        }))
     }
 
-    fn request(&self, arguments: Value) -> Result<String> {
+    fn request(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RequestArgs>(PERMISSIONS_REQUEST_TOOL_ID, arguments)?;
         let requested_tools = validate_requested_tools(args.tools)?;
         let max_operation_kind = args
             .max_operation_kind
-            .or(args.mode)
-            .unwrap_or_else(|| "write".to_string());
-        validate_operation_kind(&max_operation_kind)?;
+            .unwrap_or(OperationKindArg::Write)
+            .as_str()
+            .to_string();
         let duration = args.duration.unwrap_or_else(|| "one_turn".to_string());
         let requester_ref = args
             .requester_ref
             .unwrap_or_else(|| "tool:permissions.request".to_string());
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let request = store.create_permission_request(PermissionRequestDraft {
             requested_tools,
             max_operation_kind,
@@ -132,72 +138,82 @@ impl PermissionTools {
         Ok(render_permission_request_result(&request))
     }
 
-    fn grant(&self, arguments: Value) -> Result<String> {
+    fn grant(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<GrantArgs>(PERMISSIONS_GRANT_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
-        let grants = if let Some(request_id) = args.request_id {
-            store.grant_permission_request(
-                &request_id,
+        let store = self.open_store_writable()?;
+        let grants = match args {
+            GrantArgs::Request(args) => store.grant_permission_request(
+                &args.request_id,
                 args.granted_by_ref
                     .as_deref()
                     .unwrap_or("tool:permissions.grant"),
                 args.resolution_ref.as_deref(),
-            )?
-        } else {
-            let tool_id = args
-                .tool_id
-                .context("permissions.grant requires request_id or tool_id")?;
-            validate_requested_tools(vec![tool_id.clone()])?;
-            let max_operation_kind = args
-                .max_operation_kind
-                .unwrap_or_else(|| "write".to_string());
-            validate_operation_kind(&max_operation_kind)?;
-            vec![
-                store.create_permission_grant(PermissionGrantDraft {
-                    request_id: None,
-                    tool_id,
-                    max_operation_kind,
-                    state_effects: args.state_effects.unwrap_or_default(),
-                    scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
-                    duration: args.duration.unwrap_or_else(|| "one_turn".to_string()),
-                    granted_by_ref: args
-                        .granted_by_ref
-                        .unwrap_or_else(|| "tool:permissions.grant".to_string()),
-                })?,
-            ]
+            )?,
+            GrantArgs::Direct(args) => {
+                validate_requested_tools(vec![args.tool_id.clone()])?;
+                let max_operation_kind = args
+                    .max_operation_kind
+                    .unwrap_or(OperationKindArg::Write)
+                    .as_str()
+                    .to_string();
+                vec![
+                    store.create_permission_grant(PermissionGrantDraft {
+                        request_id: None,
+                        tool_id: args.tool_id,
+                        max_operation_kind,
+                        state_effects: args.state_effects.unwrap_or_default(),
+                        scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
+                        duration: args.duration.unwrap_or_else(|| "one_turn".to_string()),
+                        granted_by_ref: args
+                            .granted_by_ref
+                            .unwrap_or_else(|| "tool:permissions.grant".to_string()),
+                    })?,
+                ]
+            }
         };
-        let mut output = format!(
-            "tool=permissions.grant\nstatus=granted\ngrants={}",
-            grants.len()
-        );
-        for grant in grants {
-            output.push('\n');
-            output.push_str(&format!(
-                "grant id={} tool={} max_operation_kind={} duration={} status={}",
-                grant.id,
-                grant.tool_id,
-                grant.max_operation_kind,
-                grant.duration,
-                grant.status.as_str()
-            ));
-        }
-        Ok(output)
+        let grants = grants
+            .into_iter()
+            .map(|grant| {
+                json!({
+                    "grant_id": grant.id,
+                    "tool_id": grant.tool_id,
+                    "max_operation_kind": grant.max_operation_kind,
+                    "duration": grant.duration,
+                    "status": grant.status.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "tool": PERMISSIONS_GRANT_TOOL_ID,
+            "status": "granted",
+            "grant_count": grants.len(),
+            "grants": grants,
+        }))
     }
 
-    fn revoke(&self, arguments: Value) -> Result<String> {
+    fn revoke(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let grant = store.revoke_permission_grant(&args.grant_id, args.revoke_ref.as_deref())?;
-        Ok(format!(
-            "tool=permissions.revoke\ngrant_id={}\ntool_id={}\nstatus={}",
-            grant.id,
-            grant.tool_id,
-            grant.status.as_str()
-        ))
+        Ok(json!({
+            "tool": PERMISSIONS_REVOKE_TOOL_ID,
+            "grant_id": grant.id,
+            "tool_id": grant.tool_id,
+            "status": grant.status.as_str(),
+        }))
     }
 
-    fn open_store(&self) -> Result<AglStore> {
-        AglStore::open_at(&self.store_root).with_context(|| {
+    fn open_store_read_only(&self) -> Result<AglStore> {
+        AglStore::open_current_read_only_at(&self.store_root).with_context(|| {
+            format!(
+                "failed to open permission store {}",
+                self.store_root.display()
+            )
+        })
+    }
+
+    fn open_store_writable(&self) -> Result<AglStore> {
+        AglStore::open_current_at(&self.store_root).with_context(|| {
             format!(
                 "failed to open permission store {}",
                 self.store_root.display()
@@ -206,54 +222,52 @@ impl PermissionTools {
     }
 }
 
-impl ToolHandler for PermissionTools {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl ActionHandler for PermissionTools {
+    fn dispatch(
+        &self,
+        invocation: ActionInvocation,
+    ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+        Ok(ActionResult::new(data))
     }
 }
 
-pub fn declaration() -> ToolProviderDeclaration {
-    ToolProviderDeclaration::new(
-        ToolProviderId::new(PROVIDER_ID).expect("builtin permission provider id is valid"),
+pub fn declaration() -> ProviderDeclaration {
+    ProviderDeclaration::builtin(
+        ProviderId::new(PROVIDER_ID).expect("builtin permission provider id is valid"),
         "Permission Tools",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("builtin permission provider declaration is valid")
-    .with_tool(tool(
+    .with_action(action::<StatusArgs>(
         PERMISSIONS_STATUS_TOOL_ID,
         "Show pending permission requests and active grants.",
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
+        OperationKind::Read,
         &[],
         true,
     ))
-    .with_tool(tool(
+    .with_action(action::<RequestArgs>(
         PERMISSIONS_REQUEST_TOOL_ID,
         "Create a pending permission request for exact tool IDs; this does not grant access.",
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionRequests],
-        &["tools", "reason"],
+        OperationKind::Approve,
+        &[StateEffect::StorePermissionRequests],
         true,
     ))
-    .with_tool(tool(
+    .with_action(action::<GrantArgs>(
         PERMISSIONS_GRANT_TOOL_ID,
         "Grant an existing permission request or an exact tool ID.",
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionGrants],
-        &[],
+        OperationKind::Approve,
+        &[
+            StateEffect::StorePermissionGrants,
+            StateEffect::StorePermissionRequests,
+        ],
         false,
     ))
-    .with_tool(tool(
+    .with_action(action::<RevokeArgs>(
         PERMISSIONS_REVOKE_TOOL_ID,
         "Revoke an active permission grant.",
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionGrants],
-        &["grant_id"],
+        OperationKind::Approve,
+        &[StateEffect::StorePermissionGrants],
         false,
     ))
 }
@@ -262,24 +276,23 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn tool(
+fn action<T: JsonSchema>(
     id: &str,
     description: &str,
-    capability: ToolCapability,
-    operation_kind: ToolOperationKind,
-    state_effects: &[ToolStateEffect],
-    required_arguments: &[&str],
+    operation_kind: OperationKind,
+    state_effects: &[StateEffect],
     visible_in_read_only: bool,
-) -> ToolDeclaration {
-    ToolDeclaration::new(
-        ToolId::new(id).expect("builtin permission tool id is valid"),
+) -> ActionDeclaration {
+    ActionDeclaration::from_schema::<T>(
+        CapabilityId::new(id).expect("builtin permission tool id is valid"),
         description,
-        capability,
-        required_arguments.iter().copied(),
+        operation_kind,
     )
-    .with_operation_kind(operation_kind)
+    .expect("builtin permission tool declaration schema is valid")
     .with_state_effects(state_effects.iter().copied())
-    .visible_in_read_only(visible_in_read_only)
+    .with_visibility(ActionVisibility {
+        visible_in_read_only,
+    })
 }
 
 fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
@@ -289,7 +302,7 @@ fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
     let mut normalized = Vec::with_capacity(tools.len());
     let mut seen = std::collections::BTreeSet::new();
     for tool in tools {
-        let id = ToolId::new(tool.clone())
+        let id = CapabilityId::new(tool.clone())
             .with_context(|| format!("permissions.request requested tool id is invalid: {tool}"))?;
         if id.as_str().starts_with("permissions.") {
             bail!("permission tools cannot request or grant permission tools");
@@ -301,53 +314,83 @@ fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
     Ok(normalized)
 }
 
-fn validate_operation_kind(value: &str) -> Result<ToolOperationKind> {
-    ToolOperationKind::parse(value)
-        .with_context(|| format!("unknown permission operation kind `{value}`"))
+fn render_permission_request_result(request: &PermissionRequestRecord) -> Value {
+    json!({
+        "tool": PERMISSIONS_REQUEST_TOOL_ID,
+        "request_id": request.id,
+        "status": request.status.as_str(),
+        "tools": request.requested_tools,
+        "max_operation_kind": request.max_operation_kind,
+        "duration": request.duration,
+        "result": "pending_approval",
+    })
 }
 
-fn render_permission_request_result(request: &PermissionRequestRecord) -> String {
-    format!(
-        "tool=permissions.request\nrequest_id={}\nstatus={}\ntools={}\nmax_operation_kind={}\nduration={}\nresult=pending_approval",
-        request.id,
-        request.status.as_str(),
-        request.requested_tools.join(","),
-        request.max_operation_kind,
-        request.duration
-    )
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum OperationKindArg {
+    Read,
+    Write,
+    Execute,
+    Approve,
+    Admin,
 }
 
-#[derive(Deserialize)]
+impl OperationKindArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Approve => "approve",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StatusArgs {}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RequestArgs {
     tools: Vec<String>,
     reason: String,
-    max_operation_kind: Option<String>,
-    mode: Option<String>,
+    max_operation_kind: Option<OperationKindArg>,
     state_effects: Option<Vec<String>>,
     scope: Option<Value>,
     duration: Option<String>,
     requester_ref: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum GrantArgs {
+    Request(GrantRequestArgs),
+    Direct(GrantDirectArgs),
+}
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct GrantArgs {
-    request_id: Option<String>,
-    tool_id: Option<String>,
-    max_operation_kind: Option<String>,
-    state_effects: Option<Vec<String>>,
-    scope: Option<Value>,
-    duration: Option<String>,
+struct GrantRequestArgs {
+    request_id: String,
     granted_by_ref: Option<String>,
     resolution_ref: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GrantDirectArgs {
+    tool_id: String,
+    max_operation_kind: Option<OperationKindArg>,
+    state_effects: Option<Vec<String>>,
+    scope: Option<Value>,
+    duration: Option<String>,
+    granted_by_ref: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RevokeArgs {
     grant_id: String,
@@ -358,13 +401,13 @@ struct RevokeArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::temp_root;
+    use crate::test_support::{migrated_temp_root, temp_root};
 
     use super::*;
 
     #[test]
     fn permission_request_creates_pending_one_turn_request() {
-        let root = temp_root("permission-request");
+        let root = migrated_temp_root("permission-request");
         let tools = PermissionTools::new(&root);
 
         let output = tools
@@ -378,17 +421,19 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.contains("tool=permissions.request"));
-        assert!(output.contains("result=pending_approval"));
-        assert!(output.contains("duration=one_turn"));
+        assert_eq!(output["tool"], PERMISSIONS_REQUEST_TOOL_ID);
+        assert_eq!(output["result"], "pending_approval");
+        assert_eq!(output["duration"], "one_turn");
+        assert_eq!(output["tools"], json!(["notes.add"]));
 
         let status = tools
             .dispatch(PERMISSIONS_STATUS_TOOL_ID, json!({}))
             .unwrap();
-        assert!(status.contains("current_mode=unknown"));
-        assert!(status.contains("dynamic_grants=false"));
-        assert!(status.contains("pending_requests=1"));
-        assert!(status.contains("active_grants=0"));
+        assert_eq!(status["current_mode"], "unknown");
+        assert_eq!(status["dynamic_grants"], false);
+        assert_eq!(status["pending_request_count"], 1);
+        assert_eq!(status["active_grant_count"], 0);
+        assert_eq!(status["pending_requests"][0]["tools"], json!(["notes.add"]));
     }
 
     #[test]
@@ -411,7 +456,7 @@ mod tests {
 
     #[test]
     fn permission_status_reports_runtime_snapshot() {
-        let root = temp_root("permission-status");
+        let root = migrated_temp_root("permission-status");
         let tools = PermissionTools::new(&root).with_runtime_status(PermissionRuntimeStatus {
             current_mode: "read-only".to_string(),
             visible_tools: vec![
@@ -428,10 +473,51 @@ mod tests {
             .dispatch(PERMISSIONS_STATUS_TOOL_ID, json!({}))
             .unwrap();
 
-        assert!(status.contains("current_mode=read-only"));
-        assert!(status.contains("visible_tools=fs.read,permissions.status,permissions.request"));
-        assert!(status.contains("dynamic_grants=false"));
-        assert!(status.contains("granted_visible_tools="));
-        assert!(status.contains("ignored_grants="));
+        assert_eq!(status["current_mode"], "read-only");
+        assert_eq!(
+            status["visible_tools"],
+            json!(["fs.read", "permissions.status", "permissions.request"])
+        );
+        assert_eq!(status["dynamic_grants"], false);
+        assert_eq!(status["granted_visible_tools"], json!([]));
+        assert_eq!(status["ignored_grants"], json!([]));
+    }
+
+    #[test]
+    fn permission_request_schema_is_complete_and_closed() {
+        let declaration = declaration();
+        declaration.validate().unwrap();
+        let request = declaration
+            .action(&CapabilityId::new(PERMISSIONS_REQUEST_TOOL_ID).unwrap())
+            .unwrap();
+        assert_eq!(request.input_schema["additionalProperties"], false);
+        assert!(request.visibility.visible_in_read_only);
+        let schema = request.compile_schema().unwrap();
+        assert!(
+            schema
+                .validate(&json!({
+                    "tools": ["notes.add"],
+                    "reason": "Create one explicit note."
+                }))
+                .is_ok()
+        );
+        assert!(schema.validate(&json!({"tools": ["notes.add"]})).is_err());
+        assert!(
+            schema
+                .validate(&json!({
+                    "tools": ["notes.add"],
+                    "reason": "Create one explicit note.",
+                    "extra": true
+                }))
+                .is_err()
+        );
+        assert!(
+            schema
+                .validate(&json!({
+                    "tools": "notes.add",
+                    "reason": "Create one explicit note."
+                }))
+                .is_err()
+        );
     }
 }

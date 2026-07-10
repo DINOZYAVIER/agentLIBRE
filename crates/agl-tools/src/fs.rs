@@ -1,15 +1,16 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::{
-    ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
-    parse_tool_args as parse_args,
+use crate::{ToolCatalog, ToolCatalogError, parse_action_args as parse_args};
+use agl_capabilities::{
+    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
 use agl_repo::{ArtifactAccess, ArtifactPathHandleRequest};
 use anyhow::{Context, Result, bail, ensure};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub const PROVIDER_ID: &str = "core-tools";
 pub const FS_READ_TOOL_ID: &str = "fs.read";
@@ -50,7 +51,7 @@ impl CoreTools {
         &self.root
     }
 
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
+    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
             FS_READ_TOOL_ID => self.read(arguments),
             FS_LIST_TOOL_ID => self.list(arguments),
@@ -60,7 +61,7 @@ impl CoreTools {
         }
     }
 
-    fn read(&self, arguments: Value) -> Result<String> {
+    fn read(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ReadArgs>(FS_READ_TOOL_ID, arguments)?;
         let path = self.resolve_existing_path(&args.path, PathKind::File, false)?;
         let content = fs::read_to_string(&path)
@@ -71,21 +72,29 @@ impl CoreTools {
             .limit_lines
             .unwrap_or(DEFAULT_READ_LINES)
             .min(MAX_READ_LINES);
-        let mut selected = Vec::new();
+        let mut lines = Vec::new();
         for (index, line) in content.lines().enumerate().skip(start_line - 1).take(limit) {
-            selected.push(format!("{:>6} | {}", index + 1, line));
+            lines.push(json!({
+                "line": index + 1,
+                "text": line,
+            }));
         }
-        let end_line = start_line.saturating_add(selected.len()).saturating_sub(1);
+        let end_line = start_line.saturating_add(lines.len()).saturating_sub(1);
         let truncated = end_line < total_lines;
 
-        Ok(format!(
-            "tool=fs.read\npath={}\nstart_line={start_line}\nend_line={end_line}\ntotal_lines={total_lines}\ntruncated={truncated}\n---\n{}",
-            self.display_path(&path),
-            selected.join("\n")
-        ))
+        Ok(json!({
+            "tool": FS_READ_TOOL_ID,
+            "status": "ok",
+            "path": self.display_path(&path),
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "truncated": truncated,
+            "lines": lines,
+        }))
     }
 
-    fn list(&self, arguments: Value) -> Result<String> {
+    fn list(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(FS_LIST_TOOL_ID, arguments)?;
         let path = self.resolve_existing_path(&args.path, PathKind::Directory, true)?;
         let max_entries = args
@@ -97,15 +106,17 @@ impl CoreTools {
         self.collect_entries(&path, recursive, max_entries, &mut entries)?;
         let truncated = entries.len() >= max_entries;
 
-        Ok(format!(
-            "tool=fs.list\npath={}\nentries={}\ntruncated={truncated}\n---\n{}",
-            self.display_path(&path),
-            entries.len(),
-            entries.join("\n")
-        ))
+        Ok(json!({
+            "tool": FS_LIST_TOOL_ID,
+            "status": "ok",
+            "path": self.display_path(&path),
+            "entry_count": entries.len(),
+            "truncated": truncated,
+            "entries": entries,
+        }))
     }
 
-    fn search(&self, arguments: Value) -> Result<String> {
+    fn search(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SearchArgs>(FS_SEARCH_TOOL_ID, arguments)?;
         ensure!(
             !args.pattern.trim().is_empty(),
@@ -127,16 +138,18 @@ impl CoreTools {
         self.collect_matches(&path, &needle, case_sensitive, max_matches, &mut matches)?;
         let truncated = matches.len() >= max_matches;
 
-        Ok(format!(
-            "tool=fs.search\npath={}\npattern={}\nmatches={}\ntruncated={truncated}\n---\n{}",
-            self.display_path(&path),
-            args.pattern,
-            matches.len(),
-            matches.join("\n")
-        ))
+        Ok(json!({
+            "tool": FS_SEARCH_TOOL_ID,
+            "status": "ok",
+            "path": self.display_path(&path),
+            "pattern": args.pattern,
+            "match_count": matches.len(),
+            "truncated": truncated,
+            "matches": matches,
+        }))
     }
 
-    fn edit(&self, arguments: Value) -> Result<String> {
+    fn edit(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<EditArgs>(FS_EDIT_TOOL_ID, arguments)?;
         ensure!(
             !args.old_text.is_empty(),
@@ -156,12 +169,13 @@ impl CoreTools {
         fs::write(&path, updated.as_bytes())
             .with_context(|| format!("failed to write edited file {}", path.display()))?;
 
-        Ok(format!(
-            "tool=fs.edit\npath={}\nold_bytes={}\nnew_bytes={}\nstatus=edited",
-            self.display_path(&path),
-            args.old_text.len(),
-            args.new_text.len()
-        ))
+        Ok(json!({
+            "tool": FS_EDIT_TOOL_ID,
+            "status": "edited",
+            "path": self.display_path(&path),
+            "old_bytes": args.old_text.len(),
+            "new_bytes": args.new_text.len(),
+        }))
     }
 
     fn resolve_existing_path(
@@ -216,7 +230,7 @@ impl CoreTools {
         path: &Path,
         recursive: bool,
         max_entries: usize,
-        entries: &mut Vec<String>,
+        entries: &mut Vec<Value>,
     ) -> Result<()> {
         if entries.len() >= max_entries {
             return Ok(());
@@ -231,11 +245,10 @@ impl CoreTools {
             if file_type.is_symlink() || entry.file_name() == ".git" {
                 continue;
             }
-            let mut name = self.display_path(&entry.path());
-            if file_type.is_dir() {
-                name.push('/');
-            }
-            entries.push(name);
+            entries.push(json!({
+                "path": self.display_path(&entry.path()),
+                "kind": if file_type.is_dir() { "directory" } else { "file" },
+            }));
             if recursive && file_type.is_dir() {
                 self.collect_entries(&entry.path(), recursive, max_entries, entries)?;
             }
@@ -249,7 +262,7 @@ impl CoreTools {
         needle: &str,
         case_sensitive: bool,
         max_matches: usize,
-        matches: &mut Vec<String>,
+        matches: &mut Vec<Value>,
     ) -> Result<()> {
         if matches.len() >= max_matches {
             return Ok(());
@@ -287,12 +300,11 @@ impl CoreTools {
                     line.to_ascii_lowercase()
                 };
                 if haystack.contains(needle) {
-                    matches.push(format!(
-                        "{}:{}:{}",
-                        self.display_path(&entry.path()),
-                        line_index + 1,
-                        line
-                    ));
+                    matches.push(json!({
+                        "path": self.display_path(&entry.path()),
+                        "line": line_index + 1,
+                        "text": line,
+                    }));
                     if matches.len() >= max_matches {
                         break;
                     }
@@ -328,67 +340,63 @@ impl CoreTools {
     }
 }
 
-impl ToolHandler for CoreTools {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl ActionHandler for CoreTools {
+    fn dispatch(
+        &self,
+        invocation: ActionInvocation,
+    ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+        Ok(ActionResult::new(data))
     }
 }
 
-pub fn declaration() -> ToolProviderDeclaration {
-    ToolProviderDeclaration::new(
-        ToolProviderId::new(PROVIDER_ID).expect("core tool provider id is valid"),
+pub fn declaration() -> ProviderDeclaration {
+    ProviderDeclaration::builtin(
+        ProviderId::new(PROVIDER_ID).expect("core tool provider id is valid"),
         "Core Tools",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("core tool declaration is valid")
-    .with_tool(tool(
+    .with_action(action::<ReadArgs>(
         FS_READ_TOOL_ID,
         "Read a UTF-8 file from the repository with line bounds.",
-        ToolCapability::Read,
-        &["path"],
+        OperationKind::Read,
     ))
-    .with_tool(tool(
+    .with_action(action::<ListArgs>(
         FS_LIST_TOOL_ID,
         "List repository directory entries.",
-        ToolCapability::Read,
-        &["path"],
+        OperationKind::Read,
     ))
-    .with_tool(tool(
+    .with_action(action::<SearchArgs>(
         FS_SEARCH_TOOL_ID,
         "Search repository text files for a literal pattern.",
-        ToolCapability::Read,
-        &["pattern"],
+        OperationKind::Read,
     ))
-    .with_tool(tool(
-        FS_EDIT_TOOL_ID,
-        "Replace one exact text span in an existing repository file.",
-        ToolCapability::Write,
-        &["path", "old_text", "new_text"],
-    ))
+    .with_action(
+        action::<EditArgs>(
+            FS_EDIT_TOOL_ID,
+            "Replace one exact text span in an existing repository file.",
+            OperationKind::Write,
+        )
+        .with_state_effects([StateEffect::RepoFiles]),
+    )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn tool(
+fn action<T: JsonSchema>(
     id: &str,
     description: &str,
-    capability: ToolCapability,
-    required_arguments: &[&str],
-) -> ToolDeclaration {
-    let declaration = ToolDeclaration::new(
-        ToolId::new(id).expect("core tool id is valid"),
+    operation_kind: OperationKind,
+) -> ActionDeclaration {
+    ActionDeclaration::from_schema::<T>(
+        CapabilityId::new(id).expect("core tool id is valid"),
         description,
-        capability,
-        required_arguments.iter().copied(),
-    );
-    if id == FS_EDIT_TOOL_ID {
-        declaration.with_state_effects([ToolStateEffect::RepoFiles])
-    } else {
-        declaration
-    }
+        operation_kind,
+    )
+    .expect("core tool declaration schema is valid")
 }
 
 fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
@@ -445,7 +453,7 @@ enum PathKind {
     Directory,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
     path: String,
@@ -453,7 +461,7 @@ struct ReadArgs {
     limit_lines: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListArgs {
     path: String,
@@ -461,7 +469,7 @@ struct ListArgs {
     max_entries: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchArgs {
     pattern: String,
@@ -470,7 +478,7 @@ struct SearchArgs {
     case_sensitive: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct EditArgs {
     path: String,
@@ -488,20 +496,28 @@ mod tests {
 
     #[test]
     fn declaration_registers_core_filesystem_tools() {
-        let mut catalog = ToolCatalog::new();
-        register(&mut catalog).unwrap();
-
-        let read = catalog
-            .tool(&ToolId::new(FS_READ_TOOL_ID).unwrap())
+        let declaration = declaration();
+        declaration.validate().unwrap();
+        let read = declaration
+            .action(&CapabilityId::new(FS_READ_TOOL_ID).unwrap())
             .unwrap();
         assert_eq!(
             read.description,
             "Read a UTF-8 file from the repository with line bounds."
         );
-        assert_eq!(read.required_arguments, vec!["path"]);
+        assert_eq!(read.input_schema["additionalProperties"], json!(false));
+        let schema = read.compile_schema().unwrap();
+        assert!(schema.validate(&json!({"path": "README.MD"})).is_ok());
+        assert!(schema.validate(&json!({})).is_err());
         assert!(
-            catalog
-                .tool(&ToolId::new(FS_EDIT_TOOL_ID).unwrap())
+            schema
+                .validate(&json!({"path": "README.MD", "extra": true}))
+                .is_err()
+        );
+        assert!(schema.validate(&json!({"path": 42})).is_err());
+        assert!(
+            declaration
+                .action(&CapabilityId::new(FS_EDIT_TOOL_ID).unwrap())
                 .is_some()
         );
     }
@@ -530,8 +546,10 @@ mod tests {
             .dispatch(FS_LIST_TOOL_ID, json!({"path": "."}))
             .unwrap();
 
-        assert!(output.contains("README.MD"));
-        assert!(!output.contains(".git"));
+        assert_eq!(output["tool"], FS_LIST_TOOL_ID);
+        assert_eq!(output["entry_count"], 1);
+        assert_eq!(output["entries"][0]["path"], "README.MD");
+        assert_eq!(output["entries"][0]["kind"], "file");
     }
 
     #[test]
@@ -548,10 +566,11 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.contains("matches=1"));
-        assert!(output.contains("truncated=true"));
-        assert!(output.contains("src/lib.rs:1:alpha"));
-        assert!(!output.contains("src/lib.rs:3:alpha"));
+        assert_eq!(output["match_count"], 1);
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["matches"][0]["path"], "src/lib.rs");
+        assert_eq!(output["matches"][0]["line"], 1);
+        assert_eq!(output["matches"][0]["text"], "alpha");
     }
 
     #[test]
@@ -568,7 +587,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.contains("status=edited"));
+        assert_eq!(output["status"], "edited");
+        assert_eq!(output["path"], "README.MD");
         assert_eq!(fs::read_to_string(path).unwrap(), "hello new\n");
     }
 
@@ -608,7 +628,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.contains("status=edited"));
+        assert_eq!(output["status"], "edited");
         assert_eq!(
             fs::read_to_string(root.join(".agl/tasks/task.md")).unwrap(),
             "# Problem\n\nnew problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n"

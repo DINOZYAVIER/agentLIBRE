@@ -71,13 +71,13 @@ fn runtime_transcript_event(
         RuntimeEvent::ToolMessage {
             message_id,
             name,
-            content,
+            data,
         } => Some(TranscriptEvent::ToolMessage {
             run_id,
             turn_id,
             message_id,
             name,
-            content: include_content.then_some(content),
+            data: include_content.then_some(data),
         }),
         RuntimeEvent::ModelAttemptLinked => Some(TranscriptEvent::ModelAttemptLinked {
             run_id,

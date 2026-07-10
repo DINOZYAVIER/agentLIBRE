@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 
 use agl_assets::{BuiltinAsset, BuiltinSkill};
-use agl_tools::{HookId, SkillId, ToolId, ToolOperationKind, ToolStateEffect};
+use agl_capabilities::{CapabilityId, HookId, OperationKind, SkillId, StateEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -51,9 +51,9 @@ pub struct SkillHarness {
     pub source: SkillSource,
     pub pack: String,
     pub required_hooks: Vec<HookId>,
-    pub allowed_tools: Vec<ToolId>,
-    pub requestable_tools: Vec<ToolId>,
-    pub denied_tools: Vec<ToolId>,
+    pub allowed_tools: Vec<CapabilityId>,
+    pub requestable_tools: Vec<CapabilityId>,
+    pub denied_tools: Vec<CapabilityId>,
     pub permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     pub permissions: SkillPermissions,
     pub context_budget_tokens: u32,
@@ -163,11 +163,11 @@ impl SkillHarness {
 #[serde(deny_unknown_fields)]
 pub struct SkillPermissionRequestTemplate {
     pub id: String,
-    pub tools: Vec<ToolId>,
+    pub tools: Vec<CapabilityId>,
     #[serde(default)]
-    pub max_operation_kind: Option<ToolOperationKind>,
+    pub max_operation_kind: Option<OperationKind>,
     #[serde(default)]
-    pub state_effects: Vec<ToolStateEffect>,
+    pub state_effects: Vec<StateEffect>,
     pub default_duration: String,
     pub reason_template: String,
 }
@@ -236,11 +236,11 @@ struct RawSkillManifest {
     source: RawSkillSource,
     pack: String,
     required_hooks: Vec<HookId>,
-    allowed_tools: Vec<ToolId>,
+    allowed_tools: Vec<CapabilityId>,
     #[serde(default)]
-    requestable_tools: Vec<ToolId>,
+    requestable_tools: Vec<CapabilityId>,
     #[serde(default)]
-    denied_tools: Vec<ToolId>,
+    denied_tools: Vec<CapabilityId>,
     #[serde(default)]
     permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     #[serde(default)]
@@ -634,9 +634,9 @@ fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestErro
 }
 
 fn validate_tool_routing(
-    allowed_tools: &[ToolId],
-    requestable_tools: &[ToolId],
-    denied_tools: &[ToolId],
+    allowed_tools: &[CapabilityId],
+    requestable_tools: &[CapabilityId],
+    denied_tools: &[CapabilityId],
 ) -> Result<(), SkillManifestError> {
     reject_tool_overlap(
         allowed_tools,
@@ -655,8 +655,8 @@ fn validate_tool_routing(
 }
 
 fn reject_tool_overlap(
-    first: &[ToolId],
-    second: &[ToolId],
+    first: &[CapabilityId],
+    second: &[CapabilityId],
     first_field: &'static str,
     second_field: &'static str,
 ) -> Result<(), SkillManifestError> {
@@ -675,7 +675,7 @@ fn reject_tool_overlap(
 
 fn normalize_permission_request_templates(
     templates: Vec<SkillPermissionRequestTemplate>,
-    requestable_tools: &[ToolId],
+    requestable_tools: &[CapabilityId],
 ) -> Result<Vec<SkillPermissionRequestTemplate>, SkillManifestError> {
     let requestable = requestable_tools.iter().collect::<BTreeSet<_>>();
     let mut normalized = Vec::with_capacity(templates.len());
@@ -1089,7 +1089,7 @@ Body.
         .unwrap_err();
 
         assert!(matches!(err, SkillManifestError::InvalidYaml { .. }));
-        assert!(err.to_string().contains("hook id must use lowercase"));
+        assert!(err.to_string().contains("hook ID must use lowercase"));
     }
 
     #[test]
@@ -1236,7 +1236,7 @@ Body.
                 .collect::<Vec<_>>(),
             vec!["cron.add", "matrix.outbox.enqueue"]
         );
-        assert_eq!(template.max_operation_kind, Some(ToolOperationKind::Write));
+        assert_eq!(template.max_operation_kind, Some(OperationKind::Write));
     }
 
     #[test]

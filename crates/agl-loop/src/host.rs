@@ -1,5 +1,5 @@
+use agl_capabilities::{CapabilityId, DispatchDenialCode, HookBatchRequest, HookBatchResult};
 use agl_events::RuntimeEvent;
-use agl_tools::{HookBatchRequest, HookBatchResult};
 use agl_turn::{
     ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnMessage,
     TurnTransitionRecord,
@@ -7,6 +7,14 @@ use agl_turn::{
 use anyhow::Result;
 
 pub trait AgentLoopHost {
+    fn record_capability_denial(
+        &mut self,
+        _capability_id: Option<CapabilityId>,
+        _code: DispatchDenialCode,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
         Ok(HookBatchResult {
             event: request.event,

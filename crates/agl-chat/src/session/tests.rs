@@ -26,6 +26,17 @@ fn request_id() -> RequestId {
     RequestId::parse(TEST_REQUEST_ID).unwrap()
 }
 
+fn effective_capabilities(ids: &[&str]) -> EffectiveCapabilitySet {
+    let catalog = full_tool_catalog();
+    CapabilityPolicyInput::new(
+        catalog.providers().iter().cloned(),
+        tool_ids(ids),
+        ToolAccessMode::Admin,
+    )
+    .resolve()
+    .unwrap()
+}
+
 #[test]
 fn build_request_uses_agentlibre_boundaries() {
     let config = ModelConfig {
@@ -34,6 +45,7 @@ fn build_request_uses_agentlibre_boundaries() {
     };
     let session_id = session_id();
     let request_id = request_id();
+    let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -50,6 +62,7 @@ fn build_request_uses_agentlibre_boundaries() {
         InferenceRequestContexts {
             session_id: Some(&session_id),
             request_id: Some(&request_id),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -77,6 +90,7 @@ fn build_request_prepends_configured_system_prompt() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
+    let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -92,6 +106,7 @@ fn build_request_prepends_configured_system_prompt() {
         &config,
         InferenceRequestContexts {
             system_prompt: Some("demo system"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -116,6 +131,7 @@ fn build_request_prepends_skill_context_after_system_prompt() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
+    let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -132,6 +148,7 @@ fn build_request_prepends_skill_context_after_system_prompt() {
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -149,6 +166,7 @@ fn build_request_prepends_memory_context_before_skill_context() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
+    let effective = effective_capabilities(&[]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -166,6 +184,7 @@ fn build_request_prepends_memory_context_before_skill_context() {
             system_prompt: Some("system"),
             memory_context: Some("memory context"),
             skill_context: Some("skill context"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -179,19 +198,17 @@ fn build_request_prepends_memory_context_before_skill_context() {
 }
 
 #[test]
-fn build_request_injects_runtime_capabilities_before_tools() {
+fn build_request_injects_runtime_features_before_tools() {
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
-    let runtime_context = build_runtime_capability_context(
+    let effective = effective_capabilities(&["fs.list", "fs.read", "fs.search"]);
+    let visible_tools = visible_tools_from_effective(&effective);
+    let runtime_context = build_runtime_feature_context(
         std::path::Path::new("/repo"),
         ToolAccessMode::ReadOnly,
-        &[
-            VisibleTool::new("fs.list"),
-            VisibleTool::new("fs.read"),
-            VisibleTool::new("fs.search"),
-        ],
+        &visible_tools,
     );
 
     let request = build_inference_request(
@@ -202,19 +219,16 @@ fn build_request_injects_runtime_capabilities_before_tools() {
             messages: vec![TurnMessage::User {
                 content: "can you run cron jobs?".to_string(),
             }],
-            visible_tools: vec![
-                VisibleTool::new("fs.list"),
-                VisibleTool::new("fs.read"),
-                VisibleTool::new("fs.search"),
-            ],
+            visible_tools,
         },
         AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
-            runtime_capability_context: Some(&runtime_context.content),
+            runtime_feature_context: Some(&runtime_context.content),
             memory_context: Some("memory context"),
             skill_context: Some("skill context"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -225,7 +239,7 @@ fn build_request_injects_runtime_capabilities_before_tools() {
     assert!(
         request.rendered.messages[1]
             .content
-            .contains("<agentlibre_runtime_capabilities>")
+            .contains("<agentlibre_runtime_features>")
     );
     assert!(request.rendered.messages[1].content.contains("- cron:"));
     assert!(
@@ -262,6 +276,7 @@ fn build_request_injects_visible_tool_context_for_hermes() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
+    let effective = effective_capabilities(&["fs.read"]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -271,17 +286,14 @@ fn build_request_injects_visible_tool_context_for_hermes() {
             messages: vec![TurnMessage::User {
                 content: "read README".to_string(),
             }],
-            visible_tools: vec![
-                VisibleTool::new("fs.read")
-                    .describe("Read a repository file")
-                    .require_argument("path"),
-            ],
+            visible_tools: visible_tools_from_effective(&effective),
         },
         AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -302,6 +314,7 @@ fn build_request_injects_visible_tool_context_for_gemma() {
         dialect: ModelDialect::Gemma4,
         tool_call_format: ToolCallFormat::GemmaFunctionCall,
     };
+    let effective = effective_capabilities(&["fs.read"]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -311,17 +324,14 @@ fn build_request_injects_visible_tool_context_for_gemma() {
             messages: vec![TurnMessage::User {
                 content: "read README".to_string(),
             }],
-            visible_tools: vec![
-                VisibleTool::new("fs.read")
-                    .describe("Read a repository file")
-                    .require_argument("path"),
-            ],
+            visible_tools: visible_tools_from_effective(&effective),
         },
         AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
             skill_context: Some("skill context"),
+            effective_capabilities: Some(&effective),
             ..Default::default()
         },
     )
@@ -335,6 +345,24 @@ fn build_request_injects_visible_tool_context_for_gemma() {
     assert!(!tool_context.contains(r#"{"name":"TOOL_NAME""#));
     assert_eq!(request.rendered.messages[3].content, "read README");
     assert_eq!(request.rendered.tools[0].name, "fs.read");
+}
+
+#[test]
+fn hermes_and_gemma_render_the_same_complete_input_schema() {
+    let effective = effective_capabilities(&["fs.read"]);
+    let declaration = effective
+        .capability(&CapabilityId::new("fs.read").unwrap())
+        .unwrap()
+        .declaration();
+    let schema_record = render_action_schema(declaration);
+
+    let hermes = render_hermes_tool_context(&effective);
+    let gemma = render_gemma_tool_context(&effective);
+
+    assert!(hermes.contains(&schema_record));
+    assert!(gemma.contains(&schema_record));
+    assert!(schema_record.contains(r#""additionalProperties":false"#));
+    assert!(schema_record.contains(r#""path":{"type":"string"}"#));
 }
 
 #[test]
@@ -465,14 +493,15 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
     );
     assert_eq!(
-        tools[0].required_arguments,
-        vec!["path", "old_text", "new_text"]
+        tools[0].input_schema["required"],
+        serde_json::json!(["path", "old_text", "new_text"])
     );
+    assert_eq!(tools[0].input_schema["additionalProperties"], false);
     assert!(tools[0].description.contains("exact text"));
 }
 
@@ -496,7 +525,7 @@ fn visible_tools_include_read_only_core_tools_without_skills() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "fs.list",
@@ -532,7 +561,7 @@ fn visible_tools_include_edit_in_write_mode_without_skills() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "fs.edit",
@@ -546,6 +575,281 @@ fn visible_tools_include_edit_in_write_mode_without_skills() {
             "skill.status",
             "skill.verify",
         ]
+    );
+}
+
+#[test]
+fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
+    let registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let fs_read = CapabilityId::new("fs.read").unwrap();
+
+    let inherited = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+    )
+    .unwrap();
+    assert!(inherited.contains(&fs_read));
+
+    let empty_allow = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::default()),
+    )
+    .unwrap();
+    assert!(!empty_allow.contains(&fs_read));
+    assert_eq!(
+        empty_allow.exclusion(&fs_read).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+    );
+
+    let denied = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::new(
+            [fs_read.clone()],
+            [fs_read.clone()],
+        )),
+    )
+    .unwrap();
+    assert!(!denied.contains(&fs_read));
+    assert_eq!(
+        denied.exclusion(&fs_read).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::FunctionDenied
+    );
+}
+
+#[test]
+fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools() {
+    struct Case {
+        id: &'static str,
+        tools_yaml: &'static str,
+        expected_ids: &'static [&'static str],
+        policy_present: bool,
+    }
+
+    let cases = [
+        Case {
+            id: "policy-absent",
+            tools_yaml: "",
+            expected_ids: &[
+                "fs.list",
+                "fs.read",
+                "fs.search",
+                "permissions.request",
+                "permissions.status",
+                "skill.inspect",
+                "skill.list",
+                "skill.status",
+                "skill.verify",
+            ],
+            policy_present: false,
+        },
+        Case {
+            id: "policy-empty",
+            tools_yaml: "tools: {}\n",
+            expected_ids: &[],
+            policy_present: true,
+        },
+        Case {
+            id: "policy-allow-deny",
+            tools_yaml: "tools:\n  allow:\n    - fs.list\n    - fs.read\n  deny:\n    - fs.list\n",
+            expected_ids: &["fs.read"],
+            policy_present: true,
+        },
+    ];
+    let root = temp_store_root("function-policy-session");
+    let workspace = root.join("workspace");
+    let config_path = root.join("inference.toml");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+            root.join("missing-model.gguf").display()
+        ),
+    )
+    .unwrap();
+    let runtime = AgentLibreRuntimeConfig {
+        paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
+        logging: agl_runtime::AgentLibreLoggingConfig::default(),
+        history: agl_runtime::AgentLibreHistoryConfig::default(),
+        workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+    };
+    let catalog = full_tool_catalog();
+    let catalog_ids = catalog
+        .providers()
+        .iter()
+        .flat_map(|provider| provider.actions.iter())
+        .map(|action| action.id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    for case in cases {
+        let function_root = workspace.join(".agl/functions").join(case.id);
+        std::fs::create_dir_all(&function_root).unwrap();
+        std::fs::write(
+            function_root.join(agl_functions::FUNCTION_FILE_NAME),
+            format!(
+                "---\nschema: agentfunction/v1\nid: {}\ntitle: Function policy test\n{}---\n",
+                case.id, case.tools_yaml
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            function_root.join(agl_functions::FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+            "Apply the function policy.\n",
+        )
+        .unwrap();
+
+        let session = InferenceSession::new(
+            InferenceOptions {
+                config: Some(config_path.clone()),
+                function_ref: Some(case.id.to_string()),
+                artifact_root: Some(root.join("artifacts").join(case.id)),
+                workspace_root: Some(workspace.clone()),
+                ..Default::default()
+            },
+            &runtime,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            session
+                .runtime_function
+                .as_ref()
+                .unwrap()
+                .tool_policy
+                .is_some(),
+            case.policy_present,
+            "{}",
+            case.id
+        );
+
+        let visible_ids = session
+            .turn_visible_tools()
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect::<Vec<_>>();
+        let effective_ids = session
+            .effective_capabilities()
+            .capabilities()
+            .map(|capability| capability.declaration().id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(visible_ids, case.expected_ids, "{} visible", case.id);
+        assert_eq!(effective_ids, case.expected_ids, "{} effective", case.id);
+
+        let request = build_inference_request(
+            ModelRequest {
+                run_id: run_id(),
+                turn_id: turn_id(),
+                request_index: 0,
+                messages: vec![TurnMessage::User {
+                    content: "test policy".to_string(),
+                }],
+                visible_tools: session.turn_visible_tools().to_vec(),
+            },
+            AttemptId::generate(),
+            &session.model_config,
+            InferenceRequestContexts {
+                system_prompt: session.system_prompt.as_deref(),
+                runtime_feature_context: session.runtime_feature_context.as_deref(),
+                function_context: session.function_context.as_deref(),
+                memory_context: session.memory_context.as_deref(),
+                skill_context: session.skill_context.as_deref(),
+                effective_capabilities: Some(session.effective_capabilities()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let prompt_ids = request
+            .rendered
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prompt_ids, case.expected_ids, "{} prompt tools", case.id);
+
+        let tool_context = request
+            .rendered
+            .messages
+            .iter()
+            .find(|message| message.content.contains("<agentlibre_tool_context>"))
+            .map(|message| message.content.as_str());
+        assert_eq!(
+            tool_context.is_some(),
+            !case.expected_ids.is_empty(),
+            "{} textual tool context",
+            case.id
+        );
+        let expected = case.expected_ids.iter().copied().collect::<BTreeSet<_>>();
+        for capability_id in &catalog_ids {
+            let marker = format!(r#""name":"{capability_id}""#);
+            assert_eq!(
+                tool_context.is_some_and(|context| context.contains(&marker)),
+                expected.contains(capability_id),
+                "{} textual prompt capability {}",
+                case.id,
+                capability_id
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
+    let registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let cron_add = CapabilityId::new("cron.add").unwrap();
+    let snapshot = RuntimePermissionGrantSnapshot {
+        admitted: vec![AdmittedPermissionGrant {
+            grant_id: "grant-1".to_string(),
+            capability_id: cron_add.clone(),
+            max_operation_kind: OperationKind::Write,
+            state_effects: BTreeSet::from([StateEffect::StoreCron]),
+        }],
+        ignored: Vec::new(),
+    };
+
+    let effective = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &snapshot,
+        None,
+    )
+    .unwrap();
+
+    assert!(!effective.contains(&cron_add));
+    assert_eq!(
+        effective.exclusion(&cron_add).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
     );
 }
 
@@ -569,7 +873,7 @@ fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "fs.edit",
@@ -608,7 +912,7 @@ fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec!["fs.list", "fs.read", "fs.search"]
     );
@@ -637,7 +941,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
         &skill_registry,
         &catalog,
         &[],
-        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Write,
         &root,
         std::path::Path::new("/repo"),
         &run_id,
@@ -646,7 +950,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
 
     let tool_names = tools
         .iter()
-        .map(|tool| tool.name.as_str())
+        .map(|tool| tool.id.as_str())
         .collect::<Vec<_>>();
     assert!(tool_names.contains(&"cron.add"));
     assert!(!tool_names.contains(&"cron.delete"));
@@ -658,6 +962,48 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
     assert_eq!(consumed.last_admitted_run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(consumed.consumed_at.is_some());
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
+    let root = temp_store_root("grant-mode-blocked");
+    let store = AglStore::open_at(&root).unwrap();
+    store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: "cron.add".to_string(),
+            max_operation_kind: "write".to_string(),
+            state_effects: vec!["store_cron".to_string()],
+            scope: serde_json::json!({}),
+            duration: "one_turn".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let run_id = run_id();
+
+    let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
+        &skill_registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &root,
+        std::path::Path::new("/repo"),
+        &run_id,
+    )
+    .unwrap();
+
+    assert!(!tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
+    assert!(snapshot.granted_visible_tools().is_empty());
+    assert!(
+        snapshot
+            .ignored_grants()
+            .iter()
+            .any(|grant| grant.contains("cron.add:tool_mode_denied"))
+    );
+    assert_eq!(store.active_permission_grants().unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -691,7 +1037,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
     )
     .unwrap();
 
-    assert!(!tools.iter().any(|tool| tool.name == "notes.delete"));
+    assert!(!tools.iter().any(|tool| tool.id.as_str() == "notes.delete"));
     assert!(snapshot.granted_visible_tools().is_empty());
     assert!(
         snapshot.ignored_grants()[0].contains("notes.delete:denied_by_selected_skill"),
@@ -736,7 +1082,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec!["fs.read"]
     );
@@ -770,7 +1116,7 @@ fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec![
             "cron.preflight",
@@ -780,11 +1126,11 @@ fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
             "permissions.status",
         ]
     );
-    assert!(!tools.iter().any(|tool| tool.name == "cron.add"));
+    assert!(!tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
     assert!(
         !tools
             .iter()
-            .any(|tool| tool.name == "matrix.outbox.enqueue")
+            .any(|tool| tool.id.as_str() == "matrix.outbox.enqueue")
     );
 }
 
@@ -811,14 +1157,14 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
         &skill_registry,
         &catalog,
         &[SkillId::new("cron-planner").unwrap()],
-        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Write,
         &root,
         std::path::Path::new("/repo"),
         &run_id,
     )
     .unwrap();
 
-    assert!(tools.iter().any(|tool| tool.name == "cron.add"));
+    assert!(tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
     assert_eq!(snapshot.granted_visible_tools(), vec!["cron.add"]);
     assert!(store.active_permission_grants().unwrap().is_empty());
 
@@ -882,11 +1228,8 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
             vec![agl_skills::SkillPermissionRequestTemplate {
                 id: "schedule-matrix-cron".to_string(),
                 tools: tool_ids(&["cron.add", "matrix.outbox.enqueue"]),
-                max_operation_kind: Some(agl_tools::ToolOperationKind::Write),
-                state_effects: vec![
-                    agl_tools::ToolStateEffect::StoreCron,
-                    agl_tools::ToolStateEffect::MatrixOutbox,
-                ],
+                max_operation_kind: Some(OperationKind::Write),
+                state_effects: vec![StateEffect::StoreCron, StateEffect::MatrixOutbox],
                 default_duration: "one_turn".to_string(),
                 reason_template: "Schedule a Matrix notification cron job.".to_string(),
             }],
@@ -941,10 +1284,10 @@ fn hook_ids(values: &[&str]) -> Vec<HookId> {
         .collect()
 }
 
-fn tool_ids(values: &[&str]) -> Vec<ToolId> {
+fn tool_ids(values: &[&str]) -> Vec<CapabilityId> {
     values
         .iter()
-        .map(|value| ToolId::new(*value).unwrap())
+        .map(|value| CapabilityId::new(*value).unwrap())
         .collect()
 }
 
@@ -976,7 +1319,7 @@ fn selected_tool_smoke_skill_exposes_only_declared_tool() {
     assert_eq!(
         tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
         vec!["fs.read"]
     );

@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::{
     EventEnvelope, HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent,
-    StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
+    SafeParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
 };
 
 pub type RuntimeEventEnvelope = EventEnvelope<RuntimeEvent>;
@@ -78,6 +78,25 @@ pub enum RuntimeEvent {
     },
     #[serde(rename = "model.action_parsed")]
     ModelActionParsed { action: ParsedActionEvent },
+    #[serde(rename = "capability.policy_resolved")]
+    CapabilityPolicyResolved {
+        policy_hash: String,
+        capability_ids: Vec<String>,
+        exclusions: Vec<CapabilityExclusionEvent>,
+    },
+    #[serde(rename = "capability.call_admitted")]
+    CapabilityCallAdmitted {
+        policy_hash: String,
+        capability_id: String,
+        provider_id: String,
+        declaration_digest: String,
+    },
+    #[serde(rename = "capability.call_denied")]
+    CapabilityCallDenied {
+        policy_hash: String,
+        capability_id: Option<String>,
+        reason_code: String,
+    },
     #[serde(rename = "tool.json_malformed")]
     ToolJsonMalformed {
         classification: ToolJsonMalformedKind,
@@ -103,11 +122,11 @@ pub enum RuntimeEvent {
     #[serde(rename = "tool.call_started")]
     ToolCallStarted { name: String, arguments: Value },
     #[serde(rename = "tool.call_finished")]
-    ToolCallFinished { name: String, observation: String },
+    ToolCallFinished { name: String, data: Value },
     #[serde(rename = "tool.call_failed")]
     ToolCallFailed { name: String, message: String },
     #[serde(rename = "observation.appended")]
-    ObservationAppended { name: String, observation: String },
+    ObservationAppended { name: String, data: Value },
     #[serde(rename = "answer.final")]
     AnswerFinal { answer: String },
     #[serde(rename = "turn.stopped")]
@@ -137,7 +156,7 @@ pub enum RuntimeEvent {
     ToolMessage {
         message_id: MessageId,
         name: String,
-        content: String,
+        data: Value,
     },
     #[serde(rename = "model_attempt_linked")]
     ModelAttemptLinked,
@@ -172,6 +191,9 @@ impl RuntimeEvent {
             Self::ModelResponseReceived { .. } => "model.response_received",
             Self::ModelRequestFailed { .. } => "model.request_failed",
             Self::ModelActionParsed { .. } => "model.action_parsed",
+            Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
+            Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
+            Self::CapabilityCallDenied { .. } => "capability.call_denied",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
             Self::ToolJsonRepairSucceeded { .. } => "tool.json_repair_succeeded",
@@ -266,7 +288,26 @@ pub enum SafeRuntimeEvent {
         message_bytes: usize,
     },
     #[serde(rename = "model.action_parsed")]
-    ModelActionParsed { action: ParsedActionEvent },
+    ModelActionParsed { action: SafeParsedActionEvent },
+    #[serde(rename = "capability.policy_resolved")]
+    CapabilityPolicyResolved {
+        policy_hash: String,
+        capability_ids: Vec<String>,
+        exclusions: Vec<CapabilityExclusionEvent>,
+    },
+    #[serde(rename = "capability.call_admitted")]
+    CapabilityCallAdmitted {
+        policy_hash: String,
+        capability_id: String,
+        provider_id: String,
+        declaration_digest: String,
+    },
+    #[serde(rename = "capability.call_denied")]
+    CapabilityCallDenied {
+        policy_hash: String,
+        capability_id: Option<String>,
+        reason_code: String,
+    },
     #[serde(rename = "tool.json_malformed")]
     ToolJsonMalformed {
         classification: ToolJsonMalformedKind,
@@ -286,31 +327,37 @@ pub enum SafeRuntimeEvent {
     },
     #[serde(rename = "tool.args_validated")]
     ToolArgsValidated {
-        name: String,
+        capability_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool.args_invalid")]
-    ToolArgsInvalid { name: String, message_bytes: usize },
+    ToolArgsInvalid {
+        capability_id: Option<String>,
+        message_bytes: usize,
+    },
     #[serde(rename = "tool.hidden_rejected")]
-    ToolHiddenRejected { name: String },
+    ToolHiddenRejected { capability_id: Option<String> },
     #[serde(rename = "tool.limit_reached")]
     ToolLimitReached { limit: usize },
     #[serde(rename = "tool.call_started")]
     ToolCallStarted {
-        name: String,
+        capability_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool.call_finished")]
     ToolCallFinished {
-        name: String,
-        observation_bytes: usize,
+        capability_id: Option<String>,
+        data: JsonMetadata,
     },
     #[serde(rename = "tool.call_failed")]
-    ToolCallFailed { name: String, message_bytes: usize },
+    ToolCallFailed {
+        capability_id: Option<String>,
+        message_bytes: usize,
+    },
     #[serde(rename = "observation.appended")]
     ObservationAppended {
-        name: String,
-        observation_bytes: usize,
+        capability_id: Option<String>,
+        data: JsonMetadata,
     },
     #[serde(rename = "answer.final")]
     AnswerFinal { answer_bytes: usize },
@@ -334,14 +381,14 @@ pub enum SafeRuntimeEvent {
     #[serde(rename = "assistant_tool_call")]
     AssistantToolCall {
         message_id: MessageId,
-        name: String,
+        capability_id: Option<String>,
         arguments: JsonMetadata,
     },
     #[serde(rename = "tool_message")]
     ToolMessage {
         message_id: MessageId,
-        name: String,
-        content_bytes: usize,
+        capability_id: Option<String>,
+        data: JsonMetadata,
     },
     #[serde(rename = "model_attempt_linked")]
     ModelAttemptLinked,
@@ -376,6 +423,9 @@ impl SafeRuntimeEvent {
             Self::ModelResponseReceived { .. } => "model.response_received",
             Self::ModelRequestFailed { .. } => "model.request_failed",
             Self::ModelActionParsed { .. } => "model.action_parsed",
+            Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
+            Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
+            Self::CapabilityCallDenied { .. } => "capability.call_denied",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
             Self::ToolJsonRepairSucceeded { .. } => "tool.json_repair_succeeded",
@@ -413,6 +463,13 @@ pub struct HookResultEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityExclusionEvent {
+    pub capability_id: String,
+    pub reason_code: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "json_kind", rename_all = "snake_case")]
 pub enum JsonMetadata {
     Object { keys: Vec<String> },
@@ -438,6 +495,19 @@ impl From<&Value> for JsonMetadata {
             Value::Null => Self::Null,
         }
     }
+}
+
+fn safe_capability_id(value: &str) -> Option<String> {
+    let valid = !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        })
+        && value.matches(':').count() <= 1
+        && !value.starts_with(':')
+        && !value.ends_with(':');
+    valid.then(|| value.to_owned())
 }
 
 impl From<&RuntimeEvent> for SafeRuntimeEvent {
@@ -542,7 +612,41 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 message_bytes: message.len(),
             },
             RuntimeEvent::ModelActionParsed { action } => Self::ModelActionParsed {
-                action: action.clone(),
+                action: match action {
+                    ParsedActionEvent::Answer => SafeParsedActionEvent::Answer,
+                    ParsedActionEvent::ToolCall { name } => SafeParsedActionEvent::ToolCall {
+                        capability_id: safe_capability_id(name),
+                    },
+                },
+            },
+            RuntimeEvent::CapabilityPolicyResolved {
+                policy_hash,
+                capability_ids,
+                exclusions,
+            } => Self::CapabilityPolicyResolved {
+                policy_hash: policy_hash.clone(),
+                capability_ids: capability_ids.clone(),
+                exclusions: exclusions.clone(),
+            },
+            RuntimeEvent::CapabilityCallAdmitted {
+                policy_hash,
+                capability_id,
+                provider_id,
+                declaration_digest,
+            } => Self::CapabilityCallAdmitted {
+                policy_hash: policy_hash.clone(),
+                capability_id: capability_id.clone(),
+                provider_id: provider_id.clone(),
+                declaration_digest: declaration_digest.clone(),
+            },
+            RuntimeEvent::CapabilityCallDenied {
+                policy_hash,
+                capability_id,
+                reason_code,
+            } => Self::CapabilityCallDenied {
+                policy_hash: policy_hash.clone(),
+                capability_id: capability_id.clone(),
+                reason_code: reason_code.clone(),
             },
             RuntimeEvent::ToolJsonMalformed {
                 classification,
@@ -568,32 +672,32 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 }
             }
             RuntimeEvent::ToolArgsValidated { name, arguments } => Self::ToolArgsValidated {
-                name: name.clone(),
+                capability_id: safe_capability_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
             RuntimeEvent::ToolArgsInvalid { name, message } => Self::ToolArgsInvalid {
-                name: name.clone(),
+                capability_id: safe_capability_id(name),
                 message_bytes: message.len(),
             },
-            RuntimeEvent::ToolHiddenRejected { name } => {
-                Self::ToolHiddenRejected { name: name.clone() }
-            }
+            RuntimeEvent::ToolHiddenRejected { name } => Self::ToolHiddenRejected {
+                capability_id: safe_capability_id(name),
+            },
             RuntimeEvent::ToolLimitReached { limit } => Self::ToolLimitReached { limit: *limit },
             RuntimeEvent::ToolCallStarted { name, arguments } => Self::ToolCallStarted {
-                name: name.clone(),
+                capability_id: safe_capability_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
-            RuntimeEvent::ToolCallFinished { name, observation } => Self::ToolCallFinished {
-                name: name.clone(),
-                observation_bytes: observation.len(),
+            RuntimeEvent::ToolCallFinished { name, data } => Self::ToolCallFinished {
+                capability_id: safe_capability_id(name),
+                data: JsonMetadata::from(data),
             },
             RuntimeEvent::ToolCallFailed { name, message } => Self::ToolCallFailed {
-                name: name.clone(),
+                capability_id: safe_capability_id(name),
                 message_bytes: message.len(),
             },
-            RuntimeEvent::ObservationAppended { name, observation } => Self::ObservationAppended {
-                name: name.clone(),
-                observation_bytes: observation.len(),
+            RuntimeEvent::ObservationAppended { name, data } => Self::ObservationAppended {
+                capability_id: safe_capability_id(name),
+                data: JsonMetadata::from(data),
             },
             RuntimeEvent::AnswerFinal { answer } => Self::AnswerFinal {
                 answer_bytes: answer.len(),
@@ -625,17 +729,17 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 arguments,
             } => Self::AssistantToolCall {
                 message_id: message_id.clone(),
-                name: name.clone(),
+                capability_id: safe_capability_id(name),
                 arguments: JsonMetadata::from(arguments),
             },
             RuntimeEvent::ToolMessage {
                 message_id,
                 name,
-                content,
+                data,
             } => Self::ToolMessage {
                 message_id: message_id.clone(),
-                name: name.clone(),
-                content_bytes: content.len(),
+                capability_id: safe_capability_id(name),
+                data: JsonMetadata::from(data),
             },
             RuntimeEvent::ModelAttemptLinked => Self::ModelAttemptLinked,
             RuntimeEvent::InferenceAttemptStarted {

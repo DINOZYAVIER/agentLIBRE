@@ -1,16 +1,18 @@
 use std::path::{Path, PathBuf};
 
+use agl_capabilities::{
+    ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, CapabilityId,
+};
 use agl_store::{AglStore, MatrixNotificationOutboxItem};
-use agl_tools::{ToolHandler, ToolInput, ToolOutput};
+use agl_tools::matrix_delivery::MatrixOutboxDeliverArgs;
 use anyhow::{Context, Result, ensure};
-use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const DEFAULT_DELIVERY_LIMIT: usize = 10;
 const MAX_DELIVERY_LIMIT: usize = 100;
 pub const MATRIX_ROOM_NOTIFY_REF_PREFIX: &str = "matrix-room:";
 
-pub trait MatrixOutboxTransport {
+pub trait MatrixOutboxTransport: Send + Sync {
     fn deliver_notice(&self, notification: &MatrixNotificationOutboxItem) -> Result<()>;
 }
 
@@ -30,21 +32,27 @@ impl<T> MatrixOutboxDeliveryTools<T> {
 }
 
 impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
-        match name {
-            agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID => self.deliver(arguments),
-            _ => anyhow::bail!("unknown Matrix outbox delivery tool `{name}`"),
-        }
+    fn dispatch_action(&self, id: &CapabilityId, arguments: Value) -> Result<ActionResult> {
+        ensure!(
+            id.as_str() == agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            "unknown Matrix outbox delivery capability `{id}`"
+        );
+        let args =
+            serde_json::from_value::<MatrixOutboxDeliverArgs>(arguments).with_context(|| {
+                format!(
+                    "{} arguments are invalid",
+                    agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID
+                )
+            })?;
+        Ok(ActionResult::new(self.deliver(args)?))
     }
 
-    fn deliver(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<DeliverArgs>(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID, arguments)?;
+    fn deliver(&self, args: MatrixOutboxDeliverArgs) -> Result<Value> {
         let limit = args
             .limit
             .unwrap_or(DEFAULT_DELIVERY_LIMIT)
             .clamp(1, MAX_DELIVERY_LIMIT);
-        let dry_run = args.dry_run.unwrap_or(false);
-        let store = if dry_run {
+        let store = if args.dry_run {
             AglStore::open_current_read_only_at(&self.store_root)
         } else {
             AglStore::open_current_at(&self.store_root)
@@ -56,51 +64,59 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
             )
         })?;
         let (queued, truncated) = store.queued_matrix_notifications_page(limit)?;
+        let queued_count = queued.len();
         let mut sent = 0usize;
         let mut failed = 0usize;
-        let mut output = format!(
-            "tool=matrix.outbox.deliver\ndry_run={dry_run}\nlimit={limit}\nqueued={}\ntruncated={truncated}\n---",
-            queued.len()
-        );
+        let mut deliveries = Vec::with_capacity(queued_count);
         for item in queued {
-            output.push('\n');
-            if dry_run {
-                output.push_str(&format!(
-                    "notification id={} notify_ref={} action=would_deliver",
-                    item.id, item.notify_ref
-                ));
+            if args.dry_run {
+                deliveries.push(json!({
+                    "id": item.id,
+                    "notify_ref": item.notify_ref,
+                    "status": "would_deliver",
+                }));
                 continue;
             }
             match self.transport.deliver_notice(&item) {
                 Ok(()) => {
                     let item = store.mark_matrix_notification_sent(&item.id)?;
                     sent += 1;
-                    output.push_str(&format!(
-                        "notification id={} notify_ref={} action=sent",
-                        item.id, item.notify_ref
-                    ));
+                    deliveries.push(json!({
+                        "id": item.id,
+                        "notify_ref": item.notify_ref,
+                        "status": "sent",
+                    }));
                 }
-                Err(err) => {
-                    let item = store.mark_matrix_notification_failed(&item.id, &err.to_string())?;
+                Err(error) => {
+                    let item =
+                        store.mark_matrix_notification_failed(&item.id, &error.to_string())?;
                     failed += 1;
-                    output.push_str(&format!(
-                        "notification id={} notify_ref={} action=failed error={}",
-                        item.id,
-                        item.notify_ref,
-                        item.error.unwrap_or_default()
-                    ));
+                    deliveries.push(json!({
+                        "id": item.id,
+                        "notify_ref": item.notify_ref,
+                        "status": "failed",
+                        "error": item.error,
+                    }));
                 }
             }
         }
-        output.push_str(&format!("\nsent={sent}\nfailed={failed}"));
-        Ok(output)
+        Ok(json!({
+            "capability_id": agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            "dry_run": args.dry_run,
+            "limit": limit,
+            "queued": queued_count,
+            "truncated": truncated,
+            "deliveries": deliveries,
+            "sent": sent,
+            "failed": failed,
+        }))
     }
 }
 
-impl<T: MatrixOutboxTransport> ToolHandler for MatrixOutboxDeliveryTools<T> {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl<T: MatrixOutboxTransport> ActionHandler for MatrixOutboxDeliveryTools<T> {
+    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+        self.dispatch_action(&invocation.capability_id, invocation.arguments)
+            .map_err(Into::into)
     }
 }
 
@@ -117,17 +133,6 @@ pub fn parse_matrix_room_notify_ref(notify_ref: &str) -> Result<&str> {
         "Matrix notify_ref room id is empty"
     );
     Ok(room)
-}
-
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeliverArgs {
-    limit: Option<usize>,
-    dry_run: Option<bool>,
 }
 
 #[cfg(test)]
@@ -152,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_tool_marks_sent_and_failed_items() {
+    fn delivery_action_returns_structured_sent_and_failed_items() {
         let root = temp_root("deliver");
         let store = AglStore::migrate_at(&root).unwrap();
         assert_eq!(
@@ -169,16 +174,20 @@ mod tests {
         let tools = MatrixOutboxDeliveryTools::new(&root, TestTransport);
 
         let output = tools
-            .dispatch(
-                agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
                 json!({"limit": 10}),
             )
             .unwrap();
 
         let first = store.matrix_notification(&first.id).unwrap().unwrap();
         let second = store.matrix_notification(&second.id).unwrap().unwrap();
-        assert!(output.contains("sent=1"));
-        assert!(output.contains("failed=1"));
+        assert_eq!(output.data["sent"], 1);
+        assert_eq!(output.data["failed"], 1);
+        let deliveries = output.data["deliveries"].as_array().unwrap();
+        assert_eq!(deliveries[0]["status"], "sent");
+        assert_eq!(deliveries[1]["status"], "failed");
+        assert!(deliveries[1]["error"].is_string());
         assert_eq!(first.status.as_str(), "sent");
         assert_eq!(second.status.as_str(), "failed");
 
@@ -186,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_does_not_mark_items_delivered() {
+    fn dry_run_returns_would_deliver_without_mutation() {
         let root = temp_root("dry-run");
         AglStore::migrate_at(&root).unwrap();
         let store = AglStore::open_current_at(&root).unwrap();
@@ -196,16 +205,32 @@ mod tests {
         let tools = MatrixOutboxDeliveryTools::new(&root, TestTransport);
 
         let output = tools
-            .dispatch(
-                agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
                 json!({"dry_run": true}),
             )
             .unwrap();
 
         let item = store.matrix_notification(&item.id).unwrap().unwrap();
-        assert!(output.contains("action=would_deliver"));
+        assert_eq!(output.data["deliveries"][0]["status"], "would_deliver");
+        assert_eq!(output.data["sent"], 0);
         assert_eq!(item.status.as_str(), "queued");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handler_rejects_unknown_argument_fields() {
+        let root = temp_root("unknown");
+        AglStore::migrate_at(&root).unwrap();
+        let tools = MatrixOutboxDeliveryTools::new(&root, TestTransport);
+        let error = tools
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
+                json!({"unknown": true}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("arguments are invalid"));
         let _ = std::fs::remove_dir_all(root);
     }
 
