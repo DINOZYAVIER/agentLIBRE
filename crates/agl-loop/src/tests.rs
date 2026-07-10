@@ -1,7 +1,11 @@
 use crate::*;
-use agl_events::AgentEvent;
+use agl_events::RuntimeEvent;
+use agl_ids::{RunId, TurnId};
 use anyhow::{Result, anyhow};
 use serde_json::json;
+
+const TEST_RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000001";
+const TEST_TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
 
 enum FakeModelResult {
     Response(String),
@@ -24,7 +28,7 @@ struct FakeHost {
     hook_results: Vec<FakeHookResult>,
     requests: Vec<&'static str>,
     operations: Vec<String>,
-    events: Vec<AgentEvent>,
+    events: Vec<RuntimeEvent>,
     transitions: Vec<TurnTransitionRecord>,
     model_requests: Vec<ModelRequest>,
     dispatches: Vec<ToolDispatchRequest>,
@@ -67,7 +71,7 @@ impl FakeHost {
     }
 
     fn event_kinds(&self) -> Vec<&'static str> {
-        self.events.iter().map(AgentEvent::kind).collect()
+        self.events.iter().map(RuntimeEvent::kind).collect()
     }
 
     fn transition_kinds(&self) -> Vec<&'static str> {
@@ -118,13 +122,29 @@ impl AgentLoopHost for FakeHost {
         Ok(())
     }
 
-    fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()> {
+    fn emit_transition(
+        &mut self,
+        record: &TurnTransitionRecord,
+        event: &RuntimeEvent,
+    ) -> Result<()> {
         self.operations
             .push(format!("transition:{}", record.transition.as_str()));
         self.transitions.push(record.clone());
         self.events.push(event.clone());
         Ok(())
     }
+}
+
+fn run_id() -> RunId {
+    RunId::parse(TEST_RUN_ID).unwrap()
+}
+
+fn turn_id() -> TurnId {
+    TurnId::parse(TEST_TURN_ID).unwrap()
+}
+
+fn turn_input(user_input: impl Into<String>) -> TurnInput {
+    TurnInput::user(run_id(), turn_id(), user_input)
 }
 
 fn read_file_tool() -> VisibleTool {
@@ -181,7 +201,7 @@ fn required_turn_finish_hook_pass_allows_answer() {
             HookEvent::TurnFinish,
             [hook_result("guard.answer", HookStatus::Pass, &[])],
         ));
-    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
 
     let output = run_turn(&mut host, input).unwrap();
 
@@ -236,7 +256,7 @@ fn required_artifact_write_hook_runs_before_answer_is_accepted() {
             HookEvent::ArtifactWrite,
             [hook_result("guard.artifact", HookStatus::Pass, &[])],
         ));
-    let input = TurnInput::user("answer").with_hook_batch(artifact_write_hook_batch());
+    let input = turn_input("answer").with_hook_batch(artifact_write_hook_batch());
 
     let output = run_turn(&mut host, input).unwrap();
 
@@ -279,7 +299,7 @@ fn warning_turn_finish_hook_continues_and_records_warning() {
                 &["answer.warning"],
             )],
         ));
-    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
 
     let output = run_turn(&mut host, input).unwrap();
 
@@ -293,7 +313,7 @@ fn warning_turn_finish_hook_continues_and_records_warning() {
         host.events
             .iter()
             .find(|event| event.kind() == "hook.batch_finished"),
-        Some(AgentEvent::HookBatchFinished {
+        Some(RuntimeEvent::HookBatchFinished {
             outcome: agl_events::HookBatchOutcomeEvent::Warn,
             warning_count: 1,
             message_codes,
@@ -319,7 +339,7 @@ fn repairs_answer_when_required_hook_requests_repair() {
             HookEvent::ArtifactWrite,
             [hook_result("guard.artifact", HookStatus::Pass, &[])],
         ));
-    let input = TurnInput::user("what is loaded?")
+    let input = turn_input("what is loaded?")
         .with_hook_batch(artifact_write_hook_batch())
         .with_max_hook_repair_attempts(1);
 
@@ -369,7 +389,7 @@ fn failed_required_turn_finish_hook_fails_closed_before_accepting_answer() {
                 &["answer.blocked"],
             )],
         ));
-    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
 
     let err = run_turn(&mut host, input).unwrap_err();
 
@@ -393,7 +413,7 @@ fn failed_required_turn_finish_hook_fails_closed_before_accepting_answer() {
     );
     assert!(matches!(
         host.events.last(),
-        Some(AgentEvent::TurnFinished {
+        Some(RuntimeEvent::TurnFinished {
             status: agl_events::TurnFinishStatus::Failed,
             ..
         })
@@ -408,7 +428,7 @@ fn missing_required_turn_finish_hook_fails_closed() {
             HookEvent::TurnFinish,
             Vec::<HookResult>::new(),
         ));
-    let input = TurnInput::user("answer").with_hook_batch(finish_hook_batch());
+    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
 
     let err = run_turn(&mut host, input).unwrap_err();
 
@@ -417,7 +437,7 @@ fn missing_required_turn_finish_hook_fails_closed() {
         host.events
             .iter()
             .find(|event| event.kind() == "hook.batch_finished"),
-        Some(AgentEvent::HookBatchFinished {
+        Some(RuntimeEvent::HookBatchFinished {
             outcome: agl_events::HookBatchOutcomeEvent::Fail,
             failed_required_count: 0,
             missing_required_hooks,
@@ -428,7 +448,7 @@ fn missing_required_turn_finish_hook_fails_closed() {
         host.events
             .iter()
             .find(|event| event.kind() == "hook.batch_blocked"),
-        Some(AgentEvent::HookBatchBlocked {
+        Some(RuntimeEvent::HookBatchBlocked {
             missing_required_hooks,
             ..
         }) if missing_required_hooks == &["guard.answer".to_string()]
@@ -438,7 +458,7 @@ fn missing_required_turn_finish_hook_fails_closed() {
 #[test]
 fn answers_without_tools_when_model_returns_plain_text() {
     let mut host = FakeHost::default().with_model_response("done");
-    let output = run_turn(&mut host, TurnInput::user("answer")).unwrap();
+    let output = run_turn(&mut host, turn_input("answer")).unwrap();
 
     assert_eq!(
         output,
@@ -447,6 +467,13 @@ fn answers_without_tools_when_model_returns_plain_text() {
         }
     );
     assert_eq!(host.request_kinds(), ["generate"]);
+    assert_eq!(host.model_requests[0].run_id, run_id());
+    assert_eq!(host.model_requests[0].turn_id, turn_id());
+    assert!(
+        host.transitions
+            .iter()
+            .all(|record| record.run_id == run_id() && record.turn_id == turn_id())
+    );
     assert_eq!(
         host.event_kinds(),
         [
@@ -492,7 +519,7 @@ fn runs_one_tool_then_answers_with_observation() {
         .with_model_response(tool_call("README.MD"))
         .with_tool_observation("agentLIBRE readme")
         .with_model_response("README says agentLIBRE.");
-    let input = TurnInput::user("read README")
+    let input = turn_input("read README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -527,6 +554,8 @@ fn runs_one_tool_then_answers_with_observation() {
             "turn.finished",
         ]
     );
+    assert_eq!(host.dispatches[0].run_id, run_id());
+    assert_eq!(host.dispatches[0].turn_id, turn_id());
     assert_eq!(host.dispatches[0].name, "read_file");
     assert_eq!(host.dispatches[0].arguments, json!({"path": "README.MD"}));
     assert_eq!(
@@ -580,7 +609,7 @@ fn repairs_malformed_tool_json_before_dispatch() {
         )
         .with_tool_observation("agentLIBRE readme")
         .with_model_response("repaired and done");
-    let input = TurnInput::user("read README")
+    let input = turn_input("read README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -625,7 +654,7 @@ fn repairs_malformed_tool_json_before_dispatch() {
 fn stops_visibly_when_tool_json_cannot_be_repaired() {
     let mut host = FakeHost::default()
         .with_model_response(r#"<tool_call>{"name":,"arguments":42</tool_call>"#);
-    let input = TurnInput::user("bad tool")
+    let input = turn_input("bad tool")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -658,7 +687,7 @@ fn stops_visibly_when_tool_json_cannot_be_repaired() {
 #[test]
 fn stops_before_dispatch_when_tool_limit_is_reached() {
     let mut host = FakeHost::default().with_model_response(tool_call("README.MD"));
-    let input = TurnInput::user("read README")
+    let input = turn_input("read README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(0);
 
@@ -693,7 +722,7 @@ fn rejects_hidden_tool_before_dispatch() {
     let mut host = FakeHost::default().with_model_response(
         r#"<tool_call>{"name":"write_file","arguments":{"path":"README.MD"}}</tool_call>"#,
     );
-    let input = TurnInput::user("write README")
+    let input = turn_input("write README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -730,7 +759,7 @@ fn validates_tool_args_before_dispatch() {
     let mut host = FakeHost::default().with_model_response(
         r#"<tool_call>{"name":"read_file","arguments":{"other":"README.MD"}}</tool_call>"#,
     );
-    let input = TurnInput::user("read README")
+    let input = turn_input("read README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -767,7 +796,7 @@ fn validates_tool_args_before_dispatch() {
 fn model_request_failure_finishes_failed_turn() {
     let mut host = FakeHost::default().with_model_error("backend unavailable");
 
-    let err = run_turn(&mut host, TurnInput::user("answer")).unwrap_err();
+    let err = run_turn(&mut host, turn_input("answer")).unwrap_err();
 
     assert!(format!("{err:#}").contains("model request failed"));
     assert_eq!(host.request_kinds(), ["generate"]);
@@ -793,7 +822,7 @@ fn model_request_failure_finishes_failed_turn() {
     );
     assert!(matches!(
         host.events.last(),
-        Some(AgentEvent::TurnFinished {
+        Some(RuntimeEvent::TurnFinished {
             status: agl_events::TurnFinishStatus::Failed,
             ..
         })
@@ -805,7 +834,7 @@ fn tool_dispatch_failure_finishes_failed_turn() {
     let mut host = FakeHost::default()
         .with_model_response(tool_call("README.MD"))
         .with_tool_error("tool unavailable");
-    let input = TurnInput::user("read README")
+    let input = turn_input("read README")
         .with_visible_tool(read_file_tool())
         .with_max_tool_calls(1);
 
@@ -843,7 +872,7 @@ fn tool_dispatch_failure_finishes_failed_turn() {
     );
     assert!(matches!(
         host.events.last(),
-        Some(AgentEvent::TurnFinished {
+        Some(RuntimeEvent::TurnFinished {
             status: agl_events::TurnFinishStatus::Failed,
             ..
         })

@@ -1,4 +1,4 @@
-use agl_events::AgentEvent;
+use agl_events::RuntimeEvent;
 use agl_tools::{HookBatchRequest, HookBatchResult};
 use agl_turn::{
     ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnMessage,
@@ -19,5 +19,9 @@ pub trait AgentLoopHost {
     fn record_turn_messages(&mut self, _messages: &[TurnMessage]) -> Result<()> {
         Ok(())
     }
-    fn emit_transition(&mut self, record: &TurnTransitionRecord, event: &AgentEvent) -> Result<()>;
+    fn emit_transition(
+        &mut self,
+        record: &TurnTransitionRecord,
+        event: &RuntimeEvent,
+    ) -> Result<()>;
 }

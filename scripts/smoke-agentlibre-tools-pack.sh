@@ -224,10 +224,9 @@ selector = json.loads(sys.argv[2])
 minimum = int(sys.argv[3])
 with open(sys.argv[1], encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
-count = sum(
-    all(event.get(key) == value for key, value in selector.items())
-    for event in events
-)
+count = 0
+for event in events:
+    count += all(event.get(key) == value for key, value in selector.items())
 if count < minimum:
     raise SystemExit(
         f"{sys.argv[1]}: found {count} events matching {selector!r}, expected {minimum}"
@@ -328,10 +327,12 @@ require_tree_not_contains() {
 require_reused_attempts() {
   local run_dir="$1"
   shift
-  local attempt
-  for attempt in "$@"; do
+  local ordinal
+  for ordinal in "$@"; do
+    local attempt_id
     local runtime_log
-    printf -v runtime_log '%s/attempts/attempt-%04d/runtime.log' "$run_dir" "$attempt"
+    attempt_id="$(runtime_attempt_id "$run_dir/events.jsonl" "$ordinal")"
+    printf -v runtime_log '%s/attempts/%s/runtime.log' "$run_dir" "$attempt_id"
     require_contains "$runtime_log" "model_state = reused"
     require_not_contains "$runtime_log" "llama_cpp_session_reset_reason"
   done
@@ -353,11 +354,12 @@ start_live_case() {
   CASE_WORKSPACE="$workspaces_root/$name"
   CASE_HOME="$CASE_ROOT/home"
   CASE_ARTIFACTS="$CASE_ROOT/runs"
-  CASE_RUN_ID="$run_suffix-$name"
   CASE_STDOUT="$CASE_ROOT/stdout.txt"
   CASE_STDERR="$CASE_ROOT/stderr.txt"
-  CASE_RUN_DIR="$CASE_ARTIFACTS/inference-runs/$CASE_RUN_ID"
-  CASE_EVENTS="$CASE_RUN_DIR/agent-events.jsonl"
+  CASE_RUN_ID=""
+  CASE_RUN_DIR=""
+  CASE_EVENTS_RAW=""
+  CASE_EVENTS=""
   CASE_STATUS=0
   mkdir -p "$CASE_ROOT" "$CASE_WORKSPACE" "$CASE_HOME" "$CASE_ARTIFACTS"
   git -C "$CASE_WORKSPACE" init -q
@@ -376,7 +378,6 @@ run_one_shot_case() {
     AGL_HOME="$CASE_HOME" "$agl_bin" inference run \
       --config "$config" \
       --artifact-root "$CASE_ARTIFACTS" \
-      --run-id "$CASE_RUN_ID" \
       --workspace-root "$CASE_WORKSPACE" \
       --max-output-tokens "$max_output_tokens" \
       --tool-mode "$tool_mode" \
@@ -385,6 +386,19 @@ run_one_shot_case() {
   ) >"$CASE_STDOUT" 2>"$CASE_STDERR"
   CASE_STATUS=$?
   set -e
+  CASE_RUN_ID="$(single_run_id "$CASE_ARTIFACTS")"
+  CASE_RUN_DIR="$CASE_ARTIFACTS/runs/$CASE_RUN_ID"
+  CASE_EVENTS_RAW="$CASE_RUN_DIR/events.jsonl"
+  CASE_EVENTS="$CASE_ROOT/events-normalized.jsonl"
+  normalize_runtime_events "$CASE_EVENTS_RAW" "$CASE_EVENTS"
+}
+
+case_attempt_file() {
+  local ordinal="$1"
+  local name="$2"
+  local attempt_id
+  attempt_id="$(runtime_attempt_id "$CASE_EVENTS_RAW" "$ordinal")"
+  printf '%s/attempts/%s/%s' "$CASE_RUN_DIR" "$attempt_id" "$name"
 }
 
 require_successful_case_process() {
@@ -579,11 +593,11 @@ After the second observation, call no more tools and answer with exactly this si
   require_exact_event_values "$CASE_EVENTS" "tool.call_started" "name" fs.list fs.search
   require_no_event "$CASE_EVENTS" '{"kind":"tool.call_started","name":"fs.edit"}'
   local tool_context="$CASE_ROOT/tool-context.txt"
-  write_request_tool_context "$CASE_RUN_DIR/attempts/attempt-0001/request.json" "$tool_context"
+  write_request_tool_context "$(case_attempt_file 1 request.json)" "$tool_context"
   require_contains "$tool_context" "fs.list"
   require_contains "$tool_context" "fs.search"
   require_not_contains "$tool_context" "fs.edit"
-  python3 - "$CASE_RUN_DIR/attempts/attempt-0003/request.json" <<'PY'
+  python3 - "$(case_attempt_file 3 request.json)" <<'PY'
 import json
 import sys
 
@@ -654,7 +668,7 @@ PY
   require_skill_context "$CASE_RUN_DIR/skill-context.json" "skill" "fs.edit"
   require_no_event "$CASE_EVENTS" '{"kind":"tool.call_started","name":"fs.edit"}'
   local tool_context="$CASE_ROOT/tool-context.txt"
-  write_request_tool_context "$CASE_RUN_DIR/attempts/attempt-0001/request.json" "$tool_context"
+  write_request_tool_context "$(case_attempt_file 1 request.json)" "$tool_context"
   require_not_contains "$tool_context" "fs.edit"
   [[ "$(cat "$CASE_WORKSPACE/mutable.txt")" == "alpha" ]] ||
     fail "$CASE_NAME mutated the rejected fixture"
@@ -686,7 +700,7 @@ After the tool observation, call no more tools and answer with exactly this sing
   require_exact_event_values "$CASE_EVENTS" "tool.call_started" "name" fs.edit
   require_no_event "$CASE_EVENTS" '{"kind":"tool.call_failed","name":"fs.edit"}'
   local tool_context="$CASE_ROOT/tool-context.txt"
-  write_request_tool_context "$CASE_RUN_DIR/attempts/attempt-0001/request.json" "$tool_context"
+  write_request_tool_context "$(case_attempt_file 1 request.json)" "$tool_context"
   require_contains "$tool_context" "fs.edit"
   [[ "$(cat "$CASE_WORKSPACE/mutable.txt")" == "beta" ]] ||
     fail "$CASE_NAME did not apply the exact edit"
@@ -724,9 +738,9 @@ Do not explain or choose another path."
   require_exact_event_values "$CASE_EVENTS" "tool.call_started" "name" "$tool"
   require_no_event "$CASE_EVENTS" "{\"kind\":\"tool.call_finished\",\"name\":\"$tool\"}"
   local tool_context="$CASE_ROOT/tool-context.txt"
-  write_request_tool_context "$CASE_RUN_DIR/attempts/attempt-0001/request.json" "$tool_context"
+  write_request_tool_context "$(case_attempt_file 1 request.json)" "$tool_context"
   require_contains "$tool_context" "$tool"
-  require_contains "$CASE_RUN_DIR/attempts/attempt-0001/response.json" "$expected_path"
+  require_contains "$(case_attempt_file 1 response.json)" "$expected_path"
   require_contains "$CASE_STDERR" "$expected_reason"
   require_tree_not_contains "$CASE_ARTIFACTS" "$protected"
   require_not_contains "$CASE_STDOUT" "$protected"
@@ -758,7 +772,7 @@ After the repaired tool observation, call no more tools and answer with exactly 
   require_reused_attempts "$CASE_RUN_DIR" 2
   require_raw_inference_evidence "$CASE_RUN_DIR"
   require_exact_event_values "$CASE_EVENTS" "tool.call_started" "name" fs.read
-  require_contains "$CASE_RUN_DIR/attempts/attempt-0001/response.json" "facts.txt"
+  require_contains "$(case_attempt_file 1 response.json)" "facts.txt"
   [[ "$(cat "$CASE_WORKSPACE/facts.txt")" == "AGL067_REPAIR_MARKER" ]] ||
     fail "$CASE_NAME mutated its read fixture"
   record_case "$CASE_NAME" "live"
@@ -792,7 +806,8 @@ run_malformed_rejection_case() {
 run_tool_multiturn_case() {
   start_live_case "tool-multiturn-replay"
   printf '%s\n' 'AGL067_PRIOR_TOOL_OBSERVATION' >"$CASE_WORKSPACE/facts.txt"
-  local session_id="$run_suffix-tool-session"
+  local session_id
+  session_id="$(new_typed_id session)"
   local read_call first_prompt
   read_call="$(tool_call_block fs.read '{"path":"facts.txt","limit_lines":20}')"
   first_prompt="Your first response must be only this exact tool call: $read_call After the observation, call no more tools and answer with exactly this single line: first tool turn complete. Verification: fs.read completed."
@@ -805,7 +820,6 @@ run_tool_multiturn_case() {
       AGL_HOME="$CASE_HOME" "$agl_bin" inference chat \
         --config "$config" \
         --artifact-root "$CASE_ARTIFACTS" \
-        --run-id "$CASE_RUN_ID" \
         --session-id "$session_id" \
         --workspace-root "$CASE_WORKSPACE" \
         --max-output-tokens "$max_output_tokens" \
@@ -817,37 +831,79 @@ run_tool_multiturn_case() {
   require_successful_case_process
 
   local transcript="$CASE_HOME/data/sessions/$session_id/transcript.jsonl"
-  local request_3="$CASE_RUN_DIR/attempts/attempt-0003/request.json"
-  local runtime_3="$CASE_RUN_DIR/attempts/attempt-0003/runtime.log"
-  require_event_sequence "$CASE_EVENTS" \
+  local normalized_transcript="$CASE_ROOT/transcript-normalized.jsonl"
+  normalize_transcript "$transcript" "$normalized_transcript"
+  local -a turns
+  mapfile -t turns < <(transcript_turn_ids "$normalized_transcript")
+  [[ ${#turns[@]} -eq 2 ]] || fail "$CASE_NAME expected two turns, found ${#turns[@]}"
+  local run_id_1 turn_id_1 run_id_2 turn_id_2
+  IFS=$'\t' read -r run_id_1 turn_id_1 <<<"${turns[0]}"
+  IFS=$'\t' read -r run_id_2 turn_id_2 <<<"${turns[1]}"
+  [[ "$run_id_1" != "$run_id_2" ]] || fail "$CASE_NAME reused run ID $run_id_1"
+  [[ "$turn_id_1" != "$turn_id_2" ]] || fail "$CASE_NAME reused turn ID $turn_id_1"
+  local run_dir_1="$CASE_ARTIFACTS/runs/$run_id_1"
+  local run_dir_2="$CASE_ARTIFACTS/runs/$run_id_2"
+  local events_raw_1="$run_dir_1/events.jsonl"
+  local events_raw_2="$run_dir_2/events.jsonl"
+  local events_1="$CASE_ROOT/events-1-normalized.jsonl"
+  local events_2="$CASE_ROOT/events-2-normalized.jsonl"
+  normalize_runtime_events "$events_raw_1" "$events_1"
+  normalize_runtime_events "$events_raw_2" "$events_2"
+  local attempt_id_1 attempt_id_2 attempt_id_3
+  attempt_id_1="$(runtime_attempt_id "$events_raw_1" 1)"
+  attempt_id_2="$(runtime_attempt_id "$events_raw_1" 2)"
+  attempt_id_3="$(runtime_attempt_id "$events_raw_2" 1)"
+  local request_3="$run_dir_2/attempts/$attempt_id_3/request.json"
+  local runtime_3="$run_dir_2/attempts/$attempt_id_3/runtime.log"
+  require_event_sequence "$events_1" \
     '{"kind":"tool.call_started","name":"fs.read"}' \
     '{"kind":"tool.call_finished","name":"fs.read"}' \
     '{"kind":"observation.appended","name":"fs.read"}' \
     '{"kind":"hook.batch_finished","event":"artifact.write","outcome":"pass"}' \
-    '{"kind":"turn.finished","status":"answered"}' \
+    '{"kind":"turn.finished","status":"answered"}'
+  require_event_sequence "$events_2" \
     '{"kind":"turn.started"}' \
     '{"kind":"hook.batch_finished","event":"artifact.write","outcome":"pass"}' \
     '{"kind":"turn.finished","status":"answered"}'
-  require_event_count_at_least "$CASE_EVENTS" '{"kind":"turn.finished","status":"answered"}' 2
-  require_reused_attempts "$CASE_RUN_DIR" 2 3
-  require_raw_inference_evidence "$CASE_RUN_DIR"
-  require_exact_event_values "$CASE_EVENTS" "tool.call_started" "name" fs.read
-  require_jsonl_kinds "$transcript" \
+  require_event_count_at_least "$events_1" '{"kind":"turn.finished","status":"answered"}' 1
+  require_event_count_at_least "$events_2" '{"kind":"turn.finished","status":"answered"}' 1
+  require_reused_attempts "$run_dir_1" 2
+  require_reused_attempts "$run_dir_2" 1
+  require_raw_inference_evidence "$run_dir_1"
+  require_raw_inference_evidence "$run_dir_2"
+  require_exact_event_values "$events_1" "tool.call_started" "name" fs.read
+  require_jsonl_kinds "$normalized_transcript" \
     user_message model_attempt_linked assistant_tool_call tool_message assistant_message
-  require_event_count_at_least "$transcript" '{"kind":"model_attempt_linked"}' 3
   require_file "$request_3"
   require_contains "$request_3" "AGL067_PRIOR_TOOL_OBSERVATION"
-  require_contains "$transcript" '"kind":"assistant_tool_call"'
-  require_contains "$transcript" '"kind":"tool_message"'
-  require_contains "$transcript" '"name":"fs.read"'
+  require_contains "$normalized_transcript" '"kind":"assistant_tool_call"'
+  require_contains "$normalized_transcript" '"kind":"tool_message"'
+  require_contains "$normalized_transcript" '"name":"fs.read"'
   require_contains "$runtime_3" "model_state = reused"
   require_contains "$CASE_STDOUT" "assistant> AGL067_PRIOR_TOOL_OBSERVATION. Verification: prior fs.read observation retained."
-  python3 - "$transcript" <<'PY'
+  python3 - "$normalized_transcript" \
+    "$run_id_1" "$turn_id_1" "$attempt_id_1" "$attempt_id_2" \
+    "$run_id_2" "$turn_id_2" "$attempt_id_3" <<'PY'
 import json
 import sys
+import uuid
+
+
+def require_id(value, prefix):
+    if not isinstance(value, str) or not value.startswith(f"{prefix}_"):
+        raise SystemExit(f"expected {prefix}_ ID, got {value!r}")
+    payload = value[len(prefix) + 1 :]
+    try:
+        parsed = uuid.UUID(payload)
+    except ValueError as error:
+        raise SystemExit(f"invalid {prefix}_ ID {value!r}") from error
+    if str(parsed) != payload or parsed.version != 7:
+        raise SystemExit(f"non-canonical UUIDv7 {prefix}_ ID {value!r}")
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
+run_id_1, turn_id_1, attempt_id_1, attempt_id_2 = sys.argv[2:6]
+run_id_2, turn_id_2, attempt_id_3 = sys.argv[6:9]
 kinds = [event.get("kind") for event in events]
 expected = [
     "session_started",
@@ -865,8 +921,20 @@ expected = [
 if kinds != expected:
     raise SystemExit(f"{sys.argv[1]}: transcript kinds {kinds!r}, expected {expected!r}")
 attempts = [event["attempt_id"] for event in events if event.get("kind") == "model_attempt_linked"]
-if attempts != ["attempt-0001", "attempt-0002", "attempt-0003"]:
+if attempts != [attempt_id_1, attempt_id_2, attempt_id_3]:
     raise SystemExit(f"{sys.argv[1]}: attempt links {attempts!r}")
+for event in events:
+    if "message_id" in event:
+        require_id(event["message_id"], "msg")
+    if "attempt_id" in event:
+        require_id(event["attempt_id"], "attempt")
+correlated = [event for event in events if event.get("kind") not in {"session_started", "session_finished"}]
+actual_pairs = [(event.get("run_id"), event.get("turn_id")) for event in correlated]
+expected_pairs = [(run_id_1, turn_id_1)] * 6 + [(run_id_2, turn_id_2)] * 3
+if actual_pairs != expected_pairs:
+    raise SystemExit(
+        f"{sys.argv[1]}: transcript correlations {actual_pairs!r}, expected {expected_pairs!r}"
+    )
 tool_call = next(event for event in events if event.get("kind") == "assistant_tool_call")
 if tool_call.get("name") != "fs.read" or tool_call.get("arguments") != {
     "path": "facts.txt",

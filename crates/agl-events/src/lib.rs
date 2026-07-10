@@ -1,13 +1,21 @@
-mod event;
+mod envelope;
+mod payload;
 mod taxonomy;
+mod writer;
 
-pub use event::{
-    AgentEvent, HookResultEvent, JsonMetadata, RuntimeEventWriter, SafeAgentEvent, SafeRuntimeEvent,
+pub use envelope::{
+    EVENT_SCHEMA, EnvelopeValidationError, EventDraft, EventEnvelope, EventScope,
+    EventScopeBuilder, EventScopeError,
+};
+pub use payload::{
+    HookResultEvent, JsonMetadata, RuntimeEvent, RuntimeEventEnvelope, SafeRuntimeEvent,
+    SafeRuntimeEventEnvelope,
 };
 pub use taxonomy::{
-    HookBatchOutcomeEvent, ParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind,
-    TurnFinishStatus,
+    HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent, StopReasonEvent,
+    ToolJsonMalformedKind, TurnFinishStatus,
 };
+pub use writer::{EventAppender, RuntimeEventWriter};
 
 #[cfg(test)]
 mod tests;

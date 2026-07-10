@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,6 +9,10 @@ use agl_chat::{
     ChatOptions, ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus, InferenceOptions,
     ToolAccessMode as ChatToolMode,
 };
+use agl_events::{SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus};
+#[cfg(test)]
+use agl_ids::EventId;
+use agl_ids::{RequestId, RunId, SessionId, TurnId};
 use agl_protocol::{
     AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
     DaemonRequestKind, HelloEvent, PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode,
@@ -17,7 +21,7 @@ use agl_protocol::{
     TurnFailedEvent, TurnFinishedEvent, TurnStartedEvent, TurnStoppedEvent, TurnTerminalStatus,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_session::{AgentLibreSessionId, ChatSessionEvent};
+use agl_session::ChatSessionStore;
 use agl_store::{AglStore, IdempotencyOutcome, IdempotencyStatus, StoreError};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -32,7 +36,7 @@ const TURN_REPLAY_PAYLOAD_VERSION: u32 = 1;
 pub struct DaemonState {
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
-    sessions: BTreeMap<String, SessionRuntime>,
+    sessions: BTreeMap<SessionId, SessionRuntime>,
     store: AglStore,
 }
 
@@ -92,6 +96,7 @@ impl DaemonState {
                                 DaemonCapability::SessionList,
                                 DaemonCapability::SessionTranscript,
                                 DaemonCapability::FinalAssistantMessage,
+                                DaemonCapability::RuntimeEvents,
                             ],
                         }),
                     )])
@@ -117,7 +122,7 @@ impl DaemonState {
                             Err(error) => Err(error),
                         }
                     }
-                    None => Err(not_found_error(&request.session_id)),
+                    None => Err(not_found_error(request.session_id.as_str())),
                 }
             }
             DaemonRequestKind::SessionFinish(request) => {
@@ -136,7 +141,7 @@ impl DaemonState {
                         }
                         Err(error) => Err(error),
                     },
-                    None => Err(not_found_error(&request.session_id)),
+                    None => Err(not_found_error(request.session_id.as_str())),
                 }
             }
             DaemonRequestKind::SessionStatus(request) => {
@@ -144,7 +149,7 @@ impl DaemonState {
                     .sessions
                     .get(&request.session_id)
                     .map(|session| session.status)
-                    .ok_or_else(|| not_found_error(&request.session_id));
+                    .ok_or_else(|| not_found_error(request.session_id.as_str()));
                 status.map(|status| vec![status_event(&request_id, &request.session_id, status)])
             }
             DaemonRequestKind::SessionList(_request) => Ok(vec![DaemonEvent::new(
@@ -179,7 +184,7 @@ impl DaemonState {
 
     fn open_session(
         &mut self,
-        request_id: String,
+        request_id: RequestId,
         request: agl_protocol::SessionOpenRequest,
     ) -> Result<Vec<DaemonEvent>, ProtocolError> {
         if request.new_session && request.session_id.is_some() {
@@ -191,13 +196,12 @@ impl DaemonState {
         }
 
         if let Some(session_id) = &request.session_id
-            && let Some(session) = self.sessions.get(session_id)
+            && self.sessions.contains_key(session_id)
         {
             return Ok(vec![DaemonEvent::new(
                 Some(request_id),
                 DaemonEventKind::SessionOpened(SessionOpenedEvent {
                     session_id: session_id.clone(),
-                    run_id: session.run_id.clone(),
                     resumed: true,
                 }),
             )]);
@@ -215,14 +219,12 @@ impl DaemonState {
         };
         let (endpoint, summary) =
             SessionEndpoint::spawn_real(options, self.runtime.clone()).map_err(runtime_error)?;
-        let session_id = summary.session_id.to_string();
-        let run_id = summary.run_id;
+        let session_id = summary.session_id;
         let resumed = summary.resumed;
         self.sessions.insert(
             session_id.clone(),
             SessionRuntime {
                 endpoint,
-                run_id: run_id.clone(),
                 status: SessionStatus::Open,
             },
         );
@@ -231,7 +233,6 @@ impl DaemonState {
             Some(request_id),
             DaemonEventKind::SessionOpened(SessionOpenedEvent {
                 session_id,
-                run_id,
                 resumed,
             }),
         )])
@@ -239,25 +240,30 @@ impl DaemonState {
 
     fn run_turn(
         &mut self,
-        request_id: String,
+        request_id: RequestId,
         request: SessionTurnRequest,
     ) -> Result<Vec<DaemonEvent>, ProtocolError> {
         let turn = match self.prepare_turn(request_id, request)? {
             PreparedTurnAdmission::Run(turn) => turn,
             PreparedTurnAdmission::Replay(events) => return Ok(events),
         };
-        let turn_result = turn.endpoint.run_user_turn(&turn.text);
+        let turn_result = turn.endpoint.run_user_turn(
+            turn.run_id.clone(),
+            turn.turn_id.clone(),
+            Some(turn.request_id.clone()),
+            &turn.text,
+        );
         self.finish_turn(turn, turn_result)
     }
 
     fn prepare_turn(
         &mut self,
-        request_id: String,
+        request_id: RequestId,
         request: SessionTurnRequest,
     ) -> Result<PreparedTurnAdmission, ProtocolError> {
         let session_id = request.session_id.clone();
         let Some(status) = self.sessions.get(&session_id).map(|session| session.status) else {
-            return Err(not_found_error(&session_id));
+            return Err(not_found_error(session_id.as_str()));
         };
         if status == SessionStatus::Busy {
             return Err(busy_error());
@@ -277,20 +283,25 @@ impl DaemonState {
             }
         };
         let Some(session) = self.sessions.get_mut(&session_id) else {
-            return Err(not_found_error(&session_id));
+            return Err(not_found_error(session_id.as_str()));
         };
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
         session.status = SessionStatus::Busy;
         let endpoint = session.endpoint.clone();
         let events = vec![DaemonEvent::new(
             Some(request_id.clone()),
             DaemonEventKind::TurnStarted(TurnStartedEvent {
                 session_id: session_id.clone(),
-                turn_id: session.run_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
             }),
         )];
         Ok(PreparedTurnAdmission::Run(PreparedTurn {
             request_id,
             session_id,
+            run_id,
+            turn_id,
             text: request.text,
             endpoint,
             events,
@@ -303,8 +314,40 @@ impl DaemonState {
         mut turn: PreparedTurn,
         turn_result: Result<ChatTurnOutput>,
     ) -> Result<Vec<DaemonEvent>, ProtocolError> {
+        let turn_result = turn_result.and_then(|output| {
+            if output.run_id != turn.run_id || output.turn_id != turn.turn_id {
+                return Err(anyhow!(
+                    "chat turn identity does not match daemon admission: expected {}/{}, got {}/{}",
+                    turn.run_id,
+                    turn.turn_id,
+                    output.run_id,
+                    output.turn_id
+                ));
+            }
+            let terminal_status = match &output.status {
+                ChatTurnStatus::Answered { .. } => TurnFinishStatus::Answered,
+                ChatTurnStatus::Stopped { .. } => TurnFinishStatus::Stopped,
+                ChatTurnStatus::Failed { .. } => TurnFinishStatus::Failed,
+            };
+            validate_runtime_envelopes(
+                &output.runtime_events,
+                &turn.request_id,
+                &turn.session_id,
+                &turn.run_id,
+                &turn.turn_id,
+                terminal_status,
+            )?;
+            Ok(output)
+        });
         match turn_result {
             Ok(output) => {
+                turn.events
+                    .extend(output.runtime_events.into_iter().map(|event| {
+                        DaemonEvent::new(
+                            Some(turn.request_id.clone()),
+                            DaemonEventKind::RuntimeEvent(Box::new(event)),
+                        )
+                    }));
                 let terminal = match output.status {
                     ChatTurnStatus::Answered { answer } => {
                         let terminal = TurnReplayTerminal::Answered {
@@ -314,6 +357,8 @@ impl DaemonState {
                             Some(turn.request_id.clone()),
                             DaemonEventKind::AssistantMessage(AssistantMessageEvent {
                                 session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
                                 content: answer,
                             }),
                         ));
@@ -321,10 +366,12 @@ impl DaemonState {
                             Some(turn.request_id.clone()),
                             DaemonEventKind::TurnFinished(TurnFinishedEvent {
                                 session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
                                 status: TurnTerminalStatus::Answered,
                             }),
                         ));
-                        terminal
+                        (terminal, SessionStatus::Open)
                     }
                     ChatTurnStatus::Stopped { reason } => {
                         let terminal = TurnReplayTerminal::Stopped {
@@ -334,6 +381,8 @@ impl DaemonState {
                             Some(turn.request_id.clone()),
                             DaemonEventKind::TurnStopped(TurnStoppedEvent {
                                 session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
                                 reason: reason.as_str().to_string(),
                             }),
                         ));
@@ -341,19 +390,47 @@ impl DaemonState {
                             Some(turn.request_id.clone()),
                             DaemonEventKind::TurnFinished(TurnFinishedEvent {
                                 session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
                                 status: TurnTerminalStatus::Stopped,
                             }),
                         ));
-                        terminal
+                        (terminal, SessionStatus::Open)
+                    }
+                    ChatTurnStatus::Failed { message } => {
+                        let terminal = TurnReplayTerminal::Failed {
+                            message: message.clone(),
+                        };
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
+                            DaemonEventKind::TurnFailed(TurnFailedEvent {
+                                session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
+                                message,
+                            }),
+                        ));
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
+                            DaemonEventKind::TurnFinished(TurnFinishedEvent {
+                                session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
+                                status: TurnTerminalStatus::Failed,
+                            }),
+                        ));
+                        (terminal, SessionStatus::Failed)
                     }
                 };
                 let idempotency_result = self.finish_turn_idempotency(
                     turn.turn_idempotency.as_ref(),
                     &turn.session_id,
-                    &terminal,
+                    &turn.run_id,
+                    &turn.turn_id,
+                    &terminal.0,
                 );
                 let events = turn.events.clone();
-                self.restore_finished_turn(turn, SessionStatus::Open)?;
+                self.restore_finished_turn(turn, terminal.1)?;
                 idempotency_result?;
                 Ok(events)
             }
@@ -365,24 +442,29 @@ impl DaemonState {
                 let idempotency_result = self.finish_turn_idempotency(
                     turn.turn_idempotency.as_ref(),
                     &turn.session_id,
+                    &turn.run_id,
+                    &turn.turn_id,
                     &terminal,
                 );
-                let events = vec![
-                    DaemonEvent::new(
-                        Some(turn.request_id.clone()),
-                        DaemonEventKind::TurnFailed(TurnFailedEvent {
-                            session_id: turn.session_id.clone(),
-                            message,
-                        }),
-                    ),
-                    DaemonEvent::new(
-                        Some(turn.request_id.clone()),
-                        DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                            session_id: turn.session_id.clone(),
-                            status: TurnTerminalStatus::Failed,
-                        }),
-                    ),
-                ];
+                turn.events.push(DaemonEvent::new(
+                    Some(turn.request_id.clone()),
+                    DaemonEventKind::TurnFailed(TurnFailedEvent {
+                        session_id: turn.session_id.clone(),
+                        run_id: turn.run_id.clone(),
+                        turn_id: turn.turn_id.clone(),
+                        message,
+                    }),
+                ));
+                turn.events.push(DaemonEvent::new(
+                    Some(turn.request_id.clone()),
+                    DaemonEventKind::TurnFinished(TurnFinishedEvent {
+                        session_id: turn.session_id.clone(),
+                        run_id: turn.run_id.clone(),
+                        turn_id: turn.turn_id.clone(),
+                        status: TurnTerminalStatus::Failed,
+                    }),
+                ));
+                let events = turn.events.clone();
                 self.restore_finished_turn(turn, SessionStatus::Failed)?;
                 idempotency_result?;
                 Ok(events)
@@ -396,7 +478,7 @@ impl DaemonState {
         status: SessionStatus,
     ) -> Result<(), ProtocolError> {
         let Some(session) = self.sessions.get_mut(&turn.session_id) else {
-            return Err(not_found_error(&turn.session_id));
+            return Err(not_found_error(turn.session_id.as_str()));
         };
         session.status = status;
         Ok(())
@@ -404,44 +486,22 @@ impl DaemonState {
 
     fn read_transcript(
         &self,
-        request_id: String,
-        session_id: String,
+        request_id: RequestId,
+        session_id: SessionId,
         include_content: bool,
     ) -> Result<Vec<DaemonEvent>, ProtocolError> {
-        let session_id_value =
-            AgentLibreSessionId::new(session_id.clone()).map_err(invalid_request_error)?;
-        let transcript_path = self
-            .runtime
-            .paths
-            .session_dir(session_id_value.as_str())
-            .join("transcript.jsonl");
-        let content = match std::fs::read_to_string(&transcript_path) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(not_found_error(&session_id));
-            }
-            Err(err) => return Err(runtime_error(err)),
-        };
-        let mut events = Vec::new();
-        for (line_index, line) in content.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: ChatSessionEvent = serde_json::from_str(line).map_err(|err| {
-                ProtocolError::new(
-                    ProtocolErrorCode::RuntimeFailure,
-                    format!(
-                        "failed to parse transcript {} line {}: {err}",
-                        transcript_path.display(),
-                        line_index + 1
-                    ),
-                    false,
-                )
-            })?;
-            if let Some(event) = transcript_event(event, include_content) {
-                events.push(event);
-            }
+        let sessions_root = self.runtime.paths.sessions_root();
+        if !ChatSessionStore::exists(&sessions_root, &session_id) {
+            return Err(not_found_error(session_id.as_str()));
         }
+        let replay = ChatSessionStore::open(&sessions_root, session_id.clone())
+            .and_then(|store| store.read_replay())
+            .map_err(runtime_error)?;
+        let events = replay
+            .events
+            .into_iter()
+            .filter_map(|event| transcript_event(event, include_content))
+            .collect();
         Ok(vec![DaemonEvent::new(
             Some(request_id),
             DaemonEventKind::SessionTranscript(SessionTranscriptEvent {
@@ -454,7 +514,7 @@ impl DaemonState {
 
     fn begin_turn_idempotency(
         &self,
-        request_id: &str,
+        request_id: &RequestId,
         request: &SessionTurnRequest,
     ) -> Result<TurnIdempotencyAdmission, ProtocolError> {
         let Some(key) = request.idempotency_key.as_deref() else {
@@ -490,7 +550,9 @@ impl DaemonState {
     fn finish_turn_idempotency(
         &self,
         key: Option<&TurnIdempotencyKey>,
-        session_id: &str,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
         terminal: &TurnReplayTerminal,
     ) -> Result<(), ProtocolError> {
         let Some(key) = key else {
@@ -498,7 +560,9 @@ impl DaemonState {
         };
         let payload = TurnReplayPayload {
             version: TURN_REPLAY_PAYLOAD_VERSION,
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
+            run_id: run_id.clone(),
+            turn_id: turn_id.clone(),
             terminal: terminal.clone(),
         };
         let payload = serde_json::to_string(&payload).map_err(runtime_error)?;
@@ -516,13 +580,30 @@ impl DaemonState {
     }
 
     #[cfg(test)]
-    pub(crate) fn insert_test_session(&mut self, session_id: &str, outputs: Vec<ChatTurnStatus>) {
-        let run_id = format!("run-{session_id}");
+    pub(crate) fn insert_test_session(
+        &mut self,
+        session_id: SessionId,
+        outputs: Vec<ChatTurnStatus>,
+    ) {
         self.sessions.insert(
-            session_id.to_string(),
+            session_id.clone(),
             SessionRuntime {
-                endpoint: SessionEndpoint::spawn_test(outputs, None),
-                run_id,
+                endpoint: SessionEndpoint::spawn_test(session_id, outputs, None, false),
+                status: SessionStatus::Open,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_session_with_runtime_events(
+        &mut self,
+        session_id: SessionId,
+        outputs: Vec<ChatTurnStatus>,
+    ) {
+        self.sessions.insert(
+            session_id.clone(),
+            SessionRuntime {
+                endpoint: SessionEndpoint::spawn_test(session_id, outputs, None, true),
                 status: SessionStatus::Open,
             },
         );
@@ -531,23 +612,21 @@ impl DaemonState {
     #[cfg(test)]
     pub(crate) fn insert_slow_test_session(
         &mut self,
-        session_id: &str,
+        session_id: SessionId,
         outputs: Vec<ChatTurnStatus>,
         delay: std::time::Duration,
     ) {
-        let run_id = format!("run-{session_id}");
         self.sessions.insert(
-            session_id.to_string(),
+            session_id.clone(),
             SessionRuntime {
-                endpoint: SessionEndpoint::spawn_test(outputs, Some(delay)),
-                run_id,
+                endpoint: SessionEndpoint::spawn_test(session_id, outputs, Some(delay), false),
                 status: SessionStatus::Open,
             },
         );
     }
 
     #[cfg(test)]
-    pub(crate) fn test_session_turns(&self, session_id: &str) -> usize {
+    pub(crate) fn test_session_turns(&self, session_id: &SessionId) -> usize {
         self.sessions
             .get(session_id)
             .and_then(|session| session.endpoint.test_turns())
@@ -555,7 +634,12 @@ impl DaemonState {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_test_turn_idempotency(&self, session_id: &str, text: &str, key: &str) {
+    pub(crate) fn begin_test_turn_idempotency(
+        &self,
+        session_id: &SessionId,
+        text: &str,
+        key: &str,
+    ) {
         let fingerprint = turn_idempotency_fingerprint(session_id, text);
         self.store
             .begin_idempotency(SESSION_TURN_IDEMPOTENCY_NAMESPACE, key, &fingerprint)
@@ -564,7 +648,7 @@ impl DaemonState {
 
     fn error_event(
         &self,
-        request_id: Option<String>,
+        request_id: Option<RequestId>,
         code: ProtocolErrorCode,
         message: impl Into<String>,
         retryable: bool,
@@ -626,7 +710,7 @@ impl SharedDaemonState {
         }
     }
 
-    fn handle_turn(&self, request_id: String, request: SessionTurnRequest) -> Vec<DaemonEvent> {
+    fn handle_turn(&self, request_id: RequestId, request: SessionTurnRequest) -> Vec<DaemonEvent> {
         let turn = match self.inner.lock() {
             Ok(mut state) => match state.prepare_turn(request_id.clone(), request) {
                 Ok(PreparedTurnAdmission::Run(turn)) => turn,
@@ -648,7 +732,12 @@ impl SharedDaemonState {
             }
         };
 
-        let turn_result = turn.endpoint.run_user_turn(&turn.text);
+        let turn_result = turn.endpoint.run_user_turn(
+            turn.run_id.clone(),
+            turn.turn_id.clone(),
+            Some(turn.request_id.clone()),
+            &turn.text,
+        );
         match self.inner.lock() {
             Ok(mut state) => match state.finish_turn(turn, turn_result) {
                 Ok(events) => events,
@@ -669,7 +758,7 @@ impl SharedDaemonState {
     #[cfg(test)]
     pub(crate) fn insert_slow_test_session(
         &self,
-        session_id: &str,
+        session_id: SessionId,
         outputs: Vec<ChatTurnStatus>,
         delay: std::time::Duration,
     ) {
@@ -682,7 +771,6 @@ impl SharedDaemonState {
 
 struct SessionRuntime {
     endpoint: SessionEndpoint,
-    run_id: String,
     status: SessionStatus,
 }
 
@@ -695,6 +783,9 @@ struct SessionEndpoint {
 
 enum SessionCommand {
     RunTurn {
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
         text: String,
         reply: mpsc::Sender<WorkerResult<ChatTurnOutput>>,
     },
@@ -746,10 +837,19 @@ impl SessionEndpoint {
         ))
     }
 
-    fn run_user_turn(&self, input: &str) -> Result<ChatTurnOutput> {
+    fn run_user_turn(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        input: &str,
+    ) -> Result<ChatTurnOutput> {
         let (reply, receiver) = mpsc::channel();
         self.commands
             .send(SessionCommand::RunTurn {
+                run_id,
+                turn_id,
+                request_id,
                 text: input.to_string(),
                 reply,
             })
@@ -774,11 +874,25 @@ impl SessionEndpoint {
     }
 
     #[cfg(test)]
-    fn spawn_test(outputs: Vec<ChatTurnStatus>, delay: Option<std::time::Duration>) -> Self {
+    fn spawn_test(
+        session_id: SessionId,
+        outputs: Vec<ChatTurnStatus>,
+        delay: Option<std::time::Duration>,
+        emit_runtime_events: bool,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let turns = Arc::new(AtomicUsize::new(0));
         let worker_turns = Arc::clone(&turns);
-        std::thread::spawn(move || run_test_session_worker(receiver, outputs, delay, worker_turns));
+        std::thread::spawn(move || {
+            run_test_session_worker(
+                receiver,
+                session_id,
+                outputs,
+                delay,
+                emit_runtime_events,
+                worker_turns,
+            )
+        });
         Self {
             commands,
             turns: Some(turns),
@@ -796,10 +910,16 @@ impl SessionEndpoint {
 fn run_session_worker(mut service: ChatService, receiver: mpsc::Receiver<SessionCommand>) {
     while let Ok(command) = receiver.recv() {
         match command {
-            SessionCommand::RunTurn { text, reply } => {
+            SessionCommand::RunTurn {
+                run_id,
+                turn_id,
+                request_id,
+                text,
+                reply,
+            } => {
                 let _ = reply.send(
                     service
-                        .run_user_turn(&text)
+                        .run_user_turn_with_ids(run_id, turn_id, request_id, &text)
                         .map_err(|err| format!("{err:#}")),
                 );
             }
@@ -818,13 +938,21 @@ fn run_session_worker(mut service: ChatService, receiver: mpsc::Receiver<Session
 #[cfg(test)]
 fn run_test_session_worker(
     receiver: mpsc::Receiver<SessionCommand>,
+    session_id: SessionId,
     mut outputs: Vec<ChatTurnStatus>,
     delay: Option<std::time::Duration>,
+    emit_runtime_events: bool,
     turns: Arc<AtomicUsize>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
-            SessionCommand::RunTurn { reply, .. } => {
+            SessionCommand::RunTurn {
+                run_id,
+                turn_id,
+                request_id,
+                text,
+                reply,
+            } => {
                 turns.fetch_add(1, Ordering::SeqCst);
                 if let Some(delay) = delay {
                     std::thread::sleep(delay);
@@ -836,7 +964,57 @@ fn run_test_session_worker(
                 } else {
                     outputs.remove(0)
                 };
+                let terminal_status = match &status {
+                    ChatTurnStatus::Answered { .. } => TurnFinishStatus::Answered,
+                    ChatTurnStatus::Stopped { .. } => TurnFinishStatus::Stopped,
+                    ChatTurnStatus::Failed { .. } => TurnFinishStatus::Failed,
+                };
+                let mut runtime_events = Vec::new();
+                if emit_runtime_events {
+                    runtime_events.push(
+                        serde_json::from_value(serde_json::json!({
+                            "schema": "agentlibre.event.v1alpha",
+                            "event_id": EventId::generate(),
+                            "sequence": 1,
+                            "occurred_at_unix_ms": 1,
+                            "scope": {
+                                "run_id": run_id,
+                                "session_id": session_id,
+                                "turn_id": turn_id,
+                            },
+                            "request_id": request_id,
+                            "payload": {
+                                "kind": "turn.started",
+                                "user_input_bytes": text.len(),
+                            },
+                        }))
+                        .expect("test runtime event must deserialize"),
+                    );
+                }
+                runtime_events.push(
+                    serde_json::from_value(serde_json::json!({
+                        "schema": "agentlibre.event.v1alpha",
+                        "event_id": EventId::generate(),
+                        "sequence": runtime_events.len() + 1,
+                        "occurred_at_unix_ms": 2,
+                        "scope": {
+                            "run_id": run_id,
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                        },
+                        "request_id": request_id,
+                        "payload": {
+                            "kind": "turn.finished",
+                            "status": terminal_status,
+                        },
+                    }))
+                    .expect("test terminal runtime event must deserialize"),
+                );
                 let _ = reply.send(Ok(ChatTurnOutput {
+                    run_id,
+                    turn_id,
+                    attempt_ids: Vec::new(),
+                    runtime_events,
                     status,
                     generated_requests: 1,
                 }));
@@ -872,8 +1050,10 @@ enum PreparedTurnAdmission {
 }
 
 struct PreparedTurn {
-    request_id: String,
-    session_id: String,
+    request_id: RequestId,
+    session_id: SessionId,
+    run_id: RunId,
+    turn_id: TurnId,
     text: String,
     endpoint: SessionEndpoint,
     events: Vec<DaemonEvent>,
@@ -886,23 +1066,96 @@ enum TurnIdempotencyAdmission {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TurnReplayPayload {
     version: u32,
-    session_id: String,
+    session_id: SessionId,
+    run_id: RunId,
+    turn_id: TurnId,
     terminal: TurnReplayTerminal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum TurnReplayTerminal {
     Answered { answer: String },
     Stopped { reason: String },
     Failed { message: String },
 }
 
+pub(crate) fn validate_runtime_envelopes(
+    events: &[SafeRuntimeEventEnvelope],
+    request_id: &RequestId,
+    session_id: &SessionId,
+    run_id: &RunId,
+    turn_id: &TurnId,
+    expected_terminal_status: TurnFinishStatus,
+) -> Result<()> {
+    if events.is_empty() {
+        return Err(anyhow!("chat turn did not produce runtime events"));
+    }
+
+    let mut event_ids = BTreeSet::new();
+    for (index, event) in events.iter().enumerate() {
+        event
+            .validate()
+            .with_context(|| format!("runtime event {} has an invalid envelope", index + 1))?;
+        let expected_sequence = u64::try_from(index + 1)
+            .context("runtime event stream length exceeds the sequence range")?;
+        if event.sequence != expected_sequence {
+            return Err(anyhow!(
+                "runtime event sequence is not contiguous: expected {}, got {}",
+                expected_sequence,
+                event.sequence
+            ));
+        }
+        if event.request_id.as_ref() != Some(request_id) {
+            return Err(anyhow!(
+                "runtime event {} request ID does not match daemon admission",
+                event.event_id
+            ));
+        }
+        if event.scope.session_id() != Some(session_id)
+            || event.scope.run_id() != run_id
+            || event.scope.turn_id() != Some(turn_id)
+        {
+            return Err(anyhow!(
+                "runtime event {} scope does not match daemon admission",
+                event.event_id
+            ));
+        }
+        if !event_ids.insert(event.event_id.clone()) {
+            return Err(anyhow!(
+                "runtime event stream contains duplicate event ID {}",
+                event.event_id
+            ));
+        }
+        if matches!(event.payload, SafeRuntimeEvent::TurnFinished { .. })
+            && index + 1 != events.len()
+        {
+            return Err(anyhow!(
+                "terminal runtime event {} is not last",
+                event.event_id
+            ));
+        }
+    }
+
+    match &events
+        .last()
+        .expect("non-empty runtime event stream")
+        .payload
+    {
+        SafeRuntimeEvent::TurnFinished { status } if status == &expected_terminal_status => Ok(()),
+        SafeRuntimeEvent::TurnFinished { status } => Err(anyhow!(
+            "runtime terminal status {status:?} does not match chat turn status {expected_terminal_status:?}"
+        )),
+        payload => Err(anyhow!("last runtime event is not terminal: {payload:?}")),
+    }
+}
+
 fn replay_turn_idempotency(
-    request_id: &str,
-    session_id: &str,
+    request_id: &RequestId,
+    session_id: &SessionId,
     result_ref: Option<&str>,
 ) -> Result<TurnIdempotencyAdmission, ProtocolError> {
     let Some(result_ref) = result_ref else {
@@ -917,67 +1170,107 @@ fn replay_turn_idempotency(
             payload.version
         )));
     }
-    if payload.session_id != session_id {
+    if &payload.session_id != session_id {
         return Err(runtime_error("idempotent turn replay session mismatch"));
     }
 
     Ok(TurnIdempotencyAdmission::Replay(replay_events(
         request_id,
         session_id,
+        &payload.run_id,
+        &payload.turn_id,
         payload.terminal,
     )))
 }
 
 fn replay_events(
-    request_id: &str,
-    session_id: &str,
+    request_id: &RequestId,
+    session_id: &SessionId,
+    run_id: &RunId,
+    turn_id: &TurnId,
     terminal: TurnReplayTerminal,
 ) -> Vec<DaemonEvent> {
     match terminal {
         TurnReplayTerminal::Answered { answer } => vec![
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
+                DaemonEventKind::TurnStarted(TurnStartedEvent {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                }),
+            ),
+            DaemonEvent::new(
+                Some(request_id.clone()),
                 DaemonEventKind::AssistantMessage(AssistantMessageEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     content: answer,
                 }),
             ),
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
                 DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     status: TurnTerminalStatus::Answered,
                 }),
             ),
         ],
         TurnReplayTerminal::Stopped { reason } => vec![
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
+                DaemonEventKind::TurnStarted(TurnStartedEvent {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                }),
+            ),
+            DaemonEvent::new(
+                Some(request_id.clone()),
                 DaemonEventKind::TurnStopped(TurnStoppedEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     reason,
                 }),
             ),
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
                 DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     status: TurnTerminalStatus::Stopped,
                 }),
             ),
         ],
         TurnReplayTerminal::Failed { message } => vec![
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
+                DaemonEventKind::TurnStarted(TurnStartedEvent {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                }),
+            ),
+            DaemonEvent::new(
+                Some(request_id.clone()),
                 DaemonEventKind::TurnFailed(TurnFailedEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     message,
                 }),
             ),
             DaemonEvent::new(
-                Some(request_id.to_string()),
+                Some(request_id.clone()),
                 DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
                     status: TurnTerminalStatus::Failed,
                 }),
             ),
@@ -985,10 +1278,10 @@ fn replay_events(
     }
 }
 
-fn turn_idempotency_fingerprint(session_id: &str, text: &str) -> String {
+fn turn_idempotency_fingerprint(session_id: &SessionId, text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"agentlibre.daemon.session_turn.v1\0");
-    hasher.update(session_id.as_bytes());
+    hasher.update(session_id.as_str().as_bytes());
     hasher.update(b"\0");
     hasher.update(text.as_bytes());
     hasher
@@ -998,18 +1291,22 @@ fn turn_idempotency_fingerprint(session_id: &str, text: &str) -> String {
         .collect()
 }
 
-fn status_event(request_id: &str, session_id: &str, status: SessionStatus) -> DaemonEvent {
+fn status_event(
+    request_id: &RequestId,
+    session_id: &SessionId,
+    status: SessionStatus,
+) -> DaemonEvent {
     DaemonEvent::new(
-        Some(request_id.to_string()),
+        Some(request_id.clone()),
         DaemonEventKind::SessionStatus(SessionStatusEvent {
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             status,
         }),
     )
 }
 
 fn protocol_error_event(
-    request_id: Option<String>,
+    request_id: Option<RequestId>,
     code: ProtocolErrorCode,
     message: impl Into<String>,
     retryable: bool,

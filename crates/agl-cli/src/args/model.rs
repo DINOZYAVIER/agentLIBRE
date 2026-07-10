@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use agl_ids::SessionId;
 use clap::ValueEnum;
 use clap_complete::Shell;
 
@@ -548,9 +549,8 @@ pub(crate) struct RunOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
-    pub(crate) run_id: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
-    pub(crate) session_id: Option<String>,
+    pub(crate) session_id: Option<SessionId>,
     pub(crate) no_history: bool,
     pub(crate) new_session: bool,
     pub(crate) max_output_tokens: Option<u32>,
@@ -598,7 +598,6 @@ pub(crate) struct ServeOptions {
     pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,
-    pub(crate) run_id: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
     pub(crate) max_output_tokens: Option<u32>,
     pub(crate) tool_mode: Option<ToolAccessMode>,

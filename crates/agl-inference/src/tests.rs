@@ -6,12 +6,42 @@ use agl_config::{
     ModelConfig, ModelDialect, MtpProbability, MtpRuntimeConfig, PromptConfig, RuntimeSwitch,
     ToolCallFormat, load_local_inference_config,
 };
+use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
 
-use crate::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
+use crate::evidence::InferenceArtifactRoot;
 use crate::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const TEST_RUN_ID: &str = "run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31";
+const TEST_TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32";
+const TEST_SESSION_ID: &str = "ses_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b33";
+const TEST_REQUEST_ID: &str = "req_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b34";
+
+fn run_id() -> RunId {
+    RunId::parse(TEST_RUN_ID).unwrap()
+}
+
+fn turn_id() -> TurnId {
+    TurnId::parse(TEST_TURN_ID).unwrap()
+}
+
+fn session_id() -> SessionId {
+    SessionId::parse(TEST_SESSION_ID).unwrap()
+}
+
+fn request_id() -> RequestId {
+    RequestId::parse(TEST_REQUEST_ID).unwrap()
+}
+
+fn test_attempt_id(value: &str) -> AttemptId {
+    let index = value
+        .strip_prefix("attempt-")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    AttemptId::parse(&format!("attempt_01890f3b-6d7a-7c1f-b4b5-{index:012x}")).unwrap()
+}
 
 fn temp_root(name: &str) -> PathBuf {
     let id = DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -23,7 +53,8 @@ fn temp_root(name: &str) -> PathBuf {
 
 fn rendered_request() -> RenderedModelRequest {
     RenderedModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 2,
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
@@ -43,22 +74,29 @@ fn rendered_request() -> RenderedModelRequest {
 
 fn inference_request() -> InferenceRequest {
     InferenceRequest {
-        run_id: InferenceRunId::new("run-001").unwrap(),
-        attempt_id: InferenceAttemptId::new("attempt-001").unwrap(),
+        run_id: run_id(),
+        turn_id: turn_id(),
+        attempt_id: test_attempt_id("attempt-001"),
+        session_id: None,
+        request_id: None,
         rendered: rendered_request(),
     }
 }
 
 fn inference_request_with_messages(
-    attempt_id: &str,
+    attempt_id: AttemptId,
     request_index: usize,
     messages: Vec<RenderedMessage>,
 ) -> InferenceRequest {
     InferenceRequest {
-        run_id: InferenceRunId::new("run-001").unwrap(),
-        attempt_id: InferenceAttemptId::new(attempt_id).unwrap(),
+        run_id: run_id(),
+        turn_id: turn_id(),
+        attempt_id,
+        session_id: None,
+        request_id: None,
         rendered: RenderedModelRequest {
-            turn_id: "turn-1".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index,
             dialect: ModelDialect::Qwen3,
             tool_call_format: ToolCallFormat::HermesJson,
@@ -129,10 +167,39 @@ fn rendered_model_request_round_trips_for_artifacts() {
 }
 
 #[test]
+fn inference_request_round_trips_optional_correlation_and_rejects_unknown_fields() {
+    let uncorrelated = serde_json::to_value(inference_request()).unwrap();
+    assert!(uncorrelated.get("session_id").is_none());
+    assert!(uncorrelated.get("request_id").is_none());
+
+    let mut request = inference_request();
+    request.session_id = Some(session_id());
+    request.request_id = Some(request_id());
+
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["session_id"], TEST_SESSION_ID);
+    assert_eq!(value["request_id"], TEST_REQUEST_ID);
+    assert_eq!(
+        serde_json::from_value::<InferenceRequest>(value.clone()).unwrap(),
+        request
+    );
+
+    let mut unknown = value;
+    unknown["legacy_correlation"] = serde_json::Value::Bool(true);
+    assert!(serde_json::from_value::<InferenceRequest>(unknown).is_err());
+
+    let mut invalid_id = serde_json::to_value(&request).unwrap();
+    invalid_id["session_id"] = serde_json::Value::String("session-legacy".to_string());
+    assert!(serde_json::from_value::<InferenceRequest>(invalid_id).is_err());
+}
+
+#[test]
 fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
     let root_path = temp_root("llama-invalid-invocation");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
-    let request = inference_request();
+    let mut request = inference_request();
+    request.session_id = Some(session_id());
+    request.request_id = Some(request_id());
     let paths = artifact_root.paths(&request.run_id, &request.attempt_id);
     let mut backend = LlamaCppBackend::new(local_config(), artifact_root)
         .unwrap()
@@ -151,6 +218,13 @@ fn llama_cpp_backend_records_invalid_runtime_request_without_panicking() {
     let events = std::fs::read_to_string(paths.events_jsonl()).unwrap();
     assert!(events.contains("\"kind\":\"inference.attempt_failed\""));
     assert!(events.contains("\"finish_status\":\"failed\""));
+    for event in events
+        .lines()
+        .map(|line| serde_json::from_str::<agl_events::SafeRuntimeEventEnvelope>(line).unwrap())
+    {
+        assert_eq!(event.scope.session_id(), Some(&session_id()));
+        assert_eq!(event.request_id.as_ref(), Some(&request_id()));
+    }
 
     std::fs::remove_dir_all(root_path).unwrap();
 }
@@ -191,9 +265,9 @@ fn llama_cpp_test_runtime_records_enabled_mtp_config() {
 fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     let root_path = temp_root("llama-session-reuse");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
-    let run_id = InferenceRunId::new("run-001").unwrap();
-    let first_attempt = InferenceAttemptId::new("attempt-0001").unwrap();
-    let second_attempt = InferenceAttemptId::new("attempt-0002").unwrap();
+    let run_id = run_id();
+    let first_attempt = test_attempt_id("attempt-0001");
+    let second_attempt = test_attempt_id("attempt-0002");
     let mut backend = LlamaCppBackend::new_with_test_runtime(
         local_config(),
         artifact_root.clone(),
@@ -206,7 +280,7 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
     .unwrap();
 
     let first = inference_request_with_messages(
-        first_attempt.as_str(),
+        first_attempt.clone(),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -216,7 +290,7 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
         }],
     );
     let second = inference_request_with_messages(
-        second_attempt.as_str(),
+        second_attempt.clone(),
         2,
         vec![
             RenderedMessage {
@@ -239,9 +313,9 @@ fn llama_cpp_backend_reuses_test_runtime_session_and_records_artifacts() {
             },
         ],
     );
-    let third_attempt = InferenceAttemptId::new("attempt-0003").unwrap();
+    let third_attempt = test_attempt_id("attempt-0003");
     let third = inference_request_with_messages(
-        third_attempt.as_str(),
+        third_attempt.clone(),
         3,
         vec![
             RenderedMessage {
@@ -343,7 +417,7 @@ fn llama_cpp_backend_resets_session_when_rendered_prefix_changes() {
     .unwrap();
 
     let first = inference_request_with_messages(
-        "attempt-0001",
+        test_attempt_id("attempt-0001"),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -353,7 +427,7 @@ fn llama_cpp_backend_resets_session_when_rendered_prefix_changes() {
         }],
     );
     let second = inference_request_with_messages(
-        "attempt-0002",
+        test_attempt_id("attempt-0002"),
         2,
         vec![
             RenderedMessage {
@@ -406,7 +480,7 @@ fn llama_cpp_backend_reuses_session_when_only_tool_message_names_are_added() {
     .unwrap();
 
     let first = inference_request_with_messages(
-        "attempt-0001",
+        test_attempt_id("attempt-0001"),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -416,7 +490,7 @@ fn llama_cpp_backend_reuses_session_when_only_tool_message_names_are_added() {
         }],
     );
     let second = inference_request_with_messages(
-        "attempt-0002",
+        test_attempt_id("attempt-0002"),
         2,
         vec![
             RenderedMessage {
@@ -460,7 +534,7 @@ fn llama_cpp_backend_records_auto_selected_device_metadata() {
     let root_path = temp_root("llama-auto-selected-device");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
     let request = inference_request_with_messages(
-        "attempt-0001",
+        test_attempt_id("attempt-0001"),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -504,7 +578,7 @@ fn llama_cpp_backend_leaves_device_metadata_empty_when_unknown() {
     let root_path = temp_root("llama-no-selected-device");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
     let request = inference_request_with_messages(
-        "attempt-0001",
+        test_attempt_id("attempt-0001"),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -543,7 +617,7 @@ fn llama_cpp_backend_clear_context_resets_test_runtime_session() {
     .unwrap();
 
     let first = inference_request_with_messages(
-        "attempt-0001",
+        test_attempt_id("attempt-0001"),
         1,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -553,7 +627,7 @@ fn llama_cpp_backend_clear_context_resets_test_runtime_session() {
         }],
     );
     let second = inference_request_with_messages(
-        "attempt-0002",
+        test_attempt_id("attempt-0002"),
         2,
         vec![RenderedMessage {
             role: RenderedMessageRole::User,
@@ -595,10 +669,12 @@ fn manual_llama_cpp_smoke_from_env() {
     let artifact_root = std::env::var("AGL_INFERENCE_ARTIFACT_ROOT")
         .expect("AGL_INFERENCE_ARTIFACT_ROOT must point to an artifact directory");
     let mut request = inference_request();
-    request.run_id = InferenceRunId::new("manual-smoke").unwrap();
-    request.attempt_id = InferenceAttemptId::new("attempt-001").unwrap();
+    request.run_id = RunId::generate();
+    request.turn_id = TurnId::generate();
+    request.attempt_id = AttemptId::generate();
     request.rendered = RenderedModelRequest {
-        turn_id: "manual-smoke-turn".to_string(),
+        run_id: request.run_id.clone(),
+        turn_id: request.turn_id.clone(),
         request_index: 0,
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,

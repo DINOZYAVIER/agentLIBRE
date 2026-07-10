@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
     ChatOptions, ChatService, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions,
-    ToolAccessMode as ChatToolAccessMode, chat_workspace_root, default_run_id,
+    ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{
@@ -1036,7 +1036,6 @@ fn inference_options_from_serve_options(
         config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
-        run_id: options.run_id.clone(),
         workspace_root: options.workspace_root.clone(),
         max_output_tokens,
         tool_mode: chat_tool_mode(tool_mode),
@@ -1093,7 +1092,6 @@ fn inference_options_from_run_options(
         config: options.config.clone(),
         function_ref: options.function_ref.clone(),
         artifact_root: options.artifact_root.clone(),
-        run_id: options.run_id.clone(),
         workspace_root: options.workspace_root.clone(),
         max_output_tokens,
         tool_mode: chat_tool_mode(tool_mode),
@@ -1229,17 +1227,27 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     let summary = chat_service.summary();
     tracing::info!(
         target: "agentlibre::app",
-        run_id = %summary.run_id,
-        event_stream = %summary.event_stream.display(),
+        session_id = %summary.session_id,
+        artifact_root = %summary.artifact_root.display(),
         workspace_root = %summary.workspace_root.display(),
         tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
-    match chat_service.run_user_turn(&prompt)?.status {
+    let output = chat_service.run_user_turn(&prompt)?;
+    tracing::info!(
+        target: "agentlibre::app",
+        session_id = %chat_service.session_id(),
+        run_id = %output.run_id,
+        turn_id = %output.turn_id,
+        generated_requests = output.generated_requests,
+        "runtime turn finished"
+    );
+    match output.status {
         ChatTurnStatus::Answered { answer } => println!("{answer}"),
         ChatTurnStatus::Stopped { reason } => {
             println!("stopped=true reason={}", reason.as_str());
         }
+        ChatTurnStatus::Failed { message } => bail!("turn failed: {message}"),
     }
     Ok(())
 }
@@ -1761,10 +1769,8 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     run_chat_raw(options, runtime)
 }
 
-fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
-    let run_id = options.run_id.clone().unwrap_or_else(default_run_id);
-    options.run_id = Some(run_id.clone());
     let mut chat_service =
         ChatService::open(chat_options_from_run_options(&options, runtime)?, runtime)?;
     let summary = chat_service.summary();
@@ -1773,9 +1779,7 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     tracing::info!(
         target: "agentlibre::app",
         session_id = %summary.session_id,
-        run_id = %summary.run_id,
         artifact_root = %summary.artifact_root.display(),
-        event_stream = %summary.event_stream.display(),
         workspace_root = %summary.workspace_root.display(),
         tool_mode = summary.tool_mode,
         history_enabled = summary.history_enabled,
@@ -1820,7 +1824,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                         tracing::info!(
                             target: "agentlibre::app",
                             session_id = %chat_service.session_id(),
-                            run_id = %chat_service.run_id(),
                             workspace_root = %chat_service.workspace_root().display(),
                             visible_tools,
                             "chat runtime context reloaded"
@@ -1834,7 +1837,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                         tracing::warn!(
                             target: "agentlibre::app",
                             session_id = %chat_service.session_id(),
-                            run_id = %chat_service.run_id(),
                             error = %err,
                             "chat runtime context reload failed"
                         );
@@ -1850,7 +1852,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                         tracing::warn!(
                             target: "agentlibre::app",
                             session_id = %chat_service.session_id(),
-                            run_id = %chat_service.run_id(),
                             requested_workspace_root = %root.display(),
                             error = %err,
                             "chat workspace root change failed"
@@ -1860,7 +1861,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                         tracing::info!(
                             target: "agentlibre::app",
                             session_id = %chat_service.session_id(),
-                            run_id = %chat_service.run_id(),
                             workspace_root = %chat_service.workspace_root().display(),
                             "chat workspace root changed"
                         );
@@ -1874,7 +1874,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                 tracing::info!(
                     target: "agentlibre::app",
                     session_id = %chat_service.session_id(),
-                    run_id = %chat_service.run_id(),
                     cleared_messages,
                     "chat context cleared"
                 );
@@ -1887,13 +1886,23 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
             }
         };
 
-        match chat_service.run_user_turn(input)?.status {
+        let output = chat_service.run_user_turn(input)?;
+        tracing::info!(
+            target: "agentlibre::app",
+            session_id = %chat_service.session_id(),
+            run_id = %output.run_id,
+            turn_id = %output.turn_id,
+            generated_requests = output.generated_requests,
+            "chat turn finished"
+        );
+        match output.status {
             ChatTurnStatus::Answered { answer } => {
                 println!("assistant> {answer}");
             }
             ChatTurnStatus::Stopped { reason } => {
                 println!("stopped=true reason={}", reason.as_str());
             }
+            ChatTurnStatus::Failed { message } => bail!("turn failed: {message}"),
         }
     }
 
@@ -1901,7 +1910,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     tracing::info!(
         target: "agentlibre::app",
         session_id = %chat_service.session_id(),
-        run_id = %chat_service.run_id(),
         "chat session finished"
     );
     Ok(())
@@ -1909,7 +1917,6 @@ fn run_chat_raw(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
 
 fn print_chat_session_summary(chat_service: &ChatService) {
     println!("session_id={}", chat_service.session_id());
-    println!("run_id={}", chat_service.run_id());
     println!("artifact_root={}", chat_service.artifact_root().display());
     println!("workspace_root={}", chat_service.workspace_root().display());
 }
@@ -1926,7 +1933,6 @@ mod tests {
             config: None,
             function_ref: None,
             artifact_root: None,
-            run_id: None,
             workspace_root: None,
             max_output_tokens: None,
             tool_mode: None,
@@ -2085,7 +2091,7 @@ memory:
     fn one_shot_run_uses_chat_service_without_history() {
         let options = RunOptions {
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
-            session_id: Some("ignored-session".to_string()),
+            session_id: Some(agl_ids::SessionId::generate()),
             no_history: false,
             new_session: false,
             prompt: Some("hello".to_string()),

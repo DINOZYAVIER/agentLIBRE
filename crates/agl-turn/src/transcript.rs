@@ -1,3 +1,4 @@
+use agl_ids::{RunId, TurnId};
 use serde_json::Value;
 
 use crate::VisibleTool;
@@ -13,7 +14,8 @@ pub enum TurnMessage {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelRequest {
-    pub turn_id: String,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
     pub request_index: usize,
     pub messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,

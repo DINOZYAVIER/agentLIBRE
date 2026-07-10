@@ -1,8 +1,10 @@
+use agl_ids::{ParseIdError, SessionId};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BridgeCommand {
     Help,
     Status,
-    Bind { session_id: String },
+    Bind { session_id: SessionId },
     Unbind,
     Message { body: String },
 }
@@ -11,6 +13,7 @@ pub enum BridgeCommand {
 pub enum CommandParseError {
     EmptyPrefix,
     MissingArgument { command: &'static str },
+    InvalidSessionId { value: String, reason: ParseIdError },
     UnknownCommand { command: String },
 }
 
@@ -41,9 +44,13 @@ impl BridgeCommand {
                 return Err(CommandParseError::MissingArgument { command: "bind" });
             }
 
-            return Ok(Some(Self::Bind {
-                session_id: session_id.to_owned(),
-            }));
+            let parsed = SessionId::parse(session_id).map_err(|reason| {
+                CommandParseError::InvalidSessionId {
+                    value: session_id.to_owned(),
+                    reason,
+                }
+            })?;
+            return Ok(Some(Self::Bind { session_id: parsed }));
         }
 
         if rest == "unbind" {
@@ -78,6 +85,8 @@ fn command_argument<'a>(input: &'a str, command: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
+    const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
+
     #[test]
     fn ignores_non_commands() {
         assert_eq!(BridgeCommand::parse("hello", "!agl"), Ok(None));
@@ -91,11 +100,19 @@ mod tests {
     #[test]
     fn parses_bind_command() {
         assert_eq!(
-            BridgeCommand::parse("!agl bind session-1", "!agl"),
+            BridgeCommand::parse("!agl bind ses_01890f17-4a00-7000-8000-000000000001", "!agl",),
             Ok(Some(BridgeCommand::Bind {
-                session_id: "session-1".to_owned()
+                session_id: SessionId::parse(SESSION_ID).unwrap()
             }))
         );
+    }
+
+    #[test]
+    fn rejects_non_canonical_session_id() {
+        assert!(matches!(
+            BridgeCommand::parse("!agl bind session-1", "!agl"),
+            Err(CommandParseError::InvalidSessionId { .. })
+        ));
     }
 
     #[test]

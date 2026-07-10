@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use agl_ids::{AttemptId, RunId};
 use anyhow::{Context, Result};
 use serde::Serialize;
-
-use super::{InferenceAttemptId, InferenceRunId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceArtifactRoot {
@@ -29,19 +28,15 @@ impl InferenceArtifactRoot {
         &self.root
     }
 
-    pub fn run_dir(&self, run_id: &InferenceRunId) -> PathBuf {
-        self.root.join("inference-runs").join(run_id.as_str())
+    pub fn run_dir(&self, run_id: &RunId) -> PathBuf {
+        self.root.join("runs").join(run_id.as_str())
     }
 
-    pub fn events_jsonl(&self, run_id: &InferenceRunId) -> PathBuf {
+    pub fn events_jsonl(&self, run_id: &RunId) -> PathBuf {
         self.run_dir(run_id).join("events.jsonl")
     }
 
-    pub fn paths(
-        &self,
-        run_id: &InferenceRunId,
-        attempt_id: &InferenceAttemptId,
-    ) -> InferenceArtifactPaths {
+    pub fn paths(&self, run_id: &RunId, attempt_id: &AttemptId) -> InferenceArtifactPaths {
         let run_dir = self.run_dir(run_id);
         let attempt_dir = run_dir.join("attempts").join(attempt_id.as_str());
         InferenceArtifactPaths {

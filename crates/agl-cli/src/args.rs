@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use agl_ids::SessionId;
 use agl_tools::SkillId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
@@ -1315,10 +1316,6 @@ struct CommonRunArgs {
     #[arg(long, value_name = "DIR")]
     artifact_root: Option<PathBuf>,
 
-    /// Stable run id for artifacts.
-    #[arg(long, value_name = "ID")]
-    run_id: Option<String>,
-
     /// Workspace root for filesystem tools.
     #[arg(long, value_name = "DIR")]
     workspace_root: Option<PathBuf>,
@@ -1361,7 +1358,7 @@ struct ChatArgs {
 
     /// Resume or write a specific chat session id.
     #[arg(long, value_name = "ID")]
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
 
     /// Start a new chat session even when a session id is configured.
     #[arg(long)]
@@ -1391,10 +1388,6 @@ struct CommonInferenceArgs {
     /// Inference artifact root directory.
     #[arg(long, value_name = "DIR")]
     artifact_root: Option<PathBuf>,
-
-    /// Stable run id for artifacts.
-    #[arg(long, value_name = "ID")]
-    run_id: Option<String>,
 
     /// Workspace root for filesystem tools.
     #[arg(long, value_name = "DIR")]
@@ -1438,7 +1431,7 @@ struct InferenceChatArgs {
 
     /// Resume or write a specific chat session id.
     #[arg(long, value_name = "ID")]
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
 
     /// Start a new chat session even when a session id is configured.
     #[arg(long)]
@@ -2125,7 +2118,6 @@ fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
         config: args.common.config,
         function_ref: args.common.function_ref,
         artifact_root: args.common.artifact_root,
-        run_id: args.common.run_id,
         workspace_root: args.common.workspace_root,
         max_output_tokens: args
             .common
@@ -2175,7 +2167,6 @@ fn inference_serve_options_from_args(args: InferenceServeArgs) -> Result<ServeOp
         config: args.common.config,
         function_ref: None,
         artifact_root: args.common.artifact_root,
-        run_id: args.common.run_id,
         workspace_root: args.common.workspace_root,
         max_output_tokens: args
             .common
@@ -2193,7 +2184,6 @@ fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
         config: common.config,
         function_ref: common.function_ref,
         artifact_root: common.artifact_root,
-        run_id: common.run_id,
         workspace_root: common.workspace_root,
         session_id: None,
         no_history: false,
@@ -2214,7 +2204,6 @@ fn run_options_from_inference_common(common: CommonInferenceArgs) -> Result<RunO
         config: common.config,
         function_ref: None,
         artifact_root: common.artifact_root,
-        run_id: common.run_id,
         workspace_root: common.workspace_root,
         session_id: None,
         no_history: false,

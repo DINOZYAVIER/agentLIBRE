@@ -16,6 +16,7 @@ pub mod runtime;
 pub mod state;
 pub mod thread_binding;
 
+use agl_ids::SessionId;
 use anyhow::Result;
 
 pub use access::{AccessDecision, AccessPolicy};
@@ -49,11 +50,11 @@ pub use thread_binding::{BindingKey, ThreadBinding, ThreadBindingStore};
 /// Minimal daemon boundary expected by Matrix-facing bridge code.
 pub trait AgentClient {
     fn daemon_status(&mut self) -> Result<String>;
-    fn validate_session(&mut self, session_id: &str) -> Result<()>;
-    fn open_session(&mut self) -> Result<String>;
+    fn validate_session(&mut self, session_id: &SessionId) -> Result<()>;
+    fn open_session(&mut self) -> Result<SessionId>;
     fn send_message(
         &mut self,
-        session_id: &str,
+        session_id: &SessionId,
         message: &str,
         idempotency_key: &str,
     ) -> Result<String>;
@@ -72,17 +73,19 @@ mod tests {
             Ok("running".to_string())
         }
 
-        fn validate_session(&mut self, _session_id: &str) -> Result<()> {
+        fn validate_session(&mut self, _session_id: &SessionId) -> Result<()> {
             Ok(())
         }
 
-        fn open_session(&mut self) -> Result<String> {
-            Ok("session-1".to_string())
+        fn open_session(&mut self) -> Result<SessionId> {
+            Ok(SessionId::parse(
+                "ses_01890f17-4a00-7000-8000-000000000001",
+            )?)
         }
 
         fn send_message(
             &mut self,
-            session_id: &str,
+            session_id: &SessionId,
             message: &str,
             idempotency_key: &str,
         ) -> Result<String> {
@@ -108,7 +111,7 @@ mod tests {
         assert_eq!(
             client.messages,
             vec![(
-                "session-1".to_string(),
+                "ses_01890f17-4a00-7000-8000-000000000001".to_string(),
                 "hello".to_string(),
                 "$event".to_string()
             )]

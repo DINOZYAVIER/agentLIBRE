@@ -13,7 +13,6 @@ max_output_tokens="${AGL_SMOKE_MAX_OUTPUT_TOKENS:-160}"
 run_suffix="agl-056-$(date +%s)-$$"
 export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}"
 
-run_id="$run_suffix-run"
 run_root="$artifact_root/runs-$run_suffix"
 workspace="$artifact_root/workspace-$run_suffix"
 stdout_path="$artifact_root/stdout-$run_suffix.txt"
@@ -38,15 +37,6 @@ for message in messages:
 else:
     raise SystemExit("missing agentlibre_tool_context")
 PY
-}
-
-latest_response_file() {
-  local run_dir="$1"
-  shopt -s nullglob
-  local responses=("$run_dir"/attempts/attempt-*/response.json)
-  shopt -u nullglob
-  [[ ${#responses[@]} -gt 0 ]] || fail "no response artifacts under $run_dir"
-  printf '%s\n' "${responses[$((${#responses[@]} - 1))]}"
 }
 
 need_tool cargo
@@ -80,7 +70,6 @@ skill tools smoke ok. Verification: fs.read loaded facts.txt.'
   "$agl_bin" inference run \
     --config "$config" \
     --artifact-root "$run_root" \
-    --run-id "$run_id" \
     --workspace-root "$workspace" \
     --skill repo-status \
     --max-output-tokens "$max_output_tokens" \
@@ -88,16 +77,19 @@ skill tools smoke ok. Verification: fs.read loaded facts.txt.'
     >"$stdout_path"
 )
 
-run_dir="$run_root/inference-runs/$run_id"
-events="$run_dir/agent-events.jsonl"
+run_id="$(single_run_id "$run_root")"
+run_dir="$run_root/runs/$run_id"
+events="$run_dir/events.jsonl"
+attempt_id_1="$(runtime_attempt_id "$events" 1)"
+attempt_id_2="$(runtime_attempt_id "$events" 2)"
 skill_context="$run_dir/skill-context.json"
-request_1="$run_dir/attempts/attempt-0001/request.json"
-response_1="$run_dir/attempts/attempt-0001/response.json"
-runtime_1="$run_dir/attempts/attempt-0001/runtime.log"
-runtime_2="$run_dir/attempts/attempt-0002/runtime.log"
+request_1="$run_dir/attempts/$attempt_id_1/request.json"
+response_1="$run_dir/attempts/$attempt_id_1/response.json"
+runtime_1="$run_dir/attempts/$attempt_id_1/runtime.log"
+runtime_2="$run_dir/attempts/$attempt_id_2/runtime.log"
 tool_context="$artifact_root/tool-context-$run_suffix.txt"
 request_tool_context "$request_1" >"$tool_context"
-latest_response="$(latest_response_file "$run_dir")"
+latest_response="$run_dir/attempts/$attempt_id_2/response.json"
 latest_content="$(json_content "$latest_response")"
 
 require_contains "$skill_context" '"skill_id": "repo-status"'

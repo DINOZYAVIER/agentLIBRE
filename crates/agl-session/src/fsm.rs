@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::{AgentLibreMessageId, AgentLibreSessionFinishReason, AgentLibreSessionId};
+use agl_ids::{AttemptId, MessageId, RunId, SessionId, TurnId};
+
+use crate::AgentLibreSessionFinishReason;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatSessionPhase {
@@ -36,12 +38,8 @@ impl ChatSessionPhase {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChatSessionTransition {
-    StartNewSession {
-        run_id: String,
-    },
-    ResumeSession {
-        run_id: String,
-    },
+    StartNewSession,
+    ResumeSession,
     PromptForInput,
     ReadUserMessage {
         content: String,
@@ -49,28 +47,39 @@ pub enum ChatSessionTransition {
     ReadCommandClear,
     ReadCommandExit,
     RecordUserMessage {
-        message_id: AgentLibreMessageId,
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
         content: String,
     },
     LinkModelAttempt {
-        run_id: String,
-        attempt_id: String,
+        run_id: RunId,
+        turn_id: TurnId,
+        attempt_id: AttemptId,
     },
     RecordAssistantAnswer {
-        message_id: AgentLibreMessageId,
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
         content: String,
     },
     RecordAssistantStopMarker {
-        message_id: AgentLibreMessageId,
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
         content: String,
     },
     RecordAssistantToolCall {
-        message_id: AgentLibreMessageId,
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
         name: String,
         arguments: serde_json::Value,
     },
     RecordToolMessage {
-        message_id: AgentLibreMessageId,
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
         name: String,
         content: String,
     },
@@ -86,8 +95,8 @@ pub enum ChatSessionTransition {
 impl ChatSessionTransition {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ChatSessionTransition::StartNewSession { .. } => "start_new_session",
-            ChatSessionTransition::ResumeSession { .. } => "resume_session",
+            ChatSessionTransition::StartNewSession => "start_new_session",
+            ChatSessionTransition::ResumeSession => "resume_session",
             ChatSessionTransition::PromptForInput => "prompt_for_input",
             ChatSessionTransition::ReadUserMessage { .. } => "read_user_message",
             ChatSessionTransition::ReadCommandClear => "read_command_clear",
@@ -109,7 +118,7 @@ impl ChatSessionTransition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionTransitionRecord {
-    pub session_id: AgentLibreSessionId,
+    pub session_id: SessionId,
     pub sequence: usize,
     pub from: ChatSessionPhase,
     pub to: ChatSessionPhase,
@@ -118,13 +127,13 @@ pub struct ChatSessionTransitionRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionMachine {
-    session_id: AgentLibreSessionId,
+    session_id: SessionId,
     phase: ChatSessionPhase,
     sequence: usize,
 }
 
 impl ChatSessionMachine {
-    pub fn new(session_id: AgentLibreSessionId) -> Self {
+    pub fn new(session_id: SessionId) -> Self {
         Self {
             session_id,
             phase: ChatSessionPhase::Uninitialized,
@@ -132,7 +141,7 @@ impl ChatSessionMachine {
         }
     }
 
-    pub fn session_id(&self) -> &AgentLibreSessionId {
+    pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
 
@@ -192,8 +201,8 @@ fn next_phase(
     use ChatSessionTransition::*;
 
     match (from, transition) {
-        (Uninitialized, StartNewSession { .. }) => Some(Started),
-        (Uninitialized, ResumeSession { .. }) => Some(Started),
+        (Uninitialized, StartNewSession) => Some(Started),
+        (Uninitialized, ResumeSession) => Some(Started),
         (Started | ContextCleared, PromptForInput) => Some(AwaitingInput),
         (AwaitingInput, ReadUserMessage { .. }) => Some(RecordingUserMessage),
         (AwaitingInput, ReadCommandClear) => Some(HandlingCommand),
