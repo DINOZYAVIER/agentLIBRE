@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
-use agl_events::AgentEvent;
+use agl_events::RuntimeEvent;
 use agl_tools::{HookBatchRequest, HookBatchResult, HookEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
@@ -44,6 +44,7 @@ pub fn run_turn<H: AgentLoopHost>(host: &mut H, input: TurnInput) -> Result<Turn
             request_messages.push(TurnMessage::System { content: message });
         }
         let response = match host.generate(ModelRequest {
+            run_id: state.input.run_id.clone(),
             turn_id: state.input.turn_id.clone(),
             request_index,
             messages: request_messages,
@@ -716,7 +717,7 @@ fn apply_emit<H: AgentLoopHost>(
     transition: TurnTransition,
 ) -> Result<TurnTransitionRecord> {
     let record = state.apply_transition(transition)?;
-    let event: AgentEvent = event_for_record(&record);
+    let event: RuntimeEvent = event_for_record(&record);
     host.emit_transition(&record, &event)?;
     Ok(record)
 }

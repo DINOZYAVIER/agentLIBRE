@@ -1,12 +1,13 @@
 [package]
-name = "agl-events"
+name = "agl-ids"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-ids.workspace = true
-anyhow.workspace = true
 serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
 serde_json.workspace = true

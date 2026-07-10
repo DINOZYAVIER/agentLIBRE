@@ -1,10 +1,9 @@
 mod artifact;
 mod event;
-mod ids;
 
+pub use agl_events::InferenceFinishStatus;
 pub use artifact::{InferenceArtifactPaths, InferenceArtifactRoot};
-pub use event::{InferenceEventWriter, InferenceFinishStatus, InferenceObservationEvent};
-pub use ids::{InferenceAttemptId, InferenceRunId};
+pub use event::InferenceEventWriter;
 
 #[cfg(test)]
 mod tests;

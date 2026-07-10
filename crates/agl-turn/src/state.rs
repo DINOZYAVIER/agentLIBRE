@@ -21,7 +21,7 @@ impl TurnState {
         });
         let request_index = input.request_index_start;
         Self {
-            machine: TurnMachine::new(input.turn_id.clone()),
+            machine: TurnMachine::new(input.run_id.clone(), input.turn_id.clone()),
             input,
             messages,
             request_index,

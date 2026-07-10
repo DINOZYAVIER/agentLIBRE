@@ -1,3 +1,4 @@
+use agl_events::{EventEnvelope, RuntimeEvent};
 use agl_protocol::{SessionFinishReason, TranscriptEvent};
 use agl_session::ChatSessionEvent;
 
@@ -7,45 +8,9 @@ pub(crate) fn transcript_event(
 ) -> Option<TranscriptEvent> {
     match event {
         ChatSessionEvent::SessionStarted { .. } => None,
-        ChatSessionEvent::UserMessage {
-            message_id,
-            content,
-            ..
-        } => Some(TranscriptEvent::UserMessage {
-            message_id: message_id.to_string(),
-            content: include_content.then_some(content),
-        }),
-        ChatSessionEvent::AssistantMessage {
-            message_id,
-            content,
-            ..
-        } => Some(TranscriptEvent::AssistantMessage {
-            message_id: message_id.to_string(),
-            content: include_content.then_some(content),
-        }),
-        ChatSessionEvent::AssistantToolCall {
-            message_id,
-            name,
-            arguments,
-            ..
-        } => Some(TranscriptEvent::AssistantToolCall {
-            message_id: message_id.to_string(),
-            name,
-            arguments: include_content.then_some(arguments),
-        }),
-        ChatSessionEvent::ToolMessage {
-            message_id,
-            name,
-            content,
-            ..
-        } => Some(TranscriptEvent::ToolMessage {
-            message_id: message_id.to_string(),
-            name,
-            content: include_content.then_some(content),
-        }),
-        ChatSessionEvent::ModelAttemptLinked {
-            run_id, attempt_id, ..
-        } => Some(TranscriptEvent::ModelAttemptLinked { run_id, attempt_id }),
+        ChatSessionEvent::Runtime { envelope } => {
+            runtime_transcript_event(*envelope, include_content)
+        }
         ChatSessionEvent::ContextCleared { .. } => Some(TranscriptEvent::ContextCleared),
         ChatSessionEvent::SessionFinished { reason, .. } => {
             Some(TranscriptEvent::SessionFinished {
@@ -63,5 +28,62 @@ pub(crate) fn transcript_event(
         ChatSessionEvent::SessionFailed { message, .. } => {
             Some(TranscriptEvent::SessionFailed { message })
         }
+    }
+}
+
+fn runtime_transcript_event(
+    envelope: EventEnvelope<RuntimeEvent>,
+    include_content: bool,
+) -> Option<TranscriptEvent> {
+    let run_id = envelope.scope.run_id().clone();
+    let turn_id = envelope.scope.turn_id()?.clone();
+    let attempt_id = envelope.scope.attempt_id().cloned();
+    match envelope.payload {
+        RuntimeEvent::UserMessage {
+            message_id,
+            content,
+        } => Some(TranscriptEvent::UserMessage {
+            run_id,
+            turn_id,
+            message_id,
+            content: include_content.then_some(content),
+        }),
+        RuntimeEvent::AssistantMessage {
+            message_id,
+            content,
+        } => Some(TranscriptEvent::AssistantMessage {
+            run_id,
+            turn_id,
+            message_id,
+            content: include_content.then_some(content),
+        }),
+        RuntimeEvent::AssistantToolCall {
+            message_id,
+            name,
+            arguments,
+        } => Some(TranscriptEvent::AssistantToolCall {
+            run_id,
+            turn_id,
+            message_id,
+            name,
+            arguments: include_content.then_some(arguments),
+        }),
+        RuntimeEvent::ToolMessage {
+            message_id,
+            name,
+            content,
+        } => Some(TranscriptEvent::ToolMessage {
+            run_id,
+            turn_id,
+            message_id,
+            name,
+            content: include_content.then_some(content),
+        }),
+        RuntimeEvent::ModelAttemptLinked => Some(TranscriptEvent::ModelAttemptLinked {
+            run_id,
+            turn_id,
+            attempt_id: attempt_id?,
+        }),
+        _ => None,
     }
 }

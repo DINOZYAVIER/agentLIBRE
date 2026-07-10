@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const AGL_BIN: &str = env!("CARGO_BIN_EXE_agl");
+const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
 
 static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1429,14 +1430,7 @@ fn chat_rejects_prompt_option_with_clap_error() {
 
 #[test]
 fn chat_new_session_conflict_fails_before_inference_path() {
-    let output = run_agl(&[
-        "chat",
-        "--new-session",
-        "--session-id",
-        "session-001",
-        "--run-id",
-        "run-001",
-    ]);
+    let output = run_agl(&["chat", "--new-session", "--session-id", SESSION_ID]);
 
     assert_failure(&output);
     assert_empty_stdout(&output);
@@ -1545,10 +1539,8 @@ fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
             "chat",
             "--config",
             &config_arg,
-            "--run-id",
-            "failed-chat-run",
             "--session-id",
-            "failed-chat-session",
+            SESSION_ID,
             "--max-output-tokens",
             "1",
         ],
@@ -1556,14 +1548,14 @@ fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
     );
 
     assert_failure(&output);
-    assert_contains(&stdout(&output), "session_id=failed-chat-session");
+    assert_contains(&stdout(&output), &format!("session_id={SESSION_ID}"));
     assert_contains(&stderr(&output), "model request failed");
 
     let transcript = fs::read_to_string(
         home.path()
             .join("data")
             .join("sessions")
-            .join("failed-chat-session")
+            .join(SESSION_ID)
             .join("transcript.jsonl"),
     )
     .expect("chat failure should write transcript");

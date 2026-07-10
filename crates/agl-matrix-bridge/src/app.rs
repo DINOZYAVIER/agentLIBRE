@@ -78,6 +78,9 @@ mod tests {
     use crate::{
         AccessPolicy, AglConfig, BindingConfig, BindingKey, EncryptedRoomPolicy, MatrixConfig,
     };
+    use agl_ids::SessionId;
+
+    const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
 
     #[derive(Default)]
     struct FakeClient {
@@ -90,18 +93,18 @@ mod tests {
             Ok("state=running".to_string())
         }
 
-        fn validate_session(&mut self, _session_id: &str) -> Result<()> {
+        fn validate_session(&mut self, _session_id: &SessionId) -> Result<()> {
             Ok(())
         }
 
-        fn open_session(&mut self) -> Result<String> {
+        fn open_session(&mut self) -> Result<SessionId> {
             self.opened_sessions += 1;
-            Ok(format!("session-{}", self.opened_sessions))
+            Ok(SessionId::parse(SESSION_ID)?)
         }
 
         fn send_message(
             &mut self,
-            session_id: &str,
+            session_id: &SessionId,
             message: &str,
             idempotency_key: &str,
         ) -> Result<String> {
@@ -178,7 +181,7 @@ mod tests {
             state.bindings,
             vec![crate::ThreadBinding {
                 key: BindingKey::new("!room:example", Some("$thread".to_string())),
-                session_id: "session-1".to_string(),
+                session_id: SessionId::parse(SESSION_ID).unwrap(),
             }]
         );
         std::fs::remove_file(path).unwrap();

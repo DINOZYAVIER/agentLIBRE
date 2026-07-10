@@ -9,6 +9,8 @@ build = "build.rs"
 [dependencies]
 agl-actions.workspace = true
 agl-config.workspace = true
+agl-events.workspace = true
+agl-ids.workspace = true
 agl-oven.workspace = true
 anyhow.workspace = true
 serde.workspace = true

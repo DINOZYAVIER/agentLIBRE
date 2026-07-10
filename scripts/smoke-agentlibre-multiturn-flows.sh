@@ -16,15 +16,15 @@ export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}
 
 attempt_file() {
   local run_dir="$1"
-  local attempt="$2"
+  local attempt_id="$2"
   local name="$3"
-  printf '%s/attempts/attempt-%04d/%s' "$run_dir" "$attempt" "$name"
+  printf '%s/attempts/%s/%s' "$run_dir" "$attempt_id" "$name"
 }
 
 chat_run_dir() {
   local session_id="$1"
   local run_id="$2"
-  printf '%s/data/sessions/%s/runs/%s/inference-runs/%s' "$AGL_HOME" "$session_id" "$run_id" "$run_id"
+  printf '%s/data/sessions/%s/runs/%s' "$AGL_HOME" "$session_id" "$run_id"
 }
 
 session_transcript() {
@@ -45,10 +45,10 @@ require_response() {
 
 require_model_state() {
   local run_dir="$1"
-  local attempt="$2"
+  local attempt_id="$2"
   local state="$3"
   local runtime_log
-  runtime_log="$(attempt_file "$run_dir" "$attempt" runtime.log)"
+  runtime_log="$(attempt_file "$run_dir" "$attempt_id" runtime.log)"
   require_contains "$runtime_log" "model_state = $state"
   require_contains "$runtime_log" "selected_device = $device"
   require_contains "$runtime_log" "load_tensors: offloaded"
@@ -79,14 +79,12 @@ PY
 run_chat_flow() {
   local name="$1"
   local session_id="$2"
-  local run_id="$3"
-  local input="$4"
-  shift 4
+  local input="$3"
+  shift 3
 
   local stdout_path="$artifact_root/$name-stdout.txt"
   printf '%s' "$input" | "$agl_bin" chat \
     --config "$config" \
-    --run-id "$run_id" \
     --session-id "$session_id" \
     --max-output-tokens "$max_output_tokens" \
     "$@" \
@@ -109,58 +107,90 @@ agl_bin="$(smoke_abs_path "$agl_bin")"
 
 mkdir -p "$artifact_root"
 
-basic_session="$run_suffix-basic-session"
-basic_run="$run_suffix-basic-run"
-basic_stdout="$(run_chat_flow basic "$basic_session" "$basic_run" \
+basic_session="$(new_typed_id session)"
+basic_stdout="$(run_chat_flow basic "$basic_session" \
   $'Reply with one short sentence.\nReply with another short sentence.\n/exit\n')"
-basic_dir="$(chat_run_dir "$basic_session" "$basic_run")"
 basic_transcript="$(session_transcript "$basic_session")"
-require_response "$(attempt_file "$basic_dir" 1 response.json)"
-require_response "$(attempt_file "$basic_dir" 2 response.json)"
-require_model_state "$basic_dir" 1 loaded
-require_model_state "$basic_dir" 2 reused
-require_jsonl_kind_count_at_least "$basic_transcript" "user_message" 2
-require_jsonl_kind_count_at_least "$basic_transcript" "assistant_message" 2
+basic_normalized="$artifact_root/basic-transcript-normalized.jsonl"
+normalize_transcript "$basic_transcript" "$basic_normalized"
+mapfile -t basic_turns < <(transcript_turn_ids "$basic_normalized")
+[[ ${#basic_turns[@]} -eq 2 ]] || fail "basic flow expected two turns, found ${#basic_turns[@]}"
+IFS=$'\t' read -r basic_run_1 basic_turn_1 <<<"${basic_turns[0]}"
+IFS=$'\t' read -r basic_run_2 basic_turn_2 <<<"${basic_turns[1]}"
+[[ "$basic_run_1" != "$basic_run_2" ]] || fail "basic flow reused run ID $basic_run_1"
+[[ "$basic_turn_1" != "$basic_turn_2" ]] || fail "basic flow reused turn ID $basic_turn_1"
+basic_dir_1="$(chat_run_dir "$basic_session" "$basic_run_1")"
+basic_dir_2="$(chat_run_dir "$basic_session" "$basic_run_2")"
+basic_attempt_1="$(runtime_attempt_id "$basic_dir_1/events.jsonl" 1)"
+basic_attempt_2="$(runtime_attempt_id "$basic_dir_2/events.jsonl" 1)"
+require_response "$(attempt_file "$basic_dir_1" "$basic_attempt_1" response.json)"
+require_response "$(attempt_file "$basic_dir_2" "$basic_attempt_2" response.json)"
+require_model_state "$basic_dir_1" "$basic_attempt_1" loaded
+require_model_state "$basic_dir_2" "$basic_attempt_2" reused
+require_jsonl_kind_count_at_least "$basic_normalized" "user_message" 2
+require_jsonl_kind_count_at_least "$basic_normalized" "assistant_message" 2
 require_contains "$basic_stdout" "session_id=$basic_session"
 
-clear_session="$run_suffix-clear-session"
-clear_run="$run_suffix-clear-run"
-clear_stdout="$(run_chat_flow clear "$clear_session" "$clear_run" \
+clear_session="$(new_typed_id session)"
+clear_stdout="$(run_chat_flow clear "$clear_session" \
   $'Reply with one short sentence before clear.\n/clear\nReply with one short sentence after clear.\n/exit\n')"
-clear_dir="$(chat_run_dir "$clear_session" "$clear_run")"
 clear_transcript="$(session_transcript "$clear_session")"
-require_response "$(attempt_file "$clear_dir" 1 response.json)"
-require_response "$(attempt_file "$clear_dir" 2 response.json)"
-require_model_state "$clear_dir" 1 loaded
-require_model_state "$clear_dir" 2 loaded
+clear_normalized="$artifact_root/clear-transcript-normalized.jsonl"
+normalize_transcript "$clear_transcript" "$clear_normalized"
+mapfile -t clear_turns < <(transcript_turn_ids "$clear_normalized")
+[[ ${#clear_turns[@]} -eq 2 ]] || fail "clear flow expected two turns, found ${#clear_turns[@]}"
+IFS=$'\t' read -r clear_run_1 clear_turn_1 <<<"${clear_turns[0]}"
+IFS=$'\t' read -r clear_run_2 clear_turn_2 <<<"${clear_turns[1]}"
+[[ "$clear_run_1" != "$clear_run_2" ]] || fail "clear flow reused run ID $clear_run_1"
+[[ "$clear_turn_1" != "$clear_turn_2" ]] || fail "clear flow reused turn ID $clear_turn_1"
+clear_dir_1="$(chat_run_dir "$clear_session" "$clear_run_1")"
+clear_dir_2="$(chat_run_dir "$clear_session" "$clear_run_2")"
+clear_attempt_1="$(runtime_attempt_id "$clear_dir_1/events.jsonl" 1)"
+clear_attempt_2="$(runtime_attempt_id "$clear_dir_2/events.jsonl" 1)"
+require_response "$(attempt_file "$clear_dir_1" "$clear_attempt_1" response.json)"
+require_response "$(attempt_file "$clear_dir_2" "$clear_attempt_2" response.json)"
+require_model_state "$clear_dir_1" "$clear_attempt_1" loaded
+require_model_state "$clear_dir_2" "$clear_attempt_2" loaded
 require_contains "$clear_stdout" "context_cleared=true"
-require_jsonl_kind_count_at_least "$clear_transcript" "context_cleared" 1
+require_jsonl_kind_count_at_least "$clear_normalized" "context_cleared" 1
 
-workspace_session="$run_suffix-workspace-session"
-workspace_run="$run_suffix-workspace-run"
+workspace_session="$(new_typed_id session)"
 workspace="$artifact_root/workspace-$run_suffix"
 mkdir -p "$workspace"
-workspace_stdout="$(run_chat_flow workspace "$workspace_session" "$workspace_run" \
+workspace_stdout="$(run_chat_flow workspace "$workspace_session" \
   "/workspace $workspace"$'\n/session\nReply with one short sentence about the workspace.\n/exit\n')"
+workspace_transcript="$(session_transcript "$workspace_session")"
+workspace_normalized="$artifact_root/workspace-transcript-normalized.jsonl"
+normalize_transcript "$workspace_transcript" "$workspace_normalized"
+mapfile -t workspace_turns < <(transcript_turn_ids "$workspace_normalized")
+[[ ${#workspace_turns[@]} -eq 1 ]] || fail "workspace flow expected one turn, found ${#workspace_turns[@]}"
+IFS=$'\t' read -r workspace_run workspace_turn <<<"${workspace_turns[0]}"
 workspace_dir="$(chat_run_dir "$workspace_session" "$workspace_run")"
-require_response "$(attempt_file "$workspace_dir" 1 response.json)"
-require_model_state "$workspace_dir" 1 loaded
+workspace_attempt="$(runtime_attempt_id "$workspace_dir/events.jsonl" 1)"
+require_response "$(attempt_file "$workspace_dir" "$workspace_attempt" response.json)"
+require_model_state "$workspace_dir" "$workspace_attempt" loaded
 require_contains "$workspace_stdout" "workspace_root=$workspace"
-require_contains "$(attempt_file "$workspace_dir" 1 request.json)" "$workspace"
+require_contains "$(attempt_file "$workspace_dir" "$workspace_attempt" request.json)" "$workspace"
 
-reload_session="$run_suffix-reload-session"
-reload_run="$run_suffix-reload-run"
-reload_stdout="$(run_chat_flow reload "$reload_session" "$reload_run" \
+reload_session="$(new_typed_id session)"
+reload_stdout="$(run_chat_flow reload "$reload_session" \
   $'/reload\nReply with one short sentence.\n/exit\n' \
   --function gemma4-12b)"
+reload_transcript="$(session_transcript "$reload_session")"
+reload_normalized="$artifact_root/reload-transcript-normalized.jsonl"
+normalize_transcript "$reload_transcript" "$reload_normalized"
+mapfile -t reload_turns < <(transcript_turn_ids "$reload_normalized")
+[[ ${#reload_turns[@]} -eq 1 ]] || fail "reload flow expected one turn, found ${#reload_turns[@]}"
+IFS=$'\t' read -r reload_run reload_turn <<<"${reload_turns[0]}"
 reload_dir="$(chat_run_dir "$reload_session" "$reload_run")"
-require_response "$(attempt_file "$reload_dir" 1 response.json)"
-require_model_state "$reload_dir" 1 loaded
+reload_attempt="$(runtime_attempt_id "$reload_dir/events.jsonl" 1)"
+require_response "$(attempt_file "$reload_dir" "$reload_attempt" response.json)"
+require_model_state "$reload_dir" "$reload_attempt" loaded
 require_contains "$reload_stdout" "context_reloaded=true"
 require_contains "$reload_dir/function-resolution.json" '"id": "gemma4-12b"'
 require_contains "$reload_dir/function-context.md" "<agentlibre_function_context>"
 require_contains "$reload_dir/runtime-identity.json" '"gemma4-12b"'
-require_contains "$(attempt_file "$reload_dir" 1 request.json)" "<agentlibre_function_context>"
+require_contains "$(attempt_file "$reload_dir" "$reload_attempt" request.json)" "<agentlibre_function_context>"
 
 echo "AGL_HOME: $AGL_HOME"
 echo "config path: $config"
@@ -169,8 +199,8 @@ echo "basic stdout: $basic_stdout"
 echo "clear stdout: $clear_stdout"
 echo "workspace stdout: $workspace_stdout"
 echo "reload stdout: $reload_stdout"
-echo "basic run dir: $basic_dir"
-echo "clear run dir: $clear_dir"
+echo "basic run dirs: $basic_dir_1 $basic_dir_2"
+echo "clear run dirs: $clear_dir_1 $clear_dir_2"
 echo "workspace run dir: $workspace_dir"
 echo "reload run dir: $reload_dir"
 echo "AGL-097 multi-turn flow live smoke passed"

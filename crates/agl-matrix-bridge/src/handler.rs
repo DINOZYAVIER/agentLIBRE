@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use agl_ids::SessionId;
 use anyhow::{Result, anyhow, bail};
 
 use crate::{
@@ -26,12 +27,25 @@ pub struct BridgeInboundEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BridgeOutboundAction {
-    Ignore { reason: &'static str },
-    ReplyInThread { body: String },
-    NoticeInThread { body: String },
-    MarkProcessed { event_id: String },
-    PersistBinding { key: BindingKey, session_id: String },
-    RemoveBinding { key: BindingKey },
+    Ignore {
+        reason: &'static str,
+    },
+    ReplyInThread {
+        body: String,
+    },
+    NoticeInThread {
+        body: String,
+    },
+    MarkProcessed {
+        event_id: String,
+    },
+    PersistBinding {
+        key: BindingKey,
+        session_id: SessionId,
+    },
+    RemoveBinding {
+        key: BindingKey,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -181,7 +195,7 @@ impl BridgeEventHandler {
         }
 
         let (session_id, mut actions) = if let Some(session_id) = self.bindings.session_for(&key) {
-            (session_id.to_string(), Vec::new())
+            (session_id.clone(), Vec::new())
         } else {
             let session_id = client.open_session()?;
             self.bindings.bind(key.clone(), session_id.clone());
@@ -219,6 +233,13 @@ mod tests {
     use super::*;
     use crate::config::{EncryptedRoomPolicy, MatrixConfig};
 
+    const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
+    const EXISTING_SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000002";
+
+    fn session_id(value: &str) -> SessionId {
+        SessionId::parse(value).unwrap()
+    }
+
     #[derive(Default)]
     struct FakeClient {
         opened_sessions: usize,
@@ -231,19 +252,19 @@ mod tests {
             Ok("state=running".to_string())
         }
 
-        fn validate_session(&mut self, session_id: &str) -> Result<()> {
+        fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
             self.validated.push(session_id.to_string());
             Ok(())
         }
 
-        fn open_session(&mut self) -> Result<String> {
+        fn open_session(&mut self) -> Result<SessionId> {
             self.opened_sessions += 1;
-            Ok(format!("session-{}", self.opened_sessions))
+            Ok(session_id(SESSION_ID))
         }
 
         fn send_message(
             &mut self,
-            session_id: &str,
+            session_id: &SessionId,
             message: &str,
             idempotency_key: &str,
         ) -> Result<String> {
@@ -334,7 +355,7 @@ mod tests {
         assert_eq!(
             client.sent,
             vec![(
-                "session-1".to_string(),
+                SESSION_ID.to_string(),
                 "hello".to_string(),
                 "$event".to_string()
             )]
@@ -350,7 +371,7 @@ mod tests {
                 "!room:example",
                 Some("$thread".to_string())
             )),
-            Some("session-1")
+            Some(&session_id(SESSION_ID))
         );
     }
 
@@ -418,20 +439,20 @@ mod tests {
         assert_eq!(
             client.sent,
             vec![(
-                "session-1".to_string(),
+                SESSION_ID.to_string(),
                 "hello".to_string(),
                 "$event".to_string()
             )]
         );
         assert!(actions.contains(&BridgeOutboundAction::PersistBinding {
             key: BindingKey::new("!room:example", None),
-            session_id: "session-1".to_string(),
+            session_id: session_id(SESSION_ID),
         }));
         assert_eq!(
             handler
                 .bindings()
                 .session_for(&BindingKey::new("!room:example", None)),
-            Some("session-1")
+            Some(&session_id(SESSION_ID))
         );
     }
 
@@ -446,13 +467,16 @@ mod tests {
         let mut client = FakeClient::default();
 
         let actions = handler
-            .handle(event("!agl bind session-existing"), &mut client)
+            .handle(
+                event(&format!("!agl bind {EXISTING_SESSION_ID}")),
+                &mut client,
+            )
             .unwrap();
 
-        assert_eq!(client.validated, vec!["session-existing".to_string()]);
+        assert_eq!(client.validated, vec![EXISTING_SESSION_ID.to_string()]);
         assert!(actions.contains(&BridgeOutboundAction::PersistBinding {
             key: BindingKey::new("!room:example", Some("$thread".to_string())),
-            session_id: "session-existing".to_string(),
+            session_id: session_id(EXISTING_SESSION_ID),
         }));
     }
 

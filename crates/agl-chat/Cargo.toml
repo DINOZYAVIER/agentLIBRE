@@ -12,6 +12,7 @@ agl-config.workspace = true
 agl-events.workspace = true
 agl-functions.workspace = true
 agl-host-tools.workspace = true
+agl-ids.workspace = true
 agl-inference.workspace = true
 agl-loop.workspace = true
 agl-memory.workspace = true

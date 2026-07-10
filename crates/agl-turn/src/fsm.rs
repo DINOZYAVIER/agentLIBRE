@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+use agl_ids::{RunId, TurnId};
+
 use serde_json::Value;
 
 use crate::{HookBatchSummary, HookEvent, StopReason};
@@ -225,7 +227,8 @@ impl TurnTerminalStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnTransitionRecord {
-    pub turn_id: String,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
     pub sequence: usize,
     pub from: TurnPhase,
     pub to: TurnPhase,
@@ -234,7 +237,8 @@ pub struct TurnTransitionRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnMachine {
-    turn_id: String,
+    run_id: RunId,
+    turn_id: TurnId,
     phase: TurnPhase,
     sequence: usize,
     hook_context: Option<HookTransitionContext>,
@@ -247,16 +251,21 @@ struct HookTransitionContext {
 }
 
 impl TurnMachine {
-    pub fn new(turn_id: impl Into<String>) -> Self {
+    pub fn new(run_id: RunId, turn_id: TurnId) -> Self {
         Self {
-            turn_id: turn_id.into(),
+            run_id,
+            turn_id,
             phase: TurnPhase::Initialized,
             sequence: 0,
             hook_context: None,
         }
     }
 
-    pub fn turn_id(&self) -> &str {
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn turn_id(&self) -> &TurnId {
         &self.turn_id
     }
 
@@ -288,6 +297,7 @@ impl TurnMachine {
             HookContextUpdate::Clear => self.hook_context = None,
         }
         Ok(TurnTransitionRecord {
+            run_id: self.run_id.clone(),
             turn_id: self.turn_id.clone(),
             sequence: self.sequence,
             from,

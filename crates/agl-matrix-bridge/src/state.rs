@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use agl_ids::SessionId;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -61,8 +62,7 @@ impl BridgeState {
         (bindings, processed)
     }
 
-    pub fn bind(&mut self, key: BindingKey, session_id: impl Into<String>) {
-        let session_id = session_id.into();
+    pub fn bind(&mut self, key: BindingKey, session_id: SessionId) {
         if let Some(binding) = self.bindings.iter_mut().find(|binding| binding.key == key) {
             binding.session_id = session_id;
         } else {
@@ -72,7 +72,7 @@ impl BridgeState {
             .sort_by(|left, right| left.key.cmp(&right.key));
     }
 
-    pub fn unbind(&mut self, key: &BindingKey) -> Option<String> {
+    pub fn unbind(&mut self, key: &BindingKey) -> Option<SessionId> {
         self.bindings
             .iter()
             .position(|binding| &binding.key == key)
@@ -88,6 +88,8 @@ impl BridgeState {
 mod tests {
     use super::*;
 
+    const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
+
     #[test]
     fn state_round_trips_bindings_and_processed_events() {
         let path = std::env::temp_dir().join(format!(
@@ -99,7 +101,7 @@ mod tests {
         let mut state = BridgeState::default();
         state.bind(
             BindingKey::new("!room:example", Some("$thread".to_string())),
-            "session-1",
+            SessionId::parse(SESSION_ID).unwrap(),
         );
         state.mark_processed("$event");
 
@@ -108,6 +110,18 @@ mod tests {
 
         assert_eq!(loaded, state);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn state_rejects_non_canonical_session_id() {
+        let json = r#"{
+            "bindings": [{
+                "key": { "room_id": "!room:example" },
+                "session_id": "session-1"
+            }]
+        }"#;
+
+        assert!(serde_json::from_str::<BridgeState>(json).is_err());
     }
 
     #[test]

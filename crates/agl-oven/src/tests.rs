@@ -1,10 +1,22 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
+use agl_ids::{RunId, TurnId};
 use agl_turn::{ModelRequest, TurnMessage, VisibleTool};
 use serde_json::json;
 
 use crate::{
     RenderedMessage, RenderedMessageRole, RenderedTool, RenderedToolCall, render_model_request,
 };
+
+const TEST_RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000001";
+const TEST_TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
+
+fn run_id() -> RunId {
+    RunId::parse(TEST_RUN_ID).unwrap()
+}
+
+fn turn_id() -> TurnId {
+    TurnId::parse(TEST_TURN_ID).unwrap()
+}
 
 fn qwen_hermes_config() -> ModelConfig {
     ModelConfig {
@@ -16,7 +28,8 @@ fn qwen_hermes_config() -> ModelConfig {
 #[test]
 fn renders_user_messages_and_visible_tools() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 0,
         messages: vec![TurnMessage::User {
             content: "read README".to_string(),
@@ -26,7 +39,8 @@ fn renders_user_messages_and_visible_tools() {
 
     let rendered = render_model_request(&request, &qwen_hermes_config()).unwrap();
 
-    assert_eq!(rendered.turn_id, "turn-1");
+    assert_eq!(rendered.run_id, run_id());
+    assert_eq!(rendered.turn_id, turn_id());
     assert_eq!(rendered.request_index, 0);
     assert_eq!(rendered.dialect, ModelDialect::Qwen3);
     assert_eq!(rendered.tool_call_format, ToolCallFormat::HermesJson);
@@ -52,7 +66,8 @@ fn renders_user_messages_and_visible_tools() {
 #[test]
 fn renders_system_message() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 0,
         messages: vec![TurnMessage::System {
             content: "demo system".to_string(),
@@ -72,7 +87,8 @@ fn renders_system_message() {
 #[test]
 fn renders_hermes_assistant_tool_call_transcript() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
             name: "read_file".to_string(),
@@ -108,7 +124,8 @@ fn renders_hermes_assistant_tool_call_transcript() {
 #[test]
 fn renders_tool_observation_with_tool_name() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::ToolObservation {
             name: "read_file".to_string(),
@@ -133,7 +150,8 @@ fn renders_tool_observation_with_tool_name() {
 #[test]
 fn renders_structured_assistant_tool_call_without_text_wrapper() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
             name: "read_file".to_string(),
@@ -165,7 +183,8 @@ fn renders_structured_assistant_tool_call_without_text_wrapper() {
 #[test]
 fn renders_gemma_function_call_transcript() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
             name: "get_current_temperature".to_string(),
@@ -196,7 +215,8 @@ fn renders_gemma_function_call_transcript() {
 #[test]
 fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
             name: "fs.read".to_string(),
@@ -220,7 +240,8 @@ fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
 #[test]
 fn rejects_gemma_function_call_nested_arguments_explicitly() {
     let request = ModelRequest {
-        turn_id: "turn-1".to_string(),
+        run_id: run_id(),
+        turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
             name: "read_file".to_string(),

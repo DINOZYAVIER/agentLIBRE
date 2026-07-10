@@ -1,5 +1,7 @@
 use super::*;
 
+const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
+
 fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
     parse_cli(args.into_iter().map(str::to_string))
         .unwrap()
@@ -29,7 +31,6 @@ fn serve_options_default() -> ServeOptions {
         config: None,
         function_ref: None,
         artifact_root: None,
-        run_id: None,
         workspace_root: None,
         max_output_tokens: None,
         tool_mode: None,
@@ -99,8 +100,6 @@ fn parse_run_command_with_options() {
             "artifacts",
             "--prompt",
             "hello",
-            "--run-id",
-            "manual-test",
             "--workspace-root",
             "/tmp/workspace",
             "--max-output-tokens",
@@ -114,7 +113,6 @@ fn parse_run_command_with_options() {
             config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
-            run_id: Some("manual-test".to_string()),
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
             session_id: None,
             no_history: false,
@@ -125,6 +123,14 @@ fn parse_run_command_with_options() {
             memory: false,
             prompt: Some("hello".to_string()),
         }),
+    );
+}
+
+#[test]
+fn parse_run_rejects_removed_run_id_option() {
+    assert_parse_error_contains(
+        ["agl", "run", "--run-id", "manual-test", "hello"],
+        "unexpected argument '--run-id'",
     );
 }
 
@@ -185,7 +191,6 @@ fn parse_serve_command_with_daemon_options() {
             config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
-            run_id: None,
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
             max_output_tokens: Some(33),
             tool_mode: Some(ToolAccessMode::Write),
@@ -1002,13 +1007,13 @@ fn parse_chat_session_options() {
             "agl",
             "chat",
             "--session-id",
-            "session-001",
+            SESSION_ID,
             "--no-history",
             "--workspace-root",
             "/tmp/workspace",
         ],
         CliCommand::Chat(RunOptions {
-            session_id: Some("session-001".to_string()),
+            session_id: Some(SessionId::parse(SESSION_ID).unwrap()),
             no_history: true,
             workspace_root: Some(PathBuf::from("/tmp/workspace")),
             ..RunOptions::default()
@@ -1017,15 +1022,17 @@ fn parse_chat_session_options() {
 }
 
 #[test]
+fn parse_chat_rejects_non_canonical_session_id() {
+    assert_parse_error_contains(
+        ["agl", "chat", "--session-id", "session-001"],
+        "ID must start with ses_",
+    );
+}
+
+#[test]
 fn parse_chat_rejects_new_session_with_session_id() {
     assert_parse_error_contains(
-        [
-            "agl",
-            "chat",
-            "--new-session",
-            "--session-id",
-            "session-001",
-        ],
+        ["agl", "chat", "--new-session", "--session-id", SESSION_ID],
         "--new-session cannot be used with --session-id",
     );
 }

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_config::{
     ModelConfig, ToolCallFormat, load_local_inference_config, load_local_inference_config_from_str,
@@ -10,7 +9,8 @@ use agl_functions::{
     IdentityContractMode, RuntimeFunction, RuntimeIdentityContract, resolve_runtime_function,
     resolve_runtime_function_allow_missing_profile,
 };
-use agl_inference::evidence::{InferenceArtifactRoot, InferenceAttemptId, InferenceRunId};
+use agl_ids::{AttemptId, RequestId, RunId, SessionId};
+use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_oven::render_model_request;
@@ -62,7 +62,7 @@ pub struct InferenceSession {
     config_skills: Vec<String>,
     option_skills: Vec<String>,
     selected_skills: Vec<SkillId>,
-    run_id: InferenceRunId,
+    memory_enabled: bool,
     config_path: PathBuf,
     artifact_root: PathBuf,
 }
@@ -100,7 +100,6 @@ impl InferenceSession {
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
         let store_root = runtime.paths.store_root();
         let config_dir = runtime.paths.config_dir.clone();
-        let run_id = InferenceRunId::new(options.run_id.clone().unwrap_or_else(default_run_id))?;
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let function_profile_required =
             options.config.is_none() && env::var_os(CONFIG_ENV).is_none();
@@ -158,9 +157,6 @@ impl InferenceSession {
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let tool_mode = options.tool_mode;
         let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
-        if let Some(function) = &runtime_function {
-            write_function_evidence(&artifact_root, &run_id, function)?;
-        }
         let function_skills = runtime_function
             .as_ref()
             .map(|function| function.skills.clone())
@@ -174,7 +170,7 @@ impl InferenceSession {
             option_skills: &options.skills,
             tool_mode,
             artifact_root: &artifact_root,
-            run_id: &run_id,
+            run_id: None,
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
@@ -188,14 +184,6 @@ impl InferenceSession {
             )
         });
         let identity_contract = effective_identity_contract(runtime_function.as_ref());
-        if runtime_identity.is_some() || identity_contract.is_some() {
-            write_identity_evidence(
-                &artifact_root,
-                &run_id,
-                runtime_identity.as_ref(),
-                identity_contract.as_ref(),
-            )?;
-        }
         let mut hook_batches = skill_context.hook_batches;
         add_identity_hook_batch(&mut hook_batches, identity_contract.as_ref())?;
         let runtime_capabilities = build_runtime_capability_context(
@@ -213,8 +201,8 @@ impl InferenceSession {
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
             artifact_root: &artifact_root,
-            run_id: &run_id,
-            runtime,
+            run_id: None,
+            store_root: &store_root,
         })?;
         let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
             .with_max_output_tokens(options.max_output_tokens);
@@ -245,7 +233,7 @@ impl InferenceSession {
             config_skills,
             option_skills,
             selected_skills: skill_context.selected_skills,
-            run_id,
+            memory_enabled: options.memory,
             config_path,
             artifact_root,
         })
@@ -275,10 +263,6 @@ impl InferenceSession {
         runtime.paths.default_artifact_root()
     }
 
-    pub fn run_id(&self) -> &InferenceRunId {
-        &self.run_id
-    }
-
     pub fn config_path(&self) -> &std::path::Path {
         &self.config_path
     }
@@ -291,8 +275,8 @@ impl InferenceSession {
         self.backend.backend_name()
     }
 
-    pub fn event_stream_path(&self) -> PathBuf {
-        agent_event_stream_path(&self.artifact_root, &self.run_id)
+    pub fn event_stream_path(&self, run_id: &RunId) -> PathBuf {
+        agent_event_stream_path(&self.artifact_root, run_id)
     }
 
     pub fn turn_hook_batches(&self) -> &[TurnHookBatch] {
@@ -346,6 +330,7 @@ impl InferenceSession {
 
     pub(crate) fn prepare_artifact_write_for_tool(
         &self,
+        run_id: &RunId,
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> Result<()> {
@@ -369,7 +354,7 @@ impl InferenceSession {
         if !report.actions.is_empty() || report.has_errors() {
             write_skill_folder_prepare_evidence(
                 &self.artifact_root,
-                &self.run_id,
+                run_id,
                 "artifact-write",
                 &report,
             )?;
@@ -382,15 +367,27 @@ impl InferenceSession {
         Ok(())
     }
 
-    pub(crate) fn generate(&mut self, request: ModelRequest) -> Result<InferenceResponse> {
+    pub(crate) fn generate(
+        &mut self,
+        request: ModelRequest,
+        attempt_id: AttemptId,
+        session_id: Option<SessionId>,
+        request_id: Option<RequestId>,
+    ) -> Result<InferenceResponse> {
         if let Some(evidence) = &self.runtime_capability_evidence {
-            write_runtime_capability_context_evidence(&self.artifact_root, &self.run_id, evidence)?;
+            write_runtime_capability_context_evidence(
+                &self.artifact_root,
+                &request.run_id,
+                evidence,
+            )?;
         }
         let request = build_inference_request(
-            self.run_id.clone(),
             request,
+            attempt_id,
             &self.model_config,
             InferenceRequestContexts {
+                session_id: session_id.as_ref(),
+                request_id: request_id.as_ref(),
                 system_prompt: self.system_prompt.as_deref(),
                 runtime_capability_context: self.runtime_capability_context.as_deref(),
                 function_context: self.function_context.as_deref(),
@@ -410,10 +407,10 @@ impl InferenceSession {
         workspace_root: &std::path::Path,
     ) -> Result<()> {
         self.workspace_root = workspace_root.to_path_buf();
-        self.refresh_runtime_context()
+        self.refresh_runtime_context(None)
     }
 
-    pub(crate) fn refresh_runtime_context(&mut self) -> Result<()> {
+    pub(crate) fn refresh_runtime_context(&mut self, run_id: Option<&RunId>) -> Result<()> {
         if let Some(reference) = &self.function_ref {
             let function = resolve_session_function(
                 Some(reference),
@@ -422,10 +419,12 @@ impl InferenceSession {
                 self.function_profile_required,
             )?
             .expect("function ref is set");
-            write_function_evidence(&self.artifact_root, &self.run_id, &function)?;
             self.function_context = Some(function.context.clone());
             self.function_skills = function.skills.clone();
             self.runtime_function = Some(function);
+        }
+        if let (Some(run_id), Some(function)) = (run_id, self.runtime_function.as_ref()) {
+            write_function_evidence(&self.artifact_root, run_id, function)?;
         }
         let skill_context = resolve_skill_context(SkillContextRequest {
             config_skills: &self.config_skills,
@@ -433,7 +432,7 @@ impl InferenceSession {
             option_skills: &self.option_skills,
             tool_mode: self.tool_mode,
             artifact_root: &self.artifact_root,
-            run_id: &self.run_id,
+            run_id,
             workspace_root: &self.workspace_root,
             trust_store_path: &self.trust_store_path,
             store_root: &self.store_root,
@@ -447,10 +446,12 @@ impl InferenceSession {
             )
         });
         self.identity_contract = effective_identity_contract(self.runtime_function.as_ref());
-        if self.runtime_identity.is_some() || self.identity_contract.is_some() {
+        if let Some(run_id) = run_id
+            && (self.runtime_identity.is_some() || self.identity_contract.is_some())
+        {
             write_identity_evidence(
                 &self.artifact_root,
-                &self.run_id,
+                run_id,
                 self.runtime_identity.as_ref(),
                 self.identity_contract.as_ref(),
             )?;
@@ -462,6 +463,17 @@ impl InferenceSession {
         self.visible_tools = skill_context.visible_tools;
         self.permission_grants = skill_context.permission_grants;
         self.selected_skills = skill_context.selected_skills;
+        self.memory_context = resolve_memory_context(MemoryContextRequest {
+            enabled: self.memory_enabled,
+            config_skills: &self.config_skills,
+            function_skills: &self.function_skills,
+            option_skills: &self.option_skills,
+            workspace_root: &self.workspace_root,
+            trust_store_path: &self.trust_store_path,
+            artifact_root: &self.artifact_root,
+            run_id,
+            store_root: &self.store_root,
+        })?;
         let runtime_capabilities = build_runtime_capability_context(
             &self.workspace_root,
             self.tool_mode,
@@ -473,10 +485,10 @@ impl InferenceSession {
     }
 }
 
-fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &InferenceRunId) -> PathBuf {
+fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &RunId) -> PathBuf {
     InferenceArtifactRoot::new(artifact_root.to_path_buf())
         .run_dir(run_id)
-        .join("agent-events.jsonl")
+        .join("events.jsonl")
 }
 
 fn resolve_session_function(
@@ -503,7 +515,7 @@ fn resolve_session_function(
 
 fn write_function_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     function: &RuntimeFunction,
 ) -> Result<()> {
     let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
@@ -621,7 +633,7 @@ fn add_identity_hook_batch(
 
 fn write_identity_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     identity: Option<&RuntimeIdentityEvidence>,
     contract: Option<&RuntimeIdentityContract>,
 ) -> Result<()> {
@@ -650,11 +662,13 @@ fn write_identity_evidence(
 }
 
 fn build_inference_request(
-    run_id: InferenceRunId,
     request: ModelRequest,
+    attempt_id: AttemptId,
     model_config: &ModelConfig,
     contexts: InferenceRequestContexts<'_>,
 ) -> Result<InferenceRequest> {
+    let run_id = request.run_id.clone();
+    let turn_id = request.turn_id.clone();
     let request_index = request.request_index;
     let mut request_messages =
         Vec::with_capacity(request.messages.len() + contexts.non_empty_count());
@@ -692,7 +706,8 @@ fn build_inference_request(
     request_messages.extend(request.messages);
 
     let model_request = ModelRequest {
-        turn_id: request.turn_id,
+        run_id: run_id.clone(),
+        turn_id: turn_id.clone(),
         request_index,
         messages: request_messages,
         visible_tools: request.visible_tools,
@@ -700,7 +715,10 @@ fn build_inference_request(
     let rendered = render_model_request(&model_request, model_config)?;
     Ok(InferenceRequest {
         run_id,
-        attempt_id: InferenceAttemptId::new(format!("attempt-{request_index:04}"))?,
+        turn_id,
+        attempt_id,
+        session_id: contexts.session_id.cloned(),
+        request_id: contexts.request_id.cloned(),
         rendered,
     })
 }
@@ -725,6 +743,8 @@ fn build_runtime_capability_context(
 
 #[derive(Clone, Copy, Debug, Default)]
 struct InferenceRequestContexts<'a> {
+    session_id: Option<&'a SessionId>,
+    request_id: Option<&'a RequestId>,
     system_prompt: Option<&'a str>,
     runtime_capability_context: Option<&'a str>,
     function_context: Option<&'a str>,
@@ -883,8 +903,8 @@ struct MemoryContextRequest<'a> {
     workspace_root: &'a std::path::Path,
     trust_store_path: &'a std::path::Path,
     artifact_root: &'a std::path::Path,
-    run_id: &'a InferenceRunId,
-    runtime: &'a AgentLibreRuntimeConfig,
+    run_id: Option<&'a RunId>,
+    store_root: &'a std::path::Path,
 }
 
 struct SkillContextRequest<'a> {
@@ -893,7 +913,7 @@ struct SkillContextRequest<'a> {
     option_skills: &'a [String],
     tool_mode: ToolAccessMode,
     artifact_root: &'a std::path::Path,
-    run_id: &'a InferenceRunId,
+    run_id: Option<&'a RunId>,
     workspace_root: &'a std::path::Path,
     trust_store_path: &'a std::path::Path,
     store_root: &'a std::path::Path,
@@ -910,8 +930,7 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.workspace_root,
         request.trust_store_path,
     )?;
-    let store = AglStore::open_at(request.runtime.paths.store_root())
-        .context("failed to open memory store")?;
+    let store = AglStore::open_at(request.store_root).context("failed to open memory store")?;
     let memory = MemoryRepository::new(&store);
     let mut query = MemorySearchQuery::scoped(MemoryScope::user());
     query.limit = MEMORY_CONTEXT_ENTRY_LIMIT;
@@ -921,7 +940,9 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
     if entries.is_empty() {
         return Ok(None);
     }
-    write_memory_context_evidence(request.artifact_root, request.run_id, &entries)?;
+    if let Some(run_id) = request.run_id {
+        write_memory_context_evidence(request.artifact_root, run_id, &entries)?;
+    }
     Ok(Some(render_memory_context(&entries)))
 }
 
@@ -1001,12 +1022,14 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
             },
         )
         .context("failed to prepare selected skill runtime folders")?;
-        write_skill_folder_prepare_evidence(
-            request.artifact_root,
-            request.run_id,
-            "runtime-prepare",
-            &folder_prepare,
-        )?;
+        if let Some(run_id) = request.run_id {
+            write_skill_folder_prepare_evidence(
+                request.artifact_root,
+                run_id,
+                "runtime-prepare",
+                &folder_prepare,
+            )?;
+        }
         ensure!(
             !folder_prepare.has_errors(),
             "selected skill runtime folder preparation failed: {}",
@@ -1017,18 +1040,30 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
                 .context("failed to build verified skill context")?;
         let hook_batches =
             selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?;
-        write_skill_context_evidence(request.artifact_root, request.run_id, &bundle.evidence)?;
+        if let Some(run_id) = request.run_id {
+            write_skill_context_evidence(request.artifact_root, run_id, &bundle.evidence)?;
+        }
         (Some(bundle.content), hook_batches)
     };
-    let (visible_tools, permission_grants) = selected_skill_visible_tools_with_dynamic_grants(
-        &skill_registry,
-        &tool_catalog,
-        &selected_skills,
-        request.tool_mode,
-        request.store_root,
-        request.workspace_root,
-        request.run_id,
-    )?;
+    let (visible_tools, permission_grants) = if let Some(run_id) = request.run_id {
+        selected_skill_visible_tools_with_dynamic_grants(
+            &skill_registry,
+            &tool_catalog,
+            &selected_skills,
+            request.tool_mode,
+            request.store_root,
+            request.workspace_root,
+            run_id,
+        )?
+    } else {
+        selected_skill_visible_tools_with_grants(
+            &skill_registry,
+            &tool_catalog,
+            &selected_skills,
+            request.tool_mode,
+            RuntimePermissionGrantSnapshot::default(),
+        )?
+    };
     Ok(ResolvedSkillContext {
         context,
         hook_batches,
@@ -1115,7 +1150,7 @@ fn selected_skill_visible_tools_with_dynamic_grants(
     tool_mode: ToolAccessMode,
     store_root: &std::path::Path,
     workspace_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
 ) -> Result<(Vec<VisibleTool>, RuntimePermissionGrantSnapshot)> {
     let grant_snapshot = admit_dynamic_permission_grants(
         skill_registry,
@@ -1195,7 +1230,7 @@ fn admit_dynamic_permission_grants(
     selected_skills: &[SkillId],
     store_root: &std::path::Path,
     workspace_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
 ) -> Result<RuntimePermissionGrantSnapshot> {
     let store = AglStore::open_at(store_root)
         .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
@@ -1266,7 +1301,7 @@ fn evaluate_permission_grant(
     tool_catalog: &ToolCatalog,
     policy: &SelectedSkillGrantPolicy,
     workspace_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
 ) -> std::result::Result<ToolId, String> {
     let tool_id = ToolId::new(grant.tool_id.clone()).map_err(|_| "invalid_tool_id".to_string())?;
     if let Some(workspace) = grant
@@ -1409,7 +1444,7 @@ fn artifact_write_preflight_path_for_tool(
 
 fn write_skill_folder_prepare_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     label: &str,
     report: &SkillFolderPrepareReport,
 ) -> Result<()> {
@@ -1445,7 +1480,7 @@ fn write_skill_folder_prepare_evidence(
 
 fn write_skill_context_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     evidence: &[SkillContextEvidence],
 ) -> Result<()> {
     let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
@@ -1476,7 +1511,7 @@ fn write_skill_context_evidence(
 
 fn write_memory_context_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     entries: &[MemoryEntry],
 ) -> Result<()> {
     let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
@@ -1522,7 +1557,7 @@ fn write_memory_context_evidence(
 
 fn write_runtime_capability_context_evidence(
     artifact_root: &std::path::Path,
-    run_id: &InferenceRunId,
+    run_id: &RunId,
     evidence: &agl_runtime::RuntimeCapabilityContextEvidence,
 ) -> Result<()> {
     let path = InferenceArtifactRoot::new(artifact_root.to_path_buf())
@@ -1553,14 +1588,6 @@ fn write_runtime_capability_context_evidence(
             path.display()
         )
     })
-}
-
-pub fn default_run_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    format!("manual-{millis}")
 }
 
 #[cfg(test)]

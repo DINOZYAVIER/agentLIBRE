@@ -1,5 +1,5 @@
 use agl_config::LocalInferenceConfig;
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use std::time::Instant;
 
 mod ffi;
@@ -49,12 +49,27 @@ impl InferenceBackend for LlamaCppBackend {
     }
 
     fn generate(&mut self, request: InferenceRequest) -> Result<InferenceResponse> {
+        ensure!(
+            request.run_id == request.rendered.run_id,
+            "inference request run ID does not match its rendered model request"
+        );
+        ensure!(
+            request.turn_id == request.rendered.turn_id,
+            "inference request turn ID does not match its rendered model request"
+        );
         let paths = self
             .artifact_root
             .paths(&request.run_id, &request.attempt_id);
-        let writer = InferenceEventWriter::new(paths.events_jsonl());
-        let mut machine =
-            InferenceAttemptMachine::new(request.run_id.clone(), request.attempt_id.clone());
+        let writer = InferenceEventWriter::open(
+            paths.events_jsonl(),
+            request.session_id.clone(),
+            request.request_id.clone(),
+        )?;
+        let mut machine = InferenceAttemptMachine::new(
+            request.run_id.clone(),
+            request.turn_id.clone(),
+            request.attempt_id.clone(),
+        );
         let backend = self.backend_name();
         apply_inference_transition(
             &writer,
@@ -139,6 +154,7 @@ impl InferenceBackend for LlamaCppBackend {
         )?;
 
         let response = InferenceResponse {
+            attempt_id: request.attempt_id.clone(),
             content: output.content,
             finish_reason: output.finish_reason,
             metadata: InferenceResponseMetadata {
