@@ -326,13 +326,10 @@ fn read_only_mode_requires_explicit_visibility_for_mutating_actions() {
         ToolAccessMode::Write,
         ToolAccessMode::Execute,
     ] {
-        let visible_set = CapabilityPolicyInput::new(
-            [visible_provider.clone()],
-            [id.clone()],
-            mode,
-        )
-        .resolve()
-        .unwrap();
+        let visible_set =
+            CapabilityPolicyInput::new([visible_provider.clone()], [id.clone()], mode)
+                .resolve()
+                .unwrap();
         assert!(visible_set.contains(&id));
     }
 }
