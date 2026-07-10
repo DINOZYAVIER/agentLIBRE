@@ -12,6 +12,7 @@ Usage:
   scripts/agl-nix-vulkan.sh --diagnose
   scripts/agl-nix-vulkan.sh --build
   scripts/agl-nix-vulkan.sh --smoke-tools /path/to/local-inference.toml
+  scripts/agl-nix-vulkan.sh --smoke-tools-pack /path/to/local-inference.toml
   scripts/agl-nix-vulkan.sh --smoke-llama /path/to/local-inference.toml
   scripts/agl-nix-vulkan.sh --smoke-multiturn /path/to/local-inference.toml
   scripts/agl-nix-vulkan.sh -- <command> [args...]
@@ -86,6 +87,15 @@ smoke_tools() {
   AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-skill-tools.sh"
 }
 
+smoke_tools_pack() {
+  local config="${1:-}"
+  [[ -n "$config" ]] || {
+    echo "missing local inference config path" >&2
+    exit 2
+  }
+  AGL_SMOKE_CONFIG="$config" "$repo_root/scripts/smoke-agentlibre-tools-pack.sh"
+}
+
 smoke_llama() {
   local config="${1:-}"
   [[ -n "$config" ]] || {
@@ -131,6 +141,10 @@ case "${1:-}" in
   --smoke-tools)
     shift
     smoke_tools "$@"
+    ;;
+  --smoke-tools-pack)
+    shift
+    smoke_tools_pack "$@"
     ;;
   --smoke-llama)
     shift

@@ -50,6 +50,7 @@ latest_response_file() {
 }
 
 need_tool cargo
+need_tool git
 need_tool grep
 need_tool python3
 
@@ -63,21 +64,20 @@ agl_bin="$(smoke_abs_path "$agl_bin")"
 [[ -x "$agl_bin" ]] || fail "missing executable agl binary: $agl_bin"
 
 mkdir -p "$workspace"
+git -C "$workspace" init -q
 cat >"$workspace/facts.txt" <<'EOF'
 agentLIBRE skill tools smoke fixture
-Expected final answer: skill tools smoke ok
-Verification: fs.read loaded facts.txt.
+Expected final answer: skill tools smoke ok. Verification: fs.read loaded facts.txt.
 EOF
 
 prompt='You are testing agentLIBRE tool use. Your first model response must be only this exact tool call:
 <tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>
-After the tool observation, do not call another tool. Answer with exactly:
-skill tools smoke ok
-Verification: fs.read loaded facts.txt.'
+After the tool observation, do not call another tool. Answer with exactly this single line:
+skill tools smoke ok. Verification: fs.read loaded facts.txt.'
 
 (
   cd "$workspace"
-  "$agl_bin" run \
+  "$agl_bin" inference run \
     --config "$config" \
     --artifact-root "$run_root" \
     --run-id "$run_id" \
@@ -93,6 +93,8 @@ events="$run_dir/agent-events.jsonl"
 skill_context="$run_dir/skill-context.json"
 request_1="$run_dir/attempts/attempt-0001/request.json"
 response_1="$run_dir/attempts/attempt-0001/response.json"
+runtime_1="$run_dir/attempts/attempt-0001/runtime.log"
+runtime_2="$run_dir/attempts/attempt-0002/runtime.log"
 tool_context="$artifact_root/tool-context-$run_suffix.txt"
 request_tool_context "$request_1" >"$tool_context"
 latest_response="$(latest_response_file "$run_dir")"
@@ -110,6 +112,9 @@ require_contains "$request_1" "fs.list"
 require_contains "$request_1" "fs.search"
 require_not_contains "$tool_context" "fs.edit"
 require_contains "$response_1" "fs.read"
+require_contains "$runtime_1" "model_state = loaded"
+require_contains "$runtime_2" "model_state = reused"
+require_not_contains "$runtime_2" "llama_cpp_session_reset_reason"
 require_contains "$events" '"kind":"tool.call_started"'
 require_contains "$events" '"kind":"tool.call_finished"'
 require_contains "$events" '"name":"fs.read"'
@@ -118,6 +123,7 @@ require_contains "$events" '"status":"answered"'
 require_contains "$stdout_path" "skill tools smoke ok"
 require_contains "$stdout_path" "Verification:"
 require_not_contains "$stdout_path" "stopped=true"
+[[ ! -e "$run_dir/function-resolution.json" ]] || fail "raw inference run wrote function evidence"
 [[ "$latest_content" == *"skill tools smoke ok"* ]] || fail "latest response did not contain expected final answer: $latest_content"
 [[ "$latest_content" == *"Verification:"* ]] || fail "latest response did not contain verification evidence: $latest_content"
 
@@ -131,5 +137,7 @@ echo "skill context: $skill_context"
 echo "tool context: $tool_context"
 echo "first request: $request_1"
 echo "first response: $response_1"
+echo "first runtime log: $runtime_1"
+echo "second runtime log: $runtime_2"
 echo "latest response: $latest_response"
 echo "AGL-056 skill tools live smoke passed"
