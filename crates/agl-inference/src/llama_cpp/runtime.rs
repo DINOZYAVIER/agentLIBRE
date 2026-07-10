@@ -243,10 +243,14 @@ impl NativeLlamaCppRuntime {
         if let Some(session) = self.session.as_ref()
             && session.matches_config(&self.config)
         {
-            if session.can_append_rendered(rendered) {
+            if let Some(reason) = session.rendered_append_error(rendered) {
+                log.push_str("llama_cpp_session_reset_reason = rendered_history_not_appendable\n");
+                log.push_str("llama_cpp_session_reset_detail = ");
+                log.push_str(&reason);
+                log.push('\n');
+            } else {
                 return Ok(LlamaCppModelState::Reused);
             }
-            log.push_str("llama_cpp_session_reset_reason = rendered_history_not_appendable\n");
         }
 
         self.session = Some(LlamaCppSession::load(&self.config, log)?);
@@ -328,10 +332,11 @@ impl TestLlamaCppRuntime {
     }
 
     fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
-        rendered.messages.len() >= self.rendered_message_history_len
-            && self.messages.len() >= self.rendered_message_history_len
-            && self.messages[..self.rendered_message_history_len]
-                == rendered.messages[..self.rendered_message_history_len]
+        super::session::rendered_history_is_prefix(
+            &self.messages,
+            &rendered.messages,
+            self.rendered_message_history_len,
+        )
     }
 }
 

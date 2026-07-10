@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 use std::ptr;
 
+use agl_actions::{ModelAction, ToolCall, ToolJsonRepair, parse_model_action};
 use agl_config::{InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig, RuntimeSwitch};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
 use anyhow::{Context, Result, bail, ensure};
@@ -11,6 +12,10 @@ use crate::InferenceFinishReason;
 use super::ffi;
 
 const DISABLED_THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
+const QWEN_ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
+const QWEN_DISABLED_THINKING_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+const GEMMA_MODEL_HEADER: &str = "<|turn>model\n";
+const GEMMA_THOUGHT_PREFIX: &str = "<|turn>model\n<|channel>thought\n<channel|>";
 const AGL_LLAMA_MTP_OK: i32 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,9 +41,11 @@ pub(super) struct LlamaCppSession {
     model: Model,
     vocab: *const c_void,
     rendered_message_history_len: usize,
-    formatted_prompt_prefix_len: usize,
     messages: Vec<RenderedMessage>,
     token_history: Vec<ffi::llama_token>,
+    formatted_history: String,
+    normalized_history: String,
+    cache_matches_transcript: bool,
     load_native_log: String,
     prefill_batch_size: usize,
 }
@@ -146,9 +153,11 @@ impl LlamaCppSession {
             model,
             vocab,
             rendered_message_history_len: 0,
-            formatted_prompt_prefix_len: 0,
             messages: Vec::new(),
             token_history: Vec::new(),
+            formatted_history: String::new(),
+            normalized_history: String::new(),
+            cache_matches_transcript: true,
             load_native_log: String::new(),
             prefill_batch_size,
         })
@@ -162,11 +171,88 @@ impl LlamaCppSession {
         &self.load_native_log
     }
 
-    pub(super) fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
-        rendered.messages.len() >= self.rendered_message_history_len
-            && self.messages.len() >= self.rendered_message_history_len
-            && self.messages[..self.rendered_message_history_len]
-                == rendered.messages[..self.rendered_message_history_len]
+    pub(super) fn rendered_append_error(&self, rendered: &RenderedModelRequest) -> Option<String> {
+        self.render_prompt_append(rendered)
+            .err()
+            .map(|error| format!("{error:#}"))
+    }
+
+    fn render_prompt_append(
+        &self,
+        rendered: &RenderedModelRequest,
+    ) -> Result<PromptTemplateAppend> {
+        ensure!(
+            self.cache_matches_transcript,
+            "cached generation contains a trimmed continuation"
+        );
+        if !rendered_history_is_prefix(
+            &self.messages,
+            &rendered.messages,
+            self.rendered_message_history_len,
+        ) {
+            bail!("rendered_message_history_changed");
+        }
+
+        let mut messages = self.messages.clone();
+        messages.extend(
+            rendered.messages[self.rendered_message_history_len..]
+                .iter()
+                .cloned(),
+        );
+        let mut formatted =
+            apply_chat_template_messages(self.model.as_ptr().cast_const(), &messages, true)
+                .context("failed to render llama.cpp chat template")?;
+        let injected_assistant_prefix = disable_qwen_thinking(&mut formatted);
+        let assistant_context_prefix = if formatted.ends_with(DISABLED_THINKING_PREFILL) {
+            DISABLED_THINKING_PREFILL.to_string()
+        } else {
+            injected_assistant_prefix.unwrap_or_default().to_string()
+        };
+        let normalized_formatted = normalize_assistant_context(&formatted);
+        let common_prefix_bytes =
+            common_prefix_len(&self.normalized_history, &normalized_formatted);
+        if common_prefix_bytes != self.normalized_history.len() {
+            bail!(
+                "chat template rewrote cached history: exact_history_bytes={}, normalized_history_bytes={}, incoming_bytes={}, common_prefix_bytes={common_prefix_bytes}, history_tail={:?}, incoming_tail={:?}",
+                self.formatted_history.len(),
+                self.normalized_history.len(),
+                formatted.len(),
+                mismatch_excerpt(&self.normalized_history, common_prefix_bytes),
+                mismatch_excerpt(&normalized_formatted, common_prefix_bytes),
+            );
+        }
+        let history_prefix_len =
+            source_index_after_normalized_prefix(&formatted, self.normalized_history.len())
+                .context("llama.cpp normalized history is not a source prompt boundary")?;
+        let prompt = formatted[history_prefix_len..].to_string();
+        ensure!(!prompt.is_empty(), "llama.cpp prompt append is empty");
+
+        let formatted_prompt = format!("{}{prompt}", self.formatted_history);
+        let formatted_tokens = tokenize(self.vocab, &formatted_prompt, true)?;
+        let common_prefix_tokens = self
+            .token_history
+            .iter()
+            .zip(&formatted_tokens)
+            .take_while(|(recorded, incoming)| recorded == incoming)
+            .count();
+        ensure!(
+            common_prefix_tokens == self.token_history.len(),
+            "chat template retokenized cached prompt: cached_tokens={}, incoming_tokens={}, common_prefix_tokens={common_prefix_tokens}",
+            self.token_history.len(),
+            formatted_tokens.len(),
+        );
+        let tokens = formatted_tokens[self.token_history.len()..].to_vec();
+        ensure!(!tokens.is_empty(), "llama.cpp prompt append has no tokens");
+
+        Ok(PromptTemplateAppend {
+            prompt,
+            tokens,
+            history: PreparedPromptHistory {
+                assistant_context_prefix,
+                formatted_prompt,
+            },
+            messages,
+        })
     }
 
     pub(super) fn set_load_native_log(&mut self, log: String) {
@@ -179,34 +265,26 @@ impl LlamaCppSession {
         max_output_tokens: u32,
         log: &mut String,
     ) -> Result<LlamaCppSessionOutput> {
-        let PreparedPrompt {
-            text: prompt,
-            assistant_context_prefix,
-            messages: prompt_messages,
-        } = self.prepare_prompt_append(rendered, log)?;
+        let prepared = self.prepare_prompt_append(rendered, log)?;
 
-        let add_special = is_context_empty(self.context.as_ptr());
-        let mut prompt_tokens = tokenize(self.vocab, &prompt, add_special)?;
         ensure!(
-            !prompt_tokens.is_empty(),
+            !prepared.tokens.is_empty(),
             "llama.cpp prompt produced no tokens"
         );
-        let prompt_token_count = i32::try_from(prompt_tokens.len())
+        let prompt_token_count = i32::try_from(prepared.tokens.len())
             .context("llama.cpp prompt token count exceeds i32")?;
         ensure!(
             has_context_space(self.context.as_ptr(), prompt_token_count),
             "llama.cpp prompt exceeds remaining context"
         );
         if self.mtp.is_some() {
-            return self.generate_with_mtp(
-                rendered,
-                prompt_tokens,
-                prompt_messages,
-                assistant_context_prefix,
-                max_output_tokens,
-                log,
-            );
+            return self.generate_with_mtp(rendered, prepared, max_output_tokens, log);
         }
+        let PreparedPrompt {
+            tokens: mut prompt_tokens,
+            messages: prompt_messages,
+            history: prompt_history,
+        } = prepared;
 
         decode_prompt_tokens(
             self.context.as_ptr(),
@@ -218,6 +296,7 @@ impl LlamaCppSession {
         self.token_history.extend_from_slice(&prompt_tokens);
 
         let mut content = String::new();
+        let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         for _ in 0..max_output_tokens {
             if !has_context_space(self.context.as_ptr(), 1) {
@@ -237,7 +316,12 @@ impl LlamaCppSession {
             decode_tokens(self.context.as_ptr(), &mut next_token)
                 .context("failed to decode generated token")?;
             self.token_history.push(token);
+            decoded_content.push_str(&piece);
             content.push_str(&piece);
+            if isolated_tool_call(&content).is_some() {
+                finish_reason = InferenceFinishReason::Stop;
+                break;
+            }
             if trim_generated_continuation(&mut content) {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
@@ -247,7 +331,8 @@ impl LlamaCppSession {
         self.record_generated_assistant(
             rendered,
             prompt_messages,
-            assistant_context_prefix,
+            prompt_history,
+            &decoded_content,
             &content,
         )?;
 
@@ -260,12 +345,15 @@ impl LlamaCppSession {
     fn generate_with_mtp(
         &mut self,
         rendered: &RenderedModelRequest,
-        prompt_tokens: Vec<ffi::llama_token>,
-        prompt_messages: Vec<RenderedMessage>,
-        assistant_context_prefix: String,
+        prepared: PreparedPrompt,
         max_output_tokens: u32,
         log: &mut String,
     ) -> Result<LlamaCppSessionOutput> {
+        let PreparedPrompt {
+            tokens: prompt_tokens,
+            messages: prompt_messages,
+            history: prompt_history,
+        } = prepared;
         log.push_str("mtp_generation_mode = draft-mtp\n");
         log.push_str("mtp_sequence_mode = seq0-temporary\n");
 
@@ -322,10 +410,12 @@ impl LlamaCppSession {
             .context("failed to begin MTP speculation")?;
 
         let mut content = String::new();
+        let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         let mut emitted = 0_u32;
         let mut pending_needs_flush = false;
         let mut stopped_on_eog = false;
+        let mut tool_call_completed = false;
 
         while emitted < max_output_tokens {
             if context_remaining(self.context.as_ptr()) < 2 {
@@ -389,8 +479,18 @@ impl LlamaCppSession {
                     break;
                 }
 
-                content.push_str(&token_to_piece(self.vocab, id_last)?);
+                let piece = token_to_piece(self.vocab, id_last)?;
+                decoded_content.push_str(&piece);
                 emitted += 1;
+                if tool_call_completed {
+                    continue;
+                }
+                content.push_str(&piece);
+                if isolated_tool_call(&content).is_some() {
+                    finish_reason = InferenceFinishReason::Stop;
+                    tool_call_completed = true;
+                    continue;
+                }
                 if trim_generated_continuation(&mut content) {
                     finish_reason = InferenceFinishReason::Stop;
                     break;
@@ -422,7 +522,8 @@ impl LlamaCppSession {
         self.record_generated_assistant(
             rendered,
             prompt_messages,
-            assistant_context_prefix,
+            prompt_history,
+            &decoded_content,
             &content,
         )?;
 
@@ -444,38 +545,24 @@ impl LlamaCppSession {
                 self.rendered_message_history_len
             );
         }
-        if !self.can_append_rendered(rendered) {
-            bail!("llama.cpp session rendered history prefix changed");
-        }
-
-        let mut messages = self.messages.clone();
-        messages.extend(
-            rendered.messages[self.rendered_message_history_len..]
-                .iter()
-                .cloned(),
-        );
-
-        let mut formatted =
-            apply_chat_template_messages(self.model.as_ptr().cast_const(), &messages, true)
-                .context("failed to render llama.cpp chat template")?;
-        let assistant_context_prefix = disable_qwen_thinking(&mut formatted)
-            .map(str::to_string)
-            .unwrap_or_default();
-        if !assistant_context_prefix.is_empty() {
+        let PromptTemplateAppend {
+            prompt,
+            tokens: prompt_tokens,
+            history,
+            messages,
+        } = self.render_prompt_append(rendered)?;
+        if !history.assistant_context_prefix.is_empty() {
             log.push_str("thinking_prefill = disabled\n");
         }
-
-        let prompt = formatted
-            .get(self.formatted_prompt_prefix_len..)
-            .context("llama.cpp formatted prompt prefix is not a UTF-8 boundary")?
-            .to_string();
-        ensure!(!prompt.is_empty(), "llama.cpp prompt append is empty");
 
         log.push_str("rendered_message_history_len = ");
         log.push_str(&self.rendered_message_history_len.to_string());
         log.push('\n');
-        log.push_str("formatted_prompt_prefix_len = ");
-        log.push_str(&self.formatted_prompt_prefix_len.to_string());
+        log.push_str("cached_prompt_tokens = ");
+        log.push_str(&self.token_history.len().to_string());
+        log.push('\n');
+        log.push_str("prompt_append_tokens = ");
+        log.push_str(&prompt_tokens.len().to_string());
         log.push('\n');
         log.push_str("llama_cpp_prompt_append:\n");
         log.push_str(&prompt);
@@ -484,9 +571,9 @@ impl LlamaCppSession {
         }
 
         Ok(PreparedPrompt {
-            text: prompt,
-            assistant_context_prefix,
+            tokens: prompt_tokens,
             messages,
+            history,
         })
     }
 
@@ -494,9 +581,14 @@ impl LlamaCppSession {
         &mut self,
         rendered: &RenderedModelRequest,
         mut messages: Vec<RenderedMessage>,
-        assistant_context_prefix: String,
+        prompt_history: PreparedPromptHistory,
+        decoded_content: &str,
         content: &str,
     ) -> Result<()> {
+        let PreparedPromptHistory {
+            assistant_context_prefix,
+            formatted_prompt,
+        } = prompt_history;
         messages.push(RenderedMessage {
             role: RenderedMessageRole::Assistant,
             content: format!("{assistant_context_prefix}{content}"),
@@ -504,18 +596,164 @@ impl LlamaCppSession {
             tool_calls: Vec::new(),
         });
         self.messages = messages;
+        self.formatted_history = format!("{formatted_prompt}{decoded_content}");
+        self.normalized_history = normalize_assistant_context(&self.formatted_history);
+        self.cache_matches_transcript = decoded_content == content;
         self.rendered_message_history_len = rendered.messages.len() + 1;
-        self.formatted_prompt_prefix_len =
-            apply_chat_template_messages(self.model.as_ptr().cast_const(), &self.messages, false)
-                .context("failed to render llama.cpp session prefix")?
-                .len();
         Ok(())
     }
 }
 
+pub(super) fn rendered_history_is_prefix(
+    recorded: &[RenderedMessage],
+    incoming: &[RenderedMessage],
+    history_len: usize,
+) -> bool {
+    incoming.len() >= history_len
+        && recorded.len() >= history_len
+        && recorded[..history_len]
+            .iter()
+            .zip(&incoming[..history_len])
+            .all(|(recorded, incoming)| rendered_history_message_matches(recorded, incoming))
+}
+
+fn rendered_history_message_matches(
+    recorded: &RenderedMessage,
+    incoming: &RenderedMessage,
+) -> bool {
+    if recorded.role != incoming.role {
+        return false;
+    }
+    let recorded_role = recorded.role;
+    let (Ok(mut recorded_content), Ok(incoming_content)) = (
+        rendered_message_content(recorded),
+        rendered_message_content(incoming),
+    ) else {
+        return false;
+    };
+    if recorded_content == incoming_content {
+        return true;
+    }
+    if recorded_role != RenderedMessageRole::Assistant {
+        return false;
+    }
+    if let Some(content) = recorded_content.strip_prefix(DISABLED_THINKING_PREFILL) {
+        recorded_content = content.to_string();
+        if recorded_content == incoming_content {
+            return true;
+        }
+    }
+
+    matches!(
+        (
+            isolated_tool_call(&recorded_content),
+            isolated_tool_call(&incoming_content),
+        ),
+        (Some(recorded), Some(incoming)) if recorded == incoming
+    )
+}
+
+fn isolated_tool_call(content: &str) -> Option<ToolCall> {
+    let content = content.trim();
+    let isolated = isolated_block(content, "<tool_call>", "</tool_call>")
+        || isolated_block(content, "<|tool_call>", "<tool_call|>");
+    if !isolated {
+        return None;
+    }
+    match parse_model_action(content) {
+        ModelAction::ToolCall(tool_call) => Some(tool_call),
+        ModelAction::MalformedToolCall(malformed) => match malformed.repair {
+            Some(ToolJsonRepair::Succeeded { tool_call, .. }) => Some(tool_call),
+            Some(ToolJsonRepair::Failed { .. }) | None => None,
+        },
+        ModelAction::Answer(_) => None,
+    }
+}
+
+fn isolated_block(content: &str, open: &str, close: &str) -> bool {
+    content
+        .strip_prefix(open)
+        .and_then(|content| content.strip_suffix(close))
+        .is_some_and(|content| !content.contains(open) && !content.contains(close))
+}
+
+fn common_prefix_len(recorded: &str, incoming: &str) -> usize {
+    recorded
+        .bytes()
+        .zip(incoming.bytes())
+        .take_while(|(recorded, incoming)| recorded == incoming)
+        .count()
+}
+
+fn normalize_assistant_context(value: &str) -> String {
+    value
+        .replace(QWEN_DISABLED_THINKING_PREFIX, QWEN_ASSISTANT_HEADER)
+        .replace(GEMMA_THOUGHT_PREFIX, "")
+        .replace(GEMMA_MODEL_HEADER, "")
+}
+
+fn source_index_after_normalized_prefix(
+    source: &str,
+    normalized_prefix_len: usize,
+) -> Option<usize> {
+    let mut source_index = 0;
+    let mut normalized_index = 0;
+    while normalized_index < normalized_prefix_len {
+        let remaining = &source[source_index..];
+        if let Some((source_len, normalized_len)) = assistant_context_rewrite(remaining) {
+            let needed = normalized_prefix_len - normalized_index;
+            if needed < normalized_len {
+                return Some(source_index + needed);
+            }
+            normalized_index += normalized_len;
+            source_index += source_len;
+            continue;
+        }
+        let char_len = remaining.chars().next()?.len_utf8();
+        if normalized_index + char_len > normalized_prefix_len {
+            return None;
+        }
+        normalized_index += char_len;
+        source_index += char_len;
+    }
+    Some(source_index)
+}
+
+fn assistant_context_rewrite(value: &str) -> Option<(usize, usize)> {
+    if value.starts_with(QWEN_DISABLED_THINKING_PREFIX) {
+        Some((
+            QWEN_DISABLED_THINKING_PREFIX.len(),
+            QWEN_ASSISTANT_HEADER.len(),
+        ))
+    } else if value.starts_with(GEMMA_THOUGHT_PREFIX) {
+        Some((GEMMA_THOUGHT_PREFIX.len(), 0))
+    } else if value.starts_with(GEMMA_MODEL_HEADER) {
+        Some((GEMMA_MODEL_HEADER.len(), 0))
+    } else {
+        None
+    }
+}
+
+fn mismatch_excerpt(value: &str, offset: usize) -> String {
+    let bytes = &value.as_bytes()[offset.min(value.len())..];
+    String::from_utf8_lossy(&bytes[..bytes.len().min(160)]).into_owned()
+}
+
 struct PreparedPrompt {
-    text: String,
+    tokens: Vec<ffi::llama_token>,
+    messages: Vec<RenderedMessage>,
+    history: PreparedPromptHistory,
+}
+
+struct PreparedPromptHistory {
     assistant_context_prefix: String,
+    formatted_prompt: String,
+}
+
+struct PromptTemplateAppend {
+    prompt: String,
+    tokens: Vec<ffi::llama_token>,
+    history: PreparedPromptHistory,
     messages: Vec<RenderedMessage>,
 }
 
@@ -1286,22 +1524,17 @@ pub(super) fn trim_generated_continuation(content: &mut String) -> bool {
 
 fn disable_qwen_thinking(prompt: &mut String) -> Option<&'static str> {
     const THINKING_PREFILL: &str = "<think>\n";
-    const ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
     if prompt.ends_with(THINKING_PREFILL) {
         let truncate_to = prompt.len() - THINKING_PREFILL.len();
         prompt.truncate(truncate_to);
         prompt.push_str(DISABLED_THINKING_PREFILL);
         return Some(DISABLED_THINKING_PREFILL);
     }
-    if prompt.ends_with(ASSISTANT_HEADER) {
+    if prompt.ends_with(QWEN_ASSISTANT_HEADER) {
         prompt.push_str(DISABLED_THINKING_PREFILL);
         return Some(DISABLED_THINKING_PREFILL);
     }
     None
-}
-
-fn is_context_empty(ctx: *mut c_void) -> bool {
-    (unsafe { ffi::llama_memory_seq_pos_max(ffi::llama_get_memory(ctx), 0) }) == -1
 }
 
 fn context_next_pos(ctx: *mut c_void) -> ffi::llama_pos {
@@ -1380,6 +1613,64 @@ mod tests {
     }
 
     #[test]
+    fn rendered_history_matches_only_isolated_semantic_tool_calls() {
+        let recorded = RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: format!(
+                "{DISABLED_THINKING_PREFILL}{}",
+                r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
+            ),
+            name: None,
+            tool_calls: Vec::new(),
+        };
+        let canonical = RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"fs.read"}</tool_call>"#.to_string(),
+            name: Some("fs.read".to_string()),
+            tool_calls: Vec::new(),
+        };
+        let mut changed = canonical.clone();
+        changed.content = r#"<tool_call>{"arguments":{"limit_lines":20,"path":"other.txt"},"name":"fs.read"}</tool_call>"#.to_string();
+        let mut with_prose = canonical.clone();
+        with_prose.content = format!("calling now\n{}", with_prose.content);
+        let mut user_call = canonical.clone();
+        user_call.role = RenderedMessageRole::User;
+        let mut user_call_reordered = user_call.clone();
+        user_call_reordered.content = r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#.to_string();
+        let repaired = RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: r#"<tool_call>"{\"name\":\"fs.read\",\"arguments\":{\"path\":\"facts.txt\",\"limit_lines\":20}}"</tool_call>"#.to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        };
+        let mut same_prefill = canonical.clone();
+        same_prefill.content = format!("{DISABLED_THINKING_PREFILL}{}", canonical.content);
+
+        assert!(rendered_history_is_prefix(
+            std::slice::from_ref(&recorded),
+            std::slice::from_ref(&canonical),
+            1,
+        ));
+        assert!(!rendered_history_is_prefix(
+            std::slice::from_ref(&recorded),
+            std::slice::from_ref(&changed),
+            1,
+        ));
+        assert!(rendered_history_is_prefix(
+            std::slice::from_ref(&same_prefill),
+            std::slice::from_ref(&same_prefill),
+            1,
+        ));
+        assert!(rendered_history_is_prefix(&[repaired], &[canonical], 1));
+        assert!(!rendered_history_is_prefix(
+            &[user_call],
+            &[user_call_reordered],
+            1,
+        ));
+        assert!(!rendered_history_is_prefix(&[recorded], &[with_prose], 1));
+    }
+
+    #[test]
     fn stop_marker_truncates_generated_user_continuation() {
         let mut content = "hello\n\nUser:\nnext".to_string();
 
@@ -1424,6 +1715,46 @@ mod tests {
             Some(DISABLED_THINKING_PREFILL)
         );
         assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
+    }
+
+    #[test]
+    fn normalizes_qwen_thinking_and_maps_the_append_boundary() {
+        let exact_history = format!(
+            "system\n{QWEN_DISABLED_THINKING_PREFIX}tool call<|im_end|>\n{QWEN_DISABLED_THINKING_PREFIX}answer"
+        );
+        let normalized_history = normalize_assistant_context(&exact_history);
+        let incoming = format!(
+            "system\n{QWEN_ASSISTANT_HEADER}tool call<|im_end|>\n{QWEN_ASSISTANT_HEADER}answer<|im_end|>\nuser\n{QWEN_DISABLED_THINKING_PREFIX}"
+        );
+        let normalized_incoming = normalize_assistant_context(&incoming);
+
+        assert!(normalized_incoming.starts_with(&normalized_history));
+        let boundary =
+            source_index_after_normalized_prefix(&incoming, normalized_history.len()).unwrap();
+        assert_eq!(
+            &incoming[boundary..],
+            format!("<|im_end|>\nuser\n{QWEN_DISABLED_THINKING_PREFIX}")
+        );
+    }
+
+    #[test]
+    fn normalizes_gemma_thought_channel_and_maps_the_append_boundary() {
+        let exact_history = format!(
+            "system\n{GEMMA_THOUGHT_PREFIX}<|tool_call>call:fs.read{{}}<tool_call|><turn|>\n{GEMMA_THOUGHT_PREFIX}answer"
+        );
+        let normalized_history = normalize_assistant_context(&exact_history);
+        let incoming = format!(
+            "system\n<|tool_call>call:fs.read{{}}<tool_call|><turn|>\nanswer<turn|>\n<|turn>user\nnext\n{GEMMA_THOUGHT_PREFIX}"
+        );
+        let normalized_incoming = normalize_assistant_context(&incoming);
+
+        assert!(normalized_incoming.starts_with(&normalized_history));
+        let boundary =
+            source_index_after_normalized_prefix(&incoming, normalized_history.len()).unwrap();
+        assert_eq!(
+            &incoming[boundary..],
+            format!("<turn|>\n<|turn>user\nnext\n{GEMMA_THOUGHT_PREFIX}")
+        );
     }
 
     #[test]

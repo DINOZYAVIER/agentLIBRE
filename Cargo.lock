@@ -196,6 +196,7 @@ dependencies = [
 name = "agl-inference"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-actions",
  "agl-config",
  "agl-oven",
  "anyhow",

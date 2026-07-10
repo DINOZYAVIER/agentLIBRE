@@ -393,6 +393,69 @@ fn llama_cpp_backend_resets_session_when_rendered_prefix_changes() {
 }
 
 #[test]
+fn llama_cpp_backend_reuses_session_when_only_tool_message_names_are_added() {
+    let root_path = temp_root("llama-tool-session-reuse");
+    let artifact_root = InferenceArtifactRoot::new(&root_path);
+    let generated_tool_call = r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#;
+    let canonical_tool_call = r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"fs.read"}</tool_call>"#;
+    let mut backend = LlamaCppBackend::new_with_test_runtime(
+        local_config(),
+        artifact_root,
+        vec![generated_tool_call, "done"],
+    )
+    .unwrap();
+
+    let first = inference_request_with_messages(
+        "attempt-0001",
+        1,
+        vec![RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "read facts".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        }],
+    );
+    let second = inference_request_with_messages(
+        "attempt-0002",
+        2,
+        vec![
+            RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: "read facts".to_string(),
+                name: None,
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Assistant,
+                content: canonical_tool_call.to_string(),
+                name: Some("fs.read".to_string()),
+                tool_calls: Vec::new(),
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Tool,
+                content: "facts".to_string(),
+                name: Some("fs.read".to_string()),
+                tool_calls: Vec::new(),
+            },
+        ],
+    );
+
+    let first_response = backend.generate(first).unwrap();
+    let second_response = backend.generate(second).unwrap();
+
+    assert_eq!(
+        first_response.metadata.model_state.as_deref(),
+        Some("loaded")
+    );
+    assert_eq!(
+        second_response.metadata.model_state.as_deref(),
+        Some("reused")
+    );
+
+    std::fs::remove_dir_all(root_path).unwrap();
+}
+
+#[test]
 fn llama_cpp_backend_records_auto_selected_device_metadata() {
     let root_path = temp_root("llama-auto-selected-device");
     let artifact_root = InferenceArtifactRoot::new(&root_path);
