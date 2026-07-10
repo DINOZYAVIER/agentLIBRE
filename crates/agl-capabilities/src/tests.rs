@@ -321,11 +321,20 @@ fn read_only_mode_requires_explicit_visibility_for_mutating_actions() {
         ProviderDeclaration::builtin(provider_id("permission-tools"), "Permissions", "1")
             .unwrap()
             .with_action(visible);
-    let visible_set =
-        CapabilityPolicyInput::new([visible_provider], [id.clone()], ToolAccessMode::ReadOnly)
-            .resolve()
-            .unwrap();
-    assert!(visible_set.contains(&id));
+    for mode in [
+        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Write,
+        ToolAccessMode::Execute,
+    ] {
+        let visible_set = CapabilityPolicyInput::new(
+            [visible_provider.clone()],
+            [id.clone()],
+            mode,
+        )
+        .resolve()
+        .unwrap();
+        assert!(visible_set.contains(&id));
+    }
 }
 
 #[test]
