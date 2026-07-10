@@ -7,6 +7,7 @@ repository.workspace = true
 build = "build.rs"
 
 [dependencies]
+agl-actions.workspace = true
 agl-config.workspace = true
 agl-oven.workspace = true
 anyhow.workspace = true
