@@ -1,8 +1,11 @@
+use agl_ids::{RunId, TurnId};
+
 use crate::{TurnHookBatch, transcript::TurnMessage};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnInput {
-    pub turn_id: String,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
     pub user_input: String,
     pub context_messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,
@@ -14,9 +17,10 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    pub fn user(user_input: impl Into<String>) -> Self {
+    pub fn user(run_id: RunId, turn_id: TurnId, user_input: impl Into<String>) -> Self {
         Self {
-            turn_id: "turn-1".to_string(),
+            run_id,
+            turn_id,
             user_input: user_input.into(),
             context_messages: Vec::new(),
             visible_tools: Vec::new(),
@@ -26,11 +30,6 @@ impl TurnInput {
             max_tool_calls: 0,
             max_hook_repair_attempts: 0,
         }
-    }
-
-    pub fn with_turn_id(mut self, turn_id: impl Into<String>) -> Self {
-        self.turn_id = turn_id.into();
-        self
     }
 
     pub fn with_context_messages(mut self, messages: Vec<TurnMessage>) -> Self {

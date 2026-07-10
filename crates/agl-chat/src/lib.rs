@@ -12,5 +12,5 @@ pub use service::{
     ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus, chat_workspace_root,
     replay_turn_messages, stopped_turn_context_message,
 };
-pub use session::{InferenceSession, default_run_id};
+pub use session::InferenceSession;
 pub use terminal::assistant_text_for_terminal;

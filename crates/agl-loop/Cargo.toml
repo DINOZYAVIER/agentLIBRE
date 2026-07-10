@@ -12,3 +12,6 @@ agl-actions.workspace = true
 agl-turn.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+agl-ids.workspace = true

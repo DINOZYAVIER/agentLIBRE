@@ -1,8 +1,28 @@
 use agl_actions::ToolCall;
+use agl_ids::{RunId, TurnId};
 use serde_json::json;
 
 use crate::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use crate::*;
+
+const TEST_RUN_ID: &str = "run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b3c";
+const TEST_TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b3d";
+
+fn run_id() -> RunId {
+    RunId::parse(TEST_RUN_ID).unwrap()
+}
+
+fn turn_id() -> TurnId {
+    TurnId::parse(TEST_TURN_ID).unwrap()
+}
+
+fn test_input(user_input: impl Into<String>) -> TurnInput {
+    TurnInput::user(run_id(), turn_id(), user_input)
+}
+
+fn test_machine() -> TurnMachine {
+    TurnMachine::new(run_id(), turn_id())
+}
 
 fn read_file_tool() -> VisibleTool {
     VisibleTool::new("read_file").require_argument("path")
@@ -45,7 +65,7 @@ fn stop_reason_names_are_stable() {
 
 #[test]
 fn initializes_turn_state_with_user_message() {
-    let state = TurnState::new(TurnInput::user("hello"));
+    let state = TurnState::new(test_input("hello"));
 
     assert_eq!(state.request_index, 0);
     assert_eq!(state.tool_call_count, 0);
@@ -60,8 +80,7 @@ fn initializes_turn_state_with_user_message() {
 #[test]
 fn initializes_turn_state_with_context_and_request_index() {
     let state = TurnState::new(
-        TurnInput::user("new")
-            .with_turn_id("turn-chat")
+        test_input("new")
             .with_context_messages(vec![
                 TurnMessage::User {
                     content: "old".to_string(),
@@ -73,7 +92,8 @@ fn initializes_turn_state_with_context_and_request_index() {
             .with_request_index_start(7),
     );
 
-    assert_eq!(state.input.turn_id, "turn-chat");
+    assert_eq!(state.input.run_id, run_id());
+    assert_eq!(state.input.turn_id, turn_id());
     assert_eq!(state.request_index, 7);
     assert_eq!(
         state.messages,
@@ -95,7 +115,7 @@ fn initializes_turn_state_with_context_and_request_index() {
 fn initializes_turn_state_with_hook_batches() {
     let hook_batch =
         TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"));
-    let state = TurnState::new(TurnInput::user("new").with_hook_batch(hook_batch.clone()));
+    let state = TurnState::new(test_input("new").with_hook_batch(hook_batch.clone()));
 
     assert_eq!(state.input.hook_batches, [hook_batch]);
 }
@@ -133,7 +153,7 @@ fn hook_batch_summary_serializes_without_hook_message_content() {
 #[test]
 fn policy_dispatches_visible_tool_with_required_arguments() {
     let state = TurnState::new(
-        TurnInput::user("read README")
+        test_input("read README")
             .with_visible_tool(read_file_tool())
             .with_max_tool_calls(1),
     );
@@ -146,7 +166,8 @@ fn policy_dispatches_visible_tool_with_required_arguments() {
     assert_eq!(
         decision,
         ToolCallDecision::Dispatch(ToolDispatchRequest {
-            turn_id: "turn-1".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             name: "read_file".to_string(),
             arguments: json!({"path": "README.MD"}),
         })
@@ -155,7 +176,7 @@ fn policy_dispatches_visible_tool_with_required_arguments() {
 
 #[test]
 fn policy_stops_at_tool_limit_before_visibility_check() {
-    let state = TurnState::new(TurnInput::user("read README").with_max_tool_calls(0));
+    let state = TurnState::new(test_input("read README").with_max_tool_calls(0));
 
     let decision = decide_tool_call(&state, &tool_call("hidden_tool", json!({})));
 
@@ -168,7 +189,7 @@ fn policy_stops_at_tool_limit_before_visibility_check() {
 #[test]
 fn policy_stops_hidden_tool_before_dispatch() {
     let state = TurnState::new(
-        TurnInput::user("write README")
+        test_input("write README")
             .with_visible_tool(read_file_tool())
             .with_max_tool_calls(1),
     );
@@ -189,7 +210,7 @@ fn policy_stops_hidden_tool_before_dispatch() {
 #[test]
 fn policy_stops_invalid_tool_arguments_before_dispatch() {
     let state = TurnState::new(
-        TurnInput::user("read README")
+        test_input("read README")
             .with_visible_tool(read_file_tool())
             .with_max_tool_calls(1),
     );
@@ -210,7 +231,7 @@ fn policy_stops_invalid_tool_arguments_before_dispatch() {
 
 #[test]
 fn append_tool_observation_records_assistant_tool_pair() {
-    let mut state = TurnState::new(TurnInput::user("read README"));
+    let mut state = TurnState::new(test_input("read README"));
 
     state.append_tool_observation(
         tool_call("read_file", json!({"path": "README.MD"})),
@@ -241,7 +262,7 @@ fn apply(machine: &mut TurnMachine, transition: TurnTransition) -> TurnPhase {
 
 #[test]
 fn turn_machine_accepts_answer_path() {
-    let mut machine = TurnMachine::new("turn-answer");
+    let mut machine = test_machine();
 
     assert_eq!(
         apply(
@@ -303,7 +324,7 @@ fn turn_machine_accepts_answer_path() {
 
 #[test]
 fn turn_machine_accepts_tool_loop_back_to_model() {
-    let mut machine = TurnMachine::new("turn-tool");
+    let mut machine = test_machine();
 
     apply(
         &mut machine,
@@ -375,7 +396,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
 
 #[test]
 fn turn_machine_accepts_repaired_malformed_tool_json() {
-    let mut machine = TurnMachine::new("turn-repair");
+    let mut machine = test_machine();
 
     apply(
         &mut machine,
@@ -432,7 +453,7 @@ fn turn_machine_accepts_repaired_malformed_tool_json() {
 
 #[test]
 fn turn_machine_accepts_hook_batch_before_model_response_parse() {
-    let mut machine = TurnMachine::new("turn-hook");
+    let mut machine = test_machine();
     let prepared = response_guard_batch().summary();
     let finished = HookBatchSummary::from_batch_result(
         &response_guard_batch(),
@@ -510,7 +531,7 @@ fn turn_machine_accepts_hook_batch_before_model_response_parse() {
 
 #[test]
 fn turn_machine_accepts_artifact_write_hook_before_finish() {
-    let mut machine = TurnMachine::new("turn-artifact-hook");
+    let mut machine = test_machine();
     let batch = artifact_guard_batch();
     let prepared = batch.summary();
     let finished = HookBatchSummary::from_batch_result(
@@ -581,7 +602,7 @@ fn turn_machine_accepts_artifact_write_hook_before_finish() {
 
 #[test]
 fn turn_machine_rejects_illegal_hook_transitions() {
-    let mut machine = TurnMachine::new("turn-hook-illegal");
+    let mut machine = test_machine();
     let summary = response_guard_batch().summary();
 
     let err = machine
@@ -594,7 +615,7 @@ fn turn_machine_rejects_illegal_hook_transitions() {
 
 #[test]
 fn turn_machine_accepts_failed_required_hook_terminal_path() {
-    let mut machine = TurnMachine::new("turn-hook-fail");
+    let mut machine = test_machine();
     let batch = response_guard_batch();
     let prepared = batch.summary();
     let failed = HookBatchSummary::from_batch_result(
@@ -674,7 +695,7 @@ fn turn_machine_accepts_failed_required_hook_terminal_path() {
 
 #[test]
 fn turn_machine_accepts_stopped_tool_path() {
-    let mut machine = TurnMachine::new("turn-stopped");
+    let mut machine = test_machine();
 
     apply(
         &mut machine,
@@ -727,7 +748,7 @@ fn turn_machine_accepts_stopped_tool_path() {
 
 #[test]
 fn turn_machine_accepts_model_failure_path() {
-    let mut machine = TurnMachine::new("turn-model-failed");
+    let mut machine = test_machine();
 
     apply(
         &mut machine,
@@ -766,7 +787,7 @@ fn turn_machine_accepts_model_failure_path() {
 
 #[test]
 fn turn_machine_rejects_illegal_transition_and_finished_is_terminal() {
-    let mut machine = TurnMachine::new("turn-illegal");
+    let mut machine = test_machine();
 
     let err = machine
         .apply(TurnTransition::RequestModel { request_index: 1 })

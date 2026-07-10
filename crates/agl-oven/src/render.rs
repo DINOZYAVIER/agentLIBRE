@@ -1,11 +1,13 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
+use agl_ids::{RunId, TurnId};
 use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedModelRequest {
-    pub turn_id: String,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
     pub request_index: usize,
     pub dialect: ModelDialect,
     pub tool_call_format: ToolCallFormat,
@@ -65,6 +67,7 @@ pub fn render_model_request(
         .collect();
 
     Ok(RenderedModelRequest {
+        run_id: request.run_id.clone(),
         turn_id: request.turn_id.clone(),
         request_index: request.request_index,
         dialect: config.dialect,

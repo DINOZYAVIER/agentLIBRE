@@ -2,7 +2,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::evidence::{InferenceAttemptId, InferenceFinishStatus, InferenceRunId};
+use agl_ids::{AttemptId, RunId, TurnId};
+
+use crate::evidence::InferenceFinishStatus;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InferenceAttemptPhase {
@@ -71,8 +73,9 @@ impl InferenceAttemptTransition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceAttemptTransitionRecord {
-    pub run_id: InferenceRunId,
-    pub attempt_id: InferenceAttemptId,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
+    pub attempt_id: AttemptId,
     pub sequence: usize,
     pub from: InferenceAttemptPhase,
     pub to: InferenceAttemptPhase,
@@ -81,16 +84,18 @@ pub struct InferenceAttemptTransitionRecord {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InferenceAttemptMachine {
-    run_id: InferenceRunId,
-    attempt_id: InferenceAttemptId,
+    run_id: RunId,
+    turn_id: TurnId,
+    attempt_id: AttemptId,
     phase: InferenceAttemptPhase,
     sequence: usize,
 }
 
 impl InferenceAttemptMachine {
-    pub fn new(run_id: InferenceRunId, attempt_id: InferenceAttemptId) -> Self {
+    pub fn new(run_id: RunId, turn_id: TurnId, attempt_id: AttemptId) -> Self {
         Self {
             run_id,
+            turn_id,
             attempt_id,
             phase: InferenceAttemptPhase::Initialized,
             sequence: 0,
@@ -121,6 +126,7 @@ impl InferenceAttemptMachine {
         self.phase = to;
         Ok(InferenceAttemptTransitionRecord {
             run_id: self.run_id.clone(),
+            turn_id: self.turn_id.clone(),
             attempt_id: self.attempt_id.clone(),
             sequence: self.sequence,
             from,
@@ -185,8 +191,9 @@ mod tests {
 
     fn machine() -> InferenceAttemptMachine {
         InferenceAttemptMachine::new(
-            InferenceRunId::new("run-001").unwrap(),
-            InferenceAttemptId::new("attempt-001").unwrap(),
+            RunId::parse("run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31").unwrap(),
+            TurnId::parse("turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32").unwrap(),
+            AttemptId::parse("attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b33").unwrap(),
         )
     }
 

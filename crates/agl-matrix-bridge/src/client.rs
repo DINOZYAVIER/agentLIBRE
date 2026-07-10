@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use agl_client::UnixTransport;
 use agl_client::{AgentLibreClient, DaemonTransport};
+use agl_ids::SessionId;
 use agl_protocol::{
     HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, SessionOpenRequest, SessionStatus,
     SessionStatusRequest, SessionTurnRequest, TurnTerminalStatus,
@@ -50,17 +51,17 @@ impl AgentClient for LazyDaemonClient {
         AgentClient::daemon_status(self.inner()?)
     }
 
-    fn validate_session(&mut self, session_id: &str) -> Result<()> {
+    fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
         AgentClient::validate_session(self.inner()?, session_id)
     }
 
-    fn open_session(&mut self) -> Result<String> {
+    fn open_session(&mut self) -> Result<SessionId> {
         AgentClient::open_session(self.inner()?)
     }
 
     fn send_message(
         &mut self,
-        session_id: &str,
+        session_id: &SessionId,
         message: &str,
         idempotency_key: &str,
     ) -> Result<String> {
@@ -83,9 +84,9 @@ where
         ))
     }
 
-    fn validate_session(&mut self, session_id: &str) -> Result<()> {
+    fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
         let status = self.session_status(SessionStatusRequest {
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
         })?;
         match status.status {
             SessionStatus::Open | SessionStatus::Busy => Ok(()),
@@ -95,7 +96,7 @@ where
         }
     }
 
-    fn open_session(&mut self) -> Result<String> {
+    fn open_session(&mut self) -> Result<SessionId> {
         let opened = self.open_session(SessionOpenRequest {
             session_id: None,
             new_session: true,
@@ -108,12 +109,12 @@ where
 
     fn send_message(
         &mut self,
-        session_id: &str,
+        session_id: &SessionId,
         message: &str,
         idempotency_key: &str,
     ) -> Result<String> {
         let response = self.send_turn(SessionTurnRequest {
-            session_id: session_id.to_string(),
+            session_id: session_id.clone(),
             text: message.to_string(),
             idempotency_key: Some(idempotency_key.to_string()),
         })?;

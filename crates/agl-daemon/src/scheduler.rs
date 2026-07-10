@@ -115,9 +115,10 @@ pub fn run_cron_skill_chat_turn(
     match output.status {
         ChatTurnStatus::Answered { .. } => Ok(format!(
             "skill:{}:session:{}:run:{}",
-            job.target_ref, summary.session_id, summary.run_id
+            job.target_ref, summary.session_id, output.run_id
         )),
         ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
+        ChatTurnStatus::Failed { message } => bail!("cron skill turn failed: {message}"),
     }
 }
 

@@ -65,6 +65,7 @@ dependencies = [
  "agl-events",
  "agl-functions",
  "agl-host-tools",
+ "agl-ids",
  "agl-inference",
  "agl-loop",
  "agl-memory",
@@ -91,6 +92,7 @@ dependencies = [
  "agl-cron",
  "agl-daemon",
  "agl-functions",
+ "agl-ids",
  "agl-memory",
  "agl-notes",
  "agl-protocol",
@@ -111,6 +113,8 @@ dependencies = [
 name = "agl-client"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-events",
+ "agl-ids",
  "agl-protocol",
  "serde_json",
 ]
@@ -138,7 +142,10 @@ name = "agl-daemon"
 version = "1.0.0-alpha.10"
 dependencies = [
  "agl-chat",
+ "agl-client",
  "agl-cron",
+ "agl-events",
+ "agl-ids",
  "agl-protocol",
  "agl-runtime",
  "agl-session",
@@ -154,6 +161,7 @@ dependencies = [
 name = "agl-events"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-ids",
  "anyhow",
  "serde",
  "serde_json",
@@ -193,11 +201,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-ids"
+version = "1.0.0-alpha.10"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "agl-inference"
 version = "1.0.0-alpha.10"
 dependencies = [
  "agl-actions",
  "agl-config",
+ "agl-events",
+ "agl-ids",
  "agl-oven",
  "anyhow",
  "cc",
@@ -212,6 +231,7 @@ version = "1.0.0-alpha.10"
 dependencies = [
  "agl-actions",
  "agl-events",
+ "agl-ids",
  "agl-tools",
  "agl-turn",
  "anyhow",
@@ -223,6 +243,7 @@ name = "agl-matrix-bridge"
 version = "1.0.0-alpha.10"
 dependencies = [
  "agl-client",
+ "agl-ids",
  "agl-protocol",
  "agl-store",
  "agl-tools",
@@ -262,6 +283,7 @@ name = "agl-oven"
 version = "1.0.0-alpha.10"
 dependencies = [
  "agl-config",
+ "agl-ids",
  "agl-turn",
  "anyhow",
  "serde",
@@ -272,6 +294,8 @@ dependencies = [
 name = "agl-protocol"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-events",
+ "agl-ids",
  "serde",
  "serde_json",
 ]
@@ -292,6 +316,7 @@ dependencies = [
 name = "agl-runtime"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-ids",
  "anyhow",
  "directories",
  "serde",
@@ -304,6 +329,8 @@ dependencies = [
 name = "agl-session"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-events",
+ "agl-ids",
  "anyhow",
  "serde",
  "serde_json",
@@ -351,6 +378,7 @@ name = "agl-turn"
 version = "1.0.0-alpha.10"
 dependencies = [
  "agl-actions",
+ "agl-ids",
  "agl-tools",
  "serde",
  "serde_json",
@@ -4024,6 +4052,7 @@ checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

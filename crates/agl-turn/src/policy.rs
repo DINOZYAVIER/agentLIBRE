@@ -65,6 +65,7 @@ pub fn decide_tool_call(state: &TurnState, tool_call: &ToolCall) -> ToolCallDeci
     }
 
     ToolCallDecision::Dispatch(ToolDispatchRequest {
+        run_id: state.input.run_id.clone(),
         turn_id: state.input.turn_id.clone(),
         name: tool_call.name.clone(),
         arguments: tool_call.arguments.clone(),

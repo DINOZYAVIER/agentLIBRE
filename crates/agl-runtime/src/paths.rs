@@ -1,6 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use agl_ids::{RunId, SessionId};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,7 @@ impl AgentLibrePaths {
     }
 
     pub fn default_artifact_root(&self) -> PathBuf {
-        self.data_dir.join("runs")
+        self.data_dir.clone()
     }
 
     pub fn sessions_root(&self) -> PathBuf {
@@ -70,12 +71,14 @@ impl AgentLibrePaths {
         self.data_dir.join("store")
     }
 
-    pub fn session_dir(&self, session_id: impl AsRef<str>) -> PathBuf {
-        self.sessions_root().join(session_id.as_ref())
+    pub fn session_dir(&self, session_id: &SessionId) -> PathBuf {
+        self.sessions_root().join(session_id.as_str())
     }
 
-    pub fn session_run_artifact_root(&self, session_id: impl AsRef<str>, run_id: &str) -> PathBuf {
-        self.session_dir(session_id).join("runs").join(run_id)
+    pub fn session_run_artifact_root(&self, session_id: &SessionId, run_id: &RunId) -> PathBuf {
+        self.session_dir(session_id)
+            .join("runs")
+            .join(run_id.as_str())
     }
 
     pub fn app_log_path(&self) -> PathBuf {
@@ -120,7 +123,8 @@ mod tests {
     #[test]
     fn derived_paths_match_layout() {
         let paths = AgentLibrePaths::from_agl_home("/tmp/agl-home");
-        let session_id = "session-001";
+        let session_id = SessionId::parse("ses_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31").unwrap();
+        let run_id = RunId::parse("run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32").unwrap();
 
         assert_eq!(
             paths.default_local_inference_config(),
@@ -132,11 +136,13 @@ mod tests {
         );
         assert_eq!(
             paths.default_artifact_root(),
-            PathBuf::from("/tmp/agl-home/data/runs")
+            PathBuf::from("/tmp/agl-home/data")
         );
         assert_eq!(
-            paths.session_run_artifact_root(session_id, "run-001"),
-            PathBuf::from("/tmp/agl-home/data/sessions/session-001/runs/run-001")
+            paths.session_run_artifact_root(&session_id, &run_id),
+            PathBuf::from(format!(
+                "/tmp/agl-home/data/sessions/{session_id}/runs/{run_id}"
+            ))
         );
         assert_eq!(
             paths.store_root(),

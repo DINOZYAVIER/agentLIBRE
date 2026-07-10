@@ -1,33 +1,67 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use agl_config::{ModelDialect, ToolCallFormat};
+use agl_ids::{RequestId, RunId, SessionId, TurnId};
 
 use super::*;
 
+const TEST_RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000001";
+const TEST_TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
+const TEST_SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000003";
+const TEST_REQUEST_ID: &str = "req_01890f17-4a00-7000-8000-000000000004";
+
+fn run_id() -> RunId {
+    RunId::parse(TEST_RUN_ID).unwrap()
+}
+
+fn turn_id() -> TurnId {
+    TurnId::parse(TEST_TURN_ID).unwrap()
+}
+
+fn session_id() -> SessionId {
+    SessionId::parse(TEST_SESSION_ID).unwrap()
+}
+
+fn request_id() -> RequestId {
+    RequestId::parse(TEST_REQUEST_ID).unwrap()
+}
+
 #[test]
 fn build_request_uses_agentlibre_boundaries() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
+    let session_id = session_id();
+    let request_id = request_id();
 
     let request = build_inference_request(
-        run_id.clone(),
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 7,
             messages: vec![TurnMessage::User {
                 content: "hello".to_string(),
             }],
             visible_tools: Vec::new(),
         },
+        AttemptId::generate(),
         &config,
-        InferenceRequestContexts::default(),
+        InferenceRequestContexts {
+            session_id: Some(&session_id),
+            request_id: Some(&request_id),
+            ..Default::default()
+        },
     )
     .unwrap();
 
-    assert_eq!(request.run_id, run_id);
-    assert_eq!(request.attempt_id.as_str(), "attempt-0007");
-    assert_eq!(request.rendered.turn_id, "manual-test");
+    assert_eq!(request.run_id, run_id());
+    assert_eq!(request.turn_id, turn_id());
+    assert_eq!(request.session_id, Some(session_id));
+    assert_eq!(request.request_id, Some(request_id));
+    assert!(request.attempt_id.as_str().starts_with("attempt_"));
+    assert_eq!(request.rendered.run_id, run_id());
+    assert_eq!(request.rendered.turn_id, turn_id());
     assert_eq!(request.rendered.request_index, 7);
     assert_eq!(request.rendered.messages.len(), 1);
     assert_eq!(request.rendered.dialect, ModelDialect::Qwen3);
@@ -39,22 +73,22 @@ fn build_request_uses_agentlibre_boundaries() {
 
 #[test]
 fn build_request_prepends_configured_system_prompt() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "hello".to_string(),
             }],
             visible_tools: Vec::new(),
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("demo system"),
@@ -78,22 +112,22 @@ fn build_request_prepends_configured_system_prompt() {
 
 #[test]
 fn build_request_prepends_skill_context_after_system_prompt() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "hello".to_string(),
             }],
             visible_tools: Vec::new(),
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
@@ -111,22 +145,22 @@ fn build_request_prepends_skill_context_after_system_prompt() {
 
 #[test]
 fn build_request_prepends_memory_context_before_skill_context() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "hello".to_string(),
             }],
             visible_tools: Vec::new(),
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
@@ -146,7 +180,6 @@ fn build_request_prepends_memory_context_before_skill_context() {
 
 #[test]
 fn build_request_injects_runtime_capabilities_before_tools() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
@@ -162,9 +195,9 @@ fn build_request_injects_runtime_capabilities_before_tools() {
     );
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "can you run cron jobs?".to_string(),
@@ -175,6 +208,7 @@ fn build_request_injects_runtime_capabilities_before_tools() {
                 VisibleTool::new("fs.search"),
             ],
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
@@ -224,16 +258,15 @@ fn build_request_injects_runtime_capabilities_before_tools() {
 
 #[test]
 fn build_request_injects_visible_tool_context_for_hermes() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "read README".to_string(),
@@ -244,6 +277,7 @@ fn build_request_injects_visible_tool_context_for_hermes() {
                     .require_argument("path"),
             ],
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
@@ -264,16 +298,15 @@ fn build_request_injects_visible_tool_context_for_hermes() {
 
 #[test]
 fn build_request_injects_visible_tool_context_for_gemma() {
-    let run_id = InferenceRunId::new("manual-test").unwrap();
     let config = ModelConfig {
         dialect: ModelDialect::Gemma4,
         tool_call_format: ToolCallFormat::GemmaFunctionCall,
     };
 
     let request = build_inference_request(
-        run_id,
         ModelRequest {
-            turn_id: "manual-test".to_string(),
+            run_id: run_id(),
+            turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
                 content: "read README".to_string(),
@@ -284,6 +317,7 @@ fn build_request_injects_visible_tool_context_for_gemma() {
                     .require_argument("path"),
             ],
         },
+        AttemptId::generate(),
         &config,
         InferenceRequestContexts {
             system_prompt: Some("system"),
@@ -597,7 +631,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
         .unwrap();
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let run_id = InferenceRunId::new("manual-grant-test").unwrap();
+    let run_id = run_id();
 
     let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
         &skill_registry,
@@ -621,10 +655,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
     assert!(store.active_permission_grants().unwrap().is_empty());
     let consumed = store.permission_grant(&grant.id).unwrap().unwrap();
     assert_eq!(consumed.status, agl_store::PermissionGrantStatus::Expired);
-    assert_eq!(
-        consumed.last_admitted_run_id.as_deref(),
-        Some("manual-grant-test")
-    );
+    assert_eq!(consumed.last_admitted_run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(consumed.consumed_at.is_some());
 
     let _ = std::fs::remove_dir_all(root);
@@ -647,7 +678,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
         .unwrap();
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let run_id = InferenceRunId::new("manual-denied-test").unwrap();
+    let run_id = run_id();
 
     let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
         &skill_registry,
@@ -689,7 +720,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
         .unwrap();
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let run_id = InferenceRunId::new("manual-not-routed-test").unwrap();
+    let run_id = run_id();
 
     let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
         &skill_registry,
@@ -774,7 +805,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
         .unwrap();
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let run_id = InferenceRunId::new("manual-cron-selected-test").unwrap();
+    let run_id = run_id();
 
     let (tools, snapshot) = selected_skill_visible_tools_with_dynamic_grants(
         &skill_registry,
@@ -967,16 +998,16 @@ fn resolves_default_paths_from_runtime_config() {
     );
     assert_eq!(
         InferenceSession::default_artifact_root(&runtime),
-        PathBuf::from("/tmp/agl-home/data/runs")
+        PathBuf::from("/tmp/agl-home/data")
     );
 }
 
 #[test]
-fn agent_event_stream_is_separate_from_inference_evidence_events() {
-    let run_id = InferenceRunId::new("run-001").unwrap();
+fn agent_event_stream_uses_canonical_run_event_path() {
+    let run_id = run_id();
 
     assert_eq!(
         agent_event_stream_path(std::path::Path::new("/tmp/artifacts"), &run_id),
-        PathBuf::from("/tmp/artifacts/inference-runs/run-001/agent-events.jsonl")
+        PathBuf::from(format!("/tmp/artifacts/runs/{TEST_RUN_ID}/events.jsonl"))
     );
 }

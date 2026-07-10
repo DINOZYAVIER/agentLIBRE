@@ -1760,7 +1760,8 @@ mod tests {
     #[test]
     fn prepared_chat_messages_use_llama_roles() {
         let rendered = RenderedModelRequest {
-            turn_id: "turn".to_string(),
+            run_id: agl_ids::RunId::generate(),
+            turn_id: agl_ids::TurnId::generate(),
             request_index: 0,
             dialect: ModelDialect::Qwen3,
             tool_call_format: ToolCallFormat::HermesJson,

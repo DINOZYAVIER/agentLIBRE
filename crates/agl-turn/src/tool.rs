@@ -1,8 +1,10 @@
+use agl_ids::{RunId, TurnId};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolDispatchRequest {
-    pub turn_id: String,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
     pub name: String,
     pub arguments: Value,
 }
