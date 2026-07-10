@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use agl_capabilities::CapabilityId;
+pub use agl_capabilities::FunctionToolPolicy;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -156,6 +158,10 @@ impl AgentFunctionFrontMatter {
             .and_then(|runtime| runtime.max_output_tokens)
     }
 
+    pub fn tool_policy(&self) -> Option<FunctionToolPolicy> {
+        self.tools.as_ref().map(FunctionTools::to_runtime_policy)
+    }
+
     pub fn selected_skills(&self) -> &[String] {
         self.skills
             .as_ref()
@@ -264,7 +270,25 @@ impl FunctionTools {
     fn validate(&self) -> Result<()> {
         validate_extensions("tools", &self.extensions)?;
         validate_unique_non_empty("tools.allow", &self.allow)?;
-        validate_unique_non_empty("tools.deny", &self.deny)
+        validate_unique_non_empty("tools.deny", &self.deny)?;
+        for id in self.allow.iter().chain(&self.deny) {
+            CapabilityId::new(id.clone())
+                .with_context(|| format!("invalid function tool capability ID `{id}`"))?;
+        }
+        Ok(())
+    }
+
+    fn to_runtime_policy(&self) -> FunctionToolPolicy {
+        FunctionToolPolicy::new(
+            self.allow.iter().map(|id| {
+                CapabilityId::new(id.clone())
+                    .expect("validated function allow capability ID must remain valid")
+            }),
+            self.deny.iter().map(|id| {
+                CapabilityId::new(id.clone())
+                    .expect("validated function deny capability ID must remain valid")
+            }),
+        )
     }
 }
 
@@ -604,6 +628,7 @@ pub struct RuntimeFunction {
     pub inference_config_path: Option<PathBuf>,
     pub inference_config_toml: Option<String>,
     pub tool_mode: Option<FunctionToolMode>,
+    pub tool_policy: Option<FunctionToolPolicy>,
     pub max_output_tokens: Option<u32>,
     pub skills: Vec<String>,
     pub memory_enabled: bool,
@@ -628,6 +653,7 @@ pub struct FunctionStatusReport {
     pub inference_config_embedded: bool,
     pub inference_model_path: Option<PathBuf>,
     pub inference_model_exists: Option<bool>,
+    pub tool_policy: Option<FunctionToolPolicy>,
     pub skills: Vec<String>,
     pub subagents: Vec<RuntimeSubagent>,
     pub warnings: Vec<String>,
@@ -908,6 +934,7 @@ pub fn function_status(
         inference_config_embedded: false,
         inference_model_path: None,
         inference_model_exists: None,
+        tool_policy: None,
         skills: Vec::new(),
         subagents: Vec::new(),
         warnings: Vec::new(),
@@ -969,6 +996,7 @@ pub fn function_status(
         }
     }
     report.skills = loaded.front_matter.selected_skills().to_vec();
+    report.tool_policy = loaded.front_matter.tool_policy();
     report.subagents = loaded
         .subagents
         .iter()
@@ -1133,6 +1161,7 @@ fn runtime_function_from_loaded(
             .or_else(|| profile_path.clone()),
         inference_config_toml: loaded.inference_config_toml.clone(),
         tool_mode: loaded.front_matter.runtime_tool_mode(),
+        tool_policy: loaded.front_matter.tool_policy(),
         max_output_tokens: loaded.front_matter.runtime_max_output_tokens(),
         skills: loaded.front_matter.selected_skills().to_vec(),
         memory_enabled: loaded.front_matter.enables_memory_context(),
@@ -1556,6 +1585,91 @@ skills:
         );
         assert_eq!(front_matter.selected_skills(), ["repo-status"]);
         assert!(body.trim().is_empty());
+    }
+
+    #[test]
+    fn runtime_function_preserves_function_tool_policy_states() {
+        fn policy(allow: &[&str], deny: &[&str]) -> FunctionToolPolicy {
+            FunctionToolPolicy::new(
+                allow
+                    .iter()
+                    .map(|id| CapabilityId::new(*id).expect("test capability ID is valid")),
+                deny.iter()
+                    .map(|id| CapabilityId::new(*id).expect("test capability ID is valid")),
+            )
+        }
+
+        struct Case {
+            name: &'static str,
+            tools_yaml: &'static str,
+            expected: Option<FunctionToolPolicy>,
+        }
+
+        let cases = [
+            Case {
+                name: "absent",
+                tools_yaml: "",
+                expected: None,
+            },
+            Case {
+                name: "present-empty",
+                tools_yaml: "tools: {}\n",
+                expected: Some(FunctionToolPolicy::default()),
+            },
+            Case {
+                name: "allow-and-deny",
+                tools_yaml: "tools:\n  allow:\n    - fs.read\n    - repo.status\n  deny:\n    - repo.status\n",
+                expected: Some(policy(&["fs.read", "repo.status"], &["repo.status"])),
+            },
+            Case {
+                name: "deny-only",
+                tools_yaml: "tools:\n  deny:\n    - fs.edit\n",
+                expected: Some(policy(&[], &["fs.edit"])),
+            },
+        ];
+
+        let root =
+            std::env::temp_dir().join(format!("agl-functions-tool-policy-{}", std::process::id()));
+        let workspace = root.join("workspace");
+        let config = root.join("config");
+        let _ = std::fs::remove_dir_all(&root);
+
+        for (index, case) in cases.iter().enumerate() {
+            let id = format!("policy-{index}");
+            let function_root = workspace.join(".agl/functions").join(&id);
+            std::fs::create_dir_all(&function_root).unwrap();
+            std::fs::write(
+                function_root.join(FUNCTION_FILE_NAME),
+                format!(
+                    "---\nschema: agentfunction/v1\nid: {id}\ntitle: Policy {index}\n{}---\n",
+                    case.tools_yaml
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                function_root.join(FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+                "Test policy.\n",
+            )
+            .unwrap();
+
+            let runtime =
+                resolve_runtime_function_allow_missing_profile(&id, &workspace, &config).unwrap();
+            assert_eq!(runtime.tool_policy, case.expected, "{}", case.name);
+
+            let report = function_status(&id, &workspace, &config);
+            assert_eq!(report.tool_policy, case.expected, "{} status", case.name);
+
+            let serialized = serde_yaml::to_value(&runtime).unwrap();
+            let serialized_policy = serialized
+                .get("tool_policy")
+                .unwrap_or_else(|| panic!("{} evidence omitted tool_policy", case.name))
+                .clone();
+            let round_trip: Option<FunctionToolPolicy> =
+                serde_yaml::from_value(serialized_policy).unwrap();
+            assert_eq!(round_trip, case.expected, "{} evidence", case.name);
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

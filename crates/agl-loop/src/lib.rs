@@ -2,7 +2,7 @@ mod event_map;
 mod host;
 mod runner;
 
-pub use agl_tools::{
+pub use agl_capabilities::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookMessage, HookResult, HookStatus,
 };
 pub use agl_turn::{

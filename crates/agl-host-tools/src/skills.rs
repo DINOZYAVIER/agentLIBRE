@@ -1,14 +1,20 @@
 use std::path::{Path, PathBuf};
 
+use agl_capabilities::{
+    ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, CapabilityId,
+};
 use agl_skills::{
-    SkillLockOptions, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
+    SkillHarness, SkillLockOptions, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
     lock_workspace_skills, revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
     workspace_skill_report_with_trust,
 };
-use agl_tools::{ToolHandler, ToolInput, ToolOutput};
-use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
-use serde_json::Value;
+use agl_tools::skills::{
+    SkillInspectArgs, SkillListArgs, SkillListSource, SkillLockArgs, SkillRevokeArgs,
+    SkillStatusArgs, SkillTrustArgs, SkillVerifyArgs,
+};
+use anyhow::{Context, Result, ensure};
+use serde::de::DeserializeOwned;
+use serde_json::{Value, json};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_BODY_BYTES: usize = 16 * 1024;
@@ -33,292 +39,273 @@ impl SkillTools {
         }
     }
 
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
-        match name {
-            agl_tools::SKILL_LIST_TOOL_ID => self.list(arguments),
-            agl_tools::SKILL_INSPECT_TOOL_ID => self.inspect(arguments),
-            agl_tools::SKILL_STATUS_TOOL_ID => self.status(arguments),
-            agl_tools::SKILL_VERIFY_TOOL_ID => self.verify(arguments),
-            agl_tools::SKILL_LOCK_TOOL_ID => self.lock(arguments),
-            agl_tools::SKILL_TRUST_TOOL_ID => self.trust(arguments),
-            agl_tools::SKILL_REVOKE_TOOL_ID => self.revoke(arguments),
-            _ => bail!("unknown skill tool `{name}`"),
-        }
+    fn dispatch_action(&self, id: &CapabilityId, arguments: Value) -> Result<ActionResult> {
+        let data = match id.as_str() {
+            agl_tools::SKILL_LIST_TOOL_ID => self.list(parse_args(id.as_str(), arguments)?)?,
+            agl_tools::SKILL_INSPECT_TOOL_ID => {
+                self.inspect(parse_args(id.as_str(), arguments)?)?
+            }
+            agl_tools::SKILL_STATUS_TOOL_ID => self.status(parse_args(id.as_str(), arguments)?)?,
+            agl_tools::SKILL_VERIFY_TOOL_ID => self.verify(parse_args(id.as_str(), arguments)?)?,
+            agl_tools::SKILL_LOCK_TOOL_ID => self.lock(parse_args(id.as_str(), arguments)?)?,
+            agl_tools::SKILL_TRUST_TOOL_ID => self.trust(parse_args(id.as_str(), arguments)?)?,
+            agl_tools::SKILL_REVOKE_TOOL_ID => self.revoke(parse_args(id.as_str(), arguments)?)?,
+            _ => anyhow::bail!("unknown skill capability `{id}`"),
+        };
+        Ok(ActionResult::new(data))
     }
 
-    fn list(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<ListArgs>(agl_tools::SKILL_LIST_TOOL_ID, arguments)?;
-        let source = args.source.as_deref().unwrap_or("all");
-        ensure!(
-            matches!(source, "all" | "workspace" | "core" | "community" | "local"),
-            "skill.list source must be all, workspace, core, community, or local"
-        );
+    fn list(&self, args: SkillListArgs) -> Result<Value> {
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).min(DEFAULT_LIMIT);
-        let trusted_only = args.trusted_only.unwrap_or(false);
         let registry = builtin_registry()?;
         let workspace =
             workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
         let workspace_overrides = workspace
             .skills
             .iter()
-            .filter_map(|skill| {
-                skill
-                    .overrides_builtin
-                    .then(|| skill.name.clone())
-                    .flatten()
-            })
+            .filter(|skill| skill.overrides_builtin)
+            .filter_map(|skill| skill.name.clone())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut output = format!(
-            "tool=skill.list\nsource={source}\ntrusted_only={trusted_only}\nlimit={limit}\nworkspace_state={:?}\n---",
-            workspace.state
-        );
-        let mut emitted = 0usize;
-        if source != "workspace" && source != "community" && source != "local" {
+        let mut skills = Vec::new();
+
+        if matches!(args.source, SkillListSource::All | SkillListSource::Core) {
             for skill in registry.skills() {
-                if emitted >= limit {
-                    break;
-                }
-                if trusted_only && !skill.permits_context_injection() {
+                if args.trusted_only && !skill.permits_context_injection() {
                     continue;
                 }
-                emitted += 1;
-                output.push('\n');
-                output.push_str(&format!(
-                    "skill id={} source={} pack={} usable={} overridden_by_workspace={} allowed={} requestable={} denied={}",
-                    skill.harness.id,
-                    skill.harness.source.as_str(),
-                    skill.harness.pack,
-                    skill.permits_context_injection(),
-                    workspace_overrides.contains(&skill.harness.name),
-                    render_tool_ids(&skill.harness.allowed_tools),
-                    render_tool_ids(&skill.harness.requestable_tools),
-                    render_tool_ids(&skill.harness.denied_tools)
-                ));
+                skills.push(json!({
+                    "id": skill.harness.id.as_str(),
+                    "source": skill.harness.source,
+                    "pack": skill.harness.pack,
+                    "version": skill.harness.version,
+                    "usable": skill.permits_context_injection(),
+                    "trust": skill.trust,
+                    "overridden_by_workspace": workspace_overrides.contains(&skill.harness.name),
+                    "routing": routing_summary(&skill.harness),
+                }));
             }
         }
         for skill in &workspace.skills {
-            if emitted >= limit {
-                break;
-            }
-            if !workspace_skill_source_matches(source, skill) {
+            if !workspace_skill_source_matches(args.source, skill) {
                 continue;
             }
-            if trusted_only && !skill.usable {
+            if args.trusted_only && !skill.usable {
                 continue;
             }
-            emitted += 1;
-            output.push('\n');
-            output.push_str(&render_workspace_skill_line(skill));
+            skills.push(workspace_skill_summary(skill));
         }
-        Ok(output)
+
+        let total = skills.len();
+        skills.truncate(limit);
+        Ok(json!({
+            "capability_id": agl_tools::SKILL_LIST_TOOL_ID,
+            "source": args.source.as_str(),
+            "trusted_only": args.trusted_only,
+            "limit": limit,
+            "workspace_state": workspace.state,
+            "skills": skills,
+            "total": total,
+            "truncated": total > limit,
+        }))
     }
 
-    fn inspect(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<InspectArgs>(agl_tools::SKILL_INSPECT_TOOL_ID, arguments)?;
-        let include_body = args.include_body.unwrap_or(false);
-        let include_references = args.include_references.unwrap_or(false);
+    fn inspect(&self, args: SkillInspectArgs) -> Result<Value> {
         let max_bytes = args.max_bytes.unwrap_or(MAX_BODY_BYTES).min(MAX_BODY_BYTES);
         let registry = builtin_registry()?;
         let workspace =
             workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
-        let mut found = false;
-        let mut output = format!(
-            "tool=skill.inspect\nid={}\ninclude_body={include_body}\ninclude_references={include_references}\nmax_bytes={max_bytes}\n---",
-            args.id
-        );
+        let mut matches = Vec::new();
+
         for skill in registry
             .skills()
             .iter()
             .filter(|skill| skill.harness.id.as_str() == args.id || skill.harness.name == args.id)
         {
-            found = true;
-            output.push('\n');
-            output.push_str(&format!(
-                "skill id={} source={} pack={} version={} usable={} manifest_sha256={} tree_sha256={}",
-                skill.harness.id,
-                skill.harness.source.as_str(),
-                skill.harness.pack,
-                skill.harness.version,
-                skill.permits_context_injection(),
-                skill.harness.manifest_sha256,
-                skill.harness.tree_sha256
-            ));
-            render_harness_details(
-                &mut output,
-                &skill.harness,
-                include_body,
-                include_references,
-                max_bytes,
-            );
+            matches.push(json!({
+                "kind": "builtin",
+                "trust": skill.trust,
+                "usable": skill.permits_context_injection(),
+                "harness": harness_details(
+                    &skill.harness,
+                    args.include_body,
+                    args.include_references,
+                    max_bytes,
+                ),
+            }));
         }
         for skill in workspace
             .skills
             .iter()
             .filter(|skill| skill.name.as_deref() == Some(args.id.as_str()))
         {
-            found = true;
-            output.push('\n');
-            output.push_str(&render_workspace_skill_line(skill));
-            if let Some(harness) = &skill.harness {
-                render_harness_details(
-                    &mut output,
+            matches.push(json!({
+                "kind": "workspace",
+                "status": skill,
+                "harness": skill.harness.as_ref().map(|harness| harness_details(
                     harness,
-                    include_body,
-                    include_references,
+                    args.include_body,
+                    args.include_references,
                     max_bytes,
-                );
-            }
+                )),
+            }));
         }
-        ensure!(found, "skill not found: {}", args.id);
-        Ok(output)
+        ensure!(!matches.is_empty(), "skill not found: {}", args.id);
+
+        Ok(json!({
+            "capability_id": agl_tools::SKILL_INSPECT_TOOL_ID,
+            "id": args.id,
+            "include_body": args.include_body,
+            "include_references": args.include_references,
+            "max_bytes": max_bytes,
+            "matches": matches,
+        }))
     }
 
-    fn status(&self, arguments: Value) -> Result<String> {
-        parse_args::<StatusArgs>(agl_tools::SKILL_STATUS_TOOL_ID, arguments)?;
+    fn status(&self, _args: SkillStatusArgs) -> Result<Value> {
         let report =
             workspace_skill_report_with_trust(&self.workspace_root, &self.trust_store_path)?;
-        Ok(render_workspace_report(
-            agl_tools::SKILL_STATUS_TOOL_ID,
-            &report,
-        ))
+        report_value(agl_tools::SKILL_STATUS_TOOL_ID, &report)
     }
 
-    fn verify(&self, arguments: Value) -> Result<String> {
-        parse_args::<VerifyArgs>(agl_tools::SKILL_VERIFY_TOOL_ID, arguments)?;
+    fn verify(&self, _args: SkillVerifyArgs) -> Result<Value> {
         let report = workspace_skill_report(&self.workspace_root)?;
-        Ok(render_workspace_report(
-            agl_tools::SKILL_VERIFY_TOOL_ID,
-            &report,
-        ))
+        report_value(agl_tools::SKILL_VERIFY_TOOL_ID, &report)
     }
 
-    fn lock(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<LockArgs>(agl_tools::SKILL_LOCK_TOOL_ID, arguments)?;
+    fn lock(&self, args: SkillLockArgs) -> Result<Value> {
         let report = lock_workspace_skills(
             &self.workspace_root,
             &SkillLockOptions {
-                dry_run: args.dry_run.unwrap_or(false),
+                dry_run: args.dry_run,
             },
         )?;
-        Ok(format!(
-            "tool=skill.lock\nworkspace_root={}\ndry_run={}\nwrote={}\nwarnings={}\nerrors={}",
-            report.workspace_root.display(),
-            report.dry_run,
-            report.wrote,
-            report.warnings.len(),
-            report.errors.len()
-        ))
+        Ok(json!({
+            "capability_id": agl_tools::SKILL_LOCK_TOOL_ID,
+            "report": report,
+        }))
     }
 
-    fn trust(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<TrustArgs>(agl_tools::SKILL_TRUST_TOOL_ID, arguments)?;
+    fn trust(&self, args: SkillTrustArgs) -> Result<Value> {
         let report = trust_workspace_skill(
             &self.workspace_root,
             &self.trust_store_path,
             &args.name,
             &SkillTrustOptions {
-                approve: args.approve.unwrap_or(true),
+                approve: args.approve,
                 agentlibre_version: self.agentlibre_version.clone(),
             },
         )?;
-        Ok(format!(
-            "tool=skill.trust\nskill={}\naction={:?}\nwrote={}\nwarnings={}\nerrors={}",
-            report.skill_name,
-            report.action,
-            report.wrote,
-            report.warnings.len(),
-            report.errors.len()
-        ))
+        Ok(json!({
+            "capability_id": agl_tools::SKILL_TRUST_TOOL_ID,
+            "report": report,
+        }))
     }
 
-    fn revoke(&self, arguments: Value) -> Result<String> {
-        let args = parse_args::<RevokeArgs>(agl_tools::SKILL_REVOKE_TOOL_ID, arguments)?;
+    fn revoke(&self, args: SkillRevokeArgs) -> Result<Value> {
         let report =
             revoke_workspace_skill(&self.workspace_root, &self.trust_store_path, &args.name)?;
-        Ok(format!(
-            "tool=skill.revoke\nskill={}\naction={:?}\nwrote={}\nwarnings={}\nerrors={}",
-            report.skill_name,
-            report.action,
-            report.wrote,
-            report.warnings.len(),
-            report.errors.len()
-        ))
+        Ok(json!({
+            "capability_id": agl_tools::SKILL_REVOKE_TOOL_ID,
+            "report": report,
+        }))
     }
 }
 
-impl ToolHandler for SkillTools {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl ActionHandler for SkillTools {
+    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+        self.dispatch_action(&invocation.capability_id, invocation.arguments)
+            .map_err(Into::into)
     }
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
+fn parse_args<T: DeserializeOwned>(capability_id: &str, arguments: Value) -> Result<T> {
+    serde_json::from_value(arguments)
+        .with_context(|| format!("{capability_id} arguments are invalid"))
 }
 
-fn render_workspace_report(tool_id: &str, report: &agl_skills::WorkspaceSkillReport) -> String {
-    let mut output = format!(
-        "tool={tool_id}\nstate={:?}\nworkspace_root={}\nskills={}\ndiagnostics={}\nwarnings={}\nerrors={}\n---",
-        report.state,
-        report.workspace_root.display(),
-        report.skills.len(),
-        report.diagnostics.len(),
-        report.warnings.len(),
-        report.errors.len()
-    );
-    for skill in &report.skills {
-        output.push('\n');
-        output.push_str(&render_workspace_skill_line(skill));
-        for folder in &skill.artifact_folders {
-            output.push_str(&format!(
-                "\nskill.{}.folder id={} path={} kind={:?} access={:?} exists={}",
-                workspace_skill_key(skill),
-                folder.id,
-                folder.path.display(),
-                folder.kind,
-                folder.access,
-                folder.exists
-            ));
-            for readiness in &folder.readiness {
-                output.push_str(&format!(
-                    "\nskill.{}.folder.{}.ready.when={} action={}",
-                    workspace_skill_key(skill),
-                    folder.id,
-                    skill_folder_create_situation(readiness.situation),
-                    skill_folder_sync_action(readiness.action)
-                ));
-            }
-        }
-    }
-    for diagnostic in &report.diagnostics {
-        output.push('\n');
-        output.push_str(&render_workspace_skill_diagnostic(diagnostic));
-    }
-    output
+fn report_value(capability_id: &str, report: &agl_skills::WorkspaceSkillReport) -> Result<Value> {
+    Ok(json!({
+        "capability_id": capability_id,
+        "report": report,
+    }))
 }
 
-fn render_workspace_skill_line(skill: &WorkspaceSkillStatus) -> String {
-    format!(
-        "skill id={} source={} usable={} trust={:?} valid={} broadens_builtin_routing={} folders={} allowed={} requestable={} denied={}",
-        workspace_skill_key(skill),
-        skill.source.as_deref().unwrap_or("unknown"),
-        skill.usable,
-        skill.trust_state,
-        skill.valid,
-        skill.broadens_builtin_routing,
-        skill.artifact_folders.len(),
-        skill.allowed_tools.join(","),
-        skill.requestable_tools.join(","),
-        skill.denied_tools.join(",")
-    )
+fn routing_summary(harness: &SkillHarness) -> Value {
+    json!({
+        "required_hooks": id_strings(&harness.required_hooks),
+        "allowed": id_strings(&harness.allowed_tools),
+        "requestable": id_strings(&harness.requestable_tools),
+        "denied": id_strings(&harness.denied_tools),
+    })
 }
 
-fn workspace_skill_source_matches(source: &str, skill: &WorkspaceSkillStatus) -> bool {
+fn harness_details(
+    harness: &SkillHarness,
+    include_body: bool,
+    include_references: bool,
+    max_bytes: usize,
+) -> Value {
+    let body = include_body.then(|| {
+        json!({
+            "content": truncate_str(&harness.body, max_bytes),
+            "truncated": harness.body.len() > max_bytes,
+        })
+    });
+    let references = include_references.then(|| {
+        harness
+            .references
+            .iter()
+            .map(|reference| {
+                json!({
+                    "path": reference.path,
+                    "sha256": reference.sha256,
+                    "bytes": reference.content.len(),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    json!({
+        "id": harness.id.as_str(),
+        "name": harness.name,
+        "description": harness.description,
+        "version": harness.version,
+        "source": harness.source,
+        "pack": harness.pack,
+        "manifest_sha256": harness.manifest_sha256,
+        "tree_sha256": harness.tree_sha256,
+        "routing": routing_summary(harness),
+        "permission_request_templates": harness.permission_request_templates,
+        "permissions": harness.permissions,
+        "artifacts": harness.artifacts,
+        "guarantees": harness.guarantees,
+        "body": body,
+        "references": references,
+    })
+}
+
+fn workspace_skill_summary(skill: &WorkspaceSkillStatus) -> Value {
+    json!({
+        "id": workspace_skill_key(skill),
+        "source": skill.source.as_deref().unwrap_or("unknown"),
+        "usable": skill.usable,
+        "trust": skill.trust_state,
+        "valid": skill.valid,
+        "broadens_builtin_routing": skill.broadens_builtin_routing,
+        "artifact_folder_count": skill.artifact_folders.len(),
+        "routing": {
+            "allowed": skill.allowed_tools,
+            "requestable": skill.requestable_tools,
+            "denied": skill.denied_tools,
+        },
+    })
+}
+
+fn workspace_skill_source_matches(source: SkillListSource, skill: &WorkspaceSkillStatus) -> bool {
     match source {
-        "all" | "workspace" => true,
-        "core" | "community" | "local" => skill.source.as_deref() == Some(source),
-        _ => false,
+        SkillListSource::All | SkillListSource::Workspace => true,
+        SkillListSource::Core => skill.source.as_deref() == Some("core"),
+        SkillListSource::Community => skill.source.as_deref() == Some("community"),
+        SkillListSource::Local => skill.source.as_deref() == Some("local"),
     }
 }
 
@@ -329,140 +316,8 @@ fn workspace_skill_key(skill: &WorkspaceSkillStatus) -> String {
         .unwrap_or_else(|| format!("path:{}", skill.path.display()))
 }
 
-fn render_workspace_skill_diagnostic(diagnostic: &agl_skills::WorkspaceSkillDiagnostic) -> String {
-    let mut output = format!(
-        "diagnostic severity={} scope={} code={} message={}",
-        workspace_skill_diagnostic_severity(diagnostic.severity),
-        workspace_skill_diagnostic_scope(diagnostic.scope),
-        diagnostic.code,
-        diagnostic.message
-    );
-    if let Some(component) = &diagnostic.component {
-        output.push_str(&format!(" component={component}"));
-    }
-    if let Some(skill) = &diagnostic.skill {
-        output.push_str(&format!(" skill={skill}"));
-    }
-    if let Some(skill_path) = &diagnostic.skill_path {
-        output.push_str(&format!(" skill_path={}", skill_path.display()));
-    }
-    if let Some(folder_id) = &diagnostic.folder_id {
-        output.push_str(&format!(" folder={folder_id}"));
-    }
-    if let Some(path) = &diagnostic.path {
-        output.push_str(&format!(" path={}", path.display()));
-    }
-    output
-}
-
-fn workspace_skill_diagnostic_severity(
-    severity: agl_skills::WorkspaceSkillDiagnosticSeverity,
-) -> &'static str {
-    match severity {
-        agl_skills::WorkspaceSkillDiagnosticSeverity::Warning => "warning",
-        agl_skills::WorkspaceSkillDiagnosticSeverity::Error => "error",
-    }
-}
-
-fn workspace_skill_diagnostic_scope(
-    scope: agl_skills::WorkspaceSkillDiagnosticScope,
-) -> &'static str {
-    match scope {
-        agl_skills::WorkspaceSkillDiagnosticScope::Workspace => "workspace",
-        agl_skills::WorkspaceSkillDiagnosticScope::Component => "component",
-        agl_skills::WorkspaceSkillDiagnosticScope::Lock => "lock",
-        agl_skills::WorkspaceSkillDiagnosticScope::SkillManifest => "skill_manifest",
-        agl_skills::WorkspaceSkillDiagnosticScope::SkillArtifactFolder => "skill_artifact_folder",
-        agl_skills::WorkspaceSkillDiagnosticScope::SkillTrust => "skill_trust",
-    }
-}
-
-fn render_harness_details(
-    output: &mut String,
-    harness: &agl_skills::SkillHarness,
-    include_body: bool,
-    include_references: bool,
-    max_bytes: usize,
-) {
-    output.push_str(&format!(
-        "\ndescription={}\nrequired_hooks={}\nallowed_tools={}\nrequestable_tools={}\ndenied_tools={}",
-        harness.description,
-        harness
-            .required_hooks
-            .iter()
-            .map(agl_tools::HookId::as_str)
-            .collect::<Vec<_>>()
-            .join(","),
-        render_tool_ids(&harness.allowed_tools),
-        render_tool_ids(&harness.requestable_tools),
-        render_tool_ids(&harness.denied_tools)
-    ));
-    for artifact in &harness.artifacts {
-        output.push_str(&format!(
-            "\nfolder id={} path={} kind={:?} access={:?} create={} provides={} schema={}",
-            artifact.id,
-            artifact.path.display(),
-            artifact.kind,
-            artifact.access,
-            artifact
-                .create
-                .iter()
-                .map(|rule| skill_folder_create_situation(rule.when))
-                .collect::<Vec<_>>()
-                .join(","),
-            artifact.provides.join(","),
-            artifact.schema.as_deref().unwrap_or("")
-        ));
-    }
-    if include_body {
-        output.push_str("\nbody_truncated=");
-        output.push_str(if harness.body.len() > max_bytes {
-            "true\n"
-        } else {
-            "false\n"
-        });
-        output.push_str(truncate_str(&harness.body, max_bytes));
-    }
-    if include_references {
-        for reference in &harness.references {
-            output.push_str(&format!(
-                "\nreference path={} sha256={} bytes={}",
-                reference.path,
-                reference.sha256,
-                reference.content.len()
-            ));
-        }
-    }
-}
-
-fn render_tool_ids(tools: &[agl_tools::ToolId]) -> String {
-    tools
-        .iter()
-        .map(agl_tools::ToolId::as_str)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn skill_folder_create_situation(when: agl_skills::SkillFolderCreateSituation) -> &'static str {
-    match when {
-        agl_skills::SkillFolderCreateSituation::SkillSync => "skill_sync",
-        agl_skills::SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
-        agl_skills::SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
-    }
-}
-
-fn skill_folder_sync_action(action: agl_skills::SkillFolderSyncActionKind) -> &'static str {
-    match action {
-        agl_skills::SkillFolderSyncActionKind::Exists => "exists",
-        agl_skills::SkillFolderSyncActionKind::SkippedReadOnly => "skipped_read_only",
-        agl_skills::SkillFolderSyncActionKind::SkippedSource => "skipped_source",
-        agl_skills::SkillFolderSyncActionKind::SkippedNoCreateRule => "skipped_no_create_rule",
-        agl_skills::SkillFolderSyncActionKind::SkippedSituationMismatch => {
-            "skipped_situation_mismatch"
-        }
-        agl_skills::SkillFolderSyncActionKind::WouldCreateDir => "would_create_dir",
-        agl_skills::SkillFolderSyncActionKind::CreatedDir => "created_dir",
-    }
+fn id_strings<T: ToString>(ids: &[T]) -> Vec<String> {
+    ids.iter().map(ToString::to_string).collect()
 }
 
 fn truncate_str(value: &str, max_bytes: usize) -> &str {
@@ -476,50 +331,6 @@ fn truncate_str(value: &str, max_bytes: usize) -> &str {
     &value[..index]
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListArgs {
-    source: Option<String>,
-    trusted_only: Option<bool>,
-    limit: Option<usize>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InspectArgs {
-    id: String,
-    include_body: Option<bool>,
-    include_references: Option<bool>,
-    max_bytes: Option<usize>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StatusArgs {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VerifyArgs {}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LockArgs {
-    dry_run: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TrustArgs {
-    name: String,
-    approve: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RevokeArgs {
-    name: String,
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -529,35 +340,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_tools_list_and_inspect_core_skills() {
+    fn skill_tools_list_and_inspect_return_structured_core_skills() {
         let root = temp_root("list-inspect");
         std::fs::create_dir_all(&root).unwrap();
         let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
 
         let list = tools
-            .dispatch(agl_tools::SKILL_LIST_TOOL_ID, json!({"source": "core"}))
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::SKILL_LIST_TOOL_ID).unwrap(),
+                json!({"source": "core"}),
+            )
             .unwrap();
         let inspect = tools
-            .dispatch(
-                agl_tools::SKILL_INSPECT_TOOL_ID,
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::SKILL_INSPECT_TOOL_ID).unwrap(),
                 json!({"id": "skill", "include_references": true}),
             )
             .unwrap();
 
-        assert!(list.contains("tool=skill.list"));
-        assert!(list.contains("skill id=skill"));
-        assert!(list.contains("source=core"));
-        assert!(inspect.contains("tool=skill.inspect"));
-        assert!(inspect.contains("skill id=skill"));
-        assert!(inspect.contains("source=core"));
-        assert!(inspect.contains("manifest_sha256="));
-        assert!(!inspect.contains("reference path="));
+        assert_eq!(list.data["capability_id"], agl_tools::SKILL_LIST_TOOL_ID);
+        assert!(
+            list.data["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|skill| skill["id"] == "skill" && skill["source"] == "core")
+        );
+        let matches = inspect.data["matches"].as_array().unwrap();
+        assert_eq!(matches[0]["harness"]["id"], "skill");
+        assert!(matches[0]["harness"]["manifest_sha256"].is_string());
+        assert!(matches[0]["harness"]["references"].is_array());
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn skill_tools_status_and_lock_dry_run_report_workspace_errors() {
+    fn skill_tools_status_and_lock_return_structured_reports() {
         let root = temp_root("status-lock");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -565,19 +383,38 @@ mod tests {
         let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
 
         let status = tools
-            .dispatch(agl_tools::SKILL_STATUS_TOOL_ID, json!({}))
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::SKILL_STATUS_TOOL_ID).unwrap(),
+                json!({}),
+            )
             .unwrap();
         let lock = tools
-            .dispatch(agl_tools::SKILL_LOCK_TOOL_ID, json!({"dry_run": true}))
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::SKILL_LOCK_TOOL_ID).unwrap(),
+                json!({"dry_run": true}),
+            )
             .unwrap();
 
-        assert!(status.contains("tool=skill.status"));
-        assert!(status.contains("diagnostics="));
-        assert!(status.contains("diagnostic severity=error"));
-        assert!(status.contains("errors="));
-        assert!(lock.contains("tool=skill.lock"));
-        assert!(lock.contains("dry_run=true"));
+        assert!(status.data["report"]["diagnostics"].is_array());
+        assert!(status.data["report"]["errors"].is_array());
+        assert_eq!(lock.data["report"]["dry_run"], true);
+        assert!(lock.data["report"]["errors"].is_array());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_argument_dtos_reject_unknown_fields_in_handler_too() {
+        let root = temp_root("unknown");
+        std::fs::create_dir_all(&root).unwrap();
+        let tools = SkillTools::new(&root, root.join("skill-trust.toml"), "test");
+        let error = tools
+            .dispatch_action(
+                &CapabilityId::new(agl_tools::SKILL_LIST_TOOL_ID).unwrap(),
+                json!({"unknown": true}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("arguments are invalid"));
         let _ = std::fs::remove_dir_all(root);
     }
 

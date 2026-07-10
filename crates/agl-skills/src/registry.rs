@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use agl_tools::{HookId, SkillId, ToolCatalog, ToolCatalogError, ToolId};
+use agl_capabilities::{CapabilityId, HookId, SkillId};
+use agl_tools::{ToolCatalog, ToolCatalogError};
 
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
@@ -61,9 +62,9 @@ pub struct SkillRegistry {
     skill_index: BTreeMap<SkillId, usize>,
     pack_index: BTreeMap<String, Vec<usize>>,
     hook_index: BTreeMap<HookId, Vec<usize>>,
-    tool_index: BTreeMap<ToolId, Vec<usize>>,
-    requestable_tool_index: BTreeMap<ToolId, Vec<usize>>,
-    denied_tool_index: BTreeMap<ToolId, Vec<usize>>,
+    tool_index: BTreeMap<CapabilityId, Vec<usize>>,
+    requestable_tool_index: BTreeMap<CapabilityId, Vec<usize>>,
+    denied_tool_index: BTreeMap<CapabilityId, Vec<usize>>,
 }
 
 pub fn builtin_registry() -> Result<SkillRegistry, SkillRegistryError> {
@@ -145,7 +146,7 @@ impl SkillRegistry {
             .map(|index| &self.skills[*index])
     }
 
-    pub fn allowing_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+    pub fn allowing_tool(&self, tool_id: &CapabilityId) -> impl Iterator<Item = &RegisteredSkill> {
         self.tool_index
             .get(tool_id)
             .into_iter()
@@ -153,7 +154,10 @@ impl SkillRegistry {
             .map(|index| &self.skills[*index])
     }
 
-    pub fn requesting_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+    pub fn requesting_tool(
+        &self,
+        tool_id: &CapabilityId,
+    ) -> impl Iterator<Item = &RegisteredSkill> {
         self.requestable_tool_index
             .get(tool_id)
             .into_iter()
@@ -161,7 +165,7 @@ impl SkillRegistry {
             .map(|index| &self.skills[*index])
     }
 
-    pub fn denying_tool(&self, tool_id: &ToolId) -> impl Iterator<Item = &RegisteredSkill> {
+    pub fn denying_tool(&self, tool_id: &CapabilityId) -> impl Iterator<Item = &RegisteredSkill> {
         self.denied_tool_index
             .get(tool_id)
             .into_iter()
@@ -222,7 +226,7 @@ impl SkillRegistry {
             .harness
             .allowed_tools
             .iter()
-            .filter(|tool| tool_catalog.tool(tool).is_none())
+            .filter(|tool| tool_catalog.action(tool).is_none())
             .cloned()
             .collect::<Vec<_>>();
         if missing.is_empty() {
@@ -256,7 +260,7 @@ pub enum SkillRegistryError {
     },
     MissingAllowedTools {
         id: String,
-        tools: Vec<ToolId>,
+        tools: Vec<CapabilityId>,
     },
     ToolCatalog(ToolCatalogError),
 }
@@ -282,7 +286,7 @@ impl std::fmt::Display for SkillRegistryError {
             Self::MissingAllowedTools { id, tools } => {
                 let tools = tools
                     .iter()
-                    .map(ToolId::as_str)
+                    .map(CapabilityId::as_str)
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "skill `{id}` is missing allowed tools: {tools}")
@@ -296,10 +300,10 @@ impl std::error::Error for SkillRegistryError {}
 
 #[cfg(test)]
 mod tests {
-    use agl_tools::{
-        HookDeclaration, HookEvent, ToolCatalog, ToolProviderDeclaration, ToolProviderId,
-        ToolProviderTrust,
+    use agl_capabilities::{
+        HookDeclaration, HookEvent, ProviderDeclaration, ProviderId, ProviderTrust,
     };
+    use agl_tools::ToolCatalog;
 
     use super::*;
 
@@ -337,7 +341,7 @@ mod tests {
     #[test]
     fn registry_indexes_allowed_tools() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let tool_id = ToolId::new("fs.read").unwrap();
+        let tool_id = CapabilityId::new("fs.read").unwrap();
 
         let skills = registry
             .allowing_tool(&tool_id)
@@ -350,8 +354,8 @@ mod tests {
     #[test]
     fn minimal_builtin_registry_has_no_requestable_or_denied_tools() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let cron_add = ToolId::new("cron.add").unwrap();
-        let matrix_deliver = ToolId::new("matrix.outbox.deliver").unwrap();
+        let cron_add = CapabilityId::new("cron.add").unwrap();
+        let matrix_deliver = CapabilityId::new("matrix.outbox.deliver").unwrap();
 
         assert!(
             registry
@@ -447,7 +451,7 @@ mod tests {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut extensions = ToolCatalog::new();
         extensions
-            .register(core_guard_declaration().with_trust(ToolProviderTrust::Revoked))
+            .register(core_guard_declaration().with_trust(ProviderTrust::Revoked))
             .unwrap();
 
         let err = registry
@@ -480,36 +484,32 @@ mod tests {
             SkillRegistryError::MissingAllowedTools {
                 id: "skill".to_string(),
                 tools: vec![
-                    ToolId::new("fs.edit").unwrap(),
-                    ToolId::new("fs.list").unwrap(),
-                    ToolId::new("fs.read").unwrap(),
-                    ToolId::new("fs.search").unwrap(),
+                    CapabilityId::new("fs.edit").unwrap(),
+                    CapabilityId::new("fs.list").unwrap(),
+                    CapabilityId::new("fs.read").unwrap(),
+                    CapabilityId::new("fs.search").unwrap(),
                 ],
             }
         );
     }
 
-    fn core_guard_declaration() -> ToolProviderDeclaration {
-        ToolProviderDeclaration::new(
-            ToolProviderId::new("core-guards").unwrap(),
-            "Core Guards",
-            "1",
-        )
-        .unwrap()
-        .with_hook(HookDeclaration {
-            id: HookId::new("repo_path.validate").unwrap(),
-            event: HookEvent::ArtifactWrite,
-            required: true,
-        })
-        .with_hook(HookDeclaration {
-            id: HookId::new("secret_scan.validate").unwrap(),
-            event: HookEvent::ArtifactWrite,
-            required: true,
-        })
-        .with_hook(HookDeclaration {
-            id: HookId::new("skill_manifest.validate").unwrap(),
-            event: HookEvent::ArtifactWrite,
-            required: true,
-        })
+    fn core_guard_declaration() -> ProviderDeclaration {
+        ProviderDeclaration::builtin(ProviderId::new("core-guards").unwrap(), "Core Guards", "1")
+            .unwrap()
+            .with_hook(HookDeclaration {
+                id: HookId::new("repo_path.validate").unwrap(),
+                event: HookEvent::ArtifactWrite,
+                required: true,
+            })
+            .with_hook(HookDeclaration {
+                id: HookId::new("secret_scan.validate").unwrap(),
+                event: HookEvent::ArtifactWrite,
+                required: true,
+            })
+            .with_hook(HookDeclaration {
+                id: HookId::new("skill_manifest.validate").unwrap(),
+                event: HookEvent::ArtifactWrite,
+                required: true,
+            })
     }
 }

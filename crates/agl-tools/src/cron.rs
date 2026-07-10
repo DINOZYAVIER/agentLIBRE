@@ -1,16 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_capabilities::{ActionHandler, ActionHandlerError, ActionInvocation, ActionResult};
 use agl_cron::{
     CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun, CronRunAdmission, CronRunStatus,
     CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET, validate_job_draft,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::{ToolHandler, ToolInput, ToolOutput, parse_tool_args as parse_args};
+use crate::parse_action_args as parse_args;
 
 mod declarations;
 
@@ -44,7 +46,7 @@ impl CronTools {
         }
     }
 
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
+    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
             CRON_LIST_TOOL_ID => self.list(arguments),
             CRON_SHOW_TOOL_ID => self.show(arguments),
@@ -61,105 +63,130 @@ impl CronTools {
         }
     }
 
-    fn list(&self, arguments: Value) -> Result<String> {
+    fn list(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(CRON_LIST_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let cron = CronRepository::new(&store);
         let jobs = cron.list_jobs(args.include_deleted.unwrap_or(false))?;
-        Ok(render_jobs(CRON_LIST_TOOL_ID, &jobs))
+        let jobs = jobs.iter().map(job_value).collect::<Vec<_>>();
+        Ok(json!({
+            "tool": CRON_LIST_TOOL_ID,
+            "status": "ok",
+            "job_count": jobs.len(),
+            "jobs": jobs,
+        }))
     }
 
-    fn show(&self, arguments: Value) -> Result<String> {
+    fn show(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(CRON_SHOW_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let cron = CronRepository::new(&store);
         let job = cron
             .job(&args.id)?
             .with_context(|| format!("cron job not found: {}", args.id))?;
-        Ok(render_jobs(CRON_SHOW_TOOL_ID, &[job]))
+        Ok(json!({
+            "tool": CRON_SHOW_TOOL_ID,
+            "status": "ok",
+            "job": job_value(&job),
+        }))
     }
 
-    fn history(&self, arguments: Value) -> Result<String> {
+    fn history(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<HistoryArgs>(CRON_HISTORY_TOOL_ID, arguments)?;
         let limit = args
             .limit
             .unwrap_or(DEFAULT_HISTORY_LIMIT)
             .min(MAX_HISTORY_LIMIT);
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let cron = CronRepository::new(&store);
         let mut runs = cron.history(&args.job_id)?;
         runs.truncate(limit);
-        Ok(render_runs(CRON_HISTORY_TOOL_ID, &runs))
+        let runs = runs.iter().map(run_value).collect::<Vec<_>>();
+        Ok(json!({
+            "tool": CRON_HISTORY_TOOL_ID,
+            "status": "ok",
+            "job_id": args.job_id,
+            "run_count": runs.len(),
+            "runs": runs,
+        }))
     }
 
-    fn preflight(&self, arguments: Value) -> Result<String> {
+    fn preflight(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<JobDraftArgs>(CRON_PREFLIGHT_TOOL_ID, arguments)?;
         let draft = args.into_draft()?;
         validate_job_draft(&draft)?;
-        Ok(format!(
-            "tool=cron.preflight\nstatus=ok\ntarget_kind={}\ntarget_ref={}\nschedule_expr={}\ntimezone={}",
-            draft.target_kind.as_str(),
-            draft.target_ref,
-            draft.schedule_expr,
-            draft.timezone
-        ))
+        Ok(json!({
+            "tool": CRON_PREFLIGHT_TOOL_ID,
+            "status": "ok",
+            "target_kind": draft.target_kind.as_str(),
+            "target_ref": draft.target_ref,
+            "schedule_expr": draft.schedule_expr,
+            "timezone": draft.timezone,
+        }))
     }
 
-    fn add(&self, arguments: Value) -> Result<String> {
+    fn add(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<JobDraftArgs>(CRON_ADD_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let job = cron.add_job(args.into_draft()?)?;
-        Ok(format!(
-            "tool=cron.add\njob_id={}\nstatus=created\nname={}",
-            job.id, job.name
-        ))
+        Ok(json!({
+            "tool": CRON_ADD_TOOL_ID,
+            "status": "created",
+            "job_id": job.id,
+            "job": job_value(&job),
+        }))
     }
 
-    fn update(&self, arguments: Value) -> Result<String> {
+    fn update(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<UpdateArgs>(CRON_UPDATE_TOOL_ID, arguments)?;
         let id = args.id.clone();
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let job = cron.update_job(&id, args.into_update()?)?;
-        Ok(format!(
-            "tool=cron.update\njob_id={}\nstatus=updated\nname={}",
-            job.id, job.name
-        ))
+        Ok(json!({
+            "tool": CRON_UPDATE_TOOL_ID,
+            "status": "updated",
+            "job_id": job.id,
+            "job": job_value(&job),
+        }))
     }
 
-    fn delete(&self, arguments: Value) -> Result<String> {
+    fn delete(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<IdArgs>(CRON_DELETE_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let job = cron.delete_job(&args.id)?;
-        Ok(format!(
-            "tool=cron.delete\njob_id={}\ndeleted={}\nstatus=deleted",
-            job.id,
-            job.deleted_at.is_some()
-        ))
+        Ok(json!({
+            "tool": CRON_DELETE_TOOL_ID,
+            "status": "deleted",
+            "job_id": job.id,
+            "deleted": job.deleted_at.is_some(),
+        }))
     }
 
-    fn set_enabled(&self, arguments: Value, enabled: bool) -> Result<String> {
+    fn set_enabled(&self, arguments: Value, enabled: bool) -> Result<Value> {
         let tool_id = if enabled {
             CRON_ENABLE_TOOL_ID
         } else {
             CRON_DISABLE_TOOL_ID
         };
         let args = parse_args::<IdArgs>(tool_id, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let job = cron.set_enabled(&args.id, enabled)?;
-        Ok(format!(
-            "tool={tool_id}\njob_id={}\nenabled={}\nstatus=updated",
-            job.id, job.enabled
-        ))
+        Ok(json!({
+            "tool": tool_id,
+            "status": "updated",
+            "job_id": job.id,
+            "enabled": job.enabled,
+        }))
     }
 
-    fn run(&self, arguments: Value) -> Result<String> {
+    fn run(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RunArgs>(CRON_RUN_TOOL_ID, arguments)?;
-        let status = parse_run_status(args.status.as_deref().unwrap_or("succeeded"))?;
-        let store = self.open_store()?;
+        let status = args.status.unwrap_or(CronRunStatusArg::Succeeded).into();
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let (run, outcome) = if let Some(scheduled_for) = args.scheduled_for {
             cron.record_run_for(
@@ -184,11 +211,11 @@ impl CronTools {
         ))
     }
 
-    fn tick(&self, arguments: Value) -> Result<String> {
+    fn tick(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<TickArgs>(CRON_TICK_TOOL_ID, arguments)?;
         let unix_seconds = args.unix_seconds.unwrap_or_else(current_unix_seconds);
         let mock_skill_execution = args.mock_skill_execution.unwrap_or(true);
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let cron = CronRepository::new(&store);
         let due_jobs = cron.due_jobs(unix_seconds)?;
         let mut recorded = Vec::new();
@@ -226,92 +253,74 @@ impl CronTools {
             }
         }
 
-        let mut output = format!(
-            "tool=cron.tick\nunix_seconds={unix_seconds}\nrecorded_runs={}\nreplayed_runs={replays}\npending_runs={pending}\nnotifications={notifications}\n---",
-            recorded.len()
-        );
-        for run in recorded {
-            output.push('\n');
-            output.push_str(&format!(
-                "run id={} job_id={} scheduled_for={} status={}",
-                run.id,
-                run.job_id,
-                run.scheduled_for,
-                run.status.as_str()
-            ));
-        }
-        Ok(output)
+        let runs = recorded.iter().map(run_value).collect::<Vec<_>>();
+        Ok(json!({
+            "tool": CRON_TICK_TOOL_ID,
+            "status": "ok",
+            "unix_seconds": unix_seconds,
+            "recorded_run_count": runs.len(),
+            "replayed_run_count": replays,
+            "pending_run_count": pending,
+            "notification_count": notifications,
+            "runs": runs,
+        }))
     }
 
-    fn open_store(&self) -> Result<AglStore> {
-        AglStore::open_at(&self.store_root)
+    fn open_store_read_only(&self) -> Result<AglStore> {
+        AglStore::open_current_read_only_at(&self.store_root)
+            .with_context(|| format!("failed to open cron store {}", self.store_root.display()))
+    }
+
+    fn open_store_writable(&self) -> Result<AglStore> {
+        AglStore::open_current_at(&self.store_root)
             .with_context(|| format!("failed to open cron store {}", self.store_root.display()))
     }
 }
 
-impl ToolHandler for CronTools {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl ActionHandler for CronTools {
+    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+        self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
+            .map(ActionResult::new)
+            .map_err(Into::into)
     }
 }
 
-fn parse_target_kind(value: &str) -> Result<CronTargetKind> {
-    match value {
-        "builtin" => Ok(CronTargetKind::Builtin),
-        "skill" => Ok(CronTargetKind::Skill),
-        _ => anyhow::bail!("unknown cron target kind `{value}`"),
-    }
+fn job_value(job: &CronJob) -> Value {
+    json!({
+        "id": job.id,
+        "name": job.name,
+        "enabled": job.enabled,
+        "target_kind": job.target_kind.as_str(),
+        "target_ref": job.target_ref,
+        "schedule_expr": job.schedule_expr,
+        "timezone": job.timezone,
+        "notify_ref": job.notify_ref,
+        "prompt": job.prompt,
+        "input": job.input,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "deleted_at": job.deleted_at,
+    })
 }
 
-fn parse_run_status(value: &str) -> Result<CronRunStatus> {
-    match value {
-        "succeeded" => Ok(CronRunStatus::Succeeded),
-        "failed" => Ok(CronRunStatus::Failed),
-        "skipped" => Ok(CronRunStatus::Skipped),
-        _ => anyhow::bail!("unknown cron run status `{value}`"),
-    }
-}
-
-fn render_jobs(tool_id: &str, jobs: &[CronJob]) -> String {
-    let mut output = format!("tool={tool_id}\njobs={}\n---", jobs.len());
-    for job in jobs {
-        output.push('\n');
-        output.push_str(&format!(
-            "job id={} name={} enabled={} target={}:{} schedule={} timezone={} deleted={}",
-            job.id,
-            job.name,
-            job.enabled,
-            job.target_kind.as_str(),
-            job.target_ref,
-            job.schedule_expr,
-            job.timezone,
-            job.deleted_at.is_some()
-        ));
-    }
-    output
-}
-
-fn render_runs(tool_id: &str, runs: &[CronRun]) -> String {
-    let mut output = format!("tool={tool_id}\nruns={}\n---", runs.len());
-    for run in runs {
-        output.push('\n');
-        output.push_str(&format!(
-            "run id={} job_id={} scheduled_for={} status={}",
-            run.id,
-            run.job_id,
-            run.scheduled_for,
-            run.status.as_str()
-        ));
-    }
-    output
+fn run_value(run: &CronRun) -> Value {
+    json!({
+        "id": run.id,
+        "job_id": run.job_id,
+        "scheduled_for": run.scheduled_for,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "status": run.status.as_str(),
+        "result_ref": run.result_ref,
+        "error": run.error,
+    })
 }
 
 fn render_run_with_idempotency(
     tool_id: &str,
     run: &CronRun,
     outcome: &IdempotencyOutcome,
-) -> String {
+) -> Value {
     let (admission, namespace, key, initial_status) = match outcome {
         IdempotencyOutcome::Inserted(record) => (
             "inserted",
@@ -326,13 +335,18 @@ fn render_run_with_idempotency(
             record.status.as_str(),
         ),
     };
-    format!(
-        "tool={tool_id}\nrun_id={}\njob_id={}\nscheduled_for={}\nstatus={}\nidempotency.admission={admission}\nidempotency.namespace={namespace}\nidempotency.key={key}\nidempotency.initial_status={initial_status}",
-        run.id,
-        run.job_id,
-        run.scheduled_for,
-        run.status.as_str()
-    )
+    json!({
+        "tool": tool_id,
+        "status": run.status.as_str(),
+        "run_id": run.id,
+        "run": run_value(run),
+        "idempotency": {
+            "admission": admission,
+            "namespace": namespace,
+            "key": key,
+            "initial_status": initial_status,
+        },
+    })
 }
 
 fn execute_tick_target(
@@ -397,30 +411,30 @@ fn current_unix_seconds() -> u64 {
         .as_secs()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListArgs {
     include_deleted: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct IdArgs {
     id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct HistoryArgs {
     job_id: String,
     limit: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct JobDraftArgs {
     name: String,
-    target_kind: String,
+    target_kind: CronTargetKindArg,
     target_ref: String,
     schedule_expr: String,
     enabled: Option<bool>,
@@ -434,7 +448,7 @@ impl JobDraftArgs {
     fn into_draft(self) -> Result<CronJobDraft> {
         let mut draft = CronJobDraft::new(
             self.name,
-            parse_target_kind(&self.target_kind)?,
+            self.target_kind.into(),
             self.target_ref,
             self.schedule_expr,
         );
@@ -451,13 +465,13 @@ impl JobDraftArgs {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateArgs {
     id: String,
     name: Option<String>,
     enabled: Option<bool>,
-    target_kind: Option<String>,
+    target_kind: Option<CronTargetKindArg>,
     target_ref: Option<String>,
     schedule_expr: Option<String>,
     timezone: Option<String>,
@@ -474,11 +488,7 @@ impl UpdateArgs {
         Ok(CronJobUpdate {
             name: self.name,
             enabled: self.enabled,
-            target_kind: self
-                .target_kind
-                .as_deref()
-                .map(parse_target_kind)
-                .transpose()?,
+            target_kind: self.target_kind.map(Into::into),
             target_ref: self.target_ref,
             schedule_expr: self.schedule_expr,
             timezone: self.timezone,
@@ -497,21 +507,55 @@ fn optional_update(value: Option<String>, clear: Option<bool>) -> Option<Option<
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RunArgs {
     job_id: String,
     scheduled_for: Option<String>,
-    status: Option<String>,
+    status: Option<CronRunStatusArg>,
     result_ref: Option<String>,
     error: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TickArgs {
     unix_seconds: Option<u64>,
     mock_skill_execution: Option<bool>,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CronTargetKindArg {
+    Builtin,
+    Skill,
+}
+
+impl From<CronTargetKindArg> for CronTargetKind {
+    fn from(value: CronTargetKindArg) -> Self {
+        match value {
+            CronTargetKindArg::Builtin => Self::Builtin,
+            CronTargetKindArg::Skill => Self::Skill,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CronRunStatusArg {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+impl From<CronRunStatusArg> for CronRunStatus {
+    fn from(value: CronRunStatusArg) -> Self {
+        match value {
+            CronRunStatusArg::Succeeded => Self::Succeeded,
+            CronRunStatusArg::Failed => Self::Failed,
+            CronRunStatusArg::Skipped => Self::Skipped,
+        }
+    }
 }
 
 #[cfg(test)]

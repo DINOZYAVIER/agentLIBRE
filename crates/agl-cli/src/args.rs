@@ -1,8 +1,8 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use agl_capabilities::SkillId;
 use agl_ids::SessionId;
-use agl_tools::SkillId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};

@@ -1,4 +1,5 @@
-use agl_tools::{HookId, SkillId, ToolCatalog, ToolId};
+use agl_capabilities::{CapabilityId, HookId, SkillId, StateEffect};
+use agl_tools::ToolCatalog;
 use serde::Serialize;
 
 use crate::{SkillRegistry, SkillRegistryError};
@@ -169,19 +170,19 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
         allowed_tools: harness
             .allowed_tools
             .iter()
-            .map(ToolId::as_str)
+            .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         requestable_tools: harness
             .requestable_tools
             .iter()
-            .map(ToolId::as_str)
+            .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         denied_tools: harness
             .denied_tools
             .iter()
-            .map(ToolId::as_str)
+            .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         permission_request_templates: harness
@@ -192,7 +193,7 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
                 tools: template
                     .tools
                     .iter()
-                    .map(ToolId::as_str)
+                    .map(CapabilityId::as_str)
                     .map(ToOwned::to_owned)
                     .collect(),
                 max_operation_kind: template
@@ -234,19 +235,19 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
     SkillContextBlock { content, evidence }
 }
 
-fn render_tools(tools: &[ToolId]) -> String {
+fn render_tools(tools: &[CapabilityId]) -> String {
     if tools.is_empty() {
         "[]".to_string()
     } else {
         tools
             .iter()
-            .map(ToolId::as_str)
+            .map(CapabilityId::as_str)
             .collect::<Vec<_>>()
             .join(", ")
     }
 }
 
-fn state_effect_as_str(effect: agl_tools::ToolStateEffect) -> &'static str {
+fn state_effect_as_str(effect: StateEffect) -> &'static str {
     effect.as_str()
 }
 
@@ -260,7 +261,8 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use agl_tools::{ToolCatalog, ToolOperationKind, ToolStateEffect};
+    use agl_capabilities::OperationKind;
+    use agl_tools::ToolCatalog;
 
     use super::*;
     use crate::{
@@ -394,8 +396,8 @@ mod tests {
                 permission_request_templates: vec![SkillPermissionRequestTemplate {
                     id: "schedule-matrix-cron".to_string(),
                     tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
-                    max_operation_kind: Some(ToolOperationKind::Write),
-                    state_effects: vec![ToolStateEffect::StoreCron, ToolStateEffect::MatrixOutbox],
+                    max_operation_kind: Some(OperationKind::Write),
+                    state_effects: vec![StateEffect::StoreCron, StateEffect::MatrixOutbox],
                     default_duration: "one_turn".to_string(),
                     reason_template: "Schedule a Matrix notification cron job.".to_string(),
                 }],
@@ -416,10 +418,10 @@ mod tests {
         registry
     }
 
-    fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<ToolId> {
+    fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<CapabilityId> {
         values
             .into_iter()
-            .map(|value| ToolId::new(value).unwrap())
+            .map(|value| CapabilityId::new(value).unwrap())
             .collect()
     }
 }

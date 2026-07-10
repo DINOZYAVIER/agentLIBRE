@@ -1,436 +1,278 @@
+use std::collections::BTreeSet;
+
+use agl_capabilities::{CapabilityId, OperationKind, StateEffect};
+
 use super::*;
 
 #[test]
-fn ids_accept_namespaced_values() {
-    assert_eq!(
-        HookId::new("task_spec.validate").unwrap().as_str(),
-        "task_spec.validate"
+fn read_actions_do_not_create_or_migrate_an_absent_store() {
+    let root = test_support::temp_root("cron-read");
+    assert!(
+        CronTools::new(&root)
+            .dispatch(CRON_LIST_TOOL_ID, serde_json::json!({}))
+            .is_err()
     );
-    assert_eq!(SkillId::new("task-spec").unwrap().as_str(), "task-spec");
-}
+    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
 
-#[test]
-fn ids_reject_invalid_values() {
-    assert!(HookId::new("").is_err());
-    assert!(HookId::new("TaskSpec.Validate").is_err());
-    assert!(HookId::new("a:b:c").is_err());
-    assert!(HookId::new(":bad").is_err());
-}
-
-#[test]
-fn id_deserialization_uses_validation() {
-    let hook: HookId = serde_json::from_str("\"task_spec.validate\"").unwrap();
-
-    assert_eq!(hook.as_str(), "task_spec.validate");
-    assert!(serde_json::from_str::<HookId>("\"TaskSpec.Validate\"").is_err());
-}
-
-#[test]
-fn declaration_rejects_duplicate_hooks() {
-    let declaration = ToolProviderDeclaration::new(
-        ToolProviderId::new("core-guards").unwrap(),
-        "Core Guards",
-        "1",
-    )
-    .unwrap()
-    .with_hook(HookDeclaration {
-        id: HookId::new("json.validate").unwrap(),
-        event: HookEvent::ModelResponse,
-        required: true,
-    })
-    .with_hook(HookDeclaration {
-        id: HookId::new("json.validate").unwrap(),
-        event: HookEvent::ArtifactWrite,
-        required: true,
-    });
-
-    assert_eq!(
-        declaration.validate().unwrap_err(),
-        ToolProviderDeclarationError::DuplicateId {
-            kind: "hook",
-            id: "json.validate".to_string(),
-        }
+    let root = test_support::temp_root("memory-read");
+    assert!(
+        MemoryTools::new(&root)
+            .dispatch(MEMORY_LIST_TOOL_ID, serde_json::json!({}))
+            .is_err()
     );
+    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
+
+    let root = test_support::temp_root("notes-read");
+    assert!(
+        NotesTools::new(&root)
+            .dispatch(NOTES_SEARCH_TOOL_ID, serde_json::json!({"query": "x"}))
+            .is_err()
+    );
+    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
+
+    let root = test_support::temp_root("permissions-read");
+    assert!(
+        PermissionTools::new(&root)
+            .dispatch(PERMISSIONS_STATUS_TOOL_ID, serde_json::json!({}))
+            .is_err()
+    );
+    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
+
+    let root = test_support::temp_root("matrix-read");
+    assert!(
+        MatrixTools::new(&root)
+            .dispatch(MATRIX_OUTBOX_STATUS_TOOL_ID, serde_json::json!({}))
+            .is_err()
+    );
+    assert!(!root.join(agl_store::DEFAULT_DATABASE_FILE).exists());
 }
 
 #[test]
-fn builtin_tools_declare_operation_kinds_and_state_effects() {
+fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
     let catalog = builtin_tool_catalog().unwrap();
+    let actions = catalog
+        .providers()
+        .iter()
+        .flat_map(|provider| provider.actions.iter())
+        .collect::<Vec<_>>();
 
-    assert_tool_metadata(
-        FS_READ_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        FS_LIST_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        FS_SEARCH_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        FS_EDIT_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::RepoFiles],
-    );
-    assert_tool_metadata(
-        MEMORY_SEARCH_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        MEMORY_LIST_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        MEMORY_SUGGEST_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreMemorySuggestions],
-    );
-    assert_tool_metadata(
-        MEMORY_ADD_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreMemoryEntries],
-    );
-    assert_tool_metadata(
-        MEMORY_APPROVE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[
-            ToolStateEffect::StoreMemorySuggestions,
-            ToolStateEffect::StoreMemoryEntries,
-        ],
-    );
-    assert_tool_metadata(
-        MEMORY_REJECT_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StoreMemorySuggestions],
-    );
-    assert_tool_metadata(
-        NOTES_ADD_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreNotes],
-    );
-    assert_tool_metadata(
-        NOTES_SEARCH_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        NOTES_SHOW_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        NOTES_UPDATE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreNotes],
-    );
-    assert_tool_metadata(
-        NOTES_LINK_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreNoteLinks],
-    );
-    assert_tool_metadata(
-        NOTES_DELETE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreNotes],
-    );
-    assert_tool_metadata(
-        NOTES_REMEMBER_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[
-            ToolStateEffect::StoreMemoryEntries,
-            ToolStateEffect::StoreNoteLinks,
-        ],
-    );
-    assert_tool_metadata(
-        CRON_LIST_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        CRON_SHOW_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        CRON_HISTORY_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        CRON_PREFLIGHT_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        CRON_ADD_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_UPDATE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_DELETE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_ENABLE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_DISABLE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_RUN_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Execute,
-        &[ToolStateEffect::StoreCron],
-    );
-    assert_tool_metadata(
-        CRON_TICK_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Execute,
-        &[ToolStateEffect::StoreCron, ToolStateEffect::MatrixOutbox],
-    );
-    assert_tool_metadata(
-        MATRIX_OUTBOX_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Write,
-        &[ToolStateEffect::MatrixOutbox],
-    );
-    assert_tool_metadata(
-        MATRIX_OUTBOX_DELIVER_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Execute,
-        &[ToolStateEffect::MatrixOutbox],
-    );
-    assert_tool_metadata(
-        STORE_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        STORE_EXPORT_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        STORE_MIGRATE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Admin,
-        &[ToolStateEffect::StoreSchema],
-    );
-    assert_tool_metadata(
-        REPO_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        REPO_EXPORT_PROFILE_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        REPO_HOOKS_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        REPO_INIT_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Admin,
-        &[ToolStateEffect::RepoWorkspace],
-    );
-    assert_tool_metadata(
-        REPO_IMPORT_PROFILE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Admin,
-        &[ToolStateEffect::RepoWorkspace],
-    );
-    assert_tool_metadata(
-        REPO_INSTALL_HOOKS_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Admin,
-        &[ToolStateEffect::RepoHooks],
-    );
-    assert_tool_metadata(
-        SKILL_LIST_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        SKILL_INSPECT_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        SKILL_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        SKILL_VERIFY_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        SKILL_LOCK_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Admin,
-        &[ToolStateEffect::RepoWorkspace],
-    );
-    assert_tool_metadata(
-        SKILL_TRUST_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::SkillTrust],
-    );
-    assert_tool_metadata(
-        SKILL_REVOKE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::SkillTrust],
-    );
-    assert_tool_metadata(
-        PERMISSIONS_STATUS_TOOL_ID,
-        &catalog,
-        ToolCapability::Read,
-        ToolOperationKind::Read,
-        &[],
-    );
-    assert_tool_metadata(
-        PERMISSIONS_REQUEST_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionRequests],
-    );
-    assert_tool_metadata(
-        PERMISSIONS_GRANT_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionGrants],
-    );
-    assert_tool_metadata(
-        PERMISSIONS_REVOKE_TOOL_ID,
-        &catalog,
-        ToolCapability::Write,
-        ToolOperationKind::Approve,
-        &[ToolStateEffect::StorePermissionGrants],
-    );
+    assert_eq!(actions.len(), 51);
+    for provider in catalog.providers() {
+        provider.validate().unwrap();
+        for action in &provider.actions {
+            let schema = action.compile_schema().unwrap();
+            assert!(
+                schema
+                    .validate(&serde_json::json!({"__unknown": true}))
+                    .is_err(),
+                "{} must reject unknown top-level fields",
+                action.id
+            );
+        }
+    }
 }
 
-fn assert_tool_metadata(
-    tool_id: &str,
+#[test]
+fn builtin_actions_declare_operation_kinds_and_state_effects() {
+    let catalog = builtin_tool_catalog().unwrap();
+    let expected = [
+        (FS_READ_TOOL_ID, OperationKind::Read, &[][..]),
+        (FS_LIST_TOOL_ID, OperationKind::Read, &[]),
+        (FS_SEARCH_TOOL_ID, OperationKind::Read, &[]),
+        (
+            FS_EDIT_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::RepoFiles],
+        ),
+        (MEMORY_SEARCH_TOOL_ID, OperationKind::Read, &[]),
+        (MEMORY_LIST_TOOL_ID, OperationKind::Read, &[]),
+        (
+            MEMORY_SUGGEST_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreMemorySuggestions],
+        ),
+        (
+            MEMORY_ADD_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreMemoryEntries],
+        ),
+        (
+            MEMORY_APPROVE_TOOL_ID,
+            OperationKind::Approve,
+            &[
+                StateEffect::StoreMemoryEntries,
+                StateEffect::StoreMemorySuggestions,
+            ],
+        ),
+        (
+            MEMORY_REJECT_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::StoreMemorySuggestions],
+        ),
+        (
+            NOTES_ADD_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreNotes],
+        ),
+        (NOTES_SEARCH_TOOL_ID, OperationKind::Read, &[]),
+        (NOTES_SHOW_TOOL_ID, OperationKind::Read, &[]),
+        (
+            NOTES_UPDATE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreNotes],
+        ),
+        (
+            NOTES_LINK_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreNoteLinks],
+        ),
+        (
+            NOTES_DELETE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreNotes],
+        ),
+        (
+            NOTES_REMEMBER_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::StoreMemoryEntries, StateEffect::StoreNoteLinks],
+        ),
+        (CRON_LIST_TOOL_ID, OperationKind::Read, &[]),
+        (CRON_SHOW_TOOL_ID, OperationKind::Read, &[]),
+        (CRON_HISTORY_TOOL_ID, OperationKind::Read, &[]),
+        (CRON_PREFLIGHT_TOOL_ID, OperationKind::Read, &[]),
+        (
+            CRON_ADD_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreCron],
+        ),
+        (
+            CRON_UPDATE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreCron],
+        ),
+        (
+            CRON_DELETE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreCron],
+        ),
+        (
+            CRON_ENABLE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreCron],
+        ),
+        (
+            CRON_DISABLE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::StoreCron],
+        ),
+        (
+            CRON_RUN_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::StoreCron, StateEffect::StoreIdempotency],
+        ),
+        (
+            CRON_TICK_TOOL_ID,
+            OperationKind::Execute,
+            &[
+                StateEffect::StoreCron,
+                StateEffect::StoreIdempotency,
+                StateEffect::MatrixOutbox,
+            ],
+        ),
+        (MATRIX_OUTBOX_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (
+            MATRIX_OUTBOX_ENQUEUE_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::MatrixOutbox],
+        ),
+        (
+            MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::MatrixOutbox],
+        ),
+        (STORE_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (STORE_EXPORT_TOOL_ID, OperationKind::Read, &[]),
+        (
+            STORE_MIGRATE_TOOL_ID,
+            OperationKind::Admin,
+            &[StateEffect::StoreSchema],
+        ),
+        (REPO_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (REPO_EXPORT_PROFILE_TOOL_ID, OperationKind::Read, &[]),
+        (REPO_HOOKS_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (
+            REPO_INIT_TOOL_ID,
+            OperationKind::Admin,
+            &[StateEffect::RepoWorkspace],
+        ),
+        (
+            REPO_IMPORT_PROFILE_TOOL_ID,
+            OperationKind::Admin,
+            &[StateEffect::RepoWorkspace],
+        ),
+        (
+            REPO_INSTALL_HOOKS_TOOL_ID,
+            OperationKind::Admin,
+            &[StateEffect::RepoHooks],
+        ),
+        (SKILL_LIST_TOOL_ID, OperationKind::Read, &[]),
+        (SKILL_INSPECT_TOOL_ID, OperationKind::Read, &[]),
+        (SKILL_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (SKILL_VERIFY_TOOL_ID, OperationKind::Read, &[]),
+        (
+            SKILL_LOCK_TOOL_ID,
+            OperationKind::Admin,
+            &[StateEffect::RepoWorkspace],
+        ),
+        (
+            SKILL_TRUST_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::SkillTrust],
+        ),
+        (
+            SKILL_REVOKE_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::SkillTrust],
+        ),
+        (PERMISSIONS_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (
+            PERMISSIONS_REQUEST_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::StorePermissionRequests],
+        ),
+        (
+            PERMISSIONS_GRANT_TOOL_ID,
+            OperationKind::Approve,
+            &[
+                StateEffect::StorePermissionGrants,
+                StateEffect::StorePermissionRequests,
+            ],
+        ),
+        (
+            PERMISSIONS_REVOKE_TOOL_ID,
+            OperationKind::Approve,
+            &[StateEffect::StorePermissionGrants],
+        ),
+    ];
+
+    assert_eq!(expected.len(), 51);
+    for (id, operation_kind, effects) in expected {
+        assert_action_metadata(&catalog, id, operation_kind, effects);
+    }
+}
+
+fn assert_action_metadata(
     catalog: &ToolCatalog,
-    capability: ToolCapability,
-    operation_kind: ToolOperationKind,
-    state_effects: &[ToolStateEffect],
+    id: &str,
+    operation_kind: OperationKind,
+    state_effects: &[StateEffect],
 ) {
-    let tool = catalog.tool(&ToolId::new(tool_id).unwrap()).unwrap();
-    assert_eq!(tool.capability, capability);
-    assert_eq!(tool.operation_kind, operation_kind);
-    assert_eq!(tool.state_effects, state_effects);
+    let id = CapabilityId::new(id).unwrap();
+    let action = catalog.action(&id).unwrap();
+    assert_eq!(action.operation_kind, operation_kind, "{id}");
+    assert_eq!(
+        action.state_effects,
+        state_effects.iter().copied().collect::<BTreeSet<_>>(),
+        "{id}"
+    );
 }

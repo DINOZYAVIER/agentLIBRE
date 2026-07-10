@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use agl_tools::{
-    ToolCatalog, ToolCatalogError, ToolHandler, ToolId, ToolProviderDeclaration, ToolRuntime,
-};
+use agl_capabilities::{ActionHandler, CapabilityId, ProviderDeclaration};
+use agl_tools::{ToolCatalog, ToolCatalogError, ToolRuntime};
 use anyhow::{Context, Result};
 
 pub(crate) struct ChatToolRuntimeConfig<'a> {
@@ -24,6 +23,9 @@ pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
 
 pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<ToolRuntime> {
     let mut runtime = ToolRuntime::new();
+    runtime
+        .register_provider(agl_tools::guards::declaration())
+        .context("failed to register builtin core guard provider")?;
     for declaration in chat_tool_provider_declarations() {
         runtime.register_provider(declaration)?;
     }
@@ -99,7 +101,7 @@ fn register_chat_tool_providers(catalog: &mut ToolCatalog) -> Result<(), ToolCat
     Ok(())
 }
 
-fn chat_tool_provider_declarations() -> Vec<ToolProviderDeclaration> {
+pub(crate) fn chat_tool_provider_declarations() -> Vec<ProviderDeclaration> {
     vec![
         agl_tools::cron::declaration(),
         agl_tools::fs::declaration(),
@@ -120,11 +122,11 @@ fn register_handlers<H>(
     label: &str,
 ) -> Result<()>
 where
-    H: ToolHandler + Clone + 'static,
+    H: ActionHandler + Clone + 'static,
 {
     for tool_id in tool_ids {
         runtime
-            .register_handler(ToolId::new(*tool_id)?, handler.clone())
+            .register_handler(CapabilityId::new(*tool_id)?, handler.clone())
             .with_context(|| format!("failed to register {label} tool handler {tool_id}"))?;
     }
     Ok(())
@@ -212,6 +214,13 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use agl_capabilities::{
+        ActionInvocation, CapabilityPolicyInput, DeclarationDigest, DispatchDenialCode,
+        ToolAccessMode,
+    };
+    use agl_ids::{ExecutionScope, RunId};
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -231,23 +240,122 @@ mod tests {
         let catalog_tools = tool_ids(&catalog);
         let runtime_catalog_tools = tool_ids(runtime.catalog());
         let handler_tools = runtime.handler_ids().cloned().collect::<BTreeSet<_>>();
+        let catalog_providers = provider_digests(&catalog);
+        let runtime_providers = provider_digests(runtime.catalog());
 
         assert_eq!(runtime_catalog_tools, catalog_tools);
         assert_eq!(handler_tools, catalog_tools);
+        assert_eq!(runtime_providers, catalog_providers);
         assert!(
             !catalog_tools
-                .contains(&ToolId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap()),
+                .contains(&CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap()),
             "Matrix delivery is bridge-owned and must stay out of chat runtime"
         );
 
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn tool_ids(catalog: &ToolCatalog) -> BTreeSet<ToolId> {
+    fn provider_digests(
+        catalog: &ToolCatalog,
+    ) -> std::collections::BTreeMap<String, DeclarationDigest> {
         catalog
             .providers()
             .iter()
-            .flat_map(|provider| provider.tools.iter().map(|tool| tool.id.clone()))
+            .map(|provider| (provider.id.as_str().to_owned(), provider.digest()))
+            .collect()
+    }
+
+    #[test]
+    fn forged_hidden_capability_is_denied_before_its_handler_runs() {
+        let root = temp_root("hidden-dispatch");
+        let path = root.join("README.MD");
+        std::fs::write(&path, "old\n").unwrap();
+        let core_tools = agl_tools::CoreTools::new(&root).unwrap();
+        let runtime = test_runtime(&root, &core_tools);
+        let effective = CapabilityPolicyInput::new(
+            runtime.catalog().providers().iter().cloned(),
+            [CapabilityId::new(agl_tools::FS_READ_TOOL_ID).unwrap()],
+            ToolAccessMode::Admin,
+        )
+        .resolve()
+        .unwrap();
+        let capability_id = CapabilityId::new(agl_tools::FS_EDIT_TOOL_ID).unwrap();
+        let provider = runtime
+            .catalog()
+            .provider_for_action(&capability_id)
+            .unwrap();
+        let declaration = provider.action(&capability_id).unwrap();
+        let invocation = ActionInvocation::new(
+            ExecutionScope::builder(RunId::generate()).build().unwrap(),
+            capability_id,
+            provider.id.clone(),
+            declaration.digest(),
+            effective.policy_hash().clone(),
+            json!({"path": "README.MD", "old_text": "old", "new_text": "new"}),
+        );
+
+        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+
+        assert_eq!(
+            error.denial().unwrap().code,
+            DispatchDenialCode::CapabilityNotEffective
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_declaration_snapshot_is_rejected_again_at_chat_dispatch() {
+        let root = temp_root("stale-dispatch");
+        std::fs::write(root.join("README.MD"), "content\n").unwrap();
+        let core_tools = agl_tools::CoreTools::new(&root).unwrap();
+        let runtime = test_runtime(&root, &core_tools);
+        let capability_id = CapabilityId::new(agl_tools::FS_READ_TOOL_ID).unwrap();
+        let effective = CapabilityPolicyInput::new(
+            runtime.catalog().providers().iter().cloned(),
+            [capability_id.clone()],
+            ToolAccessMode::ReadOnly,
+        )
+        .resolve()
+        .unwrap();
+        let provider = runtime
+            .catalog()
+            .provider_for_action(&capability_id)
+            .unwrap();
+        let invocation = ActionInvocation::new(
+            ExecutionScope::builder(RunId::generate()).build().unwrap(),
+            capability_id,
+            provider.id.clone(),
+            DeclarationDigest::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),
+            effective.policy_hash().clone(),
+            json!({"path": "README.MD"}),
+        );
+
+        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+
+        assert_eq!(
+            error.denial().unwrap().code,
+            DispatchDenialCode::StaleDeclaration
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn test_runtime(root: &Path, core_tools: &agl_tools::CoreTools) -> ToolRuntime {
+        chat_tool_runtime(ChatToolRuntimeConfig {
+            core_tools,
+            store_root: &root.join("store"),
+            trust_store_path: &root.join("skill-trust.toml"),
+            workspace_root: root,
+            permission_status: agl_tools::PermissionRuntimeStatus::default(),
+        })
+        .unwrap()
+    }
+
+    fn tool_ids(catalog: &ToolCatalog) -> BTreeSet<CapabilityId> {
+        catalog
+            .providers()
+            .iter()
+            .flat_map(|provider| provider.actions.iter().map(|action| action.id.clone()))
             .collect()
     }
 

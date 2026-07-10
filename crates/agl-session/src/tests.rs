@@ -348,7 +348,7 @@ fn tool_messages_and_session_lifecycle_are_recorded() {
             RuntimeEvent::ToolMessage {
                 message_id: message_id('9'),
                 name: "read_file".to_string(),
-                content: "file content".to_string(),
+                data: serde_json::json!({"text": "file content"}),
             },
         ))
         .unwrap();

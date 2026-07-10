@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use agl_capabilities::SkillId;
 use agl_repo::{DEFAULT_SKILLS_URL, RepoInitOptions, init_repo_workspace};
 
 use super::*;
@@ -408,7 +409,7 @@ fn trust_promotes_changes_and_revokes_locked_workspace_skill() {
 
     let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
     let trusted_skill = registry
-        .get(&agl_tools::SkillId::new("repo-change").unwrap())
+        .get(&SkillId::new("repo-change").unwrap())
         .expect("trusted workspace skill should be registered");
     assert!(trusted_skill.permits_context_injection());
 
@@ -459,7 +460,7 @@ artifacts:
     let report = prepare_workspace_skill_folders(
         &root,
         &trust_store,
-        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &[SkillId::new("repo-change").unwrap()],
         &SkillFolderPrepareOptions {
             dry_run: false,
             situation: SkillFolderCreateSituation::RuntimePrepare,
@@ -502,7 +503,7 @@ artifacts:
     let report = prepare_workspace_skill_folders(
         &root,
         &trust_store,
-        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &[SkillId::new("repo-change").unwrap()],
         &SkillFolderPrepareOptions {
             dry_run: false,
             situation: SkillFolderCreateSituation::RuntimePrepare,
@@ -556,7 +557,7 @@ artifacts:
     let report = prepare_workspace_skill_artifact_write(
         &root,
         &trust_store,
-        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &[SkillId::new("repo-change").unwrap()],
         ".agl/tasks/repo-change/draft.md",
         &SkillFolderPrepareOptions {
             dry_run: false,
@@ -606,7 +607,7 @@ artifacts:
     let report = prepare_workspace_skill_artifact_write(
         &root,
         &trust_store,
-        &[agl_tools::SkillId::new("repo-change").unwrap()],
+        &[SkillId::new("repo-change").unwrap()],
         ".agl/tasks/repo-change/draft.md",
         &SkillFolderPrepareOptions {
             dry_run: false,
@@ -657,7 +658,7 @@ fn pinned_same_name_workspace_skill_overrides_builtin_when_trusted() {
 
     let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
     let skill = registry
-        .get(&agl_tools::SkillId::new("repo-status").unwrap())
+        .get(&SkillId::new("repo-status").unwrap())
         .expect("trusted workspace repo-status should be registered");
     assert_eq!(skill.harness.source, SkillSource::Local);
 
@@ -705,7 +706,7 @@ fn pinned_core_skill_overrides_builtin_and_preserves_source_identity() {
 
     let registry = trusted_workspace_registry(&root, &trust_store).unwrap();
     let skill = registry
-        .get(&agl_tools::SkillId::new("repo-status").unwrap())
+        .get(&SkillId::new("repo-status").unwrap())
         .expect("trusted core repo-status should be registered");
     assert_eq!(skill.harness.source, SkillSource::Core);
 

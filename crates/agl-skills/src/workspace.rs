@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_capabilities::{CapabilityId, SkillId};
 use agl_repo::{
     ComponentKind, ComponentState, ComponentStatus, RepoStatusOptions, status_repo_workspace,
 };
@@ -14,7 +15,6 @@ use crate::{
     SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource, SkillTrustState,
     builtin_registry,
 };
-use agl_tools::SkillId;
 
 const SKILLS_COMPONENT: &str = "skills";
 const SKILLS_LOCK_PATH: &str = ".agl/skills.lock";
@@ -1258,7 +1258,7 @@ fn routing_broadens_builtin(workspace: &SkillHarness, builtin: &SkillHarness) ->
         || has_extra_tools(&builtin.denied_tools, &workspace.denied_tools)
 }
 
-fn has_extra_tools(left: &[agl_tools::ToolId], right: &[agl_tools::ToolId]) -> bool {
+fn has_extra_tools(left: &[CapabilityId], right: &[CapabilityId]) -> bool {
     let right = right.iter().collect::<BTreeSet<_>>();
     left.iter().any(|tool| !right.contains(tool))
 }
@@ -1605,11 +1605,11 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
 fn validate_trust_tool_refs(
     skill_name: &str,
     field: &str,
-    tools: &[agl_tools::ToolId],
+    tools: &[CapabilityId],
     catalog: &agl_tools::ToolCatalog,
 ) -> Result<()> {
     for tool in tools {
-        if catalog.tool(tool).is_none() {
+        if catalog.action(tool).is_none() {
             bail!("skill `{skill_name}` references missing tool `{tool}` in {field}");
         }
     }

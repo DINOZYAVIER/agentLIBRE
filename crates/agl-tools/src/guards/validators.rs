@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::{HookId, HookInput, HookMessage, HookResult, HookStatus};
+use agl_capabilities::{HookId, HookInput, HookMessage, HookResult, HookStatus};
 
 pub(crate) fn validate_json(input: HookInput) -> HookResult {
     let Some(text) = payload_text(&input.payload) else {

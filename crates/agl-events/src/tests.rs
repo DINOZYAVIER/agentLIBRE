@@ -198,6 +198,23 @@ fn redaction_covers_turn_transcript_and_inference_content() {
 }
 
 #[test]
+fn invalid_capability_names_are_not_copied_into_safe_denial_events() {
+    let model_controlled_name = "SECRET invalid capability name";
+    let event = RuntimeEvent::CapabilityCallDenied {
+        policy_hash: format!("sha256:{}", "0".repeat(64)),
+        capability_id: None,
+        reason_code: "invalid_capability_id".to_string(),
+    };
+
+    let safe = SafeRuntimeEvent::from(&event);
+    let encoded = serde_json::to_string(&safe).unwrap();
+
+    assert!(!encoded.contains(model_controlled_name));
+    assert!(encoded.contains(r#""capability_id":null"#));
+    assert!(encoded.contains("invalid_capability_id"));
+}
+
+#[test]
 fn json_redaction_preserves_only_value_shape() {
     let safe = SafeRuntimeEvent::from(&RuntimeEvent::ToolCallStarted {
         name: "read_file".to_string(),

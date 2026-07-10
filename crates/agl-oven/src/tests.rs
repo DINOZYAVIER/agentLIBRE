@@ -25,6 +25,33 @@ fn qwen_hermes_config() -> ModelConfig {
     }
 }
 
+fn read_file_schema() -> serde_json::Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "options": {
+                "type": "object",
+                "properties": {
+                    "line_limit": {"type": "integer", "minimum": 1}
+                },
+                "additionalProperties": false
+            }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    })
+}
+
+fn read_file_tool() -> VisibleTool {
+    VisibleTool {
+        id: "read_file".parse().unwrap(),
+        description: "Read a file".to_string(),
+        input_schema: read_file_schema(),
+    }
+}
+
 #[test]
 fn renders_user_messages_and_visible_tools() {
     let request = ModelRequest {
@@ -34,7 +61,7 @@ fn renders_user_messages_and_visible_tools() {
         messages: vec![TurnMessage::User {
             content: "read README".to_string(),
         }],
-        visible_tools: vec![VisibleTool::new("read_file").require_argument("path")],
+        visible_tools: vec![read_file_tool()],
     };
 
     let rendered = render_model_request(&request, &qwen_hermes_config()).unwrap();
@@ -57,9 +84,36 @@ fn renders_user_messages_and_visible_tools() {
         rendered.tools,
         [RenderedTool {
             name: "read_file".to_string(),
-            description: String::new(),
-            required_arguments: vec!["path".to_string()],
+            description: "Read a file".to_string(),
+            input_schema: read_file_schema(),
         }]
+    );
+}
+
+#[test]
+fn hermes_and_gemma_render_equivalent_full_tool_schemas() {
+    let request = ModelRequest {
+        run_id: run_id(),
+        turn_id: turn_id(),
+        request_index: 0,
+        messages: vec![TurnMessage::User {
+            content: "read README".to_string(),
+        }],
+        visible_tools: vec![read_file_tool()],
+    };
+    let gemma_config = ModelConfig {
+        dialect: ModelDialect::Gemma4,
+        tool_call_format: ToolCallFormat::GemmaFunctionCall,
+    };
+
+    let hermes = render_model_request(&request, &qwen_hermes_config()).unwrap();
+    let gemma = render_model_request(&request, &gemma_config).unwrap();
+
+    assert_eq!(hermes.tools, gemma.tools);
+    assert_eq!(hermes.tools[0].input_schema, read_file_schema());
+    assert_eq!(
+        hermes.tools[0].input_schema["properties"]["options"]["properties"]["line_limit"]["minimum"],
+        1
     );
 }
 
@@ -129,7 +183,7 @@ fn renders_tool_observation_with_tool_name() {
         request_index: 1,
         messages: vec![TurnMessage::ToolObservation {
             name: "read_file".to_string(),
-            content: "agentLIBRE readme".to_string(),
+            result: agl_capabilities::ActionResult::new(json!({"text": "agentLIBRE readme"})),
         }],
         visible_tools: Vec::new(),
     };
@@ -140,7 +194,7 @@ fn renders_tool_observation_with_tool_name() {
         rendered.messages,
         [RenderedMessage {
             role: RenderedMessageRole::Tool,
-            content: "agentLIBRE readme".to_string(),
+            content: r#"{"text":"agentLIBRE readme"}"#.to_string(),
             name: Some("read_file".to_string()),
             tool_calls: Vec::new(),
         }]

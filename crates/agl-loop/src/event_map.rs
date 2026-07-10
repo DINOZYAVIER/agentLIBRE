@@ -118,16 +118,14 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> RuntimeEvent {
             name: name.clone(),
             arguments: arguments.clone(),
         },
-        TurnTransition::FinishToolCall { name, observation } => RuntimeEvent::ToolCallFinished {
+        TurnTransition::FinishToolCall { name, result } => RuntimeEvent::ToolCallFinished {
             name: name.clone(),
-            observation: observation.clone(),
+            data: result.data.clone(),
         },
-        TurnTransition::AppendObservation { name, observation } => {
-            RuntimeEvent::ObservationAppended {
-                name: name.clone(),
-                observation: observation.clone(),
-            }
-        }
+        TurnTransition::AppendObservation { name, result } => RuntimeEvent::ObservationAppended {
+            name: name.clone(),
+            data: result.data.clone(),
+        },
         TurnTransition::FinalAnswer { answer } => RuntimeEvent::AnswerFinal {
             answer: answer.clone(),
         },

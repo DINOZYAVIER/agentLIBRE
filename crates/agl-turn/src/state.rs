@@ -1,4 +1,5 @@
 use agl_actions::ToolCall;
+use agl_capabilities::ActionResult;
 
 use crate::{
     TurnInput, TurnMachine, TurnMessage, TurnTransition, TurnTransitionError, TurnTransitionRecord,
@@ -36,7 +37,7 @@ impl TurnState {
         self.machine.apply(transition)
     }
 
-    pub fn append_tool_observation(&mut self, tool_call: ToolCall, observation: String) {
+    pub fn append_tool_result(&mut self, tool_call: ToolCall, result: ActionResult) {
         self.tool_call_count += 1;
         self.messages.push(TurnMessage::AssistantToolCall {
             name: tool_call.name.clone(),
@@ -44,7 +45,7 @@ impl TurnState {
         });
         self.messages.push(TurnMessage::ToolObservation {
             name: tool_call.name,
-            content: observation,
+            result,
         });
     }
 }

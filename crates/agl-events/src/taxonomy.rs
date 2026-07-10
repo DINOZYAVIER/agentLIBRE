@@ -9,6 +9,13 @@ pub enum ParsedActionEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SafeParsedActionEvent {
+    Answer,
+    ToolCall { capability_id: Option<String> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolJsonMalformedKind {
     MissingTerminator,
     Syntax,

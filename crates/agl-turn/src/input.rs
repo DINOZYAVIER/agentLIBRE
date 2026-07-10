@@ -1,3 +1,4 @@
+use agl_capabilities::{ActionDeclaration, ActionSchema, CapabilityId, SchemaValidationError};
 use agl_ids::{RunId, TurnId};
 
 use crate::{TurnHookBatch, transcript::TurnMessage};
@@ -70,27 +71,21 @@ impl TurnInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisibleTool {
-    pub name: String,
+    pub id: CapabilityId,
     pub description: String,
-    pub required_arguments: Vec<String>,
+    pub input_schema: serde_json::Value,
 }
 
 impl VisibleTool {
-    pub fn new(name: impl Into<String>) -> Self {
+    pub fn from_declaration(declaration: &ActionDeclaration) -> Self {
         Self {
-            name: name.into(),
-            description: String::new(),
-            required_arguments: Vec::new(),
+            id: declaration.id.clone(),
+            description: declaration.description.clone(),
+            input_schema: declaration.input_schema.clone(),
         }
     }
 
-    pub fn describe(mut self, description: impl Into<String>) -> Self {
-        self.description = description.into();
-        self
-    }
-
-    pub fn require_argument(mut self, name: impl Into<String>) -> Self {
-        self.required_arguments.push(name.into());
-        self
+    pub fn compile_schema(&self) -> Result<ActionSchema, SchemaValidationError> {
+        ActionSchema::compile(&self.input_schema)
     }
 }

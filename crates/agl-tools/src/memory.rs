@@ -1,19 +1,20 @@
 use std::path::{Path, PathBuf};
 
+use agl_capabilities::{
+    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
+};
 use agl_memory::{
     MemoryDraft, MemoryKind, MemoryRepository, MemoryScope, MemoryScopeKind, MemorySearchQuery,
     MemorySuggestionDraft,
 };
 use agl_store::AglStore;
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::{
-    ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
-    ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
-    parse_tool_args as parse_args,
-};
+use crate::{ToolCatalog, ToolCatalogError, parse_action_args as parse_args};
 
 pub const PROVIDER_ID: &str = "memory-tools";
 pub const MEMORY_SEARCH_TOOL_ID: &str = "memory.search";
@@ -38,7 +39,7 @@ impl MemoryTools {
         }
     }
 
-    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<String> {
+    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
             MEMORY_SEARCH_TOOL_ID => self.search(arguments),
             MEMORY_LIST_TOOL_ID => self.list(arguments),
@@ -50,12 +51,15 @@ impl MemoryTools {
         }
     }
 
-    fn search(&self, arguments: Value) -> Result<String> {
+    fn search(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SearchArgs>(MEMORY_SEARCH_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let memory = MemoryRepository::new(&store);
         let entries = memory.search(&MemorySearchQuery {
-            scope: parse_optional_scope(args.scope.as_deref(), args.scope_key)?,
+            scope: parse_optional_scope(
+                args.scope.as_ref().map(MemoryScopeArg::as_str),
+                args.scope_key,
+            )?,
             text: Some(args.query),
             include_deleted: args.include_deleted.unwrap_or(false),
             limit: bounded_limit(args.limit),
@@ -63,12 +67,15 @@ impl MemoryTools {
         Ok(render_entries(MEMORY_SEARCH_TOOL_ID, entries))
     }
 
-    fn list(&self, arguments: Value) -> Result<String> {
+    fn list(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(MEMORY_LIST_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_read_only()?;
         let memory = MemoryRepository::new(&store);
         let entries = memory.list(&MemorySearchQuery {
-            scope: parse_optional_scope(args.scope.as_deref(), args.scope_key)?,
+            scope: parse_optional_scope(
+                args.scope.as_ref().map(MemoryScopeArg::as_str),
+                args.scope_key,
+            )?,
             text: None,
             include_deleted: args.include_deleted.unwrap_or(false),
             limit: bounded_limit(args.limit),
@@ -76,151 +83,167 @@ impl MemoryTools {
         Ok(render_entries(MEMORY_LIST_TOOL_ID, entries))
     }
 
-    fn suggest(&self, arguments: Value) -> Result<String> {
+    fn suggest(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SuggestArgs>(MEMORY_SUGGEST_TOOL_ID, arguments)?;
-        let scope = parse_scope(&args.scope, args.scope_key)?;
-        let kind = parse_kind(&args.kind)?;
+        let scope = parse_scope(args.scope.as_str(), args.scope_key)?;
+        let kind = parse_kind(args.kind.as_str())?;
         let mut draft =
             MemorySuggestionDraft::new(scope, kind, args.title, args.body, args.source_ref);
         if let Some(confidence) = args.confidence {
             draft.confidence = confidence;
         }
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let memory = MemoryRepository::new(&store);
         let suggestion = memory.suggest(draft)?;
-        Ok(format!(
-            "tool=memory.suggest\nsuggestion_id={}\nstatus={}\ntitle={}",
-            suggestion.id,
-            suggestion.status.as_str(),
-            suggestion.title
-        ))
+        Ok(json!({
+            "tool": MEMORY_SUGGEST_TOOL_ID,
+            "suggestion_id": suggestion.id,
+            "status": suggestion.status.as_str(),
+            "title": suggestion.title,
+        }))
     }
 
-    fn add(&self, arguments: Value) -> Result<String> {
+    fn add(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<AddArgs>(MEMORY_ADD_TOOL_ID, arguments)?;
-        let scope = parse_scope(&args.scope, args.scope_key)?;
-        let kind = parse_kind(&args.kind)?;
+        let scope = parse_scope(args.scope.as_str(), args.scope_key)?;
+        let kind = parse_kind(args.kind.as_str())?;
         let mut draft = MemoryDraft::new(scope, kind, args.title, args.body);
         draft.source_ref = args.source_ref;
         if let Some(confidence) = args.confidence {
             draft.confidence = confidence;
         }
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let memory = MemoryRepository::new(&store);
         let entry = memory.add(draft)?;
-        Ok(format!(
-            "tool=memory.add\nmemory_id={}\nscope={}:{}\nkind={}\ntitle={}\nstatus=created",
-            entry.id,
-            entry.scope.kind.as_str(),
-            entry.scope.key,
-            entry.kind.as_str(),
-            entry.title
-        ))
+        Ok(json!({
+            "tool": MEMORY_ADD_TOOL_ID,
+            "memory_id": entry.id,
+            "scope": {
+                "kind": entry.scope.kind.as_str(),
+                "key": entry.scope.key,
+            },
+            "kind": entry.kind.as_str(),
+            "title": entry.title,
+            "status": "created",
+        }))
     }
 
-    fn approve(&self, arguments: Value) -> Result<String> {
+    fn approve(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<SuggestionIdArgs>(MEMORY_APPROVE_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let memory = MemoryRepository::new(&store);
         let (suggestion, entry) = memory.approve_suggestion(&args.suggestion_id)?;
-        Ok(format!(
-            "tool=memory.approve\nsuggestion_id={}\nmemory_id={}\nstatus={}",
-            suggestion.id,
-            entry.id,
-            suggestion.status.as_str()
-        ))
+        Ok(json!({
+            "tool": MEMORY_APPROVE_TOOL_ID,
+            "suggestion_id": suggestion.id,
+            "memory_id": entry.id,
+            "status": suggestion.status.as_str(),
+        }))
     }
 
-    fn reject(&self, arguments: Value) -> Result<String> {
+    fn reject(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RejectArgs>(MEMORY_REJECT_TOOL_ID, arguments)?;
-        let store = self.open_store()?;
+        let store = self.open_store_writable()?;
         let memory = MemoryRepository::new(&store);
         let suggestion =
             memory.reject_suggestion(&args.suggestion_id, args.resolution_note.as_deref())?;
-        Ok(format!(
-            "tool=memory.reject\nsuggestion_id={}\nstatus={}",
-            suggestion.id,
-            suggestion.status.as_str()
-        ))
+        Ok(json!({
+            "tool": MEMORY_REJECT_TOOL_ID,
+            "suggestion_id": suggestion.id,
+            "status": suggestion.status.as_str(),
+        }))
     }
 
-    fn open_store(&self) -> Result<AglStore> {
-        AglStore::open_at(&self.store_root)
+    fn open_store_read_only(&self) -> Result<AglStore> {
+        AglStore::open_current_read_only_at(&self.store_root)
+            .with_context(|| format!("failed to open memory store {}", self.store_root.display()))
+    }
+
+    fn open_store_writable(&self) -> Result<AglStore> {
+        AglStore::open_current_at(&self.store_root)
             .with_context(|| format!("failed to open memory store {}", self.store_root.display()))
     }
 }
 
-impl ToolHandler for MemoryTools {
-    fn dispatch(&self, input: ToolInput) -> Result<ToolOutput> {
-        let observation = self.dispatch(input.id.as_str(), input.arguments)?;
-        Ok(ToolOutput { observation })
+impl ActionHandler for MemoryTools {
+    fn dispatch(
+        &self,
+        invocation: ActionInvocation,
+    ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+        Ok(ActionResult::new(data))
     }
 }
 
-pub fn declaration() -> ToolProviderDeclaration {
-    ToolProviderDeclaration::new(
-        ToolProviderId::new(PROVIDER_ID).expect("builtin memory provider id is valid"),
+pub fn declaration() -> ProviderDeclaration {
+    ProviderDeclaration::builtin(
+        ProviderId::new(PROVIDER_ID).expect("builtin memory provider id is valid"),
         "Memory Tools",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("builtin memory provider declaration is valid")
-    .with_tool(ToolDeclaration::new(
-        ToolId::new(MEMORY_SEARCH_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(action::<SearchArgs>(
+        MEMORY_SEARCH_TOOL_ID,
         "Search approved local memories by scope and text.",
-        ToolCapability::Read,
-        ["query"],
+        OperationKind::Read,
     ))
-    .with_tool(ToolDeclaration::new(
-        ToolId::new(MEMORY_LIST_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(action::<ListArgs>(
+        MEMORY_LIST_TOOL_ID,
         "List approved local memories by optional scope.",
-        ToolCapability::Read,
-        std::iter::empty::<&str>(),
+        OperationKind::Read,
     ))
-    .with_tool(
-        ToolDeclaration::new(
-            ToolId::new(MEMORY_SUGGEST_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(
+        action::<SuggestArgs>(
+            MEMORY_SUGGEST_TOOL_ID,
             "Create a pending local memory suggestion for explicit approval.",
-            ToolCapability::Write,
-            ["scope", "kind", "title", "body", "source_ref"],
+            OperationKind::Write,
         )
-        .with_state_effects([ToolStateEffect::StoreMemorySuggestions]),
+        .with_state_effects([StateEffect::StoreMemorySuggestions]),
     )
-    .with_tool(
-        ToolDeclaration::new(
-            ToolId::new(MEMORY_ADD_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(
+        action::<AddArgs>(
+            MEMORY_ADD_TOOL_ID,
             "Create an approved local memory entry.",
-            ToolCapability::Write,
-            ["scope", "kind", "title", "body"],
+            OperationKind::Write,
         )
-        .with_state_effects([ToolStateEffect::StoreMemoryEntries]),
+        .with_state_effects([StateEffect::StoreMemoryEntries]),
     )
-    .with_tool(
-        ToolDeclaration::new(
-            ToolId::new(MEMORY_APPROVE_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(
+        action::<SuggestionIdArgs>(
+            MEMORY_APPROVE_TOOL_ID,
             "Approve a pending memory suggestion into a durable memory entry.",
-            ToolCapability::Write,
-            ["suggestion_id"],
+            OperationKind::Approve,
         )
-        .with_operation_kind(ToolOperationKind::Approve)
         .with_state_effects([
-            ToolStateEffect::StoreMemorySuggestions,
-            ToolStateEffect::StoreMemoryEntries,
+            StateEffect::StoreMemorySuggestions,
+            StateEffect::StoreMemoryEntries,
         ]),
     )
-    .with_tool(
-        ToolDeclaration::new(
-            ToolId::new(MEMORY_REJECT_TOOL_ID).expect("builtin memory tool id is valid"),
+    .with_action(
+        action::<RejectArgs>(
+            MEMORY_REJECT_TOOL_ID,
             "Reject a pending memory suggestion.",
-            ToolCapability::Write,
-            ["suggestion_id"],
+            OperationKind::Approve,
         )
-        .with_operation_kind(ToolOperationKind::Approve)
-        .with_state_effects([ToolStateEffect::StoreMemorySuggestions]),
+        .with_state_effects([StateEffect::StoreMemorySuggestions]),
     )
 }
 
 pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
+}
+
+fn action<T: JsonSchema>(
+    id: &str,
+    description: &str,
+    operation_kind: OperationKind,
+) -> ActionDeclaration {
+    ActionDeclaration::from_schema::<T>(
+        CapabilityId::new(id).expect("builtin memory tool id is valid"),
+        description,
+        operation_kind,
+    )
+    .expect("builtin memory tool declaration schema is valid")
 }
 
 fn parse_scope(scope: &str, scope_key: Option<String>) -> Result<MemoryScope> {
@@ -264,73 +287,122 @@ fn bounded_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIST_LIMIT).min(MAX_LIST_LIMIT)
 }
 
-fn render_entries(tool_id: &str, entries: Vec<agl_memory::MemoryEntry>) -> String {
-    let mut output = format!("tool={tool_id}\nentries={}\n---", entries.len());
-    for entry in entries {
-        output.push('\n');
-        output.push_str(&format!(
-            "memory id={} scope={}:{} kind={} title={} deleted={}",
-            entry.id,
-            entry.scope.kind.as_str(),
-            entry.scope.key,
-            entry.kind.as_str(),
-            entry.title,
-            entry.deleted_at.is_some()
-        ));
-    }
-    output
+fn render_entries(tool_id: &str, entries: Vec<agl_memory::MemoryEntry>) -> Value {
+    let entries = entries
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "memory_id": entry.id,
+                "scope": {
+                    "kind": entry.scope.kind.as_str(),
+                    "key": entry.scope.key,
+                },
+                "kind": entry.kind.as_str(),
+                "title": entry.title,
+                "deleted": entry.deleted_at.is_some(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "tool": tool_id,
+        "status": "ok",
+        "entry_count": entries.len(),
+        "entries": entries,
+    })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryScopeArg {
+    User,
+    Repo,
+    MatrixRoom,
+    MatrixUser,
+}
+
+impl MemoryScopeArg {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Repo => "repo",
+            Self::MatrixRoom => "matrix_room",
+            Self::MatrixUser => "matrix_user",
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MemoryKindArg {
+    Fact,
+    Preference,
+    Summary,
+    Decision,
+    WorkingNote,
+}
+
+impl MemoryKindArg {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Preference => "preference",
+            Self::Summary => "summary",
+            Self::Decision => "decision",
+            Self::WorkingNote => "working_note",
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
-    scope: Option<String>,
+    scope: Option<MemoryScopeArg>,
     scope_key: Option<String>,
     limit: Option<usize>,
     include_deleted: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListArgs {
-    scope: Option<String>,
+    scope: Option<MemoryScopeArg>,
     scope_key: Option<String>,
     limit: Option<usize>,
     include_deleted: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SuggestArgs {
-    scope: String,
+    scope: MemoryScopeArg,
     scope_key: Option<String>,
-    kind: String,
+    kind: MemoryKindArg,
     title: String,
     body: String,
     source_ref: String,
     confidence: Option<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddArgs {
-    scope: String,
+    scope: MemoryScopeArg,
     scope_key: Option<String>,
-    kind: String,
+    kind: MemoryKindArg,
     title: String,
     body: String,
     source_ref: Option<String>,
     confidence: Option<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SuggestionIdArgs {
     suggestion_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RejectArgs {
     suggestion_id: String,
@@ -341,13 +413,13 @@ struct RejectArgs {
 mod tests {
     use serde_json::json;
 
-    use crate::test_support::{temp_root, value_for};
+    use crate::test_support::migrated_temp_root;
 
     use super::*;
 
     #[test]
     fn memory_suggest_tool_creates_pending_suggestion() {
-        let root = temp_root("suggest");
+        let root = migrated_temp_root("suggest");
         let tools = MemoryTools::new(&root);
 
         let output = tools
@@ -363,13 +435,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.contains("tool=memory.suggest"));
-        assert!(output.contains("status=pending"));
+        assert_eq!(output["tool"], MEMORY_SUGGEST_TOOL_ID);
+        assert_eq!(output["status"], "pending");
+        assert_eq!(output["title"], "Workflow");
     }
 
     #[test]
     fn memory_tools_add_search_approve_and_reject() {
-        let root = temp_root("lifecycle");
+        let root = migrated_temp_root("lifecycle");
         let tools = MemoryTools::new(&root);
 
         let add = tools
@@ -390,9 +463,10 @@ mod tests {
             .dispatch(MEMORY_SEARCH_TOOL_ID, json!({"query": "approvals"}))
             .unwrap();
 
-        assert!(add.contains("status=created"));
-        assert!(list.contains("entries=1"));
-        assert!(search.contains("Workflow"));
+        assert_eq!(add["status"], "created");
+        assert_eq!(add["scope"], json!({"kind": "user", "key": "default"}));
+        assert_eq!(list["entry_count"], 1);
+        assert_eq!(search["entries"][0]["title"], "Workflow");
 
         let pending = tools
             .dispatch(
@@ -406,15 +480,15 @@ mod tests {
                 }),
             )
             .unwrap();
-        let suggestion_id = value_for(&pending, "suggestion_id=").unwrap();
+        let suggestion_id = pending["suggestion_id"].as_str().unwrap();
         let approved = tools
             .dispatch(
                 MEMORY_APPROVE_TOOL_ID,
                 json!({"suggestion_id": suggestion_id}),
             )
             .unwrap();
-        assert!(approved.contains("status=approved"));
-        assert!(approved.contains("memory_id="));
+        assert_eq!(approved["status"], "approved");
+        assert!(approved["memory_id"].is_string());
 
         let pending = tools
             .dispatch(
@@ -429,7 +503,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        let suggestion_id = value_for(&pending, "suggestion_id=").unwrap();
+        let suggestion_id = pending["suggestion_id"].as_str().unwrap();
         let rejected = tools
             .dispatch(
                 MEMORY_REJECT_TOOL_ID,
@@ -439,18 +513,49 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(rejected.contains("status=rejected"));
+        assert_eq!(rejected["status"], "rejected");
     }
 
     #[test]
     fn memory_declaration_registers_suggest_tool() {
-        let mut catalog = ToolCatalog::new();
-        register(&mut catalog).unwrap();
-
+        let declaration = declaration();
+        declaration.validate().unwrap();
+        let suggest = declaration
+            .action(&CapabilityId::new(MEMORY_SUGGEST_TOOL_ID).unwrap())
+            .unwrap();
+        assert_eq!(suggest.input_schema["additionalProperties"], false);
+        let schema = suggest.compile_schema().unwrap();
+        let valid = json!({
+            "scope": "user",
+            "kind": "decision",
+            "title": "Workflow",
+            "body": "Use pending suggestions.",
+            "source_ref": "chat:turn-1"
+        });
+        assert!(schema.validate(&valid).is_ok());
+        assert!(schema.validate(&json!({})).is_err());
         assert!(
-            catalog
-                .tool(&ToolId::new(MEMORY_SUGGEST_TOOL_ID).unwrap())
-                .is_some()
+            schema
+                .validate(&json!({
+                    "scope": "user",
+                    "kind": "decision",
+                    "title": "Workflow",
+                    "body": "Use pending suggestions.",
+                    "source_ref": "chat:turn-1",
+                    "extra": true
+                }))
+                .is_err()
+        );
+        assert!(
+            schema
+                .validate(&json!({
+                    "scope": "user",
+                    "kind": "decision",
+                    "title": "Workflow",
+                    "body": "Use pending suggestions.",
+                    "source_ref": 7
+                }))
+                .is_err()
         );
     }
 }

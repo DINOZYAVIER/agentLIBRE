@@ -67,7 +67,22 @@ fn rendered_request() -> RenderedModelRequest {
         tools: vec![RenderedTool {
             name: "read_file".to_string(),
             description: "Read a file".to_string(),
-            required_arguments: vec!["path".to_string()],
+            input_schema: serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "options": {
+                        "type": "object",
+                        "properties": {
+                            "line_limit": {"type": "integer", "minimum": 1}
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
         }],
     }
 }
@@ -164,6 +179,10 @@ fn rendered_model_request_round_trips_for_artifacts() {
     assert_eq!(decoded, rendered);
     assert!(encoded.contains("\"dialect\":\"qwen3\""));
     assert!(encoded.contains("\"role\":\"user\""));
+    assert_eq!(
+        decoded.tools[0].input_schema["properties"]["options"]["properties"]["line_limit"]["minimum"],
+        1
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-tools.workspace = true
+agl-capabilities.workspace = true
 agl-events.workspace = true
 agl-actions.workspace = true
 agl-turn.workspace = true

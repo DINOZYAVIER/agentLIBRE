@@ -3,6 +3,7 @@ use std::fmt;
 
 use agl_ids::{RunId, TurnId};
 
+use agl_capabilities::ActionResult;
 use serde_json::Value;
 
 use crate::{HookBatchSummary, HookEvent, StopReason};
@@ -121,11 +122,11 @@ pub enum TurnTransition {
     },
     FinishToolCall {
         name: String,
-        observation: String,
+        result: ActionResult,
     },
     AppendObservation {
         name: String,
-        observation: String,
+        result: ActionResult,
     },
     FinalAnswer {
         answer: String,

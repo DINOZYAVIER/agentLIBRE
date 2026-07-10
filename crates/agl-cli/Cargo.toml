@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 agl-chat.workspace = true
+agl-capabilities.workspace = true
 agl-client.workspace = true
 agl-config.workspace = true
 agl-cron.workspace = true
@@ -20,7 +21,6 @@ agl-daemon.workspace = true
 agl-functions.workspace = true
 agl-ids.workspace = true
 agl-protocol.workspace = true
-agl-tools.workspace = true
 agl-memory.workspace = true
 agl-notes.workspace = true
 agl-repo.workspace = true

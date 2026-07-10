@@ -1,18 +1,19 @@
 use std::path::Path;
 
+use agl_capabilities::{
+    ActionInvocation, CapabilityId, DispatchDenial, DispatchDenialCode, HookInput,
+};
 use agl_events::{
-    EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope, RuntimeEventWriter,
-    SafeRuntimeEventEnvelope,
+    CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
+    RuntimeEventWriter, SafeRuntimeEventEnvelope,
 };
-use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
+use agl_ids::{AttemptId, ExecutionScope, RequestId, RunId, SessionId, TurnId};
 use agl_loop::{
-    AgentLoopHost, ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
-    TurnMessage, TurnTransitionRecord, VisibleTool,
+    AgentLoopHost, HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus,
+    ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnMessage,
+    TurnTransitionRecord,
 };
-use agl_tools::{
-    HookBatchRequest, HookBatchResult, HookInput, HookMessage, HookResult, HookStatus, ToolId,
-    ToolInput, ToolRuntime,
-};
+use agl_tools::ToolRuntime;
 use anyhow::{Context, Result, ensure};
 
 use crate::session::InferenceSession;
@@ -20,6 +21,7 @@ use crate::tools::{ChatToolRuntimeConfig, chat_tool_runtime};
 
 pub struct ChatLoopHost {
     session: InferenceSession,
+    active_effective_capabilities: Option<agl_capabilities::EffectiveCapabilitySet>,
     event_sink: Option<RuntimeEventWriter>,
     event_scope: Option<EventScope>,
     request_id: Option<RequestId>,
@@ -40,6 +42,7 @@ impl ChatLoopHost {
         let tool_runtime = build_chat_tool_runtime(&session, &core_tools, workspace_root.as_ref())?;
         Ok(Self {
             session,
+            active_effective_capabilities: None,
             event_sink: None,
             event_scope: None,
             request_id: None,
@@ -58,8 +61,13 @@ impl ChatLoopHost {
         &self.session
     }
 
-    pub fn session_mut(&mut self) -> &mut InferenceSession {
-        &mut self.session
+    pub fn clear_context(&mut self) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot clear context during an active turn"
+        );
+        self.session.clear_context();
+        Ok(())
     }
 
     pub fn begin_turn(
@@ -70,6 +78,7 @@ impl ChatLoopHost {
         request_id: Option<RequestId>,
     ) -> Result<()> {
         self.refresh_runtime_context(run_id)?;
+        self.active_effective_capabilities = Some(self.session.effective_capabilities().clone());
         self.event_sink = Some(RuntimeEventWriter::open(
             self.session.event_stream_path(run_id),
         )?);
@@ -85,11 +94,23 @@ impl ChatLoopHost {
         self.runtime_events.clear();
         self.pending_terminal_event = None;
         self.attempt_ids.clear();
+        self.append_runtime_event(capability_policy_resolved_event(
+            self.active_effective_capabilities
+                .as_ref()
+                .expect("active capability snapshot was just initialized"),
+        ))?;
         Ok(())
     }
 
     pub fn generated_requests(&self) -> usize {
         self.generated_requests
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_policy_hash(&self) -> Option<&agl_capabilities::PolicyHash> {
+        self.active_effective_capabilities
+            .as_ref()
+            .map(agl_capabilities::EffectiveCapabilitySet::policy_hash)
     }
 
     pub fn take_turn_messages(&mut self) -> Vec<TurnMessage> {
@@ -126,6 +147,7 @@ impl ChatLoopHost {
             })
             .collect::<Result<Vec<_>>>()?;
         self.runtime_events.clear();
+        self.active_effective_capabilities = None;
         Ok(events)
     }
 
@@ -178,6 +200,10 @@ impl ChatLoopHost {
     }
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot change workspace root during an active turn"
+        );
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
         self.session
@@ -190,11 +216,19 @@ impl ChatLoopHost {
     }
 
     pub fn reload_runtime_context(&mut self) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot reload runtime context during an active turn"
+        );
         self.session.refresh_runtime_context(None)?;
         self.rebuild_tool_runtime()
     }
 
     pub fn refresh_runtime_context(&mut self, run_id: &RunId) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot refresh runtime context during an active turn"
+        );
         self.session.refresh_runtime_context(Some(run_id))?;
         self.rebuild_tool_runtime()
     }
@@ -226,6 +260,26 @@ impl ChatLoopHost {
 }
 
 impl AgentLoopHost for ChatLoopHost {
+    fn record_capability_denial(
+        &mut self,
+        capability_id: Option<CapabilityId>,
+        code: DispatchDenialCode,
+    ) -> Result<()> {
+        let policy_hash = self
+            .active_effective_capabilities
+            .as_ref()
+            .context("turn capability snapshot is not initialized")?
+            .policy_hash()
+            .as_str()
+            .to_string();
+        self.append_runtime_event(RuntimeEvent::CapabilityCallDenied {
+            policy_hash,
+            capability_id: capability_id.map(|id| id.as_str().to_string()),
+            reason_code: code.as_str().to_string(),
+        })?;
+        Ok(())
+    }
+
     fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
         let results = request
             .hooks
@@ -263,9 +317,15 @@ impl AgentLoopHost for ChatLoopHost {
         )?;
         let attempt_id = AttemptId::generate();
         self.attempt_ids.push(attempt_id.clone());
-        let response =
-            self.session
-                .generate(request, attempt_id.clone(), session_id, request_id)?;
+        let response = self.session.generate(
+            request,
+            attempt_id.clone(),
+            session_id,
+            request_id,
+            self.active_effective_capabilities
+                .as_ref()
+                .context("turn capability snapshot is not initialized")?,
+        )?;
         ensure!(
             response.attempt_id == attempt_id,
             "inference response attempt ID does not match the admitted attempt"
@@ -276,23 +336,76 @@ impl AgentLoopHost for ChatLoopHost {
     }
 
     fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
+        let active_scope = self
+            .event_scope
+            .as_ref()
+            .context("turn event scope is not initialized")?
+            .clone();
+        ensure!(
+            active_scope.run_id() == &request.run_id
+                && active_scope.turn_id() == Some(&request.turn_id),
+            "tool request identity does not match the active event scope"
+        );
+        let effective = self
+            .active_effective_capabilities
+            .as_ref()
+            .context("turn capability snapshot is not initialized")?
+            .clone();
+        let policy_hash = effective.policy_hash().as_str().to_string();
+        let capability_id = request.capability_id.clone();
+        let Some(capability) = effective.capability(&capability_id).cloned() else {
+            let denial = DispatchDenial {
+                capability_id: capability_id.clone(),
+                code: DispatchDenialCode::CapabilityNotEffective,
+            };
+            self.append_runtime_event(RuntimeEvent::CapabilityCallDenied {
+                policy_hash,
+                capability_id: Some(capability_id.as_str().to_string()),
+                reason_code: denial.code.as_str().to_string(),
+            })?;
+            return Err(denial).context("capability dispatch was denied");
+        };
+        let scope = execution_scope(&active_scope)?;
+        let mut invocation = ActionInvocation::new(
+            scope,
+            capability_id.clone(),
+            capability.provider_id().clone(),
+            capability.declaration_digest().clone(),
+            effective.policy_hash().clone(),
+            request.arguments.clone(),
+        );
+        if let Some(request_id) = &self.request_id {
+            invocation = invocation.with_request_id(request_id.clone());
+        }
+        if let Err(denial) =
+            effective.authorize(&invocation, self.tool_runtime.catalog().providers())
+        {
+            self.append_runtime_event(RuntimeEvent::CapabilityCallDenied {
+                policy_hash,
+                capability_id: Some(capability_id.as_str().to_string()),
+                reason_code: denial.code.as_str().to_string(),
+            })?;
+            return Err(denial).context("capability dispatch was denied");
+        }
+        self.append_runtime_event(RuntimeEvent::CapabilityCallAdmitted {
+            policy_hash,
+            capability_id: capability_id.as_str().to_string(),
+            provider_id: capability.provider_id().as_str().to_string(),
+            declaration_digest: capability.declaration_digest().as_str().to_string(),
+        })?;
         self.session.prepare_artifact_write_for_tool(
             &request.run_id,
-            &request.name,
+            request.capability_id.as_str(),
             &request.arguments,
         )?;
-        let tool_id = ToolId::new(request.name.clone())
-            .with_context(|| format!("tool id is invalid: {}", request.name))?;
         let output = self
             .tool_runtime
-            .dispatch(ToolInput {
-                id: tool_id,
-                arguments: request.arguments,
-            })
-            .with_context(|| format!("tool `{}` failed", request.name))?;
-        Ok(ToolDispatchResponse {
-            observation: output.observation,
-        })
+            .dispatch(invocation, &effective)
+            .map_err(|error| {
+                anyhow::Error::new(error)
+                    .context(format!("capability `{}` failed", request.capability_id))
+            })?;
+        Ok(ToolDispatchResponse { result: output })
     }
 
     fn record_turn_messages(&mut self, messages: &[TurnMessage]) -> Result<()> {
@@ -340,7 +453,45 @@ fn inference_correlation(
     Ok((active_scope.session_id().cloned(), request_id.cloned()))
 }
 
-fn missing_hook_result(hook_id: agl_tools::HookId) -> HookResult {
+fn capability_policy_resolved_event(
+    effective: &agl_capabilities::EffectiveCapabilitySet,
+) -> RuntimeEvent {
+    RuntimeEvent::CapabilityPolicyResolved {
+        policy_hash: effective.policy_hash().as_str().to_string(),
+        capability_ids: effective
+            .capabilities()
+            .map(|capability| capability.declaration().id.as_str().to_string())
+            .collect(),
+        exclusions: effective
+            .exclusions()
+            .map(|exclusion| CapabilityExclusionEvent {
+                capability_id: exclusion.capability_id.as_str().to_string(),
+                reason_code: exclusion.reason.code().to_string(),
+            })
+            .collect(),
+    }
+}
+
+fn execution_scope(scope: &EventScope) -> Result<ExecutionScope> {
+    let mut builder = ExecutionScope::builder(scope.run_id().clone());
+    if let Some(session_id) = scope.session_id() {
+        builder = builder.session_id(session_id.clone());
+    }
+    if let Some(turn_id) = scope.turn_id() {
+        builder = builder.turn_id(turn_id.clone());
+    }
+    if let Some(step_id) = scope.step_id() {
+        builder = builder.step_id(step_id.clone());
+    }
+    if let Some(attempt_id) = scope.attempt_id() {
+        builder = builder.attempt_id(attempt_id.clone());
+    }
+    builder
+        .build()
+        .context("active event scope is invalid for capability invocation")
+}
+
+fn missing_hook_result(hook_id: agl_capabilities::HookId) -> HookResult {
     HookResult {
         hook_id,
         status: HookStatus::Fail,
@@ -360,7 +511,7 @@ fn permission_runtime_status(
         visible_tools: session
             .turn_visible_tools()
             .iter()
-            .map(|tool| tool.name.clone())
+            .map(|tool| tool.id.as_str().to_string())
             .collect(),
         dynamic_grants: true,
         granted_visible_tools: session.permission_grants().granted_visible_tools(),
@@ -373,25 +524,13 @@ fn build_chat_tool_runtime(
     core_tools: &agl_tools::CoreTools,
     workspace_root: &Path,
 ) -> Result<ToolRuntime> {
-    let mut tool_runtime = chat_tool_runtime(ChatToolRuntimeConfig {
+    chat_tool_runtime(ChatToolRuntimeConfig {
         core_tools,
         store_root: session.store_root(),
         trust_store_path: session.trust_store_path(),
         workspace_root,
         permission_status: permission_runtime_status(session),
-    })?;
-    tool_runtime.set_allowed_tools(visible_tool_ids(session.turn_visible_tools())?);
-    Ok(tool_runtime)
-}
-
-fn visible_tool_ids(visible_tools: &[VisibleTool]) -> Result<Vec<ToolId>> {
-    visible_tools
-        .iter()
-        .map(|tool| {
-            ToolId::new(tool.name.clone())
-                .with_context(|| format!("visible tool id is invalid: {}", tool.name))
-        })
-        .collect()
+    })
 }
 
 #[cfg(test)]
