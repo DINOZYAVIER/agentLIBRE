@@ -253,7 +253,7 @@ dependencies = [
  "agl-events",
  "agl-ids",
  "agl-turn",
- "anyhow",
+ "serde",
  "serde_json",
 ]
 

@@ -3,9 +3,10 @@ use std::collections::BTreeSet;
 pub use agl_capabilities::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookMessage, HookResult, HookStatus,
 };
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnHookBatch {
     pub event: HookEvent,
     pub required_hooks: Vec<HookId>,
@@ -52,7 +53,7 @@ impl TurnHookBatch {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookBatchOutcome {
     Pass,
@@ -83,14 +84,16 @@ impl From<HookStatus> for HookBatchOutcome {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookResultSummary {
     pub hook_id: HookId,
     pub status: HookBatchOutcome,
     pub message_codes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookBatchSummary {
     #[serde(serialize_with = "serialize_hook_event")]
     pub event: HookEvent,

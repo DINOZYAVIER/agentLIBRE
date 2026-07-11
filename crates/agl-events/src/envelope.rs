@@ -145,7 +145,8 @@ impl Display for EventScopeError {
 
 impl Error for EventScopeError {}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventDraft<P> {
     pub scope: EventScope,
     pub request_id: Option<RequestId>,

@@ -125,6 +125,8 @@ pub enum RuntimeEvent {
     ToolCallFinished { name: String, data: Value },
     #[serde(rename = "tool.call_failed")]
     ToolCallFailed { name: String, message: String },
+    #[serde(rename = "transcript.append_failed")]
+    TranscriptAppendFailed { reason_code: String },
     #[serde(rename = "observation.appended")]
     ObservationAppended { name: String, data: Value },
     #[serde(rename = "answer.final")]
@@ -134,6 +136,8 @@ pub enum RuntimeEvent {
         reason: StopReasonEvent,
         visible: bool,
     },
+    #[serde(rename = "turn.cancelled")]
+    TurnCancelled { reason_code: String },
     #[serde(rename = "turn.finished")]
     TurnFinished { status: TurnFinishStatus },
     #[serde(rename = "user_message")]
@@ -205,9 +209,11 @@ impl RuntimeEvent {
             Self::ToolCallStarted { .. } => "tool.call_started",
             Self::ToolCallFinished { .. } => "tool.call_finished",
             Self::ToolCallFailed { .. } => "tool.call_failed",
+            Self::TranscriptAppendFailed { .. } => "transcript.append_failed",
             Self::ObservationAppended { .. } => "observation.appended",
             Self::AnswerFinal { .. } => "answer.final",
             Self::TurnStopped { .. } => "turn.stopped",
+            Self::TurnCancelled { .. } => "turn.cancelled",
             Self::TurnFinished { .. } => "turn.finished",
             Self::UserMessage { .. } => "user_message",
             Self::AssistantMessage { .. } => "assistant_message",
@@ -354,6 +360,8 @@ pub enum SafeRuntimeEvent {
         capability_id: Option<String>,
         message_bytes: usize,
     },
+    #[serde(rename = "transcript.append_failed")]
+    TranscriptAppendFailed { reason_code: String },
     #[serde(rename = "observation.appended")]
     ObservationAppended {
         capability_id: Option<String>,
@@ -366,6 +374,8 @@ pub enum SafeRuntimeEvent {
         reason: StopReasonEvent,
         visible: bool,
     },
+    #[serde(rename = "turn.cancelled")]
+    TurnCancelled { reason_code: String },
     #[serde(rename = "turn.finished")]
     TurnFinished { status: TurnFinishStatus },
     #[serde(rename = "user_message")]
@@ -437,9 +447,11 @@ impl SafeRuntimeEvent {
             Self::ToolCallStarted { .. } => "tool.call_started",
             Self::ToolCallFinished { .. } => "tool.call_finished",
             Self::ToolCallFailed { .. } => "tool.call_failed",
+            Self::TranscriptAppendFailed { .. } => "transcript.append_failed",
             Self::ObservationAppended { .. } => "observation.appended",
             Self::AnswerFinal { .. } => "answer.final",
             Self::TurnStopped { .. } => "turn.stopped",
+            Self::TurnCancelled { .. } => "turn.cancelled",
             Self::TurnFinished { .. } => "turn.finished",
             Self::UserMessage { .. } => "user_message",
             Self::AssistantMessage { .. } => "assistant_message",
@@ -695,6 +707,9 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 capability_id: safe_capability_id(name),
                 message_bytes: message.len(),
             },
+            RuntimeEvent::TranscriptAppendFailed { reason_code } => Self::TranscriptAppendFailed {
+                reason_code: reason_code.clone(),
+            },
             RuntimeEvent::ObservationAppended { name, data } => Self::ObservationAppended {
                 capability_id: safe_capability_id(name),
                 data: JsonMetadata::from(data),
@@ -705,6 +720,9 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
             RuntimeEvent::TurnStopped { reason, visible } => Self::TurnStopped {
                 reason: reason.clone(),
                 visible: *visible,
+            },
+            RuntimeEvent::TurnCancelled { reason_code } => Self::TurnCancelled {
+                reason_code: reason_code.clone(),
             },
             RuntimeEvent::TurnFinished { status } => Self::TurnFinished {
                 status: status.clone(),

@@ -1,168 +1,177 @@
-use crate::*;
+use std::collections::VecDeque;
+
 use agl_capabilities::{
-    ActionDeclaration, ActionResult, CapabilityId, DispatchDenialCode, OperationKind,
+    ActionDeclaration, ActionResult, CapabilityId, HookBatchResult, HookId, HookMessage,
+    HookResult, HookStatus, OperationKind,
 };
-use agl_events::{RuntimeEvent, SafeRuntimeEvent};
 use agl_ids::{RunId, TurnId};
-use anyhow::{Result, anyhow};
+use agl_turn::{ModelResponse, StopReason, TurnHookBatch, TurnInput, TurnOutput, VisibleTool};
 use serde_json::json;
 
-const TEST_RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000001";
-const TEST_TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
+use crate::*;
 
-enum FakeModelResult {
-    Response(String),
-    Error(String),
-}
-
-enum FakeToolResult {
-    Observation(String),
-    Error(String),
-}
-
-enum FakeHookResult {
-    Batch(HookBatchResult),
-}
+const RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000001";
+const TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
 
 #[derive(Default)]
-struct FakeHost {
-    model_results: Vec<FakeModelResult>,
-    tool_results: Vec<FakeToolResult>,
-    hook_results: Vec<FakeHookResult>,
-    requests: Vec<&'static str>,
-    operations: Vec<String>,
-    events: Vec<RuntimeEvent>,
-    transitions: Vec<TurnTransitionRecord>,
-    model_requests: Vec<ModelRequest>,
-    dispatches: Vec<ToolDispatchRequest>,
-    hook_requests: Vec<HookBatchRequest>,
-    turn_messages: Vec<TurnMessage>,
-    denials: Vec<(Option<CapabilityId>, DispatchDenialCode)>,
+struct Script {
+    model: VecDeque<EffectOutcome<ModelResponse>>,
+    capability: VecDeque<EffectOutcome<agl_turn::ToolDispatchResponse>>,
+    hooks: VecDeque<EffectOutcome<HookEffectOutput>>,
+    transcript: VecDeque<EffectOutcome<()>>,
 }
 
-impl FakeHost {
-    fn with_model_response(mut self, response: impl Into<String>) -> Self {
-        self.model_results
-            .push(FakeModelResult::Response(response.into()));
+impl Script {
+    fn model(mut self, content: impl Into<String>) -> Self {
+        self.model
+            .push_back(EffectOutcome::Succeeded(ModelResponse {
+                content: content.into(),
+            }));
         self
     }
 
-    fn with_model_error(mut self, message: impl Into<String>) -> Self {
-        self.model_results
-            .push(FakeModelResult::Error(message.into()));
+    fn model_failure(mut self, code: EffectFailureCode, message: &str) -> Self {
+        self.model
+            .push_back(EffectOutcome::Failed(EffectFailure::new(
+                code, message, false,
+            )));
         self
     }
 
-    fn with_tool_observation(mut self, observation: impl Into<String>) -> Self {
-        self.tool_results
-            .push(FakeToolResult::Observation(observation.into()));
+    fn observation(mut self, value: serde_json::Value) -> Self {
+        self.capability
+            .push_back(EffectOutcome::Succeeded(agl_turn::ToolDispatchResponse {
+                result: ActionResult::new(value),
+            }));
         self
     }
 
-    fn with_tool_error(mut self, message: impl Into<String>) -> Self {
-        self.tool_results
-            .push(FakeToolResult::Error(message.into()));
+    fn hook(mut self, event: agl_capabilities::HookEvent, status: HookStatus) -> Self {
+        self.hooks
+            .push_back(EffectOutcome::Succeeded(HookEffectOutput {
+                result: HookBatchResult {
+                    event,
+                    results: vec![HookResult {
+                        hook_id: hook_id("guard.test"),
+                        status,
+                        messages: if status == HookStatus::Repair {
+                            vec![HookMessage {
+                                code: "answer.repair".to_string(),
+                                message: "private diagnostic".to_string(),
+                                fix: Some("remove the invalid claim".to_string()),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
+                    }],
+                },
+                duration_ms: Some(7),
+            }));
         self
     }
 
-    fn with_hook_result(mut self, result: HookBatchResult) -> Self {
-        self.hook_results.push(FakeHookResult::Batch(result));
-        self
-    }
-
-    fn request_kinds(&self) -> Vec<&'static str> {
-        self.requests.clone()
-    }
-
-    fn event_kinds(&self) -> Vec<&'static str> {
-        self.events.iter().map(RuntimeEvent::kind).collect()
-    }
-
-    fn transition_kinds(&self) -> Vec<&'static str> {
-        self.transitions
-            .iter()
-            .map(|record| record.transition.as_str())
-            .collect()
-    }
-
-    fn operation_kinds(&self) -> Vec<&str> {
-        self.operations.iter().map(String::as_str).collect()
+    fn result_for(&mut self, effect: &TurnEffect) -> TurnEffectResult {
+        match effect {
+            TurnEffect::HookBatch { key, request } => TurnEffectResult::HookBatch {
+                key: key.clone(),
+                outcome: self.hooks.pop_front().unwrap_or_else(|| {
+                    EffectOutcome::Succeeded(HookEffectOutput {
+                        result: HookBatchResult {
+                            event: request.event,
+                            results: request
+                                .hooks
+                                .iter()
+                                .cloned()
+                                .map(|hook_id| HookResult {
+                                    hook_id,
+                                    status: HookStatus::Pass,
+                                    messages: Vec::new(),
+                                })
+                                .collect(),
+                        },
+                        duration_ms: Some(1),
+                    })
+                }),
+            },
+            TurnEffect::ModelGeneration { key, .. } => TurnEffectResult::ModelGeneration {
+                key: key.clone(),
+                outcome: self
+                    .model
+                    .pop_front()
+                    .expect("missing scripted model result"),
+            },
+            TurnEffect::CapabilityDispatch { key, .. } => TurnEffectResult::CapabilityDispatch {
+                key: key.clone(),
+                outcome: self
+                    .capability
+                    .pop_front()
+                    .expect("missing scripted capability result"),
+            },
+            TurnEffect::TranscriptAppend { key, .. } => TurnEffectResult::TranscriptAppend {
+                key: key.clone(),
+                outcome: self
+                    .transcript
+                    .pop_front()
+                    .unwrap_or(EffectOutcome::Succeeded(())),
+            },
+        }
     }
 }
 
-impl AgentLoopHost for FakeHost {
-    fn record_capability_denial(
-        &mut self,
-        capability_id: Option<CapabilityId>,
-        code: DispatchDenialCode,
-    ) -> Result<()> {
-        self.denials.push((capability_id, code));
-        Ok(())
-    }
+#[derive(Debug, PartialEq)]
+struct RunResult {
+    terminal: TurnTerminal,
+    events: Vec<agl_events::RuntimeEvent>,
+    effects: Vec<TurnEffectKind>,
+}
 
-    fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
-        self.requests.push("run_hooks");
-        self.operations
-            .push(format!("run_hooks:{}", request.event.as_str()));
-        self.hook_requests.push(request);
-        match self.hook_results.remove(0) {
-            FakeHookResult::Batch(result) => Ok(result),
+fn run_script(input: TurnInput, mut script: Script, checkpoint_each: bool) -> RunResult {
+    let mut executor = TurnExecutor::new(input);
+    let mut advance = executor.next_effect().unwrap();
+    let mut events = Vec::new();
+    let mut effects = Vec::new();
+    loop {
+        events.extend(advance.events.into_iter().map(|draft| draft.payload));
+        match advance.state {
+            TurnAdvanceState::Terminal { terminal } => {
+                return RunResult {
+                    terminal,
+                    events,
+                    effects,
+                };
+            }
+            TurnAdvanceState::Pending { effect } => {
+                effects.push(effect.kind());
+                if checkpoint_each {
+                    let bytes = serde_json::to_vec(&executor.checkpoint()).unwrap();
+                    let checkpoint: TurnCheckpoint = serde_json::from_slice(&bytes).unwrap();
+                    executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
+                }
+                let result = script.result_for(&effect);
+                advance = executor.resume(result).unwrap();
+                if checkpoint_each {
+                    let bytes = serde_json::to_vec(&executor.checkpoint()).unwrap();
+                    let checkpoint: TurnCheckpoint = serde_json::from_slice(&bytes).unwrap();
+                    executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
+                }
+            }
         }
-    }
-
-    fn generate(&mut self, request: ModelRequest) -> Result<ModelResponse> {
-        self.requests.push("generate");
-        self.operations.push("generate".to_string());
-        self.model_requests.push(request);
-        match self.model_results.remove(0) {
-            FakeModelResult::Response(content) => Ok(ModelResponse { content }),
-            FakeModelResult::Error(message) => Err(anyhow!(message)),
-        }
-    }
-
-    fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
-        self.requests.push("dispatch_tool");
-        self.operations.push("dispatch_tool".to_string());
-        self.dispatches.push(request);
-        match self.tool_results.remove(0) {
-            FakeToolResult::Observation(observation) => Ok(ToolDispatchResponse {
-                result: ActionResult::new(json!({"observation": observation})),
-            }),
-            FakeToolResult::Error(message) => Err(anyhow!(message)),
-        }
-    }
-
-    fn record_turn_messages(&mut self, messages: &[TurnMessage]) -> Result<()> {
-        self.turn_messages = messages.to_vec();
-        Ok(())
-    }
-
-    fn emit_transition(
-        &mut self,
-        record: &TurnTransitionRecord,
-        event: &RuntimeEvent,
-    ) -> Result<()> {
-        self.operations
-            .push(format!("transition:{}", record.transition.as_str()));
-        self.transitions.push(record.clone());
-        self.events.push(event.clone());
-        Ok(())
     }
 }
 
 fn run_id() -> RunId {
-    RunId::parse(TEST_RUN_ID).unwrap()
+    RunId::parse(RUN_ID).unwrap()
 }
 
 fn turn_id() -> TurnId {
-    TurnId::parse(TEST_TURN_ID).unwrap()
+    TurnId::parse(TURN_ID).unwrap()
 }
 
-fn turn_input(user_input: impl Into<String>) -> TurnInput {
-    TurnInput::user(run_id(), turn_id(), user_input)
+fn input() -> TurnInput {
+    TurnInput::user(run_id(), turn_id(), "hello")
 }
 
-fn read_file_tool() -> VisibleTool {
+fn read_tool() -> VisibleTool {
     let declaration = ActionDeclaration::new(
         CapabilityId::new("read_file").unwrap(),
         "Read a file",
@@ -179,252 +188,41 @@ fn read_file_tool() -> VisibleTool {
     VisibleTool::from_declaration(&declaration)
 }
 
-fn tool_call(path: &str) -> String {
-    format!(r#"<tool_call>{{"name":"read_file","arguments":{{"path":"{path}"}}}}</tool_call>"#)
+fn tool_call(name: &str, arguments: serde_json::Value) -> String {
+    format!("<tool_call>{{\"name\":{name:?},\"arguments\":{arguments}}}</tool_call>")
 }
 
 fn hook_id(value: &str) -> HookId {
     HookId::new(value).unwrap()
 }
 
-fn finish_hook_batch() -> TurnHookBatch {
-    TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"))
-}
-
-fn artifact_write_hook_batch() -> TurnHookBatch {
-    TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id("guard.artifact"))
-}
-
-fn hook_message(code: &str) -> HookMessage {
-    HookMessage {
-        code: code.to_string(),
-        message: "hidden hook diagnostic".to_string(),
-        fix: Some("hidden hook fix".to_string()),
-    }
-}
-
-fn hook_result(id: &str, status: HookStatus, codes: &[&str]) -> HookResult {
-    HookResult {
-        hook_id: hook_id(id),
-        status,
-        messages: codes.iter().map(|code| hook_message(code)).collect(),
-    }
-}
-
-fn hook_batch_result(
-    event: HookEvent,
-    results: impl IntoIterator<Item = HookResult>,
-) -> HookBatchResult {
-    HookBatchResult {
-        event,
-        results: results.into_iter().collect(),
-    }
+fn event_kinds(events: &[agl_events::RuntimeEvent]) -> Vec<&'static str> {
+    events.iter().map(agl_events::RuntimeEvent::kind).collect()
 }
 
 #[test]
-fn required_turn_finish_hook_pass_allows_answer() {
-    let mut host = FakeHost::default()
-        .with_model_response("done")
-        .with_hook_result(hook_batch_result(
-            HookEvent::TurnFinish,
-            [hook_result("guard.answer", HookStatus::Pass, &[])],
-        ));
-    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
+fn answer_path_is_effect_driven_and_checkpoint_equivalent() {
+    let uninterrupted = run_script(input(), Script::default().model("done"), false);
+    let resumed = run_script(input(), Script::default().model("done"), true);
 
-    let output = run_turn(&mut host, input).unwrap();
-
+    assert_eq!(uninterrupted, resumed);
     assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "done".to_string()
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
-    assert_eq!(host.hook_requests[0].event, HookEvent::TurnFinish);
-    assert_eq!(host.hook_requests[0].hooks, [hook_id("guard.answer")]);
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "answer.final",
-            "hook.batch_prepared",
-            "hook.batch_started",
-            "hook.batch_finished",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(
-        host.operation_kinds(),
-        [
-            "transition:start",
-            "transition:prepare_model_request",
-            "transition:request_model",
-            "generate",
-            "transition:receive_model_response",
-            "transition:parse_answer",
-            "transition:final_answer",
-            "transition:prepare_hook_batch",
-            "transition:run_hook_batch",
-            "run_hooks:turn.finish",
-            "transition:finish_hook_batch",
-            "transition:finish",
-        ]
-    );
-}
-
-#[test]
-fn required_artifact_write_hook_runs_before_answer_is_accepted() {
-    let mut host = FakeHost::default()
-        .with_model_response("done")
-        .with_hook_result(hook_batch_result(
-            HookEvent::ArtifactWrite,
-            [hook_result("guard.artifact", HookStatus::Pass, &[])],
-        ));
-    let input = turn_input("answer").with_hook_batch(artifact_write_hook_batch());
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "done".to_string()
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
-    assert_eq!(host.hook_requests[0].event, HookEvent::ArtifactWrite);
-    assert_eq!(
-        host.operation_kinds(),
-        [
-            "transition:start",
-            "transition:prepare_model_request",
-            "transition:request_model",
-            "generate",
-            "transition:receive_model_response",
-            "transition:parse_answer",
-            "transition:final_answer",
-            "transition:prepare_hook_batch",
-            "transition:run_hook_batch",
-            "run_hooks:artifact.write",
-            "transition:finish_hook_batch",
-            "transition:finish",
-        ]
-    );
-}
-
-#[test]
-fn warning_turn_finish_hook_continues_and_records_warning() {
-    let mut host = FakeHost::default()
-        .with_model_response("done")
-        .with_hook_result(hook_batch_result(
-            HookEvent::TurnFinish,
-            [hook_result(
-                "guard.answer",
-                HookStatus::Warn,
-                &["answer.warning"],
-            )],
-        ));
-    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "done".to_string()
-        }
-    );
-    assert!(matches!(
-        host.events
-            .iter()
-            .find(|event| event.kind() == "hook.batch_finished"),
-        Some(RuntimeEvent::HookBatchFinished {
-            outcome: agl_events::HookBatchOutcomeEvent::Warn,
-            warning_count: 1,
-            message_codes,
-            ..
-        }) if message_codes == &["answer.warning".to_string()]
-    ));
-}
-
-#[test]
-fn repairs_answer_when_required_hook_requests_repair() {
-    let mut host = FakeHost::default()
-        .with_model_response("function=wrong")
-        .with_hook_result(hook_batch_result(
-            HookEvent::ArtifactWrite,
-            [hook_result(
-                "guard.artifact",
-                HookStatus::Repair,
-                &["runtime_identity_mismatch"],
-            )],
-        ))
-        .with_model_response("function=repo-analyst")
-        .with_hook_result(hook_batch_result(
-            HookEvent::ArtifactWrite,
-            [hook_result("guard.artifact", HookStatus::Pass, &[])],
-        ));
-    let input = turn_input("what is loaded?")
-        .with_hook_batch(artifact_write_hook_batch())
-        .with_max_hook_repair_attempts(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "function=repo-analyst".to_string()
-        }
-    );
-    assert_eq!(
-        host.request_kinds(),
-        ["generate", "run_hooks", "generate", "run_hooks"]
-    );
-    assert!(host.transition_kinds().contains(&"prepare_repair"));
-    assert_eq!(
-        host.turn_messages,
-        vec![
-            TurnMessage::User {
-                content: "what is loaded?".to_string()
-            },
-            TurnMessage::Assistant {
-                content: "function=repo-analyst".to_string()
+        uninterrupted.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Answered {
+                answer: "done".to_string()
             }
+        }
+    );
+    assert_eq!(
+        uninterrupted.effects,
+        [
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::TranscriptAppend,
         ]
     );
-    assert!(host.model_requests[1].messages.iter().any(|message| {
-        matches!(
-            message,
-            TurnMessage::System { content }
-                if content.contains("runtime_identity_mismatch")
-                    && content.contains("hidden hook fix")
-        )
-    }));
-}
-
-#[test]
-fn failed_required_turn_finish_hook_fails_closed_before_accepting_answer() {
-    let mut host = FakeHost::default()
-        .with_model_response("blocked answer")
-        .with_hook_result(hook_batch_result(
-            HookEvent::TurnFinish,
-            [hook_result(
-                "guard.answer",
-                HookStatus::Fail,
-                &["answer.blocked"],
-            )],
-        ));
-    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
-
-    let err = run_turn(&mut host, input).unwrap_err();
-
-    assert!(format!("{err:#}").contains("required hook batch `turn.finish` failed"));
-    assert_eq!(host.request_kinds(), ["generate", "run_hooks"]);
     assert_eq!(
-        host.event_kinds(),
+        event_kinds(&uninterrupted.events),
         [
             "turn.started",
             "model.request_prepared",
@@ -432,526 +230,378 @@ fn failed_required_turn_finish_hook_fails_closed_before_accepting_answer() {
             "model.response_received",
             "model.action_parsed",
             "answer.final",
-            "hook.batch_prepared",
-            "hook.batch_started",
-            "hook.batch_finished",
-            "hook.batch_blocked",
             "turn.finished",
         ]
     );
-    assert!(matches!(
-        host.events.last(),
-        Some(RuntimeEvent::TurnFinished {
-            status: agl_events::TurnFinishStatus::Failed,
-            ..
-        })
-    ));
 }
 
 #[test]
-fn missing_required_turn_finish_hook_fails_closed() {
-    let mut host = FakeHost::default()
-        .with_model_response("done")
-        .with_hook_result(hook_batch_result(
-            HookEvent::TurnFinish,
-            Vec::<HookResult>::new(),
-        ));
-    let input = turn_input("answer").with_hook_batch(finish_hook_batch());
-
-    let err = run_turn(&mut host, input).unwrap_err();
-
-    assert!(format!("{err:#}").contains("required hook batch `turn.finish` failed"));
-    assert!(matches!(
-        host.events
-            .iter()
-            .find(|event| event.kind() == "hook.batch_finished"),
-        Some(RuntimeEvent::HookBatchFinished {
-            outcome: agl_events::HookBatchOutcomeEvent::Fail,
-            failed_required_count: 0,
-            missing_required_hooks,
-            ..
-        }) if missing_required_hooks == &["guard.answer".to_string()]
-    ));
-    assert!(matches!(
-        host.events
-            .iter()
-            .find(|event| event.kind() == "hook.batch_blocked"),
-        Some(RuntimeEvent::HookBatchBlocked {
-            missing_required_hooks,
-            ..
-        }) if missing_required_hooks == &["guard.answer".to_string()]
-    ));
-}
-
-#[test]
-fn answers_without_tools_when_model_returns_plain_text() {
-    let mut host = FakeHost::default().with_model_response("done");
-    let output = run_turn(&mut host, turn_input("answer")).unwrap();
+fn tool_observation_loops_back_to_model_without_driver_policy() {
+    let result = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(2),
+        Script::default()
+            .model(tool_call("read_file", json!({"path": "README.md"})))
+            .observation(json!({"text": "contents"}))
+            .model("final"),
+        true,
+    );
 
     assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "done".to_string()
+        result.effects,
+        [
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::CapabilityDispatch,
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::TranscriptAppend,
+        ]
+    );
+    assert!(event_kinds(&result.events).contains(&"observation.appended"));
+    assert_eq!(
+        result.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Answered {
+                answer: "final".to_string()
+            }
         }
     );
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert_eq!(host.model_requests[0].run_id, run_id());
-    assert_eq!(host.model_requests[0].turn_id, turn_id());
+}
+
+#[test]
+fn hidden_invalid_and_limited_tools_stop_before_dispatch() {
+    let hidden = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1)
+            .with_capability_policy_hash("policy-test"),
+        Script::default().model(tool_call("write_file", json!({"path": "README.md"}))),
+        true,
+    );
+    assert!(!hidden.effects.contains(&TurnEffectKind::CapabilityDispatch));
+    assert!(event_kinds(&hidden.events).contains(&"capability.call_denied"));
+    assert!(matches!(
+        hidden.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::HiddenTool,
+                ..
+            }
+        }
+    ));
+
+    let invalid = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1),
+        Script::default().model(tool_call("read_file", json!({"other": true}))),
+        false,
+    );
+    assert!(matches!(
+        invalid.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::InvalidToolArguments,
+                ..
+            }
+        }
+    ));
+
+    let limited = run_script(
+        input().with_visible_tool(read_tool()),
+        Script::default().model(tool_call("read_file", json!({"path": "README.md"}))),
+        false,
+    );
+    assert!(matches!(
+        limited.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::ToolLimitReached,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn malformed_tool_json_repair_and_stop_paths_are_pure() {
+    let repaired = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1),
+        Script::default()
+            .model(r#"<tool_call>{"name":"read_file","arguments":{"path":"README.md"}}"#)
+            .observation(json!({"ok": true}))
+            .model("done"),
+        true,
+    );
+    assert!(event_kinds(&repaired.events).contains(&"tool.json_repair_succeeded"));
+
+    let stopped = run_script(input(), Script::default().model("<tool_call>{bad"), true);
+    assert!(matches!(
+        stopped.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::ToolJsonUnrepairable,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn hook_repair_reissues_model_and_hook_failure_is_typed() {
+    let artifact_hook = TurnHookBatch::new(agl_capabilities::HookEvent::ArtifactWrite)
+        .with_required_hook(hook_id("guard.test"));
+    let repaired = run_script(
+        input()
+            .with_hook_batch(artifact_hook.clone())
+            .with_max_hook_repair_attempts(1),
+        Script::default()
+            .model("bad")
+            .model("good")
+            .hook(
+                agl_capabilities::HookEvent::ArtifactWrite,
+                HookStatus::Repair,
+            )
+            .hook(agl_capabilities::HookEvent::ArtifactWrite, HookStatus::Pass),
+        true,
+    );
+    assert_eq!(
+        repaired
+            .effects
+            .iter()
+            .filter(|kind| **kind == TurnEffectKind::ModelGeneration)
+            .count(),
+        2
+    );
+    assert!(event_kinds(&repaired.events).contains(&"hook.repair_prepared"));
+
+    let failed = run_script(
+        input().with_hook_batch(artifact_hook),
+        Script::default()
+            .model("bad")
+            .hook(agl_capabilities::HookEvent::ArtifactWrite, HookStatus::Fail),
+        false,
+    );
+    assert!(matches!(
+        failed.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Hook,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn model_capability_and_transcript_failures_are_typed() {
+    let model = run_script(
+        input(),
+        Script::default().model_failure(EffectFailureCode::Inference, "private model failure"),
+        false,
+    );
+    assert!(matches!(
+        model.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Inference,
+                ..
+            }
+        }
+    ));
     assert!(
-        host.transitions
-            .iter()
-            .all(|record| record.run_id == run_id() && record.turn_id == turn_id())
+        !serde_json::to_string(&model.events)
+            .unwrap()
+            .contains("private model failure")
     );
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "answer.final",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(
-        host.transition_kinds(),
-        [
-            "start",
-            "prepare_model_request",
-            "request_model",
-            "receive_model_response",
-            "parse_answer",
-            "final_answer",
-            "finish",
-        ]
-    );
-    assert_eq!(
-        host.operation_kinds(),
-        [
-            "transition:start",
-            "transition:prepare_model_request",
-            "transition:request_model",
-            "generate",
-            "transition:receive_model_response",
-            "transition:parse_answer",
-            "transition:final_answer",
-            "transition:finish",
-        ]
-    );
-}
 
-#[test]
-fn runs_one_tool_then_answers_with_observation() {
-    let mut host = FakeHost::default()
-        .with_model_response(tool_call("README.MD"))
-        .with_tool_observation("agentLIBRE readme")
-        .with_model_response("README says agentLIBRE.");
-    let input = turn_input("read README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "README says agentLIBRE.".to_string()
-        }
-    );
-    assert_eq!(
-        host.request_kinds(),
-        ["generate", "dispatch_tool", "generate"]
-    );
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "tool.args_validated",
-            "tool.call_started",
-            "tool.call_finished",
-            "observation.appended",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "answer.final",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(host.dispatches[0].run_id, run_id());
-    assert_eq!(host.dispatches[0].turn_id, turn_id());
-    assert_eq!(host.dispatches[0].capability_id.as_str(), "read_file");
-    assert_eq!(host.dispatches[0].arguments, json!({"path": "README.MD"}));
-    assert_eq!(
-        host.turn_messages,
-        vec![
-            TurnMessage::User {
-                content: "read README".to_string(),
-            },
-            TurnMessage::AssistantToolCall {
-                name: "read_file".to_string(),
-                arguments: json!({"path": "README.MD"}),
-            },
-            TurnMessage::ToolObservation {
-                name: "read_file".to_string(),
-                result: ActionResult::new(json!({"observation": "agentLIBRE readme"})),
-            },
-            TurnMessage::Assistant {
-                content: "README says agentLIBRE.".to_string(),
-            },
-        ]
-    );
-    assert_eq!(
-        host.operation_kinds(),
-        [
-            "transition:start",
-            "transition:prepare_model_request",
-            "transition:request_model",
-            "generate",
-            "transition:receive_model_response",
-            "transition:parse_tool_call",
-            "transition:validate_tool_args",
-            "transition:start_tool_call",
-            "dispatch_tool",
-            "transition:finish_tool_call",
-            "transition:append_observation",
-            "transition:request_model",
-            "generate",
-            "transition:receive_model_response",
-            "transition:parse_answer",
-            "transition:final_answer",
-            "transition:finish",
-        ]
-    );
-}
-
-#[test]
-fn repairs_malformed_tool_json_before_dispatch() {
-    let mut host = FakeHost::default()
-        .with_model_response(
-            r#"<tool_call>"{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.MD\"}}"</tool_call>"#,
-        )
-        .with_tool_observation("agentLIBRE readme")
-        .with_model_response("repaired and done");
-    let input = turn_input("read README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Answered {
-            answer: "repaired and done".to_string()
-        }
-    );
-    assert_eq!(
-        host.request_kinds(),
-        ["generate", "dispatch_tool", "generate"]
-    );
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "tool.json_malformed",
-            "tool.json_repair_attempted",
-            "tool.json_repair_succeeded",
-            "model.action_parsed",
-            "tool.args_validated",
-            "tool.call_started",
-            "tool.call_finished",
-            "observation.appended",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "answer.final",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(host.dispatches[0].arguments, json!({"path": "README.MD"}));
-}
-
-#[test]
-fn stops_visibly_when_tool_json_cannot_be_repaired() {
-    let mut host = FakeHost::default()
-        .with_model_response(r#"<tool_call>{"name":,"arguments":42</tool_call>"#);
-    let input = turn_input("bad tool")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Stopped {
-            reason: StopReason::ToolJsonUnrepairable,
-            detail: None
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "tool.json_malformed",
-            "tool.json_repair_attempted",
-            "tool.json_repair_failed",
-            "turn.stopped",
-            "turn.finished",
-        ]
-    );
-}
-
-#[test]
-fn stops_before_dispatch_when_tool_limit_is_reached() {
-    let mut host = FakeHost::default().with_model_response(tool_call("README.MD"));
-    let input = turn_input("read README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(0);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Stopped {
-            reason: StopReason::ToolLimitReached,
-            detail: Some(StopDetail::ToolLimitReached { limit: 0 })
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert!(host.dispatches.is_empty());
-    assert!(host.denials.is_empty());
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "tool.limit_reached",
-            "turn.stopped",
-            "turn.finished",
-        ]
-    );
-}
-
-#[test]
-fn invalid_model_controlled_capability_name_is_absent_from_safe_events() {
-    let secret_name = "SECRET invalid capability name";
-    let mut host = FakeHost::default().with_model_response(format!(
-        r#"<tool_call>{{"name":"{secret_name}","arguments":{{}}}}</tool_call>"#
-    ));
-    let input = turn_input("try hidden")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert!(matches!(
-        output,
-        TurnOutput::Stopped {
-            reason: StopReason::HiddenTool,
-            ..
-        }
-    ));
-    assert!(host.dispatches.is_empty());
-    assert_eq!(
-        host.denials,
-        [(None, DispatchDenialCode::CapabilityNotEffective)]
-    );
-    let safe_json = host
-        .events
-        .iter()
-        .map(SafeRuntimeEvent::from)
-        .map(|event| serde_json::to_string(&event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(!safe_json.contains(secret_name), "{safe_json}");
-}
-
-#[test]
-fn rejects_hidden_tool_before_dispatch() {
-    let mut host = FakeHost::default().with_model_response(
-        r#"<tool_call>{"name":"write_file","arguments":{"path":"README.MD"}}</tool_call>"#,
-    );
-    let input = turn_input("write README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Stopped {
-            reason: StopReason::HiddenTool,
-            detail: Some(StopDetail::HiddenTool {
-                name: "write_file".to_string()
-            })
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert!(host.dispatches.is_empty());
-    assert_eq!(
-        host.denials,
-        [(
-            Some(CapabilityId::new("write_file").unwrap()),
-            DispatchDenialCode::CapabilityNotEffective,
-        )]
-    );
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "tool.hidden_rejected",
-            "turn.stopped",
-            "turn.finished",
-        ]
-    );
-}
-
-#[test]
-fn validates_tool_args_before_dispatch() {
-    let mut host = FakeHost::default().with_model_response(
-        r#"<tool_call>{"name":"read_file","arguments":{"other":"README.MD"}}</tool_call>"#,
-    );
-    let input = turn_input("read README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
-
-    let output = run_turn(&mut host, input).unwrap();
-
-    assert_eq!(
-        output,
-        TurnOutput::Stopped {
-            reason: StopReason::InvalidToolArguments,
-            detail: Some(StopDetail::InvalidToolArguments {
-                name: "read_file".to_string(),
-                message: "action arguments failed schema validation; /: Additional properties are not allowed ('other' was unexpected); /: \"path\" is a required property".to_string()
-            })
-        }
-    );
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert!(host.dispatches.is_empty());
-    assert_eq!(
-        host.denials,
-        [(
-            Some(CapabilityId::new("read_file").unwrap()),
-            DispatchDenialCode::InvalidArguments,
-        )]
-    );
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "tool.args_invalid",
-            "turn.stopped",
-            "turn.finished",
-        ]
-    );
-}
-
-#[test]
-fn model_request_failure_finishes_failed_turn() {
-    let mut host = FakeHost::default().with_model_error("backend unavailable");
-
-    let err = run_turn(&mut host, turn_input("answer")).unwrap_err();
-
-    assert!(format!("{err:#}").contains("model request failed"));
-    assert_eq!(host.request_kinds(), ["generate"]);
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.request_failed",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(
-        host.transition_kinds(),
-        [
-            "start",
-            "prepare_model_request",
-            "request_model",
-            "fail",
-            "finish",
-        ]
+    let mut capability_script =
+        Script::default().model(tool_call("read_file", json!({"path": "README.md"})));
+    capability_script
+        .capability
+        .push_back(EffectOutcome::Failed(EffectFailure::new(
+            EffectFailureCode::Capability,
+            "private capability failure",
+            false,
+        )));
+    let capability = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1),
+        capability_script,
+        false,
     );
     assert!(matches!(
-        host.events.last(),
-        Some(RuntimeEvent::TurnFinished {
-            status: agl_events::TurnFinishStatus::Failed,
-            ..
+        capability.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Capability,
+                ..
+            }
+        }
+    ));
+
+    let mut transcript_script = Script::default().model("done");
+    transcript_script
+        .transcript
+        .push_back(EffectOutcome::Failed(EffectFailure::new(
+            EffectFailureCode::Transcript,
+            "private transcript failure",
+            false,
+        )));
+    let transcript = run_script(input(), transcript_script, false);
+    assert!(matches!(
+        transcript.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Transcript,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn pending_effect_is_stable_and_results_are_exactly_once() {
+    let mut executor = TurnExecutor::new(input());
+    let first = executor.next_effect().unwrap();
+    let TurnAdvanceState::Pending { effect } = first.state else {
+        panic!("expected model effect");
+    };
+    let repeated = executor.next_effect().unwrap();
+    assert!(repeated.events.is_empty());
+    let TurnAdvanceState::Pending {
+        effect: repeated_effect,
+    } = repeated.state
+    else {
+        panic!("expected repeated model effect");
+    };
+    assert_eq!(
+        serde_json::to_vec(&effect).unwrap(),
+        serde_json::to_vec(&repeated_effect).unwrap()
+    );
+
+    let stale = EffectKey {
+        turn_id: TurnId::generate(),
+        sequence: effect.key().sequence,
+    };
+    assert!(matches!(
+        executor.resume(TurnEffectResult::ModelGeneration {
+            key: stale,
+            outcome: EffectOutcome::Succeeded(ModelResponse {
+                content: "done".to_string()
+            }),
+        }),
+        Err(TurnExecutorError::StaleEffectKey { .. })
+    ));
+    assert!(matches!(
+        executor.resume(TurnEffectResult::TranscriptAppend {
+            key: effect.key().clone(),
+            outcome: EffectOutcome::Succeeded(()),
+        }),
+        Err(TurnExecutorError::MismatchedEffectResult { .. })
+    ));
+
+    let result = TurnEffectResult::ModelGeneration {
+        key: effect.key().clone(),
+        outcome: EffectOutcome::Succeeded(ModelResponse {
+            content: "done".to_string(),
+        }),
+    };
+    executor.resume(result.clone()).unwrap();
+    assert!(matches!(
+        executor.resume(result),
+        Err(TurnExecutorError::DuplicateEffectKey(_))
+    ));
+}
+
+#[test]
+fn cancellation_is_terminal_before_during_and_between_effects() {
+    let mut before = TurnExecutor::new(input());
+    before.request_cancellation().unwrap();
+    let advance = before.next_effect().unwrap();
+    assert!(matches!(
+        advance.state,
+        TurnAdvanceState::Terminal {
+            terminal: TurnTerminal::Cancelled
+        }
+    ));
+    assert_eq!(
+        event_kinds(
+            &advance
+                .events
+                .into_iter()
+                .map(|draft| draft.payload)
+                .collect::<Vec<_>>()
+        ),
+        ["turn.cancelled", "turn.finished"]
+    );
+    assert_eq!(
+        before.request_cancellation().unwrap_err(),
+        TurnExecutorError::AlreadyTerminal
+    );
+
+    let mut active = TurnExecutor::new(input());
+    let advance = active.next_effect().unwrap();
+    let TurnAdvanceState::Pending { effect } = advance.state else {
+        panic!("expected pending model");
+    };
+    let cancelled = active
+        .resume(TurnEffectResult::ModelGeneration {
+            key: effect.key().clone(),
+            outcome: EffectOutcome::Cancelled,
         })
+        .unwrap();
+    assert!(matches!(
+        cancelled.state,
+        TurnAdvanceState::Terminal {
+            terminal: TurnTerminal::Cancelled
+        }
+    ));
+
+    let mut between = TurnExecutor::new(input());
+    let advance = between.next_effect().unwrap();
+    let TurnAdvanceState::Pending { effect } = advance.state else {
+        panic!("expected pending model");
+    };
+    between.request_cancellation().unwrap();
+    let cancelled = between
+        .resume(TurnEffectResult::ModelGeneration {
+            key: effect.key().clone(),
+            outcome: EffectOutcome::Succeeded(ModelResponse {
+                content: "completed concurrently".to_string(),
+            }),
+        })
+        .unwrap();
+    assert!(matches!(
+        cancelled.state,
+        TurnAdvanceState::Terminal {
+            terminal: TurnTerminal::Cancelled
+        }
     ));
 }
 
 #[test]
-fn tool_dispatch_failure_finishes_failed_turn() {
-    let mut host = FakeHost::default()
-        .with_model_response(tool_call("README.MD"))
-        .with_tool_error("tool unavailable");
-    let input = turn_input("read README")
-        .with_visible_tool(read_file_tool())
-        .with_max_tool_calls(1);
+fn checkpoint_decode_is_strict_and_validates_invariants() {
+    let mut executor = TurnExecutor::new(input());
+    executor.next_effect().unwrap();
+    let checkpoint = executor.checkpoint();
+    let encoded = serde_json::to_vec(&checkpoint).unwrap();
+    let decoded: TurnCheckpoint = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded.pending_effect(), checkpoint.pending_effect());
+    assert_eq!(decoded.schema(), TURN_CHECKPOINT_SCHEMA);
 
-    let err = run_turn(&mut host, input).unwrap_err();
+    let mut wrong_schema = serde_json::to_value(&checkpoint).unwrap();
+    wrong_schema["schema"] = json!("agentlibre.turn-checkpoint.v0");
+    assert!(serde_json::from_value::<TurnCheckpoint>(wrong_schema).is_err());
 
-    assert!(format!("{err:#}").contains("tool dispatch `read_file` failed"));
-    assert_eq!(host.request_kinds(), ["generate", "dispatch_tool"]);
-    assert_eq!(
-        host.event_kinds(),
-        [
-            "turn.started",
-            "model.request_prepared",
-            "model.requested",
-            "model.response_received",
-            "model.action_parsed",
-            "tool.args_validated",
-            "tool.call_started",
-            "tool.call_failed",
-            "turn.finished",
-        ]
-    );
-    assert_eq!(
-        host.transition_kinds(),
-        [
-            "start",
-            "prepare_model_request",
-            "request_model",
-            "receive_model_response",
-            "parse_tool_call",
-            "validate_tool_args",
-            "start_tool_call",
-            "fail",
-            "finish",
-        ]
-    );
-    assert!(matches!(
-        host.events.last(),
-        Some(RuntimeEvent::TurnFinished {
-            status: agl_events::TurnFinishStatus::Failed,
-            ..
-        })
-    ));
+    let mut unknown = serde_json::to_value(&checkpoint).unwrap();
+    unknown["legacy_state"] = json!(true);
+    assert!(serde_json::from_value::<TurnCheckpoint>(unknown).is_err());
+
+    let mut bad_sequence = serde_json::to_value(&checkpoint).unwrap();
+    bad_sequence["effect_sequence"] = json!(0);
+    assert!(serde_json::from_value::<TurnCheckpoint>(bad_sequence).is_err());
 }
