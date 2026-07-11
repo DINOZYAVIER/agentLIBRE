@@ -24,6 +24,17 @@ pub enum TurnEffectKind {
     TranscriptAppend,
 }
 
+impl TurnEffectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HookBatch => "hook_batch",
+            Self::ModelGeneration => "model_generation",
+            Self::CapabilityDispatch => "capability_dispatch",
+            Self::TranscriptAppend => "transcript_append",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "effect", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnEffect {

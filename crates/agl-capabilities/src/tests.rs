@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use agl_ids::{ExecutionScope, RunId};
+use agl_ids::{ExecutionScope, RunId, StepId};
 use schemars::JsonSchema;
 use serde_json::{Value, json};
 
@@ -210,6 +210,21 @@ fn operation_and_state_effect_invariants_are_enforced() {
 }
 
 #[test]
+fn mutating_delivery_requires_an_explicit_idempotency_contract() {
+    assert_eq!(read_action().delivery, ActionDelivery::ReplaySafe);
+    assert_eq!(write_action().delivery, ActionDelivery::AtMostOnce);
+    let idempotent = write_action().with_run_step_idempotency();
+    assert_eq!(idempotent.delivery, ActionDelivery::IdempotentRunStep);
+    assert!(idempotent.validate().is_ok());
+    assert!(
+        read_action()
+            .with_run_step_idempotency()
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
 fn canonical_observation_is_recursive_and_insertion_order_independent() {
     let left: Value =
         serde_json::from_str(r#"{"z":{"b":2,"a":1},"items":[{"d":4,"c":3}],"a":0}"#).unwrap();
@@ -229,6 +244,29 @@ fn structured_result_round_trips_without_text_conversion() {
         result
     );
     assert!(serde_json::from_value::<ActionResult>(json!({"data": {}, "unknown": true})).is_err());
+}
+
+#[test]
+fn invocation_exposes_stable_run_step_idempotency_key() {
+    let set = resolve([capability("fs.edit")], ToolAccessMode::Write);
+    let effective = set.capability(&capability("fs.edit")).unwrap();
+    let run_id = RunId::parse(RUN_ID).unwrap();
+    let step_id = StepId::generate();
+    let invocation = ActionInvocation::new(
+        ExecutionScope::builder(run_id.clone())
+            .step_id(step_id.clone())
+            .build()
+            .unwrap(),
+        capability("fs.edit"),
+        effective.provider_id().clone(),
+        effective.declaration_digest().clone(),
+        set.policy_hash().clone(),
+        json!({"path": "README.md"}),
+    );
+    assert_eq!(
+        invocation.run_step_idempotency_key().as_deref(),
+        Some(format!("{run_id}:{step_id}").as_str())
+    );
 }
 
 #[test]

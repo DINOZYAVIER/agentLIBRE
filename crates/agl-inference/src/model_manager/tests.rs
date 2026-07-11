@@ -172,6 +172,8 @@ impl ModelRuntime for FakeRuntime {
                 content: format!("answer:{attempt}"),
                 finish_reason: InferenceFinishReason::Stop,
                 selected_device: Some("fake:0".to_string()),
+                input_tokens: 4,
+                output_tokens: 1,
             },
             format!("fake generate {attempt}"),
         ))

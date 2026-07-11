@@ -17,6 +17,14 @@ pub enum StoreError {
     NotFound {
         resource: String,
     },
+    TransitionRejected {
+        resource: String,
+        from: String,
+        to: String,
+    },
+    LeaseLost {
+        resource: String,
+    },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
@@ -49,6 +57,12 @@ impl fmt::Display for StoreError {
                 write!(f, "invalid {field} value {value:?}: {reason}")
             }
             Self::NotFound { resource } => write!(f, "{resource} not found"),
+            Self::TransitionRejected { resource, from, to } => {
+                write!(f, "cannot transition {resource} from {from} to {to}")
+            }
+            Self::LeaseLost { resource } => {
+                write!(f, "lease for {resource} is no longer owned by this worker")
+            }
             Self::Io(err) => write!(f, "{err}"),
             Self::Sqlite(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "{err}"),

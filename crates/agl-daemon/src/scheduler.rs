@@ -1,17 +1,14 @@
-use agl_chat::{
-    ChatOptions, ChatService, ChatTurnStatus, InferenceClientHandle, InferenceOptions,
-    ToolAccessMode,
-};
 use agl_cron::{CronJob, CronRepository, CronRun, CronRunAdmission, CronRunStatus};
-use agl_runtime::AgentLibreRuntimeConfig;
+use agl_ids::RunId;
 use agl_store::AglStore;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CronExecution {
     pub status: CronRunStatus,
     pub result_ref: Option<String>,
     pub error: Option<String>,
+    pub supervisor_run_id: Option<RunId>,
 }
 
 impl CronExecution {
@@ -20,6 +17,7 @@ impl CronExecution {
             status: CronRunStatus::Succeeded,
             result_ref: Some(result_ref.into()),
             error: None,
+            supervisor_run_id: None,
         }
     }
 
@@ -28,6 +26,16 @@ impl CronExecution {
             status: CronRunStatus::Failed,
             result_ref: None,
             error: Some(error.into()),
+            supervisor_run_id: None,
+        }
+    }
+
+    pub fn queued(supervisor_run_id: RunId) -> Self {
+        Self {
+            status: CronRunStatus::Queued,
+            result_ref: Some(format!("run:{supervisor_run_id}")),
+            error: None,
+            supervisor_run_id: Some(supervisor_run_id),
         }
     }
 }
@@ -52,7 +60,7 @@ pub struct CronSchedulerReport {
 }
 
 pub trait CronTargetExecutor {
-    fn execute(&mut self, job: &CronJob) -> CronExecution;
+    fn execute(&mut self, job: &CronJob, scheduled_for: &str) -> CronExecution;
 }
 
 pub trait CronNotifier {
@@ -88,55 +96,6 @@ pub fn render_cron_notification_body(notification: &CronNotification) -> String 
     body
 }
 
-pub fn run_cron_skill_chat_turn(
-    job: &CronJob,
-    runtime: &AgentLibreRuntimeConfig,
-    mut inference: InferenceOptions,
-    inference_client: InferenceClientHandle,
-    context_label: Option<&str>,
-) -> Result<String> {
-    let prompt = render_cron_skill_prompt(job)?;
-    inference.skills.push(job.target_ref.clone());
-    inference.tool_mode = ToolAccessMode::Write;
-    let mut service = ChatService::open(
-        ChatOptions {
-            inference,
-            workspace_root: None,
-            session_id: None,
-            no_history: false,
-            new_session: true,
-        },
-        runtime,
-        inference_client,
-    )
-    .with_context(|| cron_skill_context("open", context_label, "chat session"))?;
-    let summary = service.summary();
-    let output = service
-        .run_user_turn(&prompt)
-        .with_context(|| cron_skill_context("run", context_label, "turn"));
-    let finish = service
-        .finish_eof_if_needed()
-        .with_context(|| cron_skill_context("finish", context_label, "session"));
-    let output = output?;
-    finish?;
-    match output.status {
-        ChatTurnStatus::Answered { .. } => Ok(format!(
-            "skill:{}:session:{}:run:{}",
-            job.target_ref, summary.session_id, output.run_id
-        )),
-        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
-        ChatTurnStatus::Failed { message } => bail!("cron skill turn failed: {message}"),
-        ChatTurnStatus::Cancelled => bail!("cron skill turn was cancelled"),
-    }
-}
-
-fn cron_skill_context(verb: &str, label: Option<&str>, noun: &str) -> String {
-    match label.filter(|value| !value.is_empty()) {
-        Some(label) => format!("failed to {verb} {label} cron skill {noun}"),
-        None => format!("failed to {verb} cron skill {noun}"),
-    }
-}
-
 #[derive(Default)]
 pub struct NoopCronNotifier;
 
@@ -170,22 +129,29 @@ pub fn run_cron_tick(
                 report.recorded_runs.push(run);
                 continue;
             }
-            CronRunAdmission::Pending(_) => {
-                continue;
-            }
-            CronRunAdmission::Inserted(_) => {}
+            CronRunAdmission::Pending(_) | CronRunAdmission::Inserted(_) => {}
         }
-        let execution = executor.execute(&due.job);
-        let run = repo
-            .record_admitted_run(
+        let execution = executor.execute(&due.job, &due.scheduled_for);
+        let run = if execution.status == CronRunStatus::Queued {
+            let supervisor_run_id = execution
+                .supervisor_run_id
+                .as_ref()
+                .context("queued cron execution is missing supervisor run ID")?;
+            repo.record_admitted_supervisor_run(&due.job.id, &due.scheduled_for, supervisor_run_id)
+        } else {
+            repo.record_admitted_run(
                 &due.job.id,
                 &due.scheduled_for,
                 execution.status,
                 execution.result_ref.as_deref(),
                 execution.error.as_deref(),
             )
-            .context("failed to record cron scheduler run")?;
-        if let Some(notify_ref) = &due.job.notify_ref {
+        }
+        .context("failed to record cron scheduler run")?;
+        if run.status != CronRunStatus::Queued
+            && run.status != CronRunStatus::Running
+            && let Some(notify_ref) = &due.job.notify_ref
+        {
             notifier
                 .notify(CronNotification {
                     notify_ref: notify_ref.clone(),

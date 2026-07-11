@@ -5,8 +5,8 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
-    InferenceOptions, ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
+    ChatOptions, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
+    InferenceOptions, SupervisedChat, ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{
@@ -16,8 +16,7 @@ use agl_cron::{
 };
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    default_socket_path, render_cron_notification_body, render_cron_skill_prompt,
-    run_cron_skill_chat_turn, run_cron_tick,
+    default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
@@ -555,13 +554,33 @@ fn run_skill_cron_target(
     runtime: &AgentLibreRuntimeConfig,
     inference_client: &InferenceClientHandle,
 ) -> Result<String> {
-    run_cron_skill_chat_turn(
-        job,
+    let prompt = render_cron_skill_prompt(job)?;
+    let mut inference = InferenceOptions::default();
+    inference.skills.push(job.target_ref.clone());
+    inference.tool_mode = ChatToolAccessMode::Write;
+    let chat = SupervisedChat::open(
+        ChatOptions {
+            inference,
+            workspace_root: None,
+            session_id: None,
+            no_history: false,
+            new_session: true,
+        },
         runtime,
-        InferenceOptions::default(),
         inference_client.clone(),
-        None,
-    )
+    )?;
+    let session_id = chat.session_id().clone();
+    let output = chat.run_user_turn(&prompt)?;
+    chat.finish_eof_if_needed()?;
+    match output.status {
+        ChatTurnStatus::Answered { .. } => Ok(format!(
+            "skill:{}:session:{session_id}:run:{}",
+            job.target_ref, output.run_id
+        )),
+        ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
+        ChatTurnStatus::Failed { message } => bail!("cron skill turn failed: {message}"),
+        ChatTurnStatus::Cancelled => bail!("cron skill turn was cancelled"),
+    }
 }
 
 fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
@@ -607,7 +626,7 @@ struct CliCronExecutor<'a> {
 }
 
 impl CronTargetExecutor for CliCronExecutor<'_> {
-    fn execute(&mut self, job: &CronJob) -> CronExecution {
+    fn execute(&mut self, job: &CronJob, _scheduled_for: &str) -> CronExecution {
         execute_cron_target(
             job,
             self.store,
@@ -1276,8 +1295,8 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     let tool_mode = chat_options.inference.tool_mode;
     let model_manager = process_local_model_manager()?;
     let inference_client = InferenceClientHandle::from(model_manager.handle());
-    let mut chat_service = ChatService::open(chat_options, runtime, inference_client)?;
-    let summary = chat_service.summary();
+    let chat = SupervisedChat::open(chat_options, runtime, inference_client)?;
+    let summary = chat.summary()?;
     tracing::info!(
         target: "agentlibre::app",
         session_id = %summary.session_id,
@@ -1286,13 +1305,13 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
         tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
-    let output = chat_service.run_user_turn(&prompt);
-    let finish = chat_service.finish_eof_if_needed();
+    let output = chat.run_user_turn(&prompt);
+    let finish = chat.finish_eof_if_needed();
     let output = output?;
     finish?;
     tracing::info!(
         target: "agentlibre::app",
-        session_id = %chat_service.session_id(),
+        session_id = %chat.session_id(),
         run_id = %output.run_id,
         turn_id = %output.turn_id,
         generated_requests = output.generated_requests,
@@ -1746,6 +1765,9 @@ fn print_cron_run(run: &CronRun) {
     if let Some(error) = &run.error {
         println!("cron_run.{}.error={error}", run.id);
     }
+    if let Some(supervisor_run_id) = &run.supervisor_run_id {
+        println!("cron_run.{}.supervisor_run_id={supervisor_run_id}", run.id);
+    }
 }
 
 fn print_skill_lock_report(report: &SkillLockReport) {
@@ -1830,12 +1852,12 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
     let model_manager = process_local_model_manager()?;
     let inference_client = InferenceClientHandle::from(model_manager.handle());
-    let mut chat_service = ChatService::open(
+    let mut chat = SupervisedChat::open(
         chat_options_from_run_options(&options, runtime)?,
         runtime,
         inference_client,
     )?;
-    let summary = chat_service.summary();
+    let summary = chat.summary()?;
     let stdin = io::stdin();
 
     tracing::info!(
@@ -1849,7 +1871,7 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         replayed_messages = summary.replayed_messages,
         "chat session started"
     );
-    println!("session_id={}", chat_service.session_id());
+    println!("session_id={}", chat.session_id());
 
     loop {
         print!("agl> ");
@@ -1877,28 +1899,29 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Session) => {
-                print_chat_session_summary(&chat_service);
+                print_chat_session_summary(&chat)?;
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Reload) => {
-                match chat_service.reload_runtime_context() {
+                match chat.reload_runtime_context() {
                     Ok(visible_tools) => {
+                        let workspace_root = chat.workspace_root()?;
                         tracing::info!(
                             target: "agentlibre::app",
-                            session_id = %chat_service.session_id(),
-                            workspace_root = %chat_service.workspace_root().display(),
+                            session_id = %chat.session_id(),
+                            workspace_root = %workspace_root.display(),
                             visible_tools,
                             "chat runtime context reloaded"
                         );
                         println!("context_reloaded=true visible_tools={visible_tools}");
-                        println!("workspace_root={}", chat_service.workspace_root().display());
+                        println!("workspace_root={}", workspace_root.display());
                         println!("profile_reloaded=false");
                         println!("profile_reload_next_step=start a new chat or run command");
                     }
                     Err(err) => {
                         tracing::warn!(
                             target: "agentlibre::app",
-                            session_id = %chat_service.session_id(),
+                            session_id = %chat.session_id(),
                             error = %err,
                             "chat runtime context reload failed"
                         );
@@ -1909,11 +1932,12 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
             }
             ParsedChatInput::Workspace(path) => {
                 if let Some(path) = path {
-                    let root = chat_workspace_root(path, chat_service.workspace_root());
-                    if let Err(err) = chat_service.set_workspace_root(&root) {
+                    let current_root = chat.workspace_root()?;
+                    let root = chat_workspace_root(path, &current_root);
+                    if let Err(err) = chat.set_workspace_root(&root) {
                         tracing::warn!(
                             target: "agentlibre::app",
-                            session_id = %chat_service.session_id(),
+                            session_id = %chat.session_id(),
                             requested_workspace_root = %root.display(),
                             error = %err,
                             "chat workspace root change failed"
@@ -1922,20 +1946,20 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                     } else {
                         tracing::info!(
                             target: "agentlibre::app",
-                            session_id = %chat_service.session_id(),
-                            workspace_root = %chat_service.workspace_root().display(),
+                            session_id = %chat.session_id(),
+                            workspace_root = %chat.workspace_root()?.display(),
                             "chat workspace root changed"
                         );
                     }
                 }
-                println!("workspace_root={}", chat_service.workspace_root().display());
+                println!("workspace_root={}", chat.workspace_root()?.display());
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Clear) => {
-                let cleared_messages = chat_service.clear_context()?;
+                let cleared_messages = chat.clear_context()?;
                 tracing::info!(
                     target: "agentlibre::app",
-                    session_id = %chat_service.session_id(),
+                    session_id = %chat.session_id(),
                     cleared_messages,
                     "chat context cleared"
                 );
@@ -1943,15 +1967,15 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 continue;
             }
             ParsedChatInput::Command(ChatCommand::Exit) => {
-                chat_service.request_exit()?;
+                chat.request_exit()?;
                 break;
             }
         };
 
-        let output = chat_service.run_user_turn(input)?;
+        let output = chat.run_user_turn(input)?;
         tracing::info!(
             target: "agentlibre::app",
-            session_id = %chat_service.session_id(),
+            session_id = %chat.session_id(),
             run_id = %output.run_id,
             turn_id = %output.turn_id,
             generated_requests = output.generated_requests,
@@ -1969,19 +1993,20 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
         }
     }
 
-    chat_service.finish_eof_if_needed()?;
+    chat.finish_eof_if_needed()?;
     tracing::info!(
         target: "agentlibre::app",
-        session_id = %chat_service.session_id(),
+        session_id = %chat.session_id(),
         "chat session finished"
     );
     Ok(())
 }
 
-fn print_chat_session_summary(chat_service: &ChatService) {
-    println!("session_id={}", chat_service.session_id());
-    println!("artifact_root={}", chat_service.artifact_root().display());
-    println!("workspace_root={}", chat_service.workspace_root().display());
+fn print_chat_session_summary(chat: &SupervisedChat) -> Result<()> {
+    println!("session_id={}", chat.session_id());
+    println!("artifact_root={}", chat.artifact_root()?.display());
+    println!("workspace_root={}", chat.workspace_root()?.display());
+    Ok(())
 }
 
 #[cfg(test)]

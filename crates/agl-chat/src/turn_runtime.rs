@@ -6,12 +6,13 @@ use agl_events::{
     CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeEventWriter, SafeRuntimeEventEnvelope,
 };
-use agl_ids::{AttemptId, ExecutionScope, RequestId, RunId, SessionId, TurnId};
+use agl_ids::{AttemptId, ExecutionScope, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::InferenceCancellation;
 use agl_loop::{
     HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, ModelRequest,
     ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
 };
+use agl_store::EffectDeliveryClass;
 use agl_tools::ToolRuntime;
 use anyhow::{Context, Result, ensure};
 
@@ -30,6 +31,8 @@ pub struct ChatTurnRuntime {
     core_tools: agl_tools::CoreTools,
     tool_runtime: ToolRuntime,
     generated_requests: usize,
+    model_input_tokens: u64,
+    model_output_tokens: u64,
 }
 
 impl ChatTurnRuntime {
@@ -49,6 +52,8 @@ impl ChatTurnRuntime {
             core_tools,
             tool_runtime,
             generated_requests: 0,
+            model_input_tokens: 0,
+            model_output_tokens: 0,
         })
     }
 
@@ -83,11 +88,44 @@ impl ChatTurnRuntime {
         turn_id: &TurnId,
         request_id: Option<RequestId>,
     ) -> Result<()> {
+        self.initialize_turn(session_id, run_id, turn_id, request_id, None)
+    }
+
+    pub(crate) fn resume_turn(
+        &mut self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        request_id: Option<RequestId>,
+        durable_event_sequence: u64,
+    ) -> Result<()> {
+        self.initialize_turn(
+            session_id,
+            run_id,
+            turn_id,
+            request_id,
+            Some(durable_event_sequence),
+        )
+    }
+
+    fn initialize_turn(
+        &mut self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        request_id: Option<RequestId>,
+        durable_event_sequence: Option<u64>,
+    ) -> Result<()> {
         self.refresh_runtime_context(run_id)?;
         self.active_effective_capabilities = Some(self.session.effective_capabilities().clone());
-        self.event_sink = Some(RuntimeEventWriter::open(
-            self.session.event_stream_path(run_id),
-        )?);
+        self.event_sink = Some(match durable_event_sequence {
+            Some(sequence) => RuntimeEventWriter::open_evidence_at_sequence(
+                self.session.event_stream_path(run_id),
+                run_id,
+                sequence,
+            )?,
+            None => RuntimeEventWriter::open(self.session.event_stream_path(run_id))?,
+        });
         self.event_scope = Some(
             EventScope::builder(run_id.clone())
                 .session_id(session_id.clone())
@@ -98,16 +136,22 @@ impl ChatTurnRuntime {
         self.generated_requests = 0;
         self.runtime_events.clear();
         self.attempt_ids.clear();
-        self.append_runtime_event(capability_policy_resolved_event(
-            self.active_effective_capabilities
-                .as_ref()
-                .expect("active capability snapshot was just initialized"),
-        ))?;
+        if durable_event_sequence.is_none() {
+            self.append_runtime_event(capability_policy_resolved_event(
+                self.active_effective_capabilities
+                    .as_ref()
+                    .expect("active capability snapshot was just initialized"),
+            ))?;
+        }
         Ok(())
     }
 
     pub fn generated_requests(&self) -> usize {
         self.generated_requests
+    }
+
+    pub(crate) fn model_token_usage(&self) -> (u64, u64) {
+        (self.model_input_tokens, self.model_output_tokens)
     }
 
     #[cfg(test)]
@@ -274,6 +318,23 @@ impl ChatTurnRuntime {
             .to_string())
     }
 
+    pub(crate) fn capability_delivery_class(
+        &self,
+        capability_id: &agl_capabilities::CapabilityId,
+    ) -> Result<EffectDeliveryClass> {
+        let capability = self
+            .active_effective_capabilities
+            .as_ref()
+            .context("turn capability snapshot is not initialized")?
+            .capability(capability_id)
+            .context("pending capability is not in the effective turn snapshot")?;
+        Ok(match capability.declaration().delivery {
+            agl_capabilities::ActionDelivery::ReplaySafe => EffectDeliveryClass::ReplaySafe,
+            agl_capabilities::ActionDelivery::IdempotentRunStep => EffectDeliveryClass::Idempotent,
+            agl_capabilities::ActionDelivery::AtMostOnce => EffectDeliveryClass::AtMostOnce,
+        })
+    }
+
     pub(crate) fn append_executor_events(
         &mut self,
         drafts: Vec<EventDraft<RuntimeEvent>>,
@@ -353,6 +414,12 @@ impl ChatTurnRuntime {
             response.attempt_id == attempt_id,
             "inference response attempt ID does not match the admitted attempt"
         );
+        self.model_input_tokens = self
+            .model_input_tokens
+            .saturating_add(response.metadata.input_tokens);
+        self.model_output_tokens = self
+            .model_output_tokens
+            .saturating_add(response.metadata.output_tokens);
         Ok(ModelResponse {
             content: response.content,
         })
@@ -361,6 +428,7 @@ impl ChatTurnRuntime {
     pub(crate) fn execute_capability(
         &mut self,
         request: ToolDispatchRequest,
+        step_id: Option<&StepId>,
     ) -> Result<ToolDispatchResponse> {
         let active_scope = self
             .event_scope
@@ -391,7 +459,7 @@ impl ChatTurnRuntime {
             })?;
             return Err(denial).context("capability dispatch was denied");
         };
-        let scope = execution_scope(&active_scope)?;
+        let scope = execution_scope(&active_scope, step_id)?;
         let mut invocation = ActionInvocation::new(
             scope,
             capability_id.clone(),
@@ -468,7 +536,7 @@ fn capability_policy_resolved_event(
     }
 }
 
-fn execution_scope(scope: &EventScope) -> Result<ExecutionScope> {
+fn execution_scope(scope: &EventScope, step_id: Option<&StepId>) -> Result<ExecutionScope> {
     let mut builder = ExecutionScope::builder(scope.run_id().clone());
     if let Some(session_id) = scope.session_id() {
         builder = builder.session_id(session_id.clone());
@@ -476,7 +544,7 @@ fn execution_scope(scope: &EventScope) -> Result<ExecutionScope> {
     if let Some(turn_id) = scope.turn_id() {
         builder = builder.turn_id(turn_id.clone());
     }
-    if let Some(step_id) = scope.step_id() {
+    if let Some(step_id) = step_id.or_else(|| scope.step_id()) {
         builder = builder.step_id(step_id.clone());
     }
     if let Some(attempt_id) = scope.attempt_id() {

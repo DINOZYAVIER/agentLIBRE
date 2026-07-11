@@ -57,4 +57,6 @@ pub struct ModelGeneration {
     pub content: String,
     pub finish_reason: InferenceFinishReason,
     pub selected_device: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }

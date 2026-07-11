@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 
 use agl_ids::SessionId;
+use serde::{Deserialize, Serialize};
 
 pub use agl_capabilities::ToolAccessMode;
 
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InferenceOptions {
     pub config: Option<PathBuf>,
     pub function_ref: Option<String>,
@@ -33,7 +35,8 @@ impl Default for InferenceOptions {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatOptions {
     pub inference: InferenceOptions,
     pub workspace_root: Option<PathBuf>,

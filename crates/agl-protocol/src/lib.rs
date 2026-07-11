@@ -5,9 +5,9 @@ use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, TurnId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v2alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v2alpha";
-pub const PROTOCOL_VERSION: &str = "v2alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v3alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v3alpha";
+pub const PROTOCOL_VERSION: &str = "v3alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -57,12 +57,16 @@ impl<'de> Deserialize<'de> for DaemonRequest {
 pub enum DaemonRequestKind {
     Hello(HelloRequest),
     SessionOpen(SessionOpenRequest),
-    SessionTurn(SessionTurnRequest),
     SessionClear(SessionClearRequest),
     SessionFinish(SessionFinishRequest),
     SessionStatus(SessionStatusRequest),
     SessionList(SessionListRequest),
     SessionTranscript(SessionTranscriptRequest),
+    RunSubmit(RunSubmitRequest),
+    RunStatus(RunStatusRequest),
+    RunCancel(RunCancelRequest),
+    RunEvents(RunEventsRequest),
+    RunSubscribe(RunSubscribeRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -145,16 +149,16 @@ where
 pub enum DaemonEventKind {
     Hello(HelloEvent),
     SessionOpened(SessionOpenedEvent),
-    TurnStarted(TurnStartedEvent),
-    RuntimeEvent(Box<SafeRuntimeEventEnvelope>),
-    AssistantMessage(AssistantMessageEvent),
-    TurnStopped(TurnStoppedEvent),
-    TurnFinished(TurnFinishedEvent),
-    TurnFailed(TurnFailedEvent),
     SessionFinished(SessionFinishedEvent),
     SessionStatus(SessionStatusEvent),
     SessionList(SessionListEvent),
     SessionTranscript(SessionTranscriptEvent),
+    RunAccepted(RunAcceptedEvent),
+    RunStatus(RunStatusEvent),
+    RunEvents(RunEventsEvent),
+    RunSubscriptionStarted(RunSubscriptionStartedEvent),
+    RunEvent(Box<SafeRuntimeEventEnvelope>),
+    RunSubscriptionFinished(RunSubscriptionFinishedEvent),
     Error(ProtocolError),
 }
 
@@ -179,7 +183,6 @@ pub struct HelloEvent {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonCapability {
     SessionOpen,
-    SessionTurn,
     SessionClear,
     SessionFinish,
     SessionStatus,
@@ -187,6 +190,11 @@ pub enum DaemonCapability {
     SessionTranscript,
     FinalAssistantMessage,
     RuntimeEvents,
+    RunSubmit,
+    RunStatus,
+    RunCancel,
+    RunReplay,
+    RunSubscribe,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -213,55 +221,135 @@ pub struct SessionOpenedEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SessionTurnRequest {
+pub struct RunSubmitRequest {
     pub session_id: SessionId,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub budget: RunBudgetRequest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TurnStartedEvent {
-    pub session_id: SessionId,
+pub struct RunStatusRequest {
     pub run_id: RunId,
-    pub turn_id: TurnId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AssistantMessageEvent {
-    pub session_id: SessionId,
+pub struct RunCancelRequest {
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub content: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TurnStoppedEvent {
-    pub session_id: SessionId,
+pub struct RunEventsRequest {
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub reason: String,
+    #[serde(default)]
+    pub after_sequence: u64,
+    #[serde(default = "default_event_replay_limit")]
+    pub limit: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TurnFinishedEvent {
-    pub session_id: SessionId,
+pub struct RunSubscribeRequest {
     pub run_id: RunId,
-    pub turn_id: TurnId,
-    pub status: TurnTerminalStatus,
+    #[serde(default)]
+    pub after_sequence: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TurnFailedEvent {
+pub struct RunAcceptedEvent {
     pub session_id: SessionId,
     pub run_id: RunId,
     pub turn_id: TurnId,
-    pub message: String,
+    pub state: ProtocolRunState,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunStatusEvent {
+    pub session_id: Option<SessionId>,
+    pub run_id: RunId,
+    pub turn_id: Option<TurnId>,
+    pub state: ProtocolRunState,
+    pub usage: RunUsageEvent,
+    pub cancellation_requested: bool,
+    pub attempts: u32,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub error_code: Option<String>,
+    pub terminal_result: Option<Value>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunEventsEvent {
+    pub run_id: RunId,
+    pub after_sequence: u64,
+    pub events: Vec<SafeRuntimeEventEnvelope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSubscriptionStartedEvent {
+    pub run_id: RunId,
+    pub after_sequence: u64,
+    pub replay_boundary: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSubscriptionFinishedEvent {
+    pub run_id: RunId,
+    pub state: ProtocolRunState,
+    pub last_sequence: u64,
+    pub terminal_result: Option<Value>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunBudgetRequest {
+    pub wall_time_ms: u64,
+    pub model_input_tokens: u64,
+    pub model_output_tokens: u64,
+    pub model_attempts: u32,
+    pub capability_calls: u32,
+}
+
+impl Default for RunBudgetRequest {
+    fn default() -> Self {
+        Self {
+            wall_time_ms: 300_000,
+            model_input_tokens: 1_000_000,
+            model_output_tokens: 100_000,
+            model_attempts: 32,
+            capability_calls: 64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunUsageEvent {
+    pub wall_time_ms: u64,
+    pub model_input_tokens: u64,
+    pub model_output_tokens: u64,
+    pub model_attempts: u32,
+    pub capability_calls: u32,
+}
+
+fn default_event_replay_limit() -> usize {
+    1_000
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -350,6 +438,23 @@ pub enum TurnTerminalStatus {
     Stopped,
     Failed,
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolRunState {
+    Queued,
+    Running,
+    Waiting,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl ProtocolRunState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -487,21 +592,22 @@ mod tests {
     }
 
     #[test]
-    fn session_turn_request_round_trips_as_jsonl_shape() {
+    fn run_submit_request_round_trips_as_jsonl_shape() {
         let request = DaemonRequest::new(
             request_id(),
-            DaemonRequestKind::SessionTurn(SessionTurnRequest {
+            DaemonRequestKind::RunSubmit(RunSubmitRequest {
                 session_id: session_id(),
                 text: "hello".to_string(),
                 idempotency_key: Some("matrix-event-001".to_string()),
+                budget: RunBudgetRequest::default(),
             }),
         );
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v2alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v3alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
-        assert!(json.contains("\"kind\":\"session_turn\""));
+        assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
     }
@@ -515,8 +621,8 @@ mod tests {
                 product_version: "1.0.0-alpha.6".to_string(),
                 capabilities: vec![
                     DaemonCapability::SessionOpen,
-                    DaemonCapability::SessionTurn,
-                    DaemonCapability::FinalAssistantMessage,
+                    DaemonCapability::RunSubmit,
+                    DaemonCapability::RunSubscribe,
                 ],
             }),
         );
@@ -526,37 +632,50 @@ mod tests {
         assert_eq!(value["schema"], EVENT_SCHEMA);
         assert_eq!(value["kind"], "hello");
         assert_eq!(value["payload"]["protocol_version"], PROTOCOL_VERSION);
-        assert_eq!(value["payload"]["capabilities"][1], "session_turn");
+        assert_eq!(value["payload"]["capabilities"][1], "run_submit");
         assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
     }
 
     #[test]
-    fn turn_control_frames_carry_the_admitted_identity() {
-        let started = DaemonEvent::new(
+    fn run_control_frames_carry_the_admitted_identity() {
+        let accepted = DaemonEvent::new(
             Some(request_id()),
-            DaemonEventKind::TurnStarted(TurnStartedEvent {
+            DaemonEventKind::RunAccepted(RunAcceptedEvent {
                 session_id: session_id(),
                 run_id: run_id(),
                 turn_id: turn_id(),
+                state: ProtocolRunState::Queued,
+                replayed: false,
             }),
         );
         let finished = DaemonEvent::new(
             Some(request_id()),
-            DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                session_id: session_id(),
+            DaemonEventKind::RunSubscriptionFinished(RunSubscriptionFinishedEvent {
                 run_id: run_id(),
-                turn_id: turn_id(),
-                status: TurnTerminalStatus::Answered,
+                state: ProtocolRunState::Succeeded,
+                last_sequence: 3,
+                terminal_result: Some(serde_json::json!({ "status": "answered" })),
+                error_code: None,
+                error_message: None,
             }),
         );
 
-        for event in [started, finished] {
-            let value = serde_json::to_value(&event).unwrap();
-            assert_eq!(value["payload"]["session_id"], SESSION_ID);
-            assert_eq!(value["payload"]["run_id"], RUN_ID);
-            assert_eq!(value["payload"]["turn_id"], TURN_ID);
-            assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
-        }
+        let accepted_value = serde_json::to_value(&accepted).unwrap();
+        assert_eq!(accepted_value["payload"]["session_id"], SESSION_ID);
+        assert_eq!(accepted_value["payload"]["run_id"], RUN_ID);
+        assert_eq!(accepted_value["payload"]["turn_id"], TURN_ID);
+        assert_eq!(
+            serde_json::from_value::<DaemonEvent>(accepted_value).unwrap(),
+            accepted
+        );
+
+        let finished_value = serde_json::to_value(&finished).unwrap();
+        assert_eq!(finished_value["payload"]["run_id"], RUN_ID);
+        assert_eq!(finished_value["payload"]["last_sequence"], 3);
+        assert_eq!(
+            serde_json::from_value::<DaemonEvent>(finished_value).unwrap(),
+            finished
+        );
     }
 
     #[test]
@@ -625,7 +744,7 @@ mod tests {
     #[test]
     fn previous_alpha_and_untyped_id_shapes_are_rejected() {
         let previous_alpha = serde_json::json!({
-            "schema": "agentlibre.daemon.request.v1alpha",
+            "schema": "agentlibre.daemon.request.v2alpha",
             "request_id": REQUEST_ID,
             "kind": "session_turn",
             "payload": {
@@ -638,10 +757,11 @@ mod tests {
         let untyped_ids = serde_json::json!({
             "schema": REQUEST_SCHEMA,
             "request_id": "req-001",
-            "kind": "session_turn",
+            "kind": "run_submit",
             "payload": {
                 "session_id": "session-001",
-                "text": "hello"
+                "text": "hello",
+                "budget": RunBudgetRequest::default()
             }
         });
         assert!(serde_json::from_value::<DaemonRequest>(untyped_ids).is_err());

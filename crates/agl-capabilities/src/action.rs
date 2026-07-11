@@ -44,6 +44,12 @@ impl ActionInvocation {
         self.request_id = Some(request_id);
         self
     }
+
+    pub fn run_step_idempotency_key(&self) -> Option<String> {
+        self.scope
+            .step_id()
+            .map(|step_id| format!("{}:{step_id}", self.scope.run_id()))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

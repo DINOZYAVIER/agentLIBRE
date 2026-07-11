@@ -1,23 +1,28 @@
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agl_chat::{InferenceClientHandle, InferenceOptions};
-use agl_cron::{
-    CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
-    unsupported_builtin_cron_target_message,
-};
+use agl_chat::InferenceClientHandle;
+use agl_cron::{CronJob, CronRepository, CronRunStatus};
 use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
-use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, ProtocolError, ProtocolErrorCode};
+use agl_protocol::{
+    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, ProtocolError,
+    ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
+};
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_store::{AglStore, MatrixNotificationOutboxDraft};
+use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
 use anyhow::{Context, Result, bail};
 
+use crate::state::protocol_run_state;
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions,
-    SharedDaemonState, render_cron_notification_body, run_cron_skill_chat_turn, run_cron_tick,
+    SharedDaemonState, render_cron_notification_body, run_cron_tick,
 };
+
+const CONNECTION_WRITER_CAPACITY: usize = 128;
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -59,6 +64,7 @@ impl DaemonServer {
             inference_client.clone(),
         )?;
         let mut last_cron_tick = None;
+        let mut linked_cron_runs = BTreeSet::new();
         loop {
             let now = unix_now();
             if last_cron_tick
@@ -66,9 +72,7 @@ impl DaemonServer {
             {
                 last_cron_tick = Some(now);
                 let mut executor = DaemonCronExecutor {
-                    runtime: self.runtime.clone(),
-                    inference_defaults: self.options.inference.clone(),
-                    inference_client: inference_client.clone(),
+                    state: state.clone(),
                 };
                 let mut notifier = StoreCronNotifier { store: &store };
                 match run_cron_tick(&store, now, &mut executor, &mut notifier) {
@@ -86,6 +90,12 @@ impl DaemonServer {
                         "cron scheduler tick failed"
                     ),
                 }
+                spawn_cron_run_linkers(
+                    &self.runtime.paths.store_root(),
+                    &store,
+                    &state,
+                    &mut linked_cron_runs,
+                );
                 trace_model_manager_status(&state);
             }
 
@@ -142,34 +152,118 @@ fn trace_model_manager_status(state: &SharedDaemonState) {
 }
 
 struct DaemonCronExecutor {
-    runtime: AgentLibreRuntimeConfig,
-    inference_defaults: InferenceOptions,
-    inference_client: InferenceClientHandle,
+    state: SharedDaemonState,
 }
 
 impl CronTargetExecutor for DaemonCronExecutor {
-    fn execute(&mut self, job: &CronJob) -> CronExecution {
-        match (job.target_kind, job.target_ref.as_str()) {
-            (CronTargetKind::Builtin, STORE_STATUS_BUILTIN_CRON_TARGET) => {
-                CronExecution::succeeded("builtin:store-status")
-            }
-            (CronTargetKind::Builtin, target) => {
-                CronExecution::failed(unsupported_builtin_cron_target_message(target))
-            }
-            (CronTargetKind::Skill, _target) => {
-                match run_cron_skill_chat_turn(
-                    job,
-                    &self.runtime,
-                    self.inference_defaults.clone(),
-                    self.inference_client.clone(),
-                    Some("daemon"),
-                ) {
-                    Ok(result_ref) => CronExecution::succeeded(result_ref),
-                    Err(err) => CronExecution::failed(format!("{err:#}")),
-                }
-            }
+    fn execute(&mut self, job: &CronJob, scheduled_for: &str) -> CronExecution {
+        match self.state.submit_cron_job(job, scheduled_for) {
+            Ok(accepted) => CronExecution::queued(accepted.status.run_id),
+            Err(error) => CronExecution::failed(error.message),
         }
     }
+}
+
+fn spawn_cron_run_linkers(
+    store_root: &Path,
+    store: &AglStore,
+    state: &SharedDaemonState,
+    linked: &mut BTreeSet<String>,
+) {
+    let repository = CronRepository::new(store);
+    let Ok(runs) = repository.active_supervisor_runs() else {
+        return;
+    };
+    for cron_run in runs {
+        if !linked.insert(cron_run.id.clone()) {
+            continue;
+        }
+        let Ok(Some(job)) = repository.job(&cron_run.job_id) else {
+            continue;
+        };
+        let store_root = store_root.to_path_buf();
+        let state = state.clone();
+        if let Err(error) = thread::Builder::new()
+            .name(format!("agl-cron-link-{}", cron_run.id))
+            .spawn(move || {
+                if let Err(error) = link_cron_run(&store_root, &state, cron_run, job) {
+                    tracing::warn!(
+                        target: "agentlibre::daemon",
+                        error = %error,
+                        "failed to link cron run terminal state"
+                    );
+                }
+            })
+        {
+            tracing::warn!(
+                target: "agentlibre::daemon",
+                error = %error,
+                "failed to spawn cron terminal linker"
+            );
+        }
+    }
+}
+
+pub(crate) fn link_cron_run(
+    store_root: &Path,
+    state: &SharedDaemonState,
+    cron_run: agl_cron::CronRun,
+    job: CronJob,
+) -> Result<()> {
+    let supervisor_run_id = cron_run
+        .supervisor_run_id
+        .clone()
+        .context("queued cron run has no supervisor run ID")?;
+    if let Ok(subscription) = state.subscribe_run(supervisor_run_id.clone(), 0) {
+        while subscription.recv()?.is_some() {}
+    }
+    let outcome = loop {
+        let outcome = state
+            .run_outcome(supervisor_run_id.clone())
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        if outcome.status.state.is_terminal() {
+            break outcome;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let result_ref = format!("run:{supervisor_run_id}");
+    let (status, error) = match outcome.status.state {
+        RunState::Succeeded => (CronRunStatus::Succeeded, None),
+        RunState::Failed => (
+            CronRunStatus::Failed,
+            outcome
+                .error_message
+                .or(outcome.status.error_code)
+                .or_else(|| Some("scheduled run failed".to_string())),
+        ),
+        RunState::Cancelled => (
+            CronRunStatus::Failed,
+            Some("scheduled run was cancelled".to_string()),
+        ),
+        RunState::Queued | RunState::Running | RunState::Waiting => unreachable!(),
+    };
+    let store = AglStore::open_current_at(store_root)?;
+    let repository = CronRepository::new(&store);
+    let run = repository.finish_supervisor_run(
+        &supervisor_run_id,
+        status,
+        Some(&result_ref),
+        error.as_deref(),
+    )?;
+    if let Some(notify_ref) = job.notify_ref {
+        let mut notifier = StoreCronNotifier { store: &store };
+        notifier.notify(CronNotification {
+            notify_ref,
+            run_id: run.id,
+            job_id: job.id,
+            job_name: job.name,
+            scheduled_for: run.scheduled_for,
+            status: run.status,
+            result_ref: run.result_ref,
+            error: run.error,
+        })?;
+    }
+    Ok(())
 }
 
 struct StoreCronNotifier<'a> {
@@ -259,31 +353,175 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
 
 #[cfg(unix)]
 fn handle_stream(stream: UnixStream, state: &SharedDaemonState) -> Result<()> {
-    let mut writer = stream
+    let writer = stream
         .try_clone()
         .context("failed to clone daemon client stream")?;
+    let (event_sender, event_receiver) = mpsc::sync_channel(CONNECTION_WRITER_CAPACITY);
+    thread::Builder::new()
+        .name("agl-daemon-writer".to_string())
+        .spawn(move || run_connection_writer(writer, event_receiver))
+        .context("failed to spawn daemon connection writer")?;
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let line = line.context("failed to read daemon request")?;
         if line.trim().is_empty() {
             continue;
         }
-        let events = match serde_json::from_str::<DaemonRequest>(&line) {
-            Ok(request) => state.handle_request(request),
-            Err(err) => vec![DaemonEvent::new(
-                None,
-                DaemonEventKind::Error(ProtocolError::new(
-                    ProtocolErrorCode::InvalidRequest,
-                    format!("invalid daemon request JSON: {err}"),
-                    false,
-                )),
-            )],
-        };
-        for event in events {
-            write_event(&mut writer, &event)?;
+        match serde_json::from_str::<DaemonRequest>(&line) {
+            Ok(DaemonRequest {
+                schema,
+                request_id,
+                kind: DaemonRequestKind::RunSubscribe(request),
+            }) => {
+                let _ = schema;
+                let state = state.clone();
+                let sender = event_sender.clone();
+                thread::Builder::new()
+                    .name(format!("agl-daemon-subscribe-{}", request.run_id))
+                    .spawn(move || {
+                        if let Err(error) =
+                            stream_run_subscription(&sender, &state, request_id, request)
+                        {
+                            tracing::debug!(
+                                target: "agentlibre::daemon",
+                                error = %error,
+                                "daemon run subscription ended"
+                            );
+                        }
+                    })
+                    .context("failed to spawn daemon subscription")?;
+            }
+            Ok(request) => {
+                queue_event(&event_sender, state.handle_request(request))?;
+            }
+            Err(err) => {
+                queue_event(
+                    &event_sender,
+                    DaemonEvent::new(
+                        None,
+                        DaemonEventKind::Error(ProtocolError::new(
+                            ProtocolErrorCode::InvalidRequest,
+                            format!("invalid daemon request JSON: {err}"),
+                            false,
+                        )),
+                    ),
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn stream_run_subscription(
+    sender: &mpsc::SyncSender<DaemonEvent>,
+    state: &SharedDaemonState,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::RunSubscribeRequest,
+) -> Result<()> {
+    let subscription = match state.subscribe_run(request.run_id.clone(), request.after_sequence) {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            return queue_event(
+                sender,
+                DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
+            );
+        }
+    };
+    let replay_boundary = subscription
+        .backlog
+        .last()
+        .map_or(request.after_sequence, |event| event.sequence);
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id.clone()),
+            DaemonEventKind::RunSubscriptionStarted(RunSubscriptionStartedEvent {
+                run_id: request.run_id.clone(),
+                after_sequence: request.after_sequence,
+                replay_boundary,
+            }),
+        ),
+    )?;
+    let mut last_sequence = request.after_sequence;
+    for event in &subscription.backlog {
+        last_sequence = event.sequence;
+        queue_event(
+            sender,
+            DaemonEvent::new(
+                Some(request_id.clone()),
+                DaemonEventKind::RunEvent(Box::new(event.clone())),
+            ),
+        )?;
+    }
+    loop {
+        match subscription.recv() {
+            Ok(Some(event)) => {
+                last_sequence = event.sequence;
+                queue_event(
+                    sender,
+                    DaemonEvent::new(
+                        Some(request_id.clone()),
+                        DaemonEventKind::RunEvent(Box::new(event)),
+                    ),
+                )?;
+            }
+            Ok(None) => {
+                let outcome = state
+                    .run_outcome(request.run_id.clone())
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(
+                        Some(request_id),
+                        DaemonEventKind::RunSubscriptionFinished(RunSubscriptionFinishedEvent {
+                            run_id: request.run_id,
+                            state: protocol_run_state(outcome.status.state),
+                            last_sequence,
+                            terminal_result: outcome.terminal_result,
+                            error_code: outcome.status.error_code,
+                            error_message: outcome.error_message,
+                        }),
+                    ),
+                );
+            }
+            Err(error) => {
+                let mut protocol =
+                    ProtocolError::new(ProtocolErrorCode::Busy, error.to_string(), true);
+                protocol
+                    .safe_metadata
+                    .insert("last_sequence".to_string(), last_sequence.to_string());
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(Some(request_id), DaemonEventKind::Error(protocol)),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn queue_event(sender: &mpsc::SyncSender<DaemonEvent>, event: DaemonEvent) -> Result<()> {
+    sender.try_send(event).map_err(|error| match error {
+        mpsc::TrySendError::Full(_) => anyhow::anyhow!("daemon connection writer queue is full"),
+        mpsc::TrySendError::Disconnected(_) => {
+            anyhow::anyhow!("daemon connection writer is disconnected")
+        }
+    })
+}
+
+#[cfg(unix)]
+fn run_connection_writer(mut writer: UnixStream, events: mpsc::Receiver<DaemonEvent>) {
+    for event in events {
+        if let Err(error) = write_event(&mut writer, &event) {
+            tracing::debug!(
+                target: "agentlibre::daemon",
+                error = %error,
+                "daemon connection writer stopped"
+            );
+            break;
+        }
+    }
 }
 
 #[cfg(unix)]
