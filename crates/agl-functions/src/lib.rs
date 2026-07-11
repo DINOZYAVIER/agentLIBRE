@@ -5,13 +5,14 @@ use agl_capabilities::CapabilityId;
 pub use agl_capabilities::FunctionToolPolicy;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const FUNCTION_SCHEMA: &str = "agentfunction/v1";
 pub const SUBAGENT_SCHEMA: &str = "agentlibre/subagent/v1";
 pub const FUNCTION_FILE_NAME: &str = "FUNCTION.md";
 pub const FUNCTION_SYSTEM_PROMPT_FILE_NAME: &str = "SYSTEM.md";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionSource {
     Explicit,
@@ -79,6 +80,8 @@ pub struct AgentFunctionFrontMatter {
     #[serde(default)]
     pub subagents: Option<SelectionBlock>,
     #[serde(default)]
+    pub delegation: Option<FunctionDelegationBudget>,
+    #[serde(default)]
     pub memory: Option<FunctionMemory>,
     #[serde(default)]
     pub artifacts: Option<FunctionArtifacts>,
@@ -121,6 +124,13 @@ impl AgentFunctionFrontMatter {
                 validate_function_id("subagent id", subagent)?;
             }
         }
+        if let Some(delegation) = &self.delegation {
+            delegation.validate()?;
+        }
+        ensure!(
+            self.selected_subagents().is_empty() || self.delegation.is_some(),
+            "functions with subagents must declare a finite delegation budget"
+        );
         if let Some(memory) = &self.memory {
             memory.validate()?;
         }
@@ -188,6 +198,51 @@ impl AgentFunctionFrontMatter {
             .as_ref()
             .and_then(|contracts| contracts.identity.as_ref())
             .map(FunctionIdentityContract::to_runtime)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionDelegationBudget {
+    pub max_depth: u32,
+    pub max_children_per_run: u32,
+    pub max_descendants: u32,
+    pub max_total_output_tokens: u64,
+    pub timeout_seconds: u64,
+}
+
+impl FunctionDelegationBudget {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.max_depth > 0,
+            "delegation.max_depth must be greater than zero"
+        );
+        ensure!(
+            self.max_children_per_run > 0,
+            "delegation.max_children_per_run must be greater than zero"
+        );
+        ensure!(
+            self.max_descendants > 0,
+            "delegation.max_descendants must be greater than zero"
+        );
+        ensure!(
+            self.max_total_output_tokens > 0,
+            "delegation.max_total_output_tokens must be greater than zero"
+        );
+        ensure!(
+            self.timeout_seconds > 0,
+            "delegation.timeout_seconds must be greater than zero"
+        );
+        ensure!(self.max_depth <= 16, "delegation.max_depth exceeds 16");
+        ensure!(
+            self.max_children_per_run <= 64,
+            "delegation.max_children_per_run exceeds 64"
+        );
+        ensure!(
+            self.max_descendants <= 1_024,
+            "delegation.max_descendants exceeds 1024"
+        );
+        Ok(())
     }
 }
 
@@ -450,16 +505,15 @@ pub struct SubagentFrontMatter {
     pub schema: String,
     pub id: String,
     pub title: String,
-    #[serde(default)]
-    pub model: Option<SubagentModel>,
-    #[serde(default)]
-    pub tools: Option<SubagentTools>,
+    pub description: String,
+    pub model: SubagentModel,
+    pub tools: SubagentTools,
     #[serde(default)]
     pub skills: Option<SelectionBlock>,
     #[serde(default)]
     pub memory: Option<FunctionMemory>,
-    #[serde(default)]
-    pub limits: Option<SubagentLimits>,
+    pub subagents: SelectionBlock,
+    pub limits: SubagentLimits,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
@@ -476,22 +530,24 @@ impl SubagentFrontMatter {
             !self.title.trim().is_empty(),
             "subagent title cannot be empty"
         );
+        ensure!(
+            !self.description.trim().is_empty(),
+            "subagent description cannot be empty"
+        );
         validate_extensions("subagent", &self.extensions)?;
-        if let Some(model) = &self.model {
-            model.validate()?;
-        }
-        if let Some(tools) = &self.tools {
-            tools.validate()?;
-        }
+        self.model.validate()?;
+        self.tools.validate()?;
         if let Some(skills) = &self.skills {
             skills.validate("subagent.skills.use")?;
         }
         if let Some(memory) = &self.memory {
             memory.validate()?;
         }
-        if let Some(limits) = &self.limits {
-            limits.validate()?;
+        self.subagents.validate("subagent.subagents.use")?;
+        for subagent in &self.subagents.use_ {
+            validate_function_id("child subagent id", subagent)?;
         }
+        self.limits.validate()?;
         Ok(())
     }
 }
@@ -499,7 +555,7 @@ impl SubagentFrontMatter {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentModel {
     #[serde(default)]
-    pub inherit: Option<bool>,
+    pub inherit: bool,
     #[serde(default)]
     pub profile: Option<String>,
     #[serde(flatten, default)]
@@ -512,17 +568,18 @@ impl SubagentModel {
         if let Some(profile) = &self.profile {
             validate_function_id("subagent.model.profile", profile)?;
         }
+        ensure!(
+            self.inherit ^ self.profile.is_some(),
+            "subagent.model requires exactly one of inherit=true or profile"
+        );
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentTools {
-    #[serde(default)]
-    pub mode: Option<FunctionToolMode>,
-    #[serde(default)]
+    pub mode: FunctionToolMode,
     pub allow: Vec<String>,
-    #[serde(default)]
     pub deny: Vec<String>,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
@@ -532,35 +589,55 @@ impl SubagentTools {
     fn validate(&self) -> Result<()> {
         validate_extensions("subagent.tools", &self.extensions)?;
         validate_unique_non_empty("subagent.tools.allow", &self.allow)?;
-        validate_unique_non_empty("subagent.tools.deny", &self.deny)
+        validate_unique_non_empty("subagent.tools.deny", &self.deny)?;
+        for id in self.allow.iter().chain(&self.deny) {
+            CapabilityId::new(id.clone())
+                .with_context(|| format!("invalid subagent tool capability ID `{id}`"))?;
+        }
+        Ok(())
+    }
+
+    fn to_runtime_policy(&self) -> FunctionToolPolicy {
+        FunctionToolPolicy::new(
+            self.allow.iter().map(|id| {
+                CapabilityId::new(id.clone())
+                    .expect("validated subagent allow capability ID must remain valid")
+            }),
+            self.deny.iter().map(|id| {
+                CapabilityId::new(id.clone())
+                    .expect("validated subagent deny capability ID must remain valid")
+            }),
+        )
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentLimits {
-    #[serde(default)]
-    pub max_turns: Option<u32>,
-    #[serde(default)]
-    pub max_output_tokens: Option<u32>,
-    #[serde(flatten, default)]
-    pub extensions: BTreeMap<String, serde_yaml::Value>,
+    pub max_model_attempts: u32,
+    pub max_output_tokens: u64,
+    pub max_capability_calls: u32,
+    pub timeout_seconds: u64,
 }
 
 impl SubagentLimits {
     fn validate(&self) -> Result<()> {
-        validate_extensions("subagent.limits", &self.extensions)?;
-        if let Some(max_turns) = self.max_turns {
-            ensure!(
-                max_turns > 0,
-                "subagent.limits.max_turns must be greater than zero"
-            );
-        }
-        if let Some(max_output_tokens) = self.max_output_tokens {
-            ensure!(
-                max_output_tokens > 0,
-                "subagent.limits.max_output_tokens must be greater than zero"
-            );
-        }
+        ensure!(
+            self.max_model_attempts > 0,
+            "subagent.limits.max_model_attempts must be greater than zero"
+        );
+        ensure!(
+            self.max_output_tokens > 0,
+            "subagent.limits.max_output_tokens must be greater than zero"
+        );
+        ensure!(
+            self.max_capability_calls > 0,
+            "subagent.limits.max_capability_calls must be greater than zero"
+        );
+        ensure!(
+            self.timeout_seconds > 0,
+            "subagent.limits.timeout_seconds must be greater than zero"
+        );
         Ok(())
     }
 }
@@ -589,6 +666,7 @@ pub struct LoadedSubagent {
     pub front_matter: SubagentFrontMatter,
     pub body: String,
     pub sections: Vec<MarkdownSection>,
+    pub source_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -612,7 +690,51 @@ pub struct ProfileResolution {
 pub struct RuntimeSubagent {
     pub id: String,
     pub title: String,
-    pub path: PathBuf,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSubagentModel {
+    pub inherit: bool,
+    pub profile: Option<String>,
+    pub profile_path: Option<PathBuf>,
+    pub profile_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSubagentSpec {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub model: RuntimeSubagentModel,
+    pub tool_mode: FunctionToolMode,
+    pub tool_policy: FunctionToolPolicy,
+    pub skills: Vec<String>,
+    pub memory: Option<RuntimeSubagentMemory>,
+    pub children: Vec<String>,
+    pub limits: SubagentLimits,
+    pub system_body: String,
+    pub source: FunctionSource,
+    pub source_path: PathBuf,
+    pub source_digest: String,
+    pub spec_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSubagentMemory {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDelegationPlan {
+    pub budget: FunctionDelegationBudget,
+    pub root_subagents: Vec<String>,
+    pub subagent_specs: BTreeMap<String, RuntimeSubagentSpec>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -633,9 +755,27 @@ pub struct RuntimeFunction {
     pub skills: Vec<String>,
     pub memory_enabled: bool,
     pub subagents: Vec<RuntimeSubagent>,
+    pub subagent_specs: BTreeMap<String, RuntimeSubagentSpec>,
+    pub delegation: Option<FunctionDelegationBudget>,
     pub system_prompt_path: PathBuf,
     pub identity_contract: Option<RuntimeIdentityContract>,
     pub context: String,
+}
+
+impl RuntimeFunction {
+    pub fn delegation_plan(&self) -> Option<RuntimeDelegationPlan> {
+        self.delegation
+            .as_ref()
+            .map(|budget| RuntimeDelegationPlan {
+                budget: budget.clone(),
+                root_subagents: self
+                    .subagents
+                    .iter()
+                    .map(|subagent| subagent.id.clone())
+                    .collect(),
+                subagent_specs: self.subagent_specs.clone(),
+            })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -910,7 +1050,17 @@ fn resolve_runtime_function_with_profile_policy(
     } else {
         None
     };
-    Ok(runtime_function_from_loaded(loaded, profile_path))
+    let subagent_specs = resolve_runtime_subagent_specs(
+        &loaded,
+        workspace_root.as_ref(),
+        config_dir.as_ref(),
+        require_profile,
+    )?;
+    Ok(runtime_function_from_loaded(
+        loaded,
+        profile_path,
+        subagent_specs,
+    ))
 }
 
 pub fn function_status(
@@ -998,12 +1148,19 @@ pub fn function_status(
     report.skills = loaded.front_matter.selected_skills().to_vec();
     report.tool_policy = loaded.front_matter.tool_policy();
     report.subagents = loaded
-        .subagents
+        .front_matter
+        .selected_subagents()
         .iter()
+        .filter_map(|id| {
+            loaded
+                .subagents
+                .iter()
+                .find(|subagent| &subagent.front_matter.id == id)
+        })
         .map(|subagent| RuntimeSubagent {
             id: subagent.front_matter.id.clone(),
             title: subagent.front_matter.title.clone(),
-            path: subagent.path.clone(),
+            description: subagent.front_matter.description.clone(),
         })
         .collect();
 
@@ -1068,26 +1225,24 @@ pub fn render_function_context(function: &LoadedFunction) -> String {
     }
     if !function.subagents.is_empty() {
         content.push_str("\nAvailable subagents:\n");
-        for subagent in &function.subagents {
+        for subagent_id in function.front_matter.selected_subagents() {
+            let subagent = function
+                .subagents
+                .iter()
+                .find(|candidate| &candidate.front_matter.id == subagent_id)
+                .expect("validated root subagent remains loaded");
             content.push_str("- ");
             content.push_str(&subagent.front_matter.id);
             content.push_str(": ");
             content.push_str(&subagent.front_matter.title);
+            content.push_str(" - ");
+            content.push_str(subagent.front_matter.description.trim());
             content.push('\n');
         }
     }
     content.push_str("\nFunction system prompt:\n");
     content.push_str(function.system_prompt.trim());
     content.push('\n');
-    for subagent in &function.subagents {
-        content.push_str("\n<agentlibre_subagent_context id=\"");
-        content.push_str(&subagent.front_matter.id);
-        content.push_str("\" title=\"");
-        content.push_str(&subagent.front_matter.title);
-        content.push_str("\">\n");
-        content.push_str(subagent.body.trim());
-        content.push_str("\n</agentlibre_subagent_context>\n");
-    }
     content.push_str("</agentlibre_function_context>\n");
     content
 }
@@ -1098,6 +1253,15 @@ pub fn validate_function_id(label: &str, value: &str) -> Result<()> {
         "{label} must use lowercase ASCII letters, digits, hyphens, underscores, or dots: {value}"
     );
     Ok(())
+}
+
+fn sha256_text(value: &str) -> String {
+    sha256_bytes(value.as_bytes())
+}
+
+fn sha256_bytes(value: &[u8]) -> String {
+    let digest = Sha256::digest(value);
+    format!("sha256:{digest:x}")
 }
 
 fn validate_relative_function_file_path(label: &str, value: &str) -> Result<()> {
@@ -1145,7 +1309,9 @@ fn is_valid_identity_field(field: &str) -> bool {
 fn runtime_function_from_loaded(
     loaded: LoadedFunction,
     profile_path: Option<PathBuf>,
+    subagent_specs: BTreeMap<String, RuntimeSubagentSpec>,
 ) -> RuntimeFunction {
+    let selected_subagents = loaded.front_matter.selected_subagents().to_vec();
     RuntimeFunction {
         reference: loaded.locator.reference.clone(),
         source: loaded.locator.source,
@@ -1170,14 +1336,108 @@ fn runtime_function_from_loaded(
         subagents: loaded
             .subagents
             .iter()
+            .filter(|subagent| selected_subagents.contains(&subagent.front_matter.id))
             .map(|subagent| RuntimeSubagent {
                 id: subagent.front_matter.id.clone(),
                 title: subagent.front_matter.title.clone(),
-                path: subagent.path.clone(),
+                description: subagent.front_matter.description.clone(),
             })
             .collect(),
+        subagent_specs,
+        delegation: loaded.front_matter.delegation.clone(),
         context: render_function_context(&loaded),
     }
+}
+
+fn resolve_runtime_subagent_specs(
+    loaded: &LoadedFunction,
+    workspace_root: &Path,
+    config_dir: &Path,
+    require_profile: bool,
+) -> Result<BTreeMap<String, RuntimeSubagentSpec>> {
+    loaded
+        .subagents
+        .iter()
+        .map(|subagent| {
+            let (profile_path, profile_digest) =
+                if let Some(profile) = &subagent.front_matter.model.profile {
+                    let resolution = resolve_profile(profile, workspace_root, config_dir)?;
+                    let selected = match resolution.selected_path {
+                        Some(path) => Some(path),
+                        None if require_profile => {
+                            bail!(
+                                "subagent `{}` inference profile `{profile}` not found; checked {}",
+                                subagent.front_matter.id,
+                                join_paths(&resolution.candidates)
+                            );
+                        }
+                        None => None,
+                    };
+                    let digest = selected
+                        .as_ref()
+                        .filter(|path| path.is_file())
+                        .map(std::fs::read)
+                        .transpose()
+                        .with_context(|| {
+                            format!(
+                                "failed to read subagent profile for `{}`",
+                                subagent.front_matter.id
+                            )
+                        })?
+                        .map(|bytes| sha256_bytes(&bytes));
+                    (selected, digest)
+                } else {
+                    (None, None)
+                };
+            let normalized = serde_yaml::to_string(&subagent.front_matter)
+                .context("failed to normalize subagent specification")?;
+            let spec_digest = sha256_text(&format!(
+                "{}\0{}\0{}",
+                subagent.source_digest,
+                normalized,
+                profile_digest.as_deref().unwrap_or("inherit")
+            ));
+            let memory =
+                subagent
+                    .front_matter
+                    .memory
+                    .as_ref()
+                    .map(|memory| RuntimeSubagentMemory {
+                        read: memory.read.clone(),
+                        write: memory.write.clone(),
+                    });
+            Ok((
+                subagent.front_matter.id.clone(),
+                RuntimeSubagentSpec {
+                    id: subagent.front_matter.id.clone(),
+                    title: subagent.front_matter.title.clone(),
+                    description: subagent.front_matter.description.clone(),
+                    model: RuntimeSubagentModel {
+                        inherit: subagent.front_matter.model.inherit,
+                        profile: subagent.front_matter.model.profile.clone(),
+                        profile_path,
+                        profile_digest,
+                    },
+                    tool_mode: subagent.front_matter.tools.mode,
+                    tool_policy: subagent.front_matter.tools.to_runtime_policy(),
+                    skills: subagent
+                        .front_matter
+                        .skills
+                        .as_ref()
+                        .map(|skills| skills.use_.clone())
+                        .unwrap_or_default(),
+                    memory,
+                    children: subagent.front_matter.subagents.use_.clone(),
+                    limits: subagent.front_matter.limits.clone(),
+                    system_body: subagent.body.trim().to_string(),
+                    source: loaded.locator.source,
+                    source_path: subagent.path.clone(),
+                    source_digest: subagent.source_digest.clone(),
+                    spec_digest,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn collect_function_entries(
@@ -1273,45 +1533,85 @@ fn load_declared_subagents(
     function_root: &Path,
     front_matter: &AgentFunctionFrontMatter,
 ) -> Result<Vec<LoadedSubagent>> {
-    let mut subagents = Vec::new();
+    let mut subagents = BTreeMap::new();
+    let mut visiting = Vec::new();
     for subagent_id in front_matter.selected_subagents() {
-        validate_function_id("subagent id", subagent_id)?;
-        let path = function_root
-            .join("subagents")
-            .join(format!("{subagent_id}.md"));
+        load_subagent_graph_node(function_root, subagent_id, &mut visiting, &mut subagents)?;
+    }
+    Ok(subagents.into_values().collect())
+}
+
+fn load_subagent_graph_node(
+    function_root: &Path,
+    subagent_id: &str,
+    visiting: &mut Vec<String>,
+    loaded: &mut BTreeMap<String, LoadedSubagent>,
+) -> Result<()> {
+    validate_function_id("subagent id", subagent_id)?;
+    if loaded.contains_key(subagent_id) {
+        return Ok(());
+    }
+    if let Some(index) = visiting
+        .iter()
+        .position(|candidate| candidate == subagent_id)
+    {
+        let mut cycle = visiting[index..].to_vec();
+        cycle.push(subagent_id.to_string());
+        bail!("subagent graph contains a cycle: {}", cycle.join(" -> "));
+    }
+    visiting.push(subagent_id.to_string());
+    let path = function_root
+        .join("subagents")
+        .join(format!("{subagent_id}.md"));
+    ensure!(
+        path.starts_with(function_root),
+        "subagent path escapes function root: {}",
+        path.display()
+    );
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read declared subagent `{subagent_id}`"))?;
+    let source_digest = sha256_text(&content);
+    let (front_matter, body) = parse_subagent_document(&content)
+        .with_context(|| format!("failed to parse subagent {}", path.display()))?;
+    front_matter.validate()?;
+    ensure!(
+        front_matter.id == subagent_id,
+        "subagent id `{}` does not match declared id `{subagent_id}`",
+        front_matter.id
+    );
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    ensure!(
+        file_stem == front_matter.id,
+        "subagent id `{}` does not match file `{file_stem}`",
+        front_matter.id
+    );
+    ensure!(
+        !body.trim().is_empty(),
+        "subagent `{subagent_id}` system body cannot be empty"
+    );
+    for child in &front_matter.subagents.use_ {
         ensure!(
-            path.starts_with(function_root),
-            "subagent path escapes function root: {}",
-            path.display()
+            child != subagent_id,
+            "subagent `{subagent_id}` cannot delegate to itself"
         );
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read subagent {}", path.display()))?;
-        let (front_matter, body) = parse_subagent_document(&content)
-            .with_context(|| format!("failed to parse subagent {}", path.display()))?;
-        front_matter.validate()?;
-        ensure!(
-            front_matter.id == *subagent_id,
-            "subagent id `{}` does not match declared id `{subagent_id}`",
-            front_matter.id
-        );
-        let file_stem = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        ensure!(
-            file_stem == front_matter.id,
-            "subagent id `{}` does not match file `{file_stem}`",
-            front_matter.id
-        );
-        let sections = markdown_sections(&body);
-        subagents.push(LoadedSubagent {
+        load_subagent_graph_node(function_root, child, visiting, loaded)?;
+    }
+    visiting.pop();
+    let sections = markdown_sections(&body);
+    loaded.insert(
+        subagent_id.to_string(),
+        LoadedSubagent {
             path,
             front_matter,
             body,
             sections,
-        });
-    }
-    Ok(subagents)
+            source_digest,
+        },
+    );
+    Ok(())
 }
 
 fn load_function_system_prompt(
@@ -1541,6 +1841,58 @@ fn join_paths(paths: &[PathBuf]) -> String {
 mod tests {
     use super::*;
 
+    fn graph_fixture(
+        case: &str,
+        root_subagents: &[&str],
+        subagents: &[(&str, &str)],
+    ) -> (PathBuf, FunctionLocator) {
+        let root =
+            std::env::temp_dir().join(format!("agl-functions-graph-{}-{case}", std::process::id()));
+        let function_root = root.join("graph");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(function_root.join("subagents")).unwrap();
+        let selected = root_subagents
+            .iter()
+            .map(|id| format!("    - {id}\n"))
+            .collect::<String>();
+        std::fs::write(
+            function_root.join(FUNCTION_FILE_NAME),
+            format!(
+                "---\nschema: agentfunction/v1\nid: graph\ntitle: Graph\nsubagents:\n  use:\n{selected}delegation:\n  max_depth: 4\n  max_children_per_run: 4\n  max_descendants: 8\n  max_total_output_tokens: 4096\n  timeout_seconds: 600\n---\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            function_root.join(FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+            "Coordinate declared subagents.\n",
+        )
+        .unwrap();
+        for (id, document) in subagents {
+            std::fs::write(
+                function_root.join("subagents").join(format!("{id}.md")),
+                document,
+            )
+            .unwrap();
+        }
+        let locator = FunctionLocator {
+            reference: "graph".to_string(),
+            source: FunctionSource::Workspace,
+            path: function_root.join(FUNCTION_FILE_NAME),
+            root_dir: function_root,
+        };
+        (root, locator)
+    }
+
+    fn subagent_document(id: &str, children: &[&str]) -> String {
+        let selected = children
+            .iter()
+            .map(|child| format!("    - {child}\n"))
+            .collect::<String>();
+        format!(
+            "---\nschema: agentlibre/subagent/v1\nid: {id}\ntitle: {id}\ndescription: Handles {id} tasks.\nmodel:\n  inherit: true\ntools:\n  mode: read-only\n  allow: []\n  deny: []\nsubagents:\n  use:\n{selected}limits:\n  max_model_attempts: 2\n  max_output_tokens: 512\n  max_capability_calls: 4\n  timeout_seconds: 120\n---\n\n# Mission\n\nPrivate instructions for {id}.\n"
+        )
+    }
+
     #[test]
     fn parses_function_document() {
         let content = r#"---
@@ -1728,6 +2080,12 @@ title: Coding
 subagents:
   use:
     - reviewer
+delegation:
+  max_depth: 2
+  max_children_per_run: 2
+  max_descendants: 4
+  max_total_output_tokens: 2048
+  timeout_seconds: 300
 ---
 "#,
         )
@@ -1743,6 +2101,20 @@ subagents:
 schema: agentlibre/subagent/v1
 id: reviewer
 title: Reviewer
+description: Reviews a delegated task.
+model:
+  inherit: true
+tools:
+  mode: read-only
+  allow: []
+  deny: []
+subagents:
+  use: []
+limits:
+  max_model_attempts: 2
+  max_output_tokens: 512
+  max_capability_calls: 4
+  timeout_seconds: 120
 ---
 
 # Mission
@@ -1765,8 +2137,133 @@ Review.
         assert!(context.contains("Function system prompt"));
         assert!(context.contains("Code."));
         assert!(context.contains("Available subagents"));
-        assert!(context.contains("Review."));
+        assert!(context.contains("Reviews a delegated task."));
+        assert!(!context.contains("Review.\n"));
+        assert!(!context.contains("agentlibre_subagent_context"));
+        assert!(!context.contains("subagents/reviewer.md"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolves_complete_acyclic_subagent_graph() {
+        let reviewer = subagent_document("reviewer", &["researcher"]);
+        let researcher = subagent_document("researcher", &[]);
+        let (root, locator) = graph_fixture(
+            "valid",
+            &["reviewer"],
+            &[("reviewer", &reviewer), ("researcher", &researcher)],
+        );
+
+        let loaded = load_function(locator).unwrap();
+        assert_eq!(loaded.subagents.len(), 2);
+        assert_eq!(loaded.subagents[0].front_matter.id, "researcher");
+        assert_eq!(loaded.subagents[1].front_matter.id, "reviewer");
+        assert_eq!(
+            loaded.subagents[1].front_matter.subagents.use_,
+            ["researcher"]
+        );
+        assert!(loaded.subagents.iter().all(|subagent| {
+            subagent.source_digest.starts_with("sha256:") && !subagent.body.trim().is_empty()
+        }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_unknown_subagent_reference() {
+        let reviewer = subagent_document("reviewer", &["missing"]);
+        let (root, locator) = graph_fixture("unknown", &["reviewer"], &[("reviewer", &reviewer)]);
+
+        let error = load_function(locator).unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read declared subagent `missing`"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_direct_and_indirect_subagent_cycles() {
+        let direct = subagent_document("reviewer", &["reviewer"]);
+        let (direct_root, direct_locator) =
+            graph_fixture("direct-cycle", &["reviewer"], &[("reviewer", &direct)]);
+        let error = load_function(direct_locator).unwrap_err();
+        assert!(error.to_string().contains("cannot delegate to itself"));
+        let _ = std::fs::remove_dir_all(direct_root);
+
+        let reviewer = subagent_document("reviewer", &["researcher"]);
+        let researcher = subagent_document("researcher", &["reviewer"]);
+        let (indirect_root, indirect_locator) = graph_fixture(
+            "indirect-cycle",
+            &["reviewer"],
+            &[("reviewer", &reviewer), ("researcher", &researcher)],
+        );
+        let error = load_function(indirect_locator).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("reviewer -> researcher -> reviewer")
+        );
+        let _ = std::fs::remove_dir_all(indirect_root);
+    }
+
+    #[test]
+    fn rejects_subagent_without_finite_limits() {
+        let document = r#"---
+schema: agentlibre/subagent/v1
+id: reviewer
+title: Reviewer
+description: Reviews tasks.
+model:
+  inherit: true
+tools:
+  mode: read-only
+  allow: []
+  deny: []
+subagents:
+  use: []
+---
+
+Review.
+"#;
+        let (root, locator) =
+            graph_fixture("missing-limits", &["reviewer"], &[("reviewer", document)]);
+
+        let error = load_function(locator).unwrap_err();
+        assert!(format!("{error:#}").contains("missing field `limits`"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_conflicting_subagent_model_selection() {
+        let document = subagent_document("reviewer", &[]).replace(
+            "model:\n  inherit: true",
+            "model:\n  inherit: true\n  profile: local",
+        );
+        let (root, locator) =
+            graph_fixture("model-conflict", &["reviewer"], &[("reviewer", &document)]);
+
+        let error = load_function(locator).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exactly one of inherit=true or profile")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_empty_subagent_allow_list_denies_all_tools() {
+        let reviewer = subagent_document("reviewer", &[]);
+        let (root, locator) =
+            graph_fixture("empty-tools", &["reviewer"], &[("reviewer", &reviewer)]);
+
+        let loaded = load_function(locator).unwrap();
+        let policy = loaded.subagents[0].front_matter.tools.to_runtime_policy();
+        assert!(policy.allow.is_empty());
+        assert!(policy.deny.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
