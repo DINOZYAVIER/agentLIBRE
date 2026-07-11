@@ -5,8 +5,8 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions,
-    ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
+    ChatOptions, ChatService, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
+    InferenceOptions, ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{
@@ -19,6 +19,7 @@ use agl_daemon::{
     default_socket_path, render_cron_notification_body, render_cron_skill_prompt,
     run_cron_skill_chat_turn, run_cron_tick,
 };
+use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
@@ -327,7 +328,22 @@ fn run_cron_run(
         return run_cron_preflight(&job, runtime, options.json);
     }
     validate_stored_cron_target(&job, runtime)?;
-    let execution = execute_cron_target(&job, store, runtime, options.mock_skill_execution);
+    let model_manager = if job.target_kind == CronTargetKind::Skill && !options.mock_skill_execution
+    {
+        Some(process_local_model_manager()?)
+    } else {
+        None
+    };
+    let inference_client = model_manager
+        .as_ref()
+        .map(|manager| InferenceClientHandle::from(manager.handle()));
+    let execution = execute_cron_target(
+        &job,
+        store,
+        runtime,
+        options.mock_skill_execution,
+        inference_client.as_ref(),
+    );
     let (run, outcome) = cron
         .record_manual_run_result(
             &job.id,
@@ -401,10 +417,17 @@ fn run_cron_tick_command(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let unix_seconds = options.at.unwrap_or_else(unix_now);
+    let model_manager = (!options.mock_skill_execution)
+        .then(process_local_model_manager)
+        .transpose()?;
+    let inference_client = model_manager
+        .as_ref()
+        .map(|manager| InferenceClientHandle::from(manager.handle()));
     let mut executor = CliCronExecutor {
         store,
         runtime,
         mock_skill_execution: options.mock_skill_execution,
+        inference_client,
     };
     let mut notifier = CliStoreCronNotifier { store };
     let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
@@ -485,8 +508,9 @@ fn execute_cron_target(
     store: &AglStore,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
+    inference_client: Option<&InferenceClientHandle>,
 ) -> CronExecution {
-    match run_cron_target(job, store, runtime, mock_skill_execution) {
+    match run_cron_target(job, store, runtime, mock_skill_execution, inference_client) {
         Ok(result_ref) => CronExecution::succeeded(result_ref),
         Err(err) => CronExecution::failed(format!("{err:#}")),
     }
@@ -497,11 +521,16 @@ fn run_cron_target(
     store: &AglStore,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
+    inference_client: Option<&InferenceClientHandle>,
 ) -> Result<String> {
     match job.target_kind {
         CronTargetKind::Builtin => run_builtin_cron_target(job, store),
         CronTargetKind::Skill if mock_skill_execution => run_mock_skill_cron_target(job),
-        CronTargetKind::Skill => run_skill_cron_target(job, runtime),
+        CronTargetKind::Skill => run_skill_cron_target(
+            job,
+            runtime,
+            inference_client.context("cron skill inference client is not initialized")?,
+        ),
     }
 }
 
@@ -521,8 +550,18 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
     }
 }
 
-fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
-    run_cron_skill_chat_turn(job, runtime, InferenceOptions::default(), None)
+fn run_skill_cron_target(
+    job: &CronJob,
+    runtime: &AgentLibreRuntimeConfig,
+    inference_client: &InferenceClientHandle,
+) -> Result<String> {
+    run_cron_skill_chat_turn(
+        job,
+        runtime,
+        InferenceOptions::default(),
+        inference_client.clone(),
+        None,
+    )
 }
 
 fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
@@ -564,11 +603,18 @@ struct CliCronExecutor<'a> {
     store: &'a AglStore,
     runtime: &'a AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
+    inference_client: Option<InferenceClientHandle>,
 }
 
 impl CronTargetExecutor for CliCronExecutor<'_> {
     fn execute(&mut self, job: &CronJob) -> CronExecution {
-        execute_cron_target(job, self.store, self.runtime, self.mock_skill_execution)
+        execute_cron_target(
+            job,
+            self.store,
+            self.runtime,
+            self.mock_skill_execution,
+            self.inference_client.as_ref(),
+        )
     }
 }
 
@@ -1210,6 +1256,11 @@ fn run_inference(command: InferenceCommand, runtime: &AgentLibreRuntimeConfig) -
     }
 }
 
+fn process_local_model_manager() -> Result<ModelManager> {
+    ModelManager::spawn(ModelManagerOptions::default(), LlamaCppModelRuntime::new())
+        .context("failed to start process-local model manager")
+}
+
 fn run_one_shot(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     apply_workspace_default_function_to_run(&mut options, runtime)?;
     run_one_shot_raw(options, runtime)
@@ -1223,7 +1274,9 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
         .context("run requires PROMPT or --prompt TEXT")?;
     let chat_options = one_shot_chat_options_from_run_options(&options, runtime)?;
     let tool_mode = chat_options.inference.tool_mode;
-    let mut chat_service = ChatService::open(chat_options, runtime)?;
+    let model_manager = process_local_model_manager()?;
+    let inference_client = InferenceClientHandle::from(model_manager.handle());
+    let mut chat_service = ChatService::open(chat_options, runtime, inference_client)?;
     let summary = chat_service.summary();
     tracing::info!(
         target: "agentlibre::app",
@@ -1233,7 +1286,10 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
         tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
-    let output = chat_service.run_user_turn(&prompt)?;
+    let output = chat_service.run_user_turn(&prompt);
+    let finish = chat_service.finish_eof_if_needed();
+    let output = output?;
+    finish?;
     tracing::info!(
         target: "agentlibre::app",
         session_id = %chat_service.session_id(),
@@ -1771,8 +1827,13 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
 
 fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
-    let mut chat_service =
-        ChatService::open(chat_options_from_run_options(&options, runtime)?, runtime)?;
+    let model_manager = process_local_model_manager()?;
+    let inference_client = InferenceClientHandle::from(model_manager.handle());
+    let mut chat_service = ChatService::open(
+        chat_options_from_run_options(&options, runtime)?,
+        runtime,
+        inference_client,
+    )?;
     let summary = chat_service.summary();
     let stdin = io::stdin();
 

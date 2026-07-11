@@ -3,11 +3,12 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agl_chat::InferenceOptions;
+use agl_chat::{InferenceClientHandle, InferenceOptions};
 use agl_cron::{
     CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET,
     unsupported_builtin_cron_target_message,
 };
+use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
 use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, ProtocolError, ProtocolErrorCode};
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{AglStore, MatrixNotificationOutboxDraft};
@@ -43,12 +44,20 @@ impl DaemonServer {
             .context("failed to set daemon socket nonblocking")?;
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
+        let model_manager =
+            ModelManager::spawn(ModelManagerOptions::default(), LlamaCppModelRuntime::new())
+                .context("failed to start daemon model manager")?;
+        let inference_client = InferenceClientHandle::from(model_manager.handle());
         tracing::info!(
             target: "agentlibre::daemon",
             socket_path = %self.options.socket_path.display(),
             "daemon listening"
         );
-        let state = SharedDaemonState::open(self.runtime.clone(), self.options.inference.clone())?;
+        let state = SharedDaemonState::open(
+            self.runtime.clone(),
+            self.options.inference.clone(),
+            inference_client.clone(),
+        )?;
         let mut last_cron_tick = None;
         loop {
             let now = unix_now();
@@ -59,6 +68,7 @@ impl DaemonServer {
                 let mut executor = DaemonCronExecutor {
                     runtime: self.runtime.clone(),
                     inference_defaults: self.options.inference.clone(),
+                    inference_client: inference_client.clone(),
                 };
                 let mut notifier = StoreCronNotifier { store: &store };
                 match run_cron_tick(&store, now, &mut executor, &mut notifier) {
@@ -76,6 +86,7 @@ impl DaemonServer {
                         "cron scheduler tick failed"
                     ),
                 }
+                trace_model_manager_status(&state);
             }
 
             match listener.accept() {
@@ -104,9 +115,36 @@ impl DaemonServer {
     }
 }
 
+fn trace_model_manager_status(state: &SharedDaemonState) {
+    match state.model_manager_status() {
+        Ok(status) => tracing::debug!(
+            target: "agentlibre::daemon",
+            queue_depth = status.queue_depth,
+            loaded_model_digests = ?status.loaded_model_digests,
+            active = status.active_scope.is_some(),
+            cached_contexts = status.cached_contexts,
+            model_loads = status.model_loads,
+            context_loads = status.context_loads,
+            model_evictions = status.model_evictions,
+            context_evictions = status.context_evictions,
+            completed_jobs = status.completed_jobs,
+            cancellations = status.cancellations,
+            deadline_exceeded = status.deadline_exceeded,
+            failures = status.failures,
+            "model manager status"
+        ),
+        Err(error) => tracing::warn!(
+            target: "agentlibre::daemon",
+            error = %error,
+            "failed to inspect model manager status"
+        ),
+    }
+}
+
 struct DaemonCronExecutor {
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
+    inference_client: InferenceClientHandle,
 }
 
 impl CronTargetExecutor for DaemonCronExecutor {
@@ -123,6 +161,7 @@ impl CronTargetExecutor for DaemonCronExecutor {
                     job,
                     &self.runtime,
                     self.inference_defaults.clone(),
+                    self.inference_client.clone(),
                     Some("daemon"),
                 ) {
                     Ok(result_ref) => CronExecution::succeeded(result_ref),

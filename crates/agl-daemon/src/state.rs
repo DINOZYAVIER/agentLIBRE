@@ -6,13 +6,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus, InferenceOptions,
-    ToolAccessMode as ChatToolMode,
+    ChatOptions, ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus,
+    InferenceClientHandle, InferenceOptions, ToolAccessMode as ChatToolMode,
 };
 use agl_events::{SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus};
 #[cfg(test)]
 use agl_ids::EventId;
 use agl_ids::{RequestId, RunId, SessionId, TurnId};
+use agl_inference::ModelManagerStatus;
 use agl_protocol::{
     AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
     DaemonRequestKind, HelloEvent, PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode,
@@ -36,24 +37,32 @@ const TURN_REPLAY_PAYLOAD_VERSION: u32 = 1;
 pub struct DaemonState {
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
+    inference_client: InferenceClientHandle,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     store: AglStore,
 }
 
 impl DaemonState {
-    pub fn new(runtime: AgentLibreRuntimeConfig, inference_defaults: InferenceOptions) -> Self {
-        Self::open(runtime, inference_defaults).expect("failed to open daemon state store")
+    pub fn new(
+        runtime: AgentLibreRuntimeConfig,
+        inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
+    ) -> Self {
+        Self::open(runtime, inference_defaults, inference_client)
+            .expect("failed to open daemon state store")
     }
 
     pub fn open(
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         let store = AglStore::open_at(runtime.paths.store_root())
             .context("failed to open daemon state store")?;
         Ok(Self {
             runtime,
             inference_defaults,
+            inference_client,
             sessions: BTreeMap::new(),
             store,
         })
@@ -128,19 +137,29 @@ impl DaemonState {
             DaemonRequestKind::SessionFinish(request) => {
                 match self.sessions.get_mut(&request.session_id) {
                     Some(session) if session.status == SessionStatus::Busy => Err(busy_error()),
-                    Some(session) => match session.endpoint.request_exit().map_err(runtime_error) {
-                        Ok(_) => {
-                            session.status = SessionStatus::Finished;
-                            Ok(vec![DaemonEvent::new(
-                                Some(request_id.clone()),
-                                DaemonEventKind::SessionFinished(SessionFinishedEvent {
-                                    session_id: request.session_id,
-                                    reason: request.reason,
-                                }),
-                            )])
+                    Some(session) => {
+                        let finish = if session.worker_finished {
+                            Ok(())
+                        } else {
+                            session.endpoint.request_exit().map_err(runtime_error)
+                        };
+                        match finish {
+                            Ok(_) => {
+                                session.worker_finished = true;
+                                if session.status != SessionStatus::Failed {
+                                    session.status = SessionStatus::Finished;
+                                }
+                                Ok(vec![DaemonEvent::new(
+                                    Some(request_id.clone()),
+                                    DaemonEventKind::SessionFinished(SessionFinishedEvent {
+                                        session_id: request.session_id,
+                                        reason: request.reason,
+                                    }),
+                                )])
+                            }
+                            Err(error) => Err(error),
                         }
-                        Err(error) => Err(error),
-                    },
+                    }
                     None => Err(not_found_error(request.session_id.as_str())),
                 }
             }
@@ -182,6 +201,12 @@ impl DaemonState {
         }
     }
 
+    pub fn model_manager_status(&self) -> Result<ModelManagerStatus> {
+        self.inference_client
+            .status()
+            .context("failed to inspect model manager status")
+    }
+
     fn open_session(
         &mut self,
         request_id: RequestId,
@@ -217,8 +242,12 @@ impl DaemonState {
             no_history: false,
             new_session: request.new_session,
         };
-        let (endpoint, summary) =
-            SessionEndpoint::spawn_real(options, self.runtime.clone()).map_err(runtime_error)?;
+        let (endpoint, summary) = SessionEndpoint::spawn_real(
+            options,
+            self.runtime.clone(),
+            self.inference_client.clone(),
+        )
+        .map_err(runtime_error)?;
         let session_id = summary.session_id;
         let resumed = summary.resumed;
         self.sessions.insert(
@@ -226,6 +255,7 @@ impl DaemonState {
             SessionRuntime {
                 endpoint,
                 status: SessionStatus::Open,
+                worker_finished: false,
             },
         );
 
@@ -590,6 +620,7 @@ impl DaemonState {
             SessionRuntime {
                 endpoint: SessionEndpoint::spawn_test(session_id, outputs, None, false),
                 status: SessionStatus::Open,
+                worker_finished: false,
             },
         );
     }
@@ -605,6 +636,7 @@ impl DaemonState {
             SessionRuntime {
                 endpoint: SessionEndpoint::spawn_test(session_id, outputs, None, true),
                 status: SessionStatus::Open,
+                worker_finished: false,
             },
         );
     }
@@ -621,6 +653,7 @@ impl DaemonState {
             SessionRuntime {
                 endpoint: SessionEndpoint::spawn_test(session_id, outputs, Some(delay), false),
                 status: SessionStatus::Open,
+                worker_finished: false,
             },
         );
     }
@@ -666,18 +699,31 @@ pub struct SharedDaemonState {
 }
 
 impl SharedDaemonState {
-    pub fn new(runtime: AgentLibreRuntimeConfig, inference_defaults: InferenceOptions) -> Self {
+    pub fn new(
+        runtime: AgentLibreRuntimeConfig,
+        inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
+    ) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(DaemonState::new(runtime, inference_defaults))),
+            inner: Arc::new(Mutex::new(DaemonState::new(
+                runtime,
+                inference_defaults,
+                inference_client,
+            ))),
         }
     }
 
     pub fn open(
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         Ok(Self {
-            inner: Arc::new(Mutex::new(DaemonState::open(runtime, inference_defaults)?)),
+            inner: Arc::new(Mutex::new(DaemonState::open(
+                runtime,
+                inference_defaults,
+                inference_client,
+            )?)),
         })
     }
 
@@ -708,6 +754,13 @@ impl SharedDaemonState {
                 )],
             },
         }
+    }
+
+    pub fn model_manager_status(&self) -> Result<ModelManagerStatus> {
+        self.inner
+            .lock()
+            .map_err(|error| anyhow!("daemon state lock is poisoned: {error}"))?
+            .model_manager_status()
     }
 
     fn handle_turn(&self, request_id: RequestId, request: SessionTurnRequest) -> Vec<DaemonEvent> {
@@ -772,6 +825,7 @@ impl SharedDaemonState {
 struct SessionRuntime {
     endpoint: SessionEndpoint,
     status: SessionStatus,
+    worker_finished: bool,
 }
 
 #[derive(Clone)]
@@ -803,13 +857,14 @@ impl SessionEndpoint {
     fn spawn_real(
         options: ChatOptions,
         runtime: AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
     ) -> Result<(Self, ChatSessionSummary)> {
         let (commands, receiver) = mpsc::channel();
         let (init_sender, init_receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("agl-daemon-session".to_string())
             .spawn(move || {
-                let service = ChatService::open(options, &runtime);
+                let service = ChatService::open(options, &runtime, inference_client);
                 match service {
                     Ok(service) => {
                         let summary = service.summary();
@@ -928,10 +983,21 @@ fn run_session_worker(mut service: ChatService, receiver: mpsc::Receiver<Session
             }
             SessionCommand::RequestExit { reply } => {
                 let result = service.request_exit().map_err(|err| format!("{err:#}"));
+                let finished = result.is_ok();
                 let _ = reply.send(result);
-                break;
+                if finished {
+                    break;
+                }
             }
         }
+    }
+    if let Err(err) = service.finish_eof_if_needed() {
+        tracing::warn!(
+            target: "agentlibre::daemon",
+            session_id = %service.session_id(),
+            error = %err,
+            "failed to release daemon session inference context"
+        );
     }
 }
 

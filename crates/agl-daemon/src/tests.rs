@@ -1,16 +1,21 @@
-use agl_chat::InferenceOptions;
+use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
 use agl_client::{AgentLibreClient, ClientError, DaemonTransport};
+use agl_config::LocalInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
 use agl_events::{
     EVENT_SCHEMA as RUNTIME_EVENT_SCHEMA, EventEnvelope, EventScope, RuntimeEvent,
     RuntimeEventEnvelope, SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus,
 };
 use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, TurnId};
+use agl_inference::InferenceResponse;
+use agl_inference::{InferenceFinishReason, InferenceResponseMetadata, ModelManagerStatus};
 use agl_protocol::{
     AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
     DaemonRequestKind, EVENT_SCHEMA, HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode,
-    REQUEST_SCHEMA, SessionListEvent, SessionListRequest, SessionStatus, SessionStatusRequest,
-    SessionTranscriptRequest, SessionTurnRequest, TranscriptEvent, TurnTerminalStatus,
+    ProtocolToolMode, REQUEST_SCHEMA, SessionClearRequest, SessionFinishReason,
+    SessionFinishRequest, SessionListEvent, SessionListRequest, SessionOpenRequest, SessionStatus,
+    SessionStatusRequest, SessionTranscriptRequest, SessionTurnRequest, TranscriptEvent,
+    TurnTerminalStatus,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -20,6 +25,7 @@ use agl_session::ChatSessionStore;
 use agl_store::AglStore;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -39,6 +45,92 @@ fn runtime() -> AgentLibreRuntimeConfig {
         logging: AgentLibreLoggingConfig::from_env(),
         history: AgentLibreHistoryConfig::default(),
         workspace: AgentLibreWorkspaceConfig::default(),
+    }
+}
+
+fn inference_client() -> InferenceClientHandle {
+    struct TestInferenceClient;
+
+    impl InferenceClient for TestInferenceClient {
+        fn generate(&self, _job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
+            anyhow::bail!("test inference client has no scripted response")
+        }
+
+        fn clear_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            _session_id: &SessionId,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            _session_id: &SessionId,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> anyhow::Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+    }
+
+    InferenceClientHandle::new(TestInferenceClient)
+}
+
+#[derive(Default)]
+struct RecordingInferenceCalls {
+    generated: Vec<SessionId>,
+    cleared: Vec<SessionId>,
+    released: Vec<SessionId>,
+}
+
+#[derive(Clone)]
+struct RecordingInferenceClient {
+    calls: Arc<Mutex<RecordingInferenceCalls>>,
+}
+
+impl InferenceClient for RecordingInferenceClient {
+    fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
+        self.calls
+            .lock()
+            .unwrap()
+            .generated
+            .push(job.session_id.clone());
+        Ok(InferenceResponse {
+            attempt_id: job.request.attempt_id,
+            content: "managed answer\n\nVerification: not run (fake inference).".to_string(),
+            finish_reason: InferenceFinishReason::Stop,
+            metadata: InferenceResponseMetadata {
+                model_state: Some("fake_shared".to_string()),
+                selected_device: None,
+                duration_ms: 0,
+            },
+        })
+    }
+
+    fn clear_context(
+        &self,
+        _config: &LocalInferenceConfig,
+        session_id: &SessionId,
+    ) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().cleared.push(session_id.clone());
+        Ok(())
+    }
+
+    fn release_context(
+        &self,
+        _config: &LocalInferenceConfig,
+        session_id: &SessionId,
+    ) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().released.push(session_id.clone());
+        Ok(())
+    }
+
+    fn status(&self) -> anyhow::Result<ModelManagerStatus> {
+        Ok(ModelManagerStatus::default())
     }
 }
 
@@ -135,7 +227,7 @@ impl DaemonTransport for StateTransport {
 
 #[test]
 fn hello_reports_alpha_capabilities_without_loading_model() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
 
     let events = state.handle_request(request(DaemonRequestKind::Hello(HelloRequest {
         client_name: Some("test".to_string()),
@@ -154,8 +246,172 @@ fn hello_reports_alpha_capabilities_without_loading_model() {
 }
 
 #[test]
+fn daemon_sessions_share_one_inference_client_and_keep_context_commands_isolated() {
+    let runtime = runtime();
+    let root = runtime.paths.config_dir.parent().unwrap().to_path_buf();
+    let workspace = root.join("workspace");
+    let config_path = root.join("inference.toml");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+            root.join("missing-model.gguf").display()
+        ),
+    )
+    .unwrap();
+    let calls = Arc::new(Mutex::new(RecordingInferenceCalls::default()));
+    let client = InferenceClientHandle::new(RecordingInferenceClient {
+        calls: Arc::clone(&calls),
+    });
+    let mut state = DaemonState::new(
+        runtime.clone(),
+        InferenceOptions {
+            config: Some(config_path),
+            ..Default::default()
+        },
+        client,
+    );
+    let first = SessionId::generate();
+    let second = SessionId::generate();
+
+    for session_id in [&first, &second] {
+        let events = state.handle_request(request(DaemonRequestKind::SessionOpen(
+            SessionOpenRequest {
+                session_id: Some(session_id.clone()),
+                new_session: false,
+                workspace_root: Some(workspace.display().to_string()),
+                skills: Vec::new(),
+                tool_mode: ProtocolToolMode::ReadOnly,
+            },
+        )));
+        assert!(matches!(events[0].kind, DaemonEventKind::SessionOpened(_)));
+    }
+
+    for session_id in [&first, &second, &first] {
+        let events = state.handle_request(request(DaemonRequestKind::SessionTurn(
+            SessionTurnRequest {
+                session_id: session_id.clone(),
+                text: "hello".to_string(),
+                idempotency_key: None,
+            },
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            DaemonEventKind::AssistantMessage(AssistantMessageEvent { ref content, .. })
+                if content.starts_with("managed answer")
+        )));
+    }
+
+    let _ = state.handle_request(request(DaemonRequestKind::SessionClear(
+        SessionClearRequest {
+            session_id: first.clone(),
+        },
+    )));
+    for session_id in [&second, &first] {
+        let _ = state.handle_request(request(DaemonRequestKind::SessionFinish(
+            SessionFinishRequest {
+                session_id: session_id.clone(),
+                reason: SessionFinishReason::HostShutdown,
+            },
+        )));
+    }
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.generated,
+        vec![first.clone(), second.clone(), first.clone()]
+    );
+    assert_eq!(calls.cleared, vec![first.clone()]);
+    assert_eq!(calls.released, vec![second, first]);
+    drop(calls);
+    drop(state);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cron_skill_sessions_reuse_the_injected_inference_client() {
+    let runtime = runtime();
+    let root = runtime.paths.config_dir.parent().unwrap().to_path_buf();
+    let config_path = root.join("cron-inference.toml");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+            root.join("missing-cron-model.gguf").display()
+        ),
+    )
+    .unwrap();
+    let store = AglStore::open_at(runtime.paths.store_root()).unwrap();
+    let cron = agl_cron::CronRepository::new(&store);
+    let mut draft = CronJobDraft::new(
+        "managed cron",
+        CronTargetKind::Skill,
+        "repo-status",
+        "0 0 * * *",
+    );
+    draft.prompt = Some("Report repository status.".to_string());
+    let job = cron.add_job(draft).unwrap();
+    let calls = Arc::new(Mutex::new(RecordingInferenceCalls::default()));
+    let client = InferenceClientHandle::new(RecordingInferenceClient {
+        calls: Arc::clone(&calls),
+    });
+    let inference = InferenceOptions {
+        config: Some(config_path),
+        ..Default::default()
+    };
+
+    run_cron_skill_chat_turn(
+        &job,
+        &runtime,
+        inference.clone(),
+        client.clone(),
+        Some("test"),
+    )
+    .unwrap();
+    run_cron_skill_chat_turn(&job, &runtime, inference, client, Some("test")).unwrap();
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.generated.len(), 2);
+    assert_ne!(calls.generated[0], calls.generated[1]);
+    assert_eq!(calls.released, calls.generated);
+    drop(calls);
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn status_for_unknown_session_returns_not_found() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let missing_session_id = SessionId::generate();
 
     let events = state.handle_request(request(DaemonRequestKind::SessionStatus(
@@ -172,7 +428,7 @@ fn status_for_unknown_session_returns_not_found() {
 
 #[test]
 fn session_list_starts_empty() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
 
     let events = state.handle_request(request(DaemonRequestKind::SessionList(
         SessionListRequest::default(),
@@ -186,7 +442,7 @@ fn session_list_starts_empty() {
 
 #[test]
 fn session_turn_idempotency_replays_without_rerunning_turn() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_test_session(
         session_id.clone(),
@@ -249,7 +505,7 @@ fn session_turn_idempotency_replays_without_rerunning_turn() {
 
 #[test]
 fn sequential_turns_share_session_and_have_distinct_run_and_turn_ids() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_test_session(
         session_id.clone(),
@@ -319,7 +575,7 @@ fn sequential_turns_share_session_and_have_distinct_run_and_turn_ids() {
 #[test]
 fn client_json_transport_keeps_two_turn_envelopes_exact() {
     let session_id = SessionId::generate();
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     state.insert_test_session_with_runtime_events(
         session_id.clone(),
         vec![
@@ -422,7 +678,7 @@ fn client_json_transport_keeps_two_turn_envelopes_exact() {
 
 #[test]
 fn runtime_events_follow_admission_and_keep_outer_request_correlation() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     let request_id = RequestId::generate();
     state.insert_test_session_with_runtime_events(
@@ -479,7 +735,7 @@ fn runtime_events_follow_admission_and_keep_outer_request_correlation() {
 
 #[test]
 fn failed_chat_output_emits_runtime_then_failed_control_terminal() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_test_session(
         session_id.clone(),
@@ -510,6 +766,30 @@ fn failed_chat_output_emits_runtime_then_failed_control_terminal() {
         other => panic!("unexpected event: {other:?}"),
     }
 
+    let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
+        SessionStatusRequest {
+            session_id: session_id.clone(),
+        },
+    )));
+    match &status[0].kind {
+        DaemonEventKind::SessionStatus(event) => assert_eq!(event.status, SessionStatus::Failed),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let finish = || {
+        request(DaemonRequestKind::SessionFinish(SessionFinishRequest {
+            session_id: session_id.clone(),
+            reason: SessionFinishReason::HostShutdown,
+        }))
+    };
+    for _ in 0..2 {
+        let events = state.handle_request(finish());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].kind,
+            DaemonEventKind::SessionFinished(_)
+        ));
+    }
     let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
         SessionStatusRequest { session_id },
     )));
@@ -686,7 +966,7 @@ fn runtime_envelope_validation_rejects_stream_integrity_drift() {
 
 #[test]
 fn session_turn_idempotency_rejects_key_reuse_with_different_text() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_test_session(
         session_id.clone(),
@@ -722,7 +1002,7 @@ fn session_turn_idempotency_rejects_key_reuse_with_different_text() {
 
 #[test]
 fn session_turn_idempotency_reports_in_progress_key_as_busy() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_test_session(session_id.clone(), Vec::new());
     state.begin_test_turn_idempotency(&session_id, "say hi", "matrix-event-1");
@@ -747,7 +1027,7 @@ fn session_turn_idempotency_reports_in_progress_key_as_busy() {
 
 #[test]
 fn shared_daemon_state_reports_busy_while_turn_runs() {
-    let state = SharedDaemonState::new(runtime(), InferenceOptions::default());
+    let state = SharedDaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let session_id = SessionId::generate();
     state.insert_slow_test_session(
         session_id.clone(),
@@ -849,7 +1129,11 @@ fn transcript_read_omits_content_by_default() {
             },
         ))
         .unwrap();
-    let mut state = DaemonState::new(runtime.clone(), InferenceOptions::default());
+    let mut state = DaemonState::new(
+        runtime.clone(),
+        InferenceOptions::default(),
+        inference_client(),
+    );
 
     let events = state.handle_request(request(DaemonRequestKind::SessionTranscript(
         SessionTranscriptRequest {
@@ -905,7 +1189,11 @@ fn transcript_read_rejects_session_metadata_identity_drift() {
         serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
     metadata["session_id"] = serde_json::json!(SessionId::generate());
     std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-    let mut state = DaemonState::new(runtime.clone(), InferenceOptions::default());
+    let mut state = DaemonState::new(
+        runtime.clone(),
+        InferenceOptions::default(),
+        inference_client(),
+    );
 
     let events = state.handle_request(request(DaemonRequestKind::SessionTranscript(
         SessionTranscriptRequest {
@@ -926,7 +1214,7 @@ fn transcript_read_rejects_session_metadata_identity_drift() {
 
 #[test]
 fn wrong_schema_returns_protocol_version_error() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default());
+    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
     let mut req = request(DaemonRequestKind::SessionList(SessionListRequest::default()));
     req.schema = "agentlibre.daemon.request.v2".to_string();
 

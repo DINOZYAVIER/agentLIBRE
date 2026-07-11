@@ -1,398 +1,155 @@
-use std::error::Error;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::fmt;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
+use crate::model_manager::{
+    InferenceJob, ModelGeneration, ModelKey, ModelRuntime, RuntimeFailure, RuntimeOperation,
+};
 use agl_config::{KvCacheType, LocalInferenceConfig, MtpRuntimeConfig};
-use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
 
-use crate::InferenceFinishReason;
-
+use super::context_slot::LlamaCppContextSlot;
 use super::ffi;
-use super::session::{LlamaCppModelState, LlamaCppSession};
-
-#[cfg(test)]
-use super::session::trim_generated_continuation;
-#[cfg(test)]
-use agl_oven::{RenderedMessage, RenderedMessageRole};
-#[cfg(test)]
-use std::collections::VecDeque;
+use super::generation::LlamaCppGenerationControl;
+use super::model::LlamaCppModel;
 
 static LLAMA_BACKEND: OnceLock<()> = OnceLock::new();
-static LLAMA_LOGS: Mutex<String> = Mutex::new(String::new());
+static LLAMA_LOGS: Mutex<NativeLogState> = Mutex::new(NativeLogState { active: None });
 
-pub(super) struct LlamaCppRuntime {
-    inner: LlamaCppRuntimeInner,
+struct NativeLogState {
+    active: Option<String>,
 }
 
-enum LlamaCppRuntimeInner {
-    Native(Box<NativeLlamaCppRuntime>),
-    #[cfg(test)]
-    Test(Box<TestLlamaCppRuntime>),
+pub(crate) struct NativeLogCapture {
+    active: bool,
 }
 
-struct NativeLlamaCppRuntime {
-    config: LocalInferenceConfig,
-    max_output_tokens: u32,
-    session: Option<LlamaCppSession>,
-}
+#[derive(Default)]
+pub struct LlamaCppModelRuntime;
 
-pub(super) struct LlamaCppRuntimeOutput {
-    pub(super) content: String,
-    pub(super) finish_reason: InferenceFinishReason,
-    pub(super) model_state: String,
-    pub(super) selected_device: Option<String>,
-    pub(super) log: String,
-}
-
-#[derive(Debug)]
-pub(super) struct LlamaCppRuntimeError {
-    message: String,
-    log: String,
-}
-
-impl LlamaCppRuntimeError {
-    fn new(message: String, log: String) -> Self {
-        Self { message, log }
-    }
-
-    pub(super) fn log(&self) -> &str {
-        &self.log
+impl LlamaCppModelRuntime {
+    pub fn new() -> Self {
+        Self
     }
 }
 
-impl fmt::Display for LlamaCppRuntimeError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
+impl ModelRuntime for LlamaCppModelRuntime {
+    type Model = LlamaCppModel;
+    type Context = LlamaCppContextSlot;
 
-impl Error for LlamaCppRuntimeError {}
-
-impl LlamaCppRuntime {
-    pub(super) fn new(config: LocalInferenceConfig, max_output_tokens: u32) -> Self {
-        Self {
-            inner: LlamaCppRuntimeInner::Native(Box::new(NativeLlamaCppRuntime {
-                config,
-                max_output_tokens,
-                session: None,
-            })),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn new_test(
-        config: LocalInferenceConfig,
-        max_output_tokens: u32,
-        responses: Vec<&str>,
-        auto_selected_device: Option<&str>,
-    ) -> Self {
-        Self {
-            inner: LlamaCppRuntimeInner::Test(Box::new(TestLlamaCppRuntime {
-                config,
-                max_output_tokens,
-                responses: responses
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect::<VecDeque<_>>(),
-                auto_selected_device: auto_selected_device.map(str::to_string),
-                loaded: false,
-                rendered_message_history_len: 0,
-                messages: Vec::new(),
-            })),
-        }
-    }
-
-    pub(super) fn config(&self) -> &LocalInferenceConfig {
-        match &self.inner {
-            LlamaCppRuntimeInner::Native(runtime) => &runtime.config,
-            #[cfg(test)]
-            LlamaCppRuntimeInner::Test(runtime) => &runtime.config,
-        }
-    }
-
-    pub(super) fn set_max_output_tokens(&mut self, max_output_tokens: u32) {
-        match &mut self.inner {
-            LlamaCppRuntimeInner::Native(runtime) => {
-                runtime.max_output_tokens = max_output_tokens;
-            }
-            #[cfg(test)]
-            LlamaCppRuntimeInner::Test(runtime) => {
-                runtime.max_output_tokens = max_output_tokens;
-            }
-        }
-    }
-
-    pub(super) fn clear_context(&mut self) {
-        match &mut self.inner {
-            LlamaCppRuntimeInner::Native(runtime) => {
-                runtime.session = None;
-            }
-            #[cfg(test)]
-            LlamaCppRuntimeInner::Test(runtime) => {
-                runtime.loaded = false;
-                runtime.rendered_message_history_len = 0;
-                runtime.messages.clear();
-            }
-        }
-    }
-
-    pub(super) fn generate(
+    fn load_model(
         &mut self,
-        rendered: &RenderedModelRequest,
-    ) -> Result<LlamaCppRuntimeOutput> {
-        match &mut self.inner {
-            LlamaCppRuntimeInner::Native(runtime) => runtime.generate(rendered),
-            #[cfg(test)]
-            LlamaCppRuntimeInner::Test(runtime) => runtime.generate(rendered),
-        }
-    }
-}
-
-impl NativeLlamaCppRuntime {
-    fn generate(&mut self, rendered: &RenderedModelRequest) -> Result<LlamaCppRuntimeOutput> {
-        ensure!(
-            self.max_output_tokens > 0,
-            "llama.cpp max_output_tokens cannot be zero"
-        );
-        init_llama_backend();
-        let backend_init_logs = take_llama_logs();
-
-        let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
-        let mut log = runtime_log_header(&self.config, supports_gpu_offload);
-        append_backend_init_logs(&mut log, &backend_init_logs);
-        if let Some(message) =
-            gpu_offload_unavailable_message(self.config.runtime.gpu_layers, supports_gpu_offload)
-        {
-            return Err(runtime_error(message, log));
-        }
-        let model_state = match self.ensure_session(rendered, &mut log) {
-            Ok(model_state) => model_state,
-            Err(err) => {
-                return Err(runtime_error(format!("{err:#}"), log));
+        _key: &ModelKey,
+        config: &LocalInferenceConfig,
+    ) -> std::result::Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
+        let mut operation = capture_operation(|log| {
+            init_llama_backend();
+            let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
+            log.push_str(&runtime_log_header(config, supports_gpu_offload));
+            log.push_str("llama_cpp_operation = load_model\n");
+            if let Some(message) =
+                gpu_offload_unavailable_message(config.runtime.gpu_layers, supports_gpu_offload)
+            {
+                anyhow::bail!(message);
             }
-        };
-        log.push_str("model_state = ");
-        log.push_str(model_state.as_str());
-        log.push('\n');
-        if let Some(device) = &self.config.runtime.device {
-            log.push_str("selected_device = ");
-            log.push_str(device);
-            log.push('\n');
-        }
-
-        let output = {
-            let Some(session) = self.session.as_mut() else {
-                return Err(runtime_error(
-                    "llama.cpp session was not initialized".to_string(),
-                    log,
-                ));
-            };
-            if model_state == LlamaCppModelState::Reused && !session.load_native_log().is_empty() {
-                log.push_str("llama_cpp_session_load_log:\n");
-                log.push_str(session.load_native_log());
-                if !session.load_native_log().ends_with('\n') {
-                    log.push('\n');
-                }
-            }
-
-            session.generate(rendered, self.max_output_tokens, &mut log)
-        };
-        let output = match output {
-            Ok(output) => output,
-            Err(err) => {
-                self.session = None;
-                return Err(runtime_error(format!("{err:#}"), log));
-            }
-        };
-        let native_logs = take_llama_logs();
+            LlamaCppModel::load(config, log)
+        })?;
         let selected_device = resolve_selected_device(
-            self.config.runtime.device.as_deref(),
-            &native_logs,
-            self.session.as_ref().map(LlamaCppSession::load_native_log),
+            config.runtime.device.as_deref(),
+            &operation.log,
+            operation.value.metadata().selected_device.as_deref(),
         );
-        if self.config.runtime.device.is_none()
-            && let Some(device) = &selected_device
-        {
-            log.push_str("selected_device = ");
-            log.push_str(device);
-            log.push('\n');
-        }
-        if model_state == LlamaCppModelState::Loaded
-            && let Some(session) = self.session.as_mut()
-        {
-            session.set_load_native_log(native_logs.clone());
-        }
+        operation.value.record_selected_device(selected_device);
+        Ok(operation)
+    }
 
-        Ok(LlamaCppRuntimeOutput {
-            content: output.content,
-            finish_reason: output.finish_reason,
-            model_state: model_state.as_str().to_string(),
-            selected_device,
-            log: finish_runtime_log(log, native_logs),
+    fn create_context(
+        &mut self,
+        model: &mut Self::Model,
+        job: &InferenceJob,
+    ) -> std::result::Result<RuntimeOperation<Self::Context>, RuntimeFailure> {
+        capture_operation(|log| {
+            log.push_str("llama_cpp_operation = create_context\n");
+            ensure!(
+                model.matches_config(job.config()),
+                "loaded llama.cpp model resources do not match the inference job"
+            );
+            LlamaCppContextSlot::new(model, job.config(), log)
         })
     }
 
-    fn ensure_session(
+    fn generate(
         &mut self,
-        rendered: &RenderedModelRequest,
-        log: &mut String,
-    ) -> Result<LlamaCppModelState> {
-        if let Some(session) = self.session.as_ref()
-            && session.matches_config(&self.config)
-        {
-            if let Some(reason) = session.rendered_append_error(rendered) {
-                log.push_str("llama_cpp_session_reset_reason = rendered_history_not_appendable\n");
-                log.push_str("llama_cpp_session_reset_detail = ");
+        model: &mut Self::Model,
+        context: &mut Self::Context,
+        job: &InferenceJob,
+    ) -> std::result::Result<RuntimeOperation<ModelGeneration>, RuntimeFailure> {
+        capture_operation(|log| {
+            let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
+            log.push_str(&runtime_log_header(job.config(), supports_gpu_offload));
+            log.push_str("llama_cpp_operation = generate\n");
+            ensure!(
+                model.matches_config(job.config()),
+                "loaded llama.cpp model resources do not match the inference job"
+            );
+            if !context.matches_config(job.config()) {
+                log.push_str("llama_cpp_context_reset_reason = context_config_changed\n");
+                context.reset_cache(model, job.config(), log)?;
+            } else if let Some(reason) =
+                context.rendered_append_error(model, &job.request().rendered)
+            {
+                log.push_str("llama_cpp_context_reset_reason = rendered_history_not_appendable\n");
+                log.push_str("llama_cpp_context_reset_detail = ");
                 log.push_str(&reason);
                 log.push('\n');
-            } else {
-                return Ok(LlamaCppModelState::Reused);
+                context.reset_cache(model, job.config(), log)?;
             }
-        }
-
-        self.session = Some(LlamaCppSession::load(&self.config, log)?);
-        Ok(LlamaCppModelState::Loaded)
-    }
-}
-
-fn runtime_error(message: String, log: String) -> anyhow::Error {
-    LlamaCppRuntimeError::new(message, finish_runtime_log(log, take_llama_logs())).into()
-}
-
-#[cfg(test)]
-struct TestLlamaCppRuntime {
-    config: LocalInferenceConfig,
-    max_output_tokens: u32,
-    responses: VecDeque<String>,
-    auto_selected_device: Option<String>,
-    loaded: bool,
-    rendered_message_history_len: usize,
-    messages: Vec<RenderedMessage>,
-}
-
-#[cfg(test)]
-impl TestLlamaCppRuntime {
-    fn generate(&mut self, rendered: &RenderedModelRequest) -> Result<LlamaCppRuntimeOutput> {
-        ensure!(
-            self.max_output_tokens > 0,
-            "llama.cpp max_output_tokens cannot be zero"
-        );
-
-        let can_append = self.can_append_rendered(rendered);
-        let model_state = if self.loaded && can_append {
-            LlamaCppModelState::Reused
-        } else {
-            self.loaded = true;
-            self.rendered_message_history_len = 0;
-            self.messages.clear();
-            LlamaCppModelState::Loaded
-        };
-        let mut content = self
-            .responses
-            .pop_front()
-            .unwrap_or_else(|| "test response".to_string());
-        trim_generated_continuation(&mut content);
-
-        let appended_messages = &rendered.messages[self.rendered_message_history_len..];
-        let mut log = test_runtime_log(
-            &self.config,
-            model_state,
-            self.rendered_message_history_len,
-            appended_messages,
-            self.auto_selected_device.as_deref(),
-        );
-        self.messages = rendered.messages.clone();
-        self.messages.push(RenderedMessage {
-            role: RenderedMessageRole::Assistant,
-            content: content.clone(),
-            name: None,
-            tool_calls: Vec::new(),
-        });
-        self.rendered_message_history_len = self.messages.len();
-        if model_state == LlamaCppModelState::Reused {
-            log.push_str("llama_cpp_session_load_log:\n");
-            log.push_str("load_tensors: offloaded 66/66 layers to GPU\n");
-        }
-
-        Ok(LlamaCppRuntimeOutput {
-            content,
-            finish_reason: InferenceFinishReason::Stop,
-            model_state: model_state.as_str().to_string(),
-            selected_device: self
-                .config
-                .runtime
-                .device
-                .clone()
-                .or_else(|| self.auto_selected_device.clone()),
-            log,
+            let control = LlamaCppGenerationControl::cancellable_until(
+                job.cancellation().atomic_flag(),
+                job.deadline(),
+            );
+            let output = context.generate(
+                model,
+                &job.request().rendered,
+                job.max_output_tokens(),
+                &control,
+                log,
+            )?;
+            Ok(ModelGeneration {
+                content: output.content,
+                finish_reason: output.finish_reason,
+                selected_device: model.metadata().selected_device.clone(),
+            })
         })
     }
 
-    fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
-        super::session::rendered_history_is_prefix(
-            &self.messages,
-            &rendered.messages,
-            self.rendered_message_history_len,
-        )
+    fn clear_context(
+        &mut self,
+        model: &mut Self::Model,
+        context: &mut Self::Context,
+    ) -> std::result::Result<RuntimeOperation<()>, RuntimeFailure> {
+        capture_operation(|log| {
+            log.push_str("llama_cpp_operation = clear_context\n");
+            context.clear_cache(model, log)
+        })
     }
 }
 
-#[cfg(test)]
-fn test_runtime_log(
-    config: &LocalInferenceConfig,
-    model_state: LlamaCppModelState,
-    rendered_message_history_len: usize,
-    appended_messages: &[RenderedMessage],
-    auto_selected_device: Option<&str>,
-) -> String {
+fn capture_operation<T>(
+    operation: impl FnOnce(&mut String) -> Result<T>,
+) -> std::result::Result<RuntimeOperation<T>, RuntimeFailure> {
+    let capture = NativeLogCapture::begin()
+        .map_err(|error| RuntimeFailure::new(format!("{error:#}"), String::new()))?;
     let mut log = String::new();
-    log.push_str("backend = llama_cpp\n");
-    append_mtp_config_log(&mut log, &config.runtime.mtp);
-    log.push_str("model_state = ");
-    log.push_str(model_state.as_str());
-    log.push('\n');
-    if let Some(device) = &config.runtime.device {
-        log.push_str("selected_device = ");
-        log.push_str(device);
-        log.push('\n');
-    } else if let Some(device) = auto_selected_device {
-        log.push_str("llama_prepare_model_devices: using device ");
-        log.push_str(device);
-        log.push_str(" (test device)\n");
+    let result = operation(&mut log);
+    let log = finish_runtime_log(log, capture.finish());
+    match result {
+        Ok(value) => Ok(RuntimeOperation::new(value, log)),
+        Err(error) => Err(RuntimeFailure::new(format!("{error:#}"), log)),
     }
-    log.push_str("load_tensors: offloaded 66/66 layers to GPU\n");
-    log.push_str("rendered_message_history_len = ");
-    log.push_str(&rendered_message_history_len.to_string());
-    log.push('\n');
-    if appended_messages
-        .last()
-        .is_some_and(|message| message.role == RenderedMessageRole::User)
-    {
-        log.push_str("thinking_prefill = disabled\n");
-    }
-    log.push_str("llama_cpp_prompt_append:\n");
-    for message in appended_messages {
-        write_test_message(&mut log, message);
-    }
-    log
 }
 
-#[cfg(test)]
-fn write_test_message(log: &mut String, message: &RenderedMessage) {
-    match message.role {
-        RenderedMessageRole::System => log.push_str("System: "),
-        RenderedMessageRole::User => log.push_str("User: "),
-        RenderedMessageRole::Assistant => log.push_str("Assistant: "),
-        RenderedMessageRole::Tool => log.push_str("Tool: "),
-    }
-    log.push_str(&message.content);
-    log.push('\n');
-}
-
-fn init_llama_backend() {
+pub(crate) fn init_llama_backend() {
     LLAMA_BACKEND.get_or_init(|| {
         let lib_dir =
             CString::new(env!("AGL_LLAMA_CPP_LIBRARY_DIR")).expect("valid llama.cpp lib dir");
@@ -410,17 +167,45 @@ unsafe extern "C" fn llama_log_callback(
     _user_data: *mut c_void,
 ) {
     if let Some(text) = cstr_to_string(text)
-        && let Ok(mut logs) = LLAMA_LOGS.lock()
+        && let Ok(mut state) = LLAMA_LOGS.lock()
+        && let Some(logs) = state.active.as_mut()
     {
         logs.push_str(&text);
     }
 }
 
-fn take_llama_logs() -> String {
-    LLAMA_LOGS
-        .lock()
-        .map(|mut logs| std::mem::take(&mut *logs))
-        .unwrap_or_default()
+impl NativeLogCapture {
+    pub(crate) fn begin() -> Result<Self> {
+        let mut state = LLAMA_LOGS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("llama.cpp native log capture lock is poisoned"))?;
+        ensure!(
+            state.active.is_none(),
+            "llama.cpp native operation already has an active log capture"
+        );
+        state.active = Some(String::new());
+        Ok(Self { active: true })
+    }
+
+    pub(crate) fn finish(mut self) -> String {
+        self.active = false;
+        LLAMA_LOGS
+            .lock()
+            .ok()
+            .and_then(|mut state| state.active.take())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for NativeLogCapture {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Ok(mut state) = LLAMA_LOGS.lock() {
+            state.active = None;
+        }
+    }
 }
 
 fn finish_runtime_log(mut log: String, native_logs: String) -> String {
@@ -432,18 +217,6 @@ fn finish_runtime_log(mut log: String, native_logs: String) -> String {
         }
     }
     log
-}
-
-fn append_backend_init_logs(log: &mut String, backend_init_logs: &str) {
-    if backend_init_logs.is_empty() {
-        return;
-    }
-
-    log.push_str("llama_cpp_backend_init_log:\n");
-    log.push_str(backend_init_logs);
-    if !backend_init_logs.ends_with('\n') {
-        log.push('\n');
-    }
 }
 
 fn gpu_offload_unavailable_message(gpu_layers: u32, supports_gpu_offload: bool) -> Option<String> {
@@ -459,12 +232,12 @@ fn gpu_offload_unavailable_message(gpu_layers: u32, supports_gpu_offload: bool) 
 fn resolve_selected_device(
     configured_device: Option<&str>,
     current_native_logs: &str,
-    load_native_log: Option<&str>,
+    prior_selected_device: Option<&str>,
 ) -> Option<String> {
     configured_device
         .map(str::to_string)
         .or_else(|| selected_device_from_llama_logs(current_native_logs))
-        .or_else(|| load_native_log.and_then(selected_device_from_llama_logs))
+        .or_else(|| prior_selected_device.map(str::to_string))
 }
 
 fn selected_device_from_llama_logs(log: &str) -> Option<String> {
@@ -605,6 +378,13 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn model_runtime_can_move_to_worker_before_loading_native_resources() {
+        assert_send::<LlamaCppModelRuntime>();
+    }
+
     #[test]
     fn extracts_auto_selected_llama_device() {
         let log = "\
@@ -630,11 +410,9 @@ load_tensors: offloaded 34/34 layers to GPU
     }
 
     #[test]
-    fn selected_device_can_use_prior_load_log() {
-        let load_log = "llama_prepare_model_devices: using device Vulkan0 (auto)\n";
-
+    fn selected_device_can_use_prior_model_metadata() {
         assert_eq!(
-            resolve_selected_device(None, "", Some(load_log)).as_deref(),
+            resolve_selected_device(None, "", Some("Vulkan0")).as_deref(),
             Some("Vulkan0")
         );
     }
@@ -659,11 +437,77 @@ load_tensors: offloaded 34/34 layers to GPU
     }
 
     #[test]
-    fn backend_init_logs_are_labeled() {
-        let mut log = String::new();
+    fn sequential_native_log_captures_do_not_cross_boundaries() {
+        let first = NativeLogCapture::begin().unwrap();
+        let first_message = CString::new("first operation\n").unwrap();
+        unsafe { llama_log_callback(0, first_message.as_ptr(), ptr::null_mut()) };
+        let first_log = first.finish();
 
-        append_backend_init_logs(&mut log, "backend loaded");
+        let outside_message = CString::new("outside capture\n").unwrap();
+        unsafe { llama_log_callback(0, outside_message.as_ptr(), ptr::null_mut()) };
 
-        assert_eq!(log, "llama_cpp_backend_init_log:\nbackend loaded\n");
+        let second = NativeLogCapture::begin().unwrap();
+        let second_message = CString::new("second operation\n").unwrap();
+        unsafe { llama_log_callback(0, second_message.as_ptr(), ptr::null_mut()) };
+        let second_log = second.finish();
+
+        assert_eq!(first_log, "first operation\n");
+        assert_eq!(second_log, "second operation\n");
+    }
+
+    #[test]
+    fn native_log_capture_rejects_overlapping_operations() {
+        let capture = NativeLogCapture::begin().unwrap();
+
+        let error = NativeLogCapture::begin().err().unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("already has an active log capture")
+        );
+        drop(capture);
+        assert!(NativeLogCapture::begin().is_ok());
+    }
+
+    #[test]
+    fn dropped_native_log_capture_discards_partial_operation_log() {
+        let abandoned = NativeLogCapture::begin().unwrap();
+        let abandoned_message = CString::new("abandoned operation\n").unwrap();
+        unsafe { llama_log_callback(0, abandoned_message.as_ptr(), ptr::null_mut()) };
+        drop(abandoned);
+
+        let next = NativeLogCapture::begin().unwrap();
+        let next_message = CString::new("next operation\n").unwrap();
+        unsafe { llama_log_callback(0, next_message.as_ptr(), ptr::null_mut()) };
+
+        assert_eq!(next.finish(), "next operation\n");
+    }
+
+    #[test]
+    fn runtime_operation_keeps_only_its_scoped_native_log() {
+        let operation = capture_operation(|log| {
+            log.push_str("logical operation\n");
+            let native = CString::new("native operation\n").unwrap();
+            unsafe { llama_log_callback(0, native.as_ptr(), ptr::null_mut()) };
+            Ok(7_u8)
+        })
+        .unwrap();
+
+        assert_eq!(operation.value, 7);
+        assert!(operation.log.contains("logical operation\n"));
+        assert!(operation.log.contains("llama_cpp_log:\nnative operation\n"));
+    }
+
+    #[test]
+    fn runtime_failure_preserves_the_failed_operation_log() {
+        let failure = capture_operation::<()>(|log| {
+            log.push_str("before failure\n");
+            anyhow::bail!("native failure")
+        })
+        .unwrap_err();
+
+        assert_eq!(failure.message(), "native failure");
+        assert_eq!(failure.log(), "before failure\n");
     }
 }

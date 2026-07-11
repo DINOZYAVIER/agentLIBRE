@@ -735,6 +735,8 @@ tool_call_format = "hermes_json"
             },
             &runtime,
             None,
+            session_id(),
+            crate::inference_client::test_inference_client(),
         )
         .unwrap();
         assert_eq!(

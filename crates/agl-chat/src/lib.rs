@@ -1,3 +1,4 @@
+mod inference_client;
 mod loop_host;
 mod options;
 mod prompt;
@@ -6,6 +7,7 @@ mod session;
 mod terminal;
 mod tools;
 
+pub use inference_client::{ChatInferenceJob, InferenceClient, InferenceClientHandle};
 pub use loop_host::ChatLoopHost;
 pub use options::{ChatOptions, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions, ToolAccessMode};
 pub use service::{

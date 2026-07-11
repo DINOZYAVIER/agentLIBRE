@@ -36,6 +36,7 @@ static_assert(std::is_same_v<decltype(&llama_model_default_params), llama_model_
 static_assert(std::is_same_v<decltype(&llama_context_default_params), llama_context_params (*)()>, "llama_context_default_params signature changed");
 static_assert(std::is_same_v<decltype(&llama_batch_get_one), llama_batch (*)(llama_token *, int32_t)>, "llama_batch_get_one signature changed");
 static_assert(std::is_same_v<decltype(&llama_decode), int32_t (*)(llama_context *, llama_batch)>, "llama_decode signature changed");
+static_assert(std::is_same_v<decltype(&llama_set_abort_callback), void (*)(llama_context *, ggml_abort_callback, void *)>, "llama_set_abort_callback signature changed");
 
 extern "C" int agl_llama_cpp_abi_guard(void) {
     return 0;
