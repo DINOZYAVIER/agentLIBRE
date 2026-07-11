@@ -1,4 +1,5 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
+use agl_content::Content;
 use agl_ids::{RunId, TurnId};
 use agl_turn::{ModelRequest, TurnMessage, VisibleTool};
 use serde_json::json;
@@ -16,6 +17,18 @@ fn run_id() -> RunId {
 
 fn turn_id() -> TurnId {
     TurnId::parse(TEST_TURN_ID).unwrap()
+}
+
+fn text(value: impl Into<String>) -> Content {
+    Content::text(value).unwrap()
+}
+
+fn rendered_text(message: &RenderedMessage) -> String {
+    message
+        .content
+        .as_ref()
+        .and_then(Content::text_only)
+        .expect("test message must contain text only")
 }
 
 fn qwen_hermes_config() -> ModelConfig {
@@ -59,7 +72,7 @@ fn renders_user_messages_and_visible_tools() {
         turn_id: turn_id(),
         request_index: 0,
         messages: vec![TurnMessage::User {
-            content: "read README".to_string(),
+            content: text("read README"),
         }],
         visible_tools: vec![read_file_tool()],
     };
@@ -75,7 +88,7 @@ fn renders_user_messages_and_visible_tools() {
         rendered.messages,
         [RenderedMessage {
             role: RenderedMessageRole::User,
-            content: "read README".to_string(),
+            content: Some(text("read README")),
             name: None,
             tool_calls: Vec::new(),
         }]
@@ -97,7 +110,7 @@ fn hermes_and_gemma_render_equivalent_full_tool_schemas() {
         turn_id: turn_id(),
         request_index: 0,
         messages: vec![TurnMessage::User {
-            content: "read README".to_string(),
+            content: text("read README"),
         }],
         visible_tools: vec![read_file_tool()],
     };
@@ -124,7 +137,7 @@ fn renders_system_message() {
         turn_id: turn_id(),
         request_index: 0,
         messages: vec![TurnMessage::System {
-            content: "demo system".to_string(),
+            content: text("demo system"),
         }],
         visible_tools: Vec::new(),
     };
@@ -133,7 +146,7 @@ fn renders_system_message() {
 
     assert_eq!(rendered.messages.len(), 1);
     assert_eq!(rendered.messages[0].role, RenderedMessageRole::System);
-    assert_eq!(rendered.messages[0].content, "demo system");
+    assert_eq!(rendered_text(&rendered.messages[0]), "demo system");
     assert_eq!(rendered.messages[0].name, None);
     assert!(rendered.messages[0].tool_calls.is_empty());
 }
@@ -157,11 +170,11 @@ fn renders_hermes_assistant_tool_call_transcript() {
     assert_eq!(rendered.messages[0].role, RenderedMessageRole::Assistant);
     assert_eq!(rendered.messages[0].name, Some("read_file".to_string()));
     assert!(rendered.messages[0].tool_calls.is_empty());
-    assert!(rendered.messages[0].content.starts_with("<tool_call>"));
-    assert!(rendered.messages[0].content.ends_with("</tool_call>"));
+    let content = rendered_text(&rendered.messages[0]);
+    assert!(content.starts_with("<tool_call>"));
+    assert!(content.ends_with("</tool_call>"));
 
-    let raw_json = rendered.messages[0]
-        .content
+    let raw_json = content
         .strip_prefix("<tool_call>")
         .and_then(|value| value.strip_suffix("</tool_call>"))
         .unwrap();
@@ -194,7 +207,7 @@ fn renders_tool_observation_with_tool_name() {
         rendered.messages,
         [RenderedMessage {
             role: RenderedMessageRole::Tool,
-            content: r#"{"text":"agentLIBRE readme"}"#.to_string(),
+            content: Some(text(r#"{"text":"agentLIBRE readme"}"#)),
             name: Some("read_file".to_string()),
             tool_calls: Vec::new(),
         }]
@@ -224,7 +237,7 @@ fn renders_structured_assistant_tool_call_without_text_wrapper() {
         rendered.messages,
         [RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: String::new(),
+            content: None,
             name: None,
             tool_calls: vec![RenderedToolCall {
                 name: "read_file".to_string(),
@@ -257,9 +270,10 @@ fn renders_gemma_function_call_transcript() {
         rendered.messages,
         [RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content:
+            content: Some(text(
                 r#"<|tool_call>call:get_current_temperature{location:<|"|>London<|"|>}<tool_call|>"#
                     .to_string(),
+            )),
             name: Some("get_current_temperature".to_string()),
             tool_calls: Vec::new(),
         }]
@@ -286,7 +300,7 @@ fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
     let rendered = render_model_request(&request, &config).unwrap();
 
     assert_eq!(
-        rendered.messages[0].content,
+        rendered_text(&rendered.messages[0]),
         r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#
     );
 }

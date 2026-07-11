@@ -4,6 +4,7 @@ use agl_capabilities::{
     ActionDeclaration, ActionResult, CapabilityId, HookBatchResult, HookId, HookMessage,
     HookResult, HookStatus, OperationKind,
 };
+use agl_content::Content;
 use agl_ids::{RunId, TurnId};
 use agl_turn::{ModelResponse, StopReason, TurnHookBatch, TurnInput, TurnOutput, VisibleTool};
 use serde_json::json;
@@ -25,7 +26,7 @@ impl Script {
     fn model(mut self, content: impl Into<String>) -> Self {
         self.model
             .push_back(EffectOutcome::Succeeded(ModelResponse {
-                content: content.into(),
+                content: Content::text(content).unwrap(),
             }));
         self
     }
@@ -168,7 +169,7 @@ fn turn_id() -> TurnId {
 }
 
 fn input() -> TurnInput {
-    TurnInput::user(run_id(), turn_id(), "hello")
+    TurnInput::user(run_id(), turn_id(), Content::text("hello").unwrap())
 }
 
 fn read_tool() -> VisibleTool {
@@ -491,7 +492,7 @@ fn pending_effect_is_stable_and_results_are_exactly_once() {
         executor.resume(TurnEffectResult::ModelGeneration {
             key: stale,
             outcome: EffectOutcome::Succeeded(ModelResponse {
-                content: "done".to_string()
+                content: Content::text("done").unwrap()
             }),
         }),
         Err(TurnExecutorError::StaleEffectKey { .. })
@@ -507,7 +508,7 @@ fn pending_effect_is_stable_and_results_are_exactly_once() {
     let result = TurnEffectResult::ModelGeneration {
         key: effect.key().clone(),
         outcome: EffectOutcome::Succeeded(ModelResponse {
-            content: "done".to_string(),
+            content: Content::text("done").unwrap(),
         }),
     };
     executor.resume(result.clone()).unwrap();
@@ -571,7 +572,7 @@ fn cancellation_is_terminal_before_during_and_between_effects() {
         .resume(TurnEffectResult::ModelGeneration {
             key: effect.key().clone(),
             outcome: EffectOutcome::Succeeded(ModelResponse {
-                content: "completed concurrently".to_string(),
+                content: Content::text("completed concurrently").unwrap(),
             }),
         })
         .unwrap();

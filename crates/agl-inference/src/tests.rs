@@ -45,7 +45,7 @@ fn rendered_request() -> RenderedModelRequest {
         tool_call_format: ToolCallFormat::HermesJson,
         messages: vec![RenderedMessage {
             role: RenderedMessageRole::User,
-            content: "use the rendered request".to_string(),
+            content: Some(agl_content::Content::text("use the rendered request").unwrap()),
             name: None,
             tool_calls: Vec::new(),
         }],
@@ -79,6 +79,7 @@ fn local_config() -> LocalInferenceConfig {
         backend: InferenceBackendConfig {
             kind: BackendKind::LlamaCpp,
             model: PathBuf::from("/models/qwen.gguf"),
+            multimodal_projector: None,
         },
         runtime: InferenceRuntimeConfig {
             gpu_layers: 0,
@@ -147,6 +148,7 @@ fn invalid_job_scope_is_rejected_before_manager_admission() {
             request,
             context,
             InferenceArtifactRoot::new("/tmp/unused"),
+            PathBuf::from("/tmp/unused-store"),
             32,
         ),
         Err(ModelManagerError::ProfileInvalid { .. })
@@ -162,7 +164,7 @@ fn local_llama_cpp_config_has_no_executable_path() {
 }
 
 #[test]
-#[ignore = "requires AGL_LOCAL_INFERENCE_CONFIG and AGL_INFERENCE_ARTIFACT_ROOT"]
+#[ignore = "requires AGL_LOCAL_INFERENCE_CONFIG, AGL_INFERENCE_ARTIFACT_ROOT, and AGL_STORE_ROOT"]
 fn manual_llama_cpp_smoke_from_env() -> anyhow::Result<()> {
     let config_path = std::env::var("AGL_LOCAL_INFERENCE_CONFIG")?;
     let artifact_root = std::env::var("AGL_INFERENCE_ARTIFACT_ROOT")?;
@@ -173,6 +175,7 @@ fn manual_llama_cpp_smoke_from_env() -> anyhow::Result<()> {
         inference_request(),
         context,
         InferenceArtifactRoot::new(artifact_root),
+        PathBuf::from(std::env::var("AGL_STORE_ROOT")?),
         64,
     )?;
     let mut manager =

@@ -1,4 +1,5 @@
 use agl_capabilities::{ActionDeclaration, ActionSchema, CapabilityId, SchemaValidationError};
+use agl_content::Content;
 use agl_ids::{RunId, TurnId};
 use serde::{Deserialize, Serialize};
 
@@ -9,7 +10,7 @@ use crate::{TurnHookBatch, transcript::TurnMessage};
 pub struct TurnInput {
     pub run_id: RunId,
     pub turn_id: TurnId,
-    pub user_input: String,
+    pub user_input: Content,
     pub context_messages: Vec<TurnMessage>,
     pub visible_tools: Vec<VisibleTool>,
     pub hook_batches: Vec<TurnHookBatch>,
@@ -22,11 +23,11 @@ pub struct TurnInput {
 }
 
 impl TurnInput {
-    pub fn user(run_id: RunId, turn_id: TurnId, user_input: impl Into<String>) -> Self {
+    pub fn user(run_id: RunId, turn_id: TurnId, user_input: Content) -> Self {
         Self {
             run_id,
             turn_id,
-            user_input: user_input.into(),
+            user_input,
             context_messages: Vec::new(),
             visible_tools: Vec::new(),
             hook_batches: Vec::new(),

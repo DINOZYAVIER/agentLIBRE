@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActionDeclaration, ActionInvocation, CapabilityId, DeclarationDigest, DeclarationError,
-    OperationKind, PolicyHash, ProviderDeclaration, ProviderId, ProviderTrust, SkillId,
-    StateEffect,
+    OperationKind, PolicyHash, ProviderDeclaration, ProviderId, ProviderTrust, SensitiveInput,
+    SkillId, StateEffect,
 };
 
 #[derive(
@@ -97,6 +97,7 @@ pub struct CapabilityGrant {
     pub capability_id: CapabilityId,
     pub max_operation_kind: OperationKind,
     pub state_effects: BTreeSet<StateEffect>,
+    pub sensitive_inputs: BTreeSet<SensitiveInput>,
 }
 
 impl CapabilityGrant {
@@ -105,6 +106,7 @@ impl CapabilityGrant {
             capability_id,
             max_operation_kind,
             state_effects: BTreeSet::new(),
+            sensitive_inputs: BTreeSet::new(),
         }
     }
 
@@ -116,17 +118,32 @@ impl CapabilityGrant {
         self
     }
 
+    pub fn with_sensitive_inputs(
+        mut self,
+        sensitive_inputs: impl IntoIterator<Item = SensitiveInput>,
+    ) -> Self {
+        self.sensitive_inputs = sensitive_inputs.into_iter().collect();
+        self
+    }
+
     fn permits(&self, declaration: &ActionDeclaration) -> Result<(), CapabilityExclusionReason> {
         if !self.max_operation_kind.permits(declaration.operation_kind) {
             return Err(CapabilityExclusionReason::GrantOperationDenied);
         }
-        if !self.state_effects.is_empty()
+        if (!self.state_effects.is_empty() || !declaration.sensitive_inputs.is_empty())
             && !declaration
                 .state_effects
                 .iter()
                 .all(|effect| self.state_effects.contains(effect))
         {
             return Err(CapabilityExclusionReason::GrantStateEffectDenied);
+        }
+        if !declaration
+            .sensitive_inputs
+            .iter()
+            .all(|input| self.sensitive_inputs.contains(input))
+        {
+            return Err(CapabilityExclusionReason::GrantSensitiveInputDenied);
         }
         Ok(())
     }
@@ -139,6 +156,7 @@ pub struct CapabilityPolicyInput {
     pub baseline: BTreeSet<CapabilityId>,
     pub selected_skills: Vec<SkillCapabilityPolicy>,
     pub grants: Vec<CapabilityGrant>,
+    pub unavailable_capabilities: BTreeSet<CapabilityId>,
     pub function_policy: Option<FunctionToolPolicy>,
     pub tool_mode: ToolAccessMode,
 }
@@ -154,6 +172,7 @@ impl CapabilityPolicyInput {
             baseline: baseline.into_iter().collect(),
             selected_skills: Vec::new(),
             grants: Vec::new(),
+            unavailable_capabilities: BTreeSet::new(),
             function_policy: None,
             tool_mode,
         }
@@ -169,6 +188,14 @@ impl CapabilityPolicyInput {
 
     pub fn with_grants(mut self, grants: impl IntoIterator<Item = CapabilityGrant>) -> Self {
         self.grants = grants.into_iter().collect();
+        self
+    }
+
+    pub fn with_unavailable_capabilities(
+        mut self,
+        capabilities: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.unavailable_capabilities = capabilities.into_iter().collect();
         self
     }
 
@@ -194,6 +221,8 @@ pub enum CapabilityExclusionReason {
     FunctionDenied,
     GrantOperationDenied,
     GrantStateEffectDenied,
+    GrantSensitiveInputDenied,
+    ProviderUnavailable,
 }
 
 impl CapabilityExclusionReason {
@@ -208,6 +237,8 @@ impl CapabilityExclusionReason {
             Self::FunctionDenied => "function_denied",
             Self::GrantOperationDenied => "grant_operation_denied",
             Self::GrantStateEffectDenied => "grant_state_effect_denied",
+            Self::GrantSensitiveInputDenied => "grant_sensitive_input_denied",
+            Self::ProviderUnavailable => "provider_unavailable",
         }
     }
 }
@@ -298,12 +329,33 @@ impl EffectiveCapabilitySet {
                 continue;
             };
 
+            if input.unavailable_capabilities.contains(&capability_id) {
+                exclude(
+                    &mut exclusions,
+                    capability_id,
+                    CapabilityExclusionReason::ProviderUnavailable,
+                );
+                continue;
+            }
+
             let eligible_grant = grants.get(&capability_id).and_then(|candidates| {
                 candidates
                     .iter()
                     .find(|grant| grant.permits(declaration).is_ok())
             });
-            let mut reason = if !routed.contains(&capability_id) && eligible_grant.is_none() {
+            let mut reason = if !declaration.sensitive_inputs.is_empty() && eligible_grant.is_none()
+            {
+                grants.get(&capability_id).map_or(
+                    CapabilityExclusionReason::GrantSensitiveInputDenied,
+                    |candidates| {
+                        candidates
+                            .iter()
+                            .filter_map(|grant| grant.permits(declaration).err())
+                            .min()
+                            .unwrap_or(CapabilityExclusionReason::GrantSensitiveInputDenied)
+                    },
+                )
+            } else if !routed.contains(&capability_id) && eligible_grant.is_none() {
                 grants.get(&capability_id).map_or(
                     CapabilityExclusionReason::NotRouted,
                     |candidates| {
@@ -380,6 +432,7 @@ impl EffectiveCapabilitySet {
             baseline: &'a BTreeSet<CapabilityId>,
             selected_skills: BTreeMap<&'a SkillId, SkillHashMaterial<'a>>,
             grants: BTreeSet<&'a CapabilityGrant>,
+            unavailable_capabilities: &'a BTreeSet<CapabilityId>,
             function_policy: &'a Option<FunctionToolPolicy>,
             capabilities: &'a BTreeMap<CapabilityId, EffectiveCapability>,
             exclusions: &'a BTreeMap<CapabilityId, CapabilityExclusion>,
@@ -442,6 +495,7 @@ impl EffectiveCapabilitySet {
             baseline: &input.baseline,
             selected_skills,
             grants: input.grants.iter().collect(),
+            unavailable_capabilities: &input.unavailable_capabilities,
             function_policy: &input.function_policy,
             capabilities: &capabilities,
             exclusions: &exclusions,

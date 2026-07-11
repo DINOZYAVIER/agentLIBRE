@@ -183,6 +183,40 @@ tool_call_format = "gemma_function_call"
 }
 
 #[test]
+fn local_inference_config_rejects_projector_with_mtp() {
+    let path = write_temp_config(
+        "local-inference-projector-mtp",
+        r#"
+[backend]
+kind = "llama_cpp"
+model = "/models/gemma4.gguf"
+multimodal_projector = "/models/mmproj.gguf"
+
+[runtime]
+gpu_layers = 999
+context_tokens = 32768
+threads = 8
+
+[runtime.mtp]
+enabled = true
+draft_model = "/models/gemma4-mtp-q4_0.gguf"
+draft_tokens = 4
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    );
+
+    let error = load_local_inference_config(&path).unwrap_err();
+
+    assert_error_contains(
+        &error,
+        "multimodal projector profiles cannot enable speculative MTP",
+    );
+}
+
+#[test]
 fn local_inference_config_rejects_enabled_mtp_without_draft_model() {
     let path = write_temp_config(
         "local-inference-mtp-missing-draft",

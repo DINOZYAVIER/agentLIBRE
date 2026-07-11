@@ -198,7 +198,7 @@ impl DaemonState {
                     Some(session_id.clone()),
                     Some(turn_id),
                     serde_json::to_value(ChatRunInput {
-                        text: prompt,
+                        content: agl_content::Content::text(prompt).map_err(runtime_error)?,
                         request_id: None,
                         options: persisted_options,
                     })
@@ -403,8 +403,13 @@ impl DaemonState {
         request_id: RequestId,
         request: agl_protocol::RunSubmitRequest,
     ) -> Result<DaemonEventKind, ProtocolError> {
-        if request.text.trim().is_empty() {
-            return Err(invalid("run text cannot be blank"));
+        if !request.content.has_artifacts()
+            && request
+                .content
+                .text_only()
+                .is_some_and(|text| text.trim().is_empty())
+        {
+            return Err(invalid("run content cannot be blank"));
         }
         let session = self
             .sessions
@@ -419,14 +424,14 @@ impl DaemonState {
         let run_id = RunId::generate();
         let turn_id = TurnId::generate();
         let input = serde_json::to_value(ChatRunInput {
-            text: request.text.clone(),
+            content: request.content.clone(),
             request_id: Some(request_id),
             options: session.options.clone(),
         })
         .map_err(runtime_error)?;
         let idempotency = request.idempotency_key.map(|key| IdempotentRunSpec {
             namespace: RUN_SUBMIT_IDEMPOTENCY_NAMESPACE.to_string(),
-            fingerprint: run_fingerprint(&request.session_id, &request.text),
+            fingerprint: run_fingerprint(&request.session_id, &request.content),
             key,
         });
         let accepted = self
@@ -632,12 +637,13 @@ pub(crate) fn protocol_run_state(state: RunState) -> ProtocolRunState {
     }
 }
 
-fn run_fingerprint(session_id: &SessionId, text: &str) -> String {
+fn run_fingerprint(session_id: &SessionId, content: &agl_content::Content) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"agentlibre.daemon.run_submit.v1\0");
+    hasher.update(b"agentlibre.daemon.run_submit.v2\0");
     hasher.update(session_id.as_str().as_bytes());
     hasher.update(b"\0");
-    hasher.update(text.as_bytes());
+    hasher
+        .update(serde_json::to_vec(content).expect("validated content always serializes to JSON"));
     hasher
         .finalize()
         .iter()

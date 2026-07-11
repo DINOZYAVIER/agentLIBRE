@@ -421,7 +421,7 @@ impl ChatTurnRuntime {
             .model_output_tokens
             .saturating_add(response.metadata.output_tokens);
         Ok(ModelResponse {
-            content: response.content,
+            content: agl_content::Content::text(response.content)?,
         })
     }
 
@@ -588,12 +588,17 @@ fn build_chat_tool_runtime(
     core_tools: &agl_tools::CoreTools,
     workspace_root: &Path,
 ) -> Result<ToolRuntime> {
+    let screen_id = agl_capabilities::CapabilityId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
     chat_tool_runtime(ChatToolRuntimeConfig {
         core_tools,
         store_root: session.store_root(),
         trust_store_path: session.trust_store_path(),
         workspace_root,
         permission_status: permission_runtime_status(session),
+        screen_admitted_run: session
+            .permission_grants()
+            .sensitive_input_run(&screen_id, agl_capabilities::SensitiveInput::ScreenCapture)
+            .cloned(),
     })
 }
 

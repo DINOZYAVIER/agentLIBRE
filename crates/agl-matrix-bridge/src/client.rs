@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use agl_client::UnixTransport;
 use agl_client::{AgentLibreClient, DaemonTransport};
+use agl_content::Content;
 use agl_ids::SessionId;
 use agl_protocol::{
     HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
@@ -115,7 +116,7 @@ where
     ) -> Result<String> {
         let response = self.send_turn(RunSubmitRequest {
             session_id: session_id.clone(),
-            text: message.to_string(),
+            content: Content::text(message)?,
             idempotency_key: Some(idempotency_key.to_string()),
             budget: RunBudgetRequest::default(),
         })?;

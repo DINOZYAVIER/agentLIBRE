@@ -5,13 +5,14 @@ use std::time::Instant;
 
 use agl_capabilities::{
     CapabilityGrant, CapabilityId, CapabilityPolicyInput, EffectiveCapabilitySet,
-    FunctionToolPolicy, HookEvent, HookId, OperationKind, SkillCapabilityPolicy, SkillId,
-    StateEffect, render_canonical_json,
+    FunctionToolPolicy, HookEvent, HookId, OperationKind, SensitiveInput, SkillCapabilityPolicy,
+    SkillId, StateEffect, render_canonical_json,
 };
 use agl_config::{
     LocalInferenceConfig, ModelConfig, ToolCallFormat, load_local_inference_config,
     load_local_inference_config_from_str,
 };
+use agl_content::Content;
 use agl_functions::{
     IdentityContractMode, RuntimeFunction, RuntimeIdentityContract, resolve_runtime_function,
     resolve_runtime_function_allow_missing_profile,
@@ -424,6 +425,7 @@ impl InferenceSession {
         self.inference_client.generate(ChatInferenceJob {
             config: self.inference_config.clone(),
             artifact_root: InferenceArtifactRoot::new(self.artifact_root.clone()),
+            content_store_root: self.store_root.clone(),
             max_output_tokens: self.max_output_tokens,
             session_id: self.session_id.clone(),
             request,
@@ -721,27 +723,27 @@ fn build_inference_request(
         Vec::with_capacity(request.messages.len() + contexts.non_empty_count());
     if let Some(system_prompt) = non_empty_context(contexts.system_prompt) {
         request_messages.push(TurnMessage::System {
-            content: system_prompt.to_string(),
+            content: Content::text(system_prompt)?,
         });
     }
     if let Some(runtime_feature_context) = non_empty_context(contexts.runtime_feature_context) {
         request_messages.push(TurnMessage::System {
-            content: runtime_feature_context.to_string(),
+            content: Content::text(runtime_feature_context)?,
         });
     }
     if let Some(function_context) = non_empty_context(contexts.function_context) {
         request_messages.push(TurnMessage::System {
-            content: function_context.to_string(),
+            content: Content::text(function_context)?,
         });
     }
     if let Some(memory_context) = non_empty_context(contexts.memory_context) {
         request_messages.push(TurnMessage::System {
-            content: memory_context.to_string(),
+            content: Content::text(memory_context)?,
         });
     }
     if let Some(skill_context) = non_empty_context(contexts.skill_context) {
         request_messages.push(TurnMessage::System {
-            content: skill_context.to_string(),
+            content: Content::text(skill_context)?,
         });
     }
     let effective_capabilities = contexts
@@ -750,7 +752,10 @@ fn build_inference_request(
     ensure_visible_tool_parity(&request.visible_tools, effective_capabilities)?;
     if effective_capabilities.capabilities().len() != 0 {
         request_messages.push(TurnMessage::System {
-            content: render_tool_context(effective_capabilities, model_config.tool_call_format)?,
+            content: Content::text(render_tool_context(
+                effective_capabilities,
+                model_config.tool_call_format,
+            )?)?,
         });
     }
     request_messages.extend(request.messages);
@@ -947,8 +952,22 @@ impl RuntimePermissionGrantSnapshot {
             .map(|grant| {
                 CapabilityGrant::new(grant.capability_id.clone(), grant.max_operation_kind)
                     .with_state_effects(grant.state_effects.iter().copied())
+                    .with_sensitive_inputs(grant.sensitive_inputs.iter().copied())
             })
             .collect()
+    }
+
+    pub(crate) fn sensitive_input_run(
+        &self,
+        capability_id: &CapabilityId,
+        input: SensitiveInput,
+    ) -> Option<&RunId> {
+        self.admitted
+            .iter()
+            .find(|grant| {
+                &grant.capability_id == capability_id && grant.sensitive_inputs.contains(&input)
+            })
+            .map(|grant| &grant.run_id)
     }
 }
 
@@ -958,6 +977,8 @@ struct AdmittedPermissionGrant {
     capability_id: CapabilityId,
     max_operation_kind: OperationKind,
     state_effects: BTreeSet<StateEffect>,
+    sensitive_inputs: BTreeSet<SensitiveInput>,
+    run_id: RunId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1291,6 +1312,11 @@ fn resolve_effective_capabilities(
     )
     .with_selected_skills(skill_policies)
     .with_grants(grant_snapshot.capability_grants());
+    if !agl_host_tools::screen::provider_available() {
+        input = input.with_unavailable_capabilities([CapabilityId::new(
+            agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
+        )?]);
+    }
     if let Some(function_policy) = function_policy {
         input = input.with_function_policy(function_policy);
     }
@@ -1336,6 +1362,8 @@ fn admit_dynamic_permission_grants(
                     capability_id: capability_grant.capability_id,
                     max_operation_kind: capability_grant.max_operation_kind,
                     state_effects: capability_grant.state_effects,
+                    sensitive_inputs: capability_grant.sensitive_inputs,
+                    run_id: run_id.clone(),
                 });
             }
             Err(reason) => snapshot.ignored.push(IgnoredPermissionGrant {
@@ -1461,17 +1489,24 @@ fn evaluate_permission_grant(
     if !max_operation_kind.permits(declaration.operation_kind) {
         return Err("operation_ceiling_denied".to_string());
     }
-    if !grant.state_effects.is_empty() {
+    let granted_sensitive_inputs = parse_sensitive_inputs(&grant.sensitive_inputs)?;
+    for input in &declaration.sensitive_inputs {
+        if !granted_sensitive_inputs.contains(input) {
+            return Err("sensitive_input_denied".to_string());
+        }
+    }
+    let capability_grant = CapabilityGrant::new(capability_id, max_operation_kind)
+        .with_sensitive_inputs(granted_sensitive_inputs);
+    if !grant.state_effects.is_empty() || !declaration.sensitive_inputs.is_empty() {
         let granted_effects = parse_state_effects(&grant.state_effects)?;
         for effect in &declaration.state_effects {
             if !granted_effects.contains(effect) {
                 return Err("state_effect_denied".to_string());
             }
         }
-        return Ok(CapabilityGrant::new(capability_id, max_operation_kind)
-            .with_state_effects(granted_effects));
+        return Ok(capability_grant.with_state_effects(granted_effects));
     }
-    Ok(CapabilityGrant::new(capability_id, max_operation_kind))
+    Ok(capability_grant)
 }
 
 fn parse_operation_kind(value: &str) -> std::result::Result<OperationKind, String> {
@@ -1489,6 +1524,7 @@ fn parse_state_effects(values: &[String]) -> std::result::Result<BTreeSet<StateE
     values
         .iter()
         .map(|value| match value.as_str() {
+            "host_screen_capture" => Ok(StateEffect::HostScreenCapture),
             "repo_files" => Ok(StateEffect::RepoFiles),
             "repo_workspace" => Ok(StateEffect::RepoWorkspace),
             "repo_hooks" => Ok(StateEffect::RepoHooks),
@@ -1508,8 +1544,21 @@ fn parse_state_effects(values: &[String]) -> std::result::Result<BTreeSet<StateE
         .collect()
 }
 
+fn parse_sensitive_inputs(
+    values: &[String],
+) -> std::result::Result<BTreeSet<SensitiveInput>, String> {
+    values
+        .iter()
+        .map(|value| match value.as_str() {
+            "screen_capture" => Ok(SensitiveInput::ScreenCapture),
+            _ => Err("invalid_sensitive_input".to_string()),
+        })
+        .collect()
+}
+
 fn core_tool_ids() -> Result<BTreeSet<CapabilityId>> {
     [
+        agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
         agl_tools::FS_READ_TOOL_ID,
         agl_tools::FS_LIST_TOOL_ID,
         agl_tools::FS_SEARCH_TOOL_ID,

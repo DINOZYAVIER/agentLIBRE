@@ -316,7 +316,10 @@ impl<R: ModelRuntime> Worker<R> {
         self.refresh_resource_status();
     }
 
-    fn process_job(&mut self, job: InferenceJob) -> Result<InferenceResponse, ModelManagerError> {
+    fn process_job(
+        &mut self,
+        mut job: InferenceJob,
+    ) -> Result<InferenceResponse, ModelManagerError> {
         {
             let mut status = lock_status(&self.status);
             status.active_scope = Some(job.scope());
@@ -328,34 +331,42 @@ impl<R: ModelRuntime> Worker<R> {
             job.context_key().digest()
         );
         let result = match AttemptEvidence::start(&job) {
-            Ok(evidence) => match self.process_active_job(&job, &mut log) {
-                Ok((generation, model_loaded)) => {
-                    let response = InferenceResponse {
-                        attempt_id: job.request().attempt_id.clone(),
-                        content: generation.content,
-                        finish_reason: generation.finish_reason,
-                        metadata: InferenceResponseMetadata {
-                            model_state: Some(if model_loaded {
-                                "loaded".to_string()
-                            } else {
-                                "reused".to_string()
-                            }),
-                            selected_device: generation.selected_device,
-                            duration_ms: elapsed_millis(started),
-                            input_tokens: generation.input_tokens,
-                            output_tokens: generation.output_tokens,
-                        },
-                    };
-                    match evidence.succeed(&response, log) {
-                        Ok(()) => Ok(response),
-                        Err(error) => Err(error),
+            Ok(evidence) => {
+                let active = job.resolve_content().and_then(|(images, bytes)| {
+                    log.push_str(&format!(
+                        "resolved_images = {images}\nresolved_media_bytes = {bytes}\n"
+                    ));
+                    self.process_active_job(&job, &mut log)
+                });
+                match active {
+                    Ok((generation, model_loaded)) => {
+                        let response = InferenceResponse {
+                            attempt_id: job.request().attempt_id.clone(),
+                            content: generation.content,
+                            finish_reason: generation.finish_reason,
+                            metadata: InferenceResponseMetadata {
+                                model_state: Some(if model_loaded {
+                                    "loaded".to_string()
+                                } else {
+                                    "reused".to_string()
+                                }),
+                                selected_device: generation.selected_device,
+                                duration_ms: elapsed_millis(started),
+                                input_tokens: generation.input_tokens,
+                                output_tokens: generation.output_tokens,
+                            },
+                        };
+                        match evidence.succeed(&response, log) {
+                            Ok(()) => Ok(response),
+                            Err(error) => Err(error),
+                        }
                     }
+                    Err(error) => match evidence.fail(&error, log) {
+                        Ok(()) => Err(error),
+                        Err(evidence_error) => Err(evidence_error),
+                    },
                 }
-                Err(error) => match evidence.fail(&error, log) {
-                    Ok(()) => Err(error),
-                    Err(evidence_error) => Err(evidence_error),
-                },
-            },
+            }
             Err(error) => Err(error),
         };
         {
@@ -420,8 +431,14 @@ impl<R: ModelRuntime> Worker<R> {
             Err(error) => {
                 append_operation_log(log, "generation", error.log());
                 self.invalidate_context(&model_key, &context_key);
-                return Err(ModelManagerError::GenerationFailed {
-                    message: error.message().to_string(),
+                return Err(if error.is_multimodal_encode() {
+                    ModelManagerError::MultimodalEncodeFailed {
+                        message: error.message().to_string(),
+                    }
+                } else {
+                    ModelManagerError::GenerationFailed {
+                        message: error.message().to_string(),
+                    }
                 });
             }
         };

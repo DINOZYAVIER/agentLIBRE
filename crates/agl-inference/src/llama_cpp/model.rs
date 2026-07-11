@@ -1,10 +1,10 @@
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 
-use agl_config::LocalInferenceConfig;
+use agl_config::{LocalInferenceConfig, RuntimeSwitch};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::ffi;
@@ -12,6 +12,7 @@ use super::ffi;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LlamaCppModelKey {
     model: PathBuf,
+    multimodal_projector: Option<PathBuf>,
     gpu_layers: u32,
     device: Option<String>,
     mmap: Option<bool>,
@@ -24,6 +25,7 @@ impl LlamaCppModelKey {
         let mtp_enabled = config.runtime.mtp.enabled;
         Self {
             model: config.backend.model.clone(),
+            multimodal_projector: config.backend.multimodal_projector.clone(),
             gpu_layers: config.runtime.gpu_layers,
             device: config.runtime.device.clone(),
             mmap: config.runtime.mmap,
@@ -55,6 +57,8 @@ pub(crate) struct LlamaCppModelLoadMetadata {
 /// unsafe `Send` or `Sync` implementation.
 pub struct LlamaCppModel {
     key: LlamaCppModelKey,
+    // Vision owns model-backed resources and must drop before the weights.
+    vision: Option<VisionHandle>,
     // Handles precede their load-time device arrays so weights drop first.
     main: ModelHandle,
     draft: Option<ModelHandle>,
@@ -95,6 +99,17 @@ impl LlamaCppModel {
         let vocab = unsafe { ffi::llama_model_get_vocab(main.as_ptr().cast_const()) };
         ensure!(!vocab.is_null(), "llama.cpp model has no vocab");
 
+        let vision = config
+            .backend
+            .multimodal_projector
+            .as_ref()
+            .map(|projector| VisionHandle::load(projector, main.as_ptr(), config))
+            .transpose()
+            .context("failed to initialize llama.cpp multimodal projector")?;
+        if vision.is_some() {
+            log.push_str("multimodal_projector = loaded\n");
+        }
+
         let (draft, draft_devices, draft_description) = if config.runtime.mtp.enabled {
             let Some(draft_model_path) = &config.runtime.mtp.draft_model else {
                 bail!("runtime.mtp enabled requires draft_model");
@@ -131,6 +146,7 @@ impl LlamaCppModel {
 
         Ok(Self {
             key: LlamaCppModelKey::from_config(config),
+            vision,
             main,
             draft,
             vocab,
@@ -169,6 +185,24 @@ impl LlamaCppModel {
 
     pub(super) fn vocab(&self) -> *const c_void {
         self.vocab
+    }
+
+    pub(super) fn vision_marker(&self) -> Option<&str> {
+        self.vision.as_ref().map(VisionHandle::marker)
+    }
+
+    pub(super) fn eval_vision(
+        &self,
+        llama_context: *mut c_void,
+        prompt: &str,
+        images: &[&[u8]],
+        batch_size: usize,
+    ) -> Result<(ffi::llama_pos, usize)> {
+        let vision = self
+            .vision
+            .as_ref()
+            .context("llama.cpp model has no multimodal projector")?;
+        vision.eval(llama_context, prompt, images, batch_size)
     }
 }
 
@@ -260,6 +294,127 @@ impl Drop for ModelHandle {
     }
 }
 
+struct VisionHandle {
+    raw: *mut c_void,
+    marker: String,
+}
+
+impl VisionHandle {
+    fn load(
+        projector: &std::path::Path,
+        model: *mut c_void,
+        config: &LocalInferenceConfig,
+    ) -> Result<Self> {
+        let projector = path_cstring(projector)?;
+        let threads = i32::try_from(config.runtime.threads)
+            .context("llama.cpp multimodal threads exceeds i32")?;
+        let mut error = vec![0_i8; 4096];
+        let raw = unsafe {
+            ffi::agl_mtmd_init(
+                projector.as_ptr(),
+                model.cast_const(),
+                config.runtime.gpu_layers > 0,
+                threads,
+                map_flash_attention(config.runtime.flash_attention),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        ensure!(
+            !raw.is_null(),
+            "llama.cpp mtmd initialization failed: {}",
+            c_error_message(&error)
+        );
+        let marker_ptr = unsafe { ffi::agl_mtmd_marker(raw.cast_const()) };
+        ensure!(!marker_ptr.is_null(), "llama.cpp mtmd marker is missing");
+        let marker = unsafe { CStr::from_ptr(marker_ptr) }
+            .to_str()
+            .context("llama.cpp mtmd marker is not UTF-8")?
+            .to_string();
+        ensure!(!marker.is_empty(), "llama.cpp mtmd marker is empty");
+        Ok(Self { raw, marker })
+    }
+
+    fn marker(&self) -> &str {
+        &self.marker
+    }
+
+    fn eval(
+        &self,
+        llama_context: *mut c_void,
+        prompt: &str,
+        images: &[&[u8]],
+        batch_size: usize,
+    ) -> Result<(ffi::llama_pos, usize)> {
+        ensure!(!llama_context.is_null(), "llama.cpp context is null");
+        ensure!(!images.is_empty(), "llama.cpp mtmd image set is empty");
+        ensure!(
+            images.iter().all(|image| !image.is_empty()),
+            "llama.cpp mtmd image buffer is empty"
+        );
+        let prompt = CString::new(prompt).context("llama.cpp mtmd prompt contains NUL")?;
+        let image_data = images
+            .iter()
+            .map(|image| image.as_ptr())
+            .collect::<Vec<_>>();
+        let image_lengths = images.iter().map(|image| image.len()).collect::<Vec<_>>();
+        let batch_size =
+            i32::try_from(batch_size).context("llama.cpp mtmd batch size exceeds i32")?;
+        let mut positions = 0;
+        let mut tokens = 0;
+        let mut error = vec![0_i8; 4096];
+        let status = unsafe {
+            ffi::agl_mtmd_eval_images(
+                self.raw,
+                llama_context,
+                prompt.as_ptr(),
+                image_data.as_ptr(),
+                image_lengths.as_ptr(),
+                image_data.len(),
+                batch_size,
+                &mut positions,
+                &mut tokens,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        ensure!(
+            status == 0,
+            "llama.cpp mtmd evaluation failed ({status}): {}",
+            c_error_message(&error)
+        );
+        ensure!(
+            positions > 0,
+            "llama.cpp mtmd produced no context positions"
+        );
+        ensure!(tokens > 0, "llama.cpp mtmd produced no input tokens");
+        Ok((positions, tokens))
+    }
+}
+
+impl Drop for VisionHandle {
+    fn drop(&mut self) {
+        unsafe { ffi::agl_mtmd_free(self.raw) };
+    }
+}
+
+fn map_flash_attention(value: Option<RuntimeSwitch>) -> i32 {
+    match value {
+        Some(RuntimeSwitch::On) => ffi::LLAMA_FLASH_ATTN_TYPE_ENABLED,
+        Some(RuntimeSwitch::Off) => ffi::LLAMA_FLASH_ATTN_TYPE_DISABLED,
+        Some(RuntimeSwitch::Auto) | None => ffi::LLAMA_FLASH_ATTN_TYPE_AUTO,
+    }
+}
+
+fn c_error_message(error: &[c_char]) -> String {
+    let bytes = error
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 #[cfg(unix)]
 fn path_cstring(path: &std::path::Path) -> Result<CString> {
     use std::os::unix::ffi::OsStrExt;
@@ -281,6 +436,7 @@ mod tests {
             backend: InferenceBackendConfig {
                 kind: BackendKind::LlamaCpp,
                 model: PathBuf::from("/models/main.gguf"),
+                multimodal_projector: None,
             },
             runtime: InferenceRuntimeConfig {
                 gpu_layers: 24,
@@ -335,6 +491,18 @@ mod tests {
         assert_ne!(
             LlamaCppModelKey::from_config(&original),
             LlamaCppModelKey::from_config(&draft_changed)
+        );
+    }
+
+    #[test]
+    fn model_key_includes_multimodal_projector() {
+        let original = config();
+        let mut changed = original.clone();
+        changed.backend.multimodal_projector = Some(PathBuf::from("/models/mmproj.gguf"));
+
+        assert_ne!(
+            LlamaCppModelKey::from_config(&original),
+            LlamaCppModelKey::from_config(&changed)
         );
     }
 }

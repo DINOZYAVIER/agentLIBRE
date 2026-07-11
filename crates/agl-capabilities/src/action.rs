@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+use agl_content::Content;
 use agl_ids::{ExecutionScope, RequestId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -56,11 +57,21 @@ impl ActionInvocation {
 #[serde(deny_unknown_fields)]
 pub struct ActionResult {
     pub data: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Content>,
 }
 
 impl ActionResult {
     pub fn new(data: Value) -> Self {
-        Self { data }
+        Self {
+            data,
+            content: None,
+        }
+    }
+
+    pub fn with_content(mut self, content: Content) -> Self {
+        self.content = Some(content);
+        self
     }
 
     pub fn render_observation(&self) -> String {

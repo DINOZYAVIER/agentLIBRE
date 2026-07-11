@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 anyhow.workspace = true

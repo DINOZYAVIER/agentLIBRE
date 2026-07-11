@@ -11,7 +11,7 @@ pub use action::{
 };
 pub use declaration::{
     ActionDeclaration, ActionDelivery, ActionVisibility, DeclarationError, HookDeclaration,
-    OperationKind, ProviderDeclaration, ProviderSource, ProviderTrust, StateEffect,
+    OperationKind, ProviderDeclaration, ProviderSource, ProviderTrust, SensitiveInput, StateEffect,
 };
 pub use digest::{DeclarationDigest, DigestParseError, PolicyHash};
 pub use hook::{

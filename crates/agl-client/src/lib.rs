@@ -737,7 +737,7 @@ mod tests {
     fn run_request() -> RunSubmitRequest {
         RunSubmitRequest {
             session_id: session_id(),
-            text: "test".to_string(),
+            content: agl_content::Content::text("test").unwrap(),
             idempotency_key: Some("key".to_string()),
             budget: RunBudgetRequest::default(),
         }

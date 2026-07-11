@@ -1,15 +1,21 @@
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use agl_config::LocalInferenceConfig;
+use agl_content::{ArtifactRef, ContentPart};
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::InferenceRequest;
 use crate::evidence::InferenceArtifactRoot;
+
+const MAX_RESOLVED_IMAGES: usize = 8;
+const MAX_RESOLVED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_RESOLVED_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 
 pub const DEFAULT_MAX_LOADED_MODELS: usize = 1;
 pub const DEFAULT_MAX_CONTEXTS_PER_MODEL: usize = 2;
@@ -97,6 +103,7 @@ impl ModelKey {
         let identity = ModelLoadIdentity {
             backend: config.backend.kind.as_str(),
             model: &config.backend.model,
+            multimodal_projector: config.backend.multimodal_projector.as_deref(),
             gpu_layers: config.runtime.gpu_layers,
             device: config.runtime.device.as_deref(),
             mmap: config.runtime.mmap,
@@ -219,6 +226,8 @@ pub struct InferenceJob {
     model_key: ModelKey,
     context_key: ContextKey,
     artifact_root: InferenceArtifactRoot,
+    content_store_root: PathBuf,
+    resolved_content: Option<ResolvedModelContent>,
     max_output_tokens: u32,
     deadline: Option<Instant>,
     cancellation: InferenceCancellation,
@@ -230,6 +239,7 @@ impl InferenceJob {
         request: InferenceRequest,
         context_key: ContextKey,
         artifact_root: InferenceArtifactRoot,
+        content_store_root: PathBuf,
         max_output_tokens: u32,
     ) -> Result<Self, ModelManagerError> {
         let model_key = ModelKey::from_config(&config)?;
@@ -249,12 +259,20 @@ impl InferenceJob {
                 message: "inference scope does not match the rendered request".to_string(),
             });
         }
+        if content_store_root.as_os_str().is_empty() {
+            return Err(ModelManagerError::ProfileInvalid {
+                message: "content store root cannot be empty".to_string(),
+            });
+        }
+        validate_content_profile(&config, &request)?;
         Ok(Self {
             config,
             request,
             model_key,
             context_key,
             artifact_root,
+            content_store_root,
+            resolved_content: None,
             max_output_tokens,
             deadline: None,
             cancellation: InferenceCancellation::new(),
@@ -291,6 +309,10 @@ impl InferenceJob {
         &self.artifact_root
     }
 
+    pub fn resolved_content(&self) -> Option<&ResolvedModelContent> {
+        self.resolved_content.as_ref()
+    }
+
     pub fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
     }
@@ -320,6 +342,158 @@ impl InferenceJob {
 
     pub fn should_abort(&self) -> bool {
         self.cancellation.is_cancelled() || self.deadline_exceeded()
+    }
+
+    pub(super) fn resolve_content(&mut self) -> Result<(usize, u64), ModelManagerError> {
+        let mut store = None;
+        let mut image_count = 0_usize;
+        let mut total_bytes = 0_u64;
+        let mut messages = Vec::with_capacity(self.request.rendered.messages.len());
+        for message in &self.request.rendered.messages {
+            let mut parts = Vec::new();
+            if let Some(content) = &message.content {
+                for part in &content.parts {
+                    match part {
+                        ContentPart::Text { text } => {
+                            parts.push(ResolvedContentPart::Text { text: text.clone() });
+                        }
+                        ContentPart::Artifact { artifact } => {
+                            image_count = image_count.saturating_add(1);
+                            if image_count > MAX_RESOLVED_IMAGES
+                                || artifact.byte_length > MAX_RESOLVED_IMAGE_BYTES
+                                || total_bytes.saturating_add(artifact.byte_length)
+                                    > MAX_RESOLVED_MEDIA_BYTES
+                            {
+                                return Err(ModelManagerError::UnsupportedContent {
+                                    message: "media request exceeds manager resolution limits"
+                                        .to_string(),
+                                });
+                            }
+                            if store.is_none() {
+                                store = Some(
+                                    agl_store::AglStore::open_current_at(&self.content_store_root)
+                                        .map_err(|error| {
+                                            ModelManagerError::ArtifactUnavailable {
+                                                artifact_id: artifact.artifact_id.to_string(),
+                                                message: error.to_string(),
+                                            }
+                                        })?,
+                                );
+                            }
+                            let resolved = store
+                                .as_ref()
+                                .expect("artifact store was initialized above")
+                                .resolve_artifact(&self.request.run_id, artifact)
+                                .map_err(|error| map_artifact_error(artifact, error))?;
+                            total_bytes = total_bytes.saturating_add(artifact.byte_length);
+                            parts.push(ResolvedContentPart::Image {
+                                artifact: artifact.clone(),
+                                bytes: resolved.bytes,
+                            });
+                        }
+                    }
+                }
+            }
+            messages.push(ResolvedMessageContent { parts });
+        }
+        self.resolved_content = Some(ResolvedModelContent { messages });
+        Ok((image_count, total_bytes))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedModelContent {
+    messages: Vec<ResolvedMessageContent>,
+}
+
+impl ResolvedModelContent {
+    pub fn messages(&self) -> &[ResolvedMessageContent] {
+        &self.messages
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedMessageContent {
+    parts: Vec<ResolvedContentPart>,
+}
+
+impl ResolvedMessageContent {
+    pub fn parts(&self) -> &[ResolvedContentPart] {
+        &self.parts
+    }
+}
+
+#[derive(Clone)]
+pub enum ResolvedContentPart {
+    Text {
+        text: String,
+    },
+    Image {
+        artifact: ArtifactRef,
+        bytes: Vec<u8>,
+    },
+}
+
+impl ResolvedContentPart {
+    pub fn image(&self) -> Option<(&ArtifactRef, &[u8])> {
+        match self {
+            Self::Image { artifact, bytes } => Some((artifact, bytes)),
+            Self::Text { .. } => None,
+        }
+    }
+}
+
+impl fmt::Debug for ResolvedContentPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { text } => formatter.debug_struct("Text").field("text", text).finish(),
+            Self::Image { artifact, bytes } => formatter
+                .debug_struct("Image")
+                .field("artifact", artifact)
+                .field("byte_length", &bytes.len())
+                .finish(),
+        }
+    }
+}
+
+fn validate_content_profile(
+    config: &LocalInferenceConfig,
+    request: &InferenceRequest,
+) -> Result<(), ModelManagerError> {
+    let has_media = request
+        .rendered
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_ref())
+        .any(|content| content.has_artifacts());
+    if !has_media {
+        return Ok(());
+    }
+    if config.runtime.mtp.enabled {
+        return Err(ModelManagerError::UnsupportedContent {
+            message: "media requests cannot use speculative MTP".to_string(),
+        });
+    }
+    if config.backend.multimodal_projector.is_none() {
+        return Err(ModelManagerError::UnsupportedContent {
+            message: "text-only inference profile cannot consume artifact content".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn map_artifact_error(artifact: &ArtifactRef, error: agl_store::StoreError) -> ModelManagerError {
+    match error {
+        agl_store::StoreError::ArtifactIntegrityFailed { reason, .. } => {
+            ModelManagerError::ArtifactIntegrityFailed {
+                artifact_id: artifact.artifact_id.to_string(),
+                message: reason,
+            }
+        }
+        other => ModelManagerError::ArtifactUnavailable {
+            artifact_id: artifact.artifact_id.to_string(),
+            message: other.to_string(),
+        },
     }
 }
 
@@ -363,6 +537,20 @@ pub enum ModelManagerError {
     GenerationFailed {
         message: String,
     },
+    UnsupportedContent {
+        message: String,
+    },
+    ArtifactUnavailable {
+        artifact_id: String,
+        message: String,
+    },
+    ArtifactIntegrityFailed {
+        artifact_id: String,
+        message: String,
+    },
+    MultimodalEncodeFailed {
+        message: String,
+    },
     ManagerUnavailable,
 }
 
@@ -381,6 +569,10 @@ impl ModelManagerError {
             Self::LoadFailed { .. } => "manager.load_failed",
             Self::ContextFailed { .. } => "manager.context_failed",
             Self::GenerationFailed { .. } => "manager.generation_failed",
+            Self::UnsupportedContent { .. } => "unsupported_content",
+            Self::ArtifactUnavailable { .. } => "artifact_unavailable",
+            Self::ArtifactIntegrityFailed { .. } => "artifact_integrity_failed",
+            Self::MultimodalEncodeFailed { .. } => "multimodal_encode_failed",
             Self::ManagerUnavailable => "manager.unavailable",
         }
     }
@@ -412,6 +604,26 @@ impl fmt::Display for ModelManagerError {
             Self::GenerationFailed { message } => {
                 write!(formatter, "inference generation failed: {message}")
             }
+            Self::UnsupportedContent { message } => {
+                write!(formatter, "unsupported inference content: {message}")
+            }
+            Self::ArtifactUnavailable {
+                artifact_id,
+                message,
+            } => write!(
+                formatter,
+                "artifact {artifact_id} is unavailable: {message}"
+            ),
+            Self::ArtifactIntegrityFailed {
+                artifact_id,
+                message,
+            } => write!(
+                formatter,
+                "artifact {artifact_id} failed integrity validation: {message}"
+            ),
+            Self::MultimodalEncodeFailed { message } => {
+                write!(formatter, "multimodal encoding failed: {message}")
+            }
             Self::ManagerUnavailable => formatter.write_str("model manager is unavailable"),
         }
     }
@@ -427,6 +639,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 struct ModelLoadIdentity<'a> {
     backend: &'a str,
     model: &'a std::path::Path,
+    multimodal_projector: Option<&'a std::path::Path>,
     gpu_layers: u32,
     device: Option<&'a str>,
     mmap: Option<bool>,

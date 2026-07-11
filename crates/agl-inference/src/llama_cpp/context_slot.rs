@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use agl_actions::{ModelAction, ToolCall, ToolJsonRepair, parse_model_action};
 use agl_config::{InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig, RuntimeSwitch};
+use agl_content::Content;
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -265,6 +266,32 @@ impl LlamaCppContextSlot {
         result
     }
 
+    pub(crate) fn generate_vision(
+        &mut self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+        images: &[&[u8]],
+        max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
+        log: &mut String,
+    ) -> Result<LlamaCppGenerationOutput> {
+        control.ensure_running()?;
+        ensure!(
+            self.mtp.is_none(),
+            "llama.cpp vision cannot use speculative MTP"
+        );
+        let abort_guard = control.install_abort_callback(self.context.as_ptr(), None);
+        let result =
+            self.generate_vision_inner(model, rendered, images, max_output_tokens, control, log);
+        drop(abort_guard);
+
+        self.cache.cache_matches_transcript = false;
+        if control.should_abort() {
+            return Err(LlamaCppGenerationCancelled.into());
+        }
+        result
+    }
+
     fn generate_inner(
         &mut self,
         model: &LlamaCppModel,
@@ -311,6 +338,76 @@ impl LlamaCppContextSlot {
         .context("failed to decode prompt")?;
         self.cache.token_history.extend_from_slice(&prompt_tokens);
 
+        self.generate_after_prefill(
+            model,
+            rendered,
+            prompt_messages,
+            prompt_history,
+            input_tokens,
+            max_output_tokens,
+            control,
+        )
+    }
+
+    fn generate_vision_inner(
+        &mut self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+        images: &[&[u8]],
+        max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
+        log: &mut String,
+    ) -> Result<LlamaCppGenerationOutput> {
+        ensure!(
+            self.cache.rendered_message_history_len == 0 && self.cache.token_history.is_empty(),
+            "llama.cpp vision requires a fresh context"
+        );
+        let prepared = self.prepare_prompt_append(model, rendered, log)?;
+        let PreparedPrompt {
+            messages: prompt_messages,
+            history: prompt_history,
+            ..
+        } = prepared;
+        let (positions, input_tokens) = model
+            .eval_vision(
+                self.context.as_ptr(),
+                &prompt_history.formatted_prompt,
+                images,
+                self.prefill_batch_size,
+            )
+            .context("failed to encode multimodal prompt")?;
+        log.push_str("multimodal_images = ");
+        log.push_str(&images.len().to_string());
+        log.push('\n');
+        log.push_str("multimodal_prompt_positions = ");
+        log.push_str(&positions.to_string());
+        log.push('\n');
+        log.push_str("multimodal_input_tokens = ");
+        log.push_str(&input_tokens.to_string());
+        log.push('\n');
+
+        self.generate_after_prefill(
+            model,
+            rendered,
+            prompt_messages,
+            prompt_history,
+            u64::try_from(input_tokens).unwrap_or(u64::MAX),
+            max_output_tokens,
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_after_prefill(
+        &mut self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+        prompt_messages: Vec<RenderedMessage>,
+        prompt_history: PreparedPromptHistory,
+        input_tokens: u64,
+        max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
+    ) -> Result<LlamaCppGenerationOutput> {
         let mut content = String::new();
         let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
@@ -643,7 +740,9 @@ impl LlamaCppContextSlot {
         } = prompt_history;
         messages.push(RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: format!("{assistant_context_prefix}{content}"),
+            content: Some(Content::text(format!(
+                "{assistant_context_prefix}{content}"
+            ))?),
             name: None,
             tool_calls: Vec::new(),
         });
@@ -1247,7 +1346,12 @@ impl PreparedChatMessages {
 }
 
 pub(crate) fn rendered_message_content(message: &RenderedMessage) -> Result<String> {
-    let mut content = message.content.clone();
+    let mut content = match &message.content {
+        Some(content) => content.text_only().context(
+            "unsupported_content: llama.cpp text rendering cannot consume artifact references",
+        )?,
+        None => String::new(),
+    };
     for tool_call in &message.tool_calls {
         if !content.is_empty() {
             content.push('\n');
@@ -1526,6 +1630,10 @@ mod tests {
 
     use super::*;
 
+    fn text(value: impl Into<String>) -> Option<Content> {
+        Some(Content::text(value).unwrap())
+    }
+
     #[test]
     fn context_caches_keep_conversation_state_isolated() {
         let mut first = ContextCache {
@@ -1539,7 +1647,7 @@ mod tests {
 
         first.messages.push(RenderedMessage {
             role: RenderedMessageRole::User,
-            content: "first conversation".to_string(),
+            content: text("first conversation"),
             name: None,
             tool_calls: Vec::new(),
         });
@@ -1558,7 +1666,7 @@ mod tests {
     fn rendered_message_content_includes_tool_calls() {
         let message = RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: "result".to_string(),
+            content: text("result"),
             name: None,
             tool_calls: vec![RenderedToolCall {
                 name: "read_file".to_string(),
@@ -1577,35 +1685,49 @@ mod tests {
     fn rendered_history_matches_only_isolated_semantic_tool_calls() {
         let recorded = RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: format!(
+            content: text(format!(
                 "{DISABLED_THINKING_PREFILL}{}",
                 r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
-            ),
+            )),
             name: None,
             tool_calls: Vec::new(),
         };
         let canonical = RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"fs.read"}</tool_call>"#.to_string(),
+            content: text(
+                r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"fs.read"}</tool_call>"#,
+            ),
             name: Some("fs.read".to_string()),
             tool_calls: Vec::new(),
         };
         let mut changed = canonical.clone();
-        changed.content = r#"<tool_call>{"arguments":{"limit_lines":20,"path":"other.txt"},"name":"fs.read"}</tool_call>"#.to_string();
+        changed.content = text(
+            r#"<tool_call>{"arguments":{"limit_lines":20,"path":"other.txt"},"name":"fs.read"}</tool_call>"#,
+        );
         let mut with_prose = canonical.clone();
-        with_prose.content = format!("calling now\n{}", with_prose.content);
+        with_prose.content = text(format!(
+            "calling now\n{}",
+            rendered_message_content(&canonical).unwrap()
+        ));
         let mut user_call = canonical.clone();
         user_call.role = RenderedMessageRole::User;
         let mut user_call_reordered = user_call.clone();
-        user_call_reordered.content = r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#.to_string();
+        user_call_reordered.content = text(
+            r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
+        );
         let repaired = RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: r#"<tool_call>"{\"name\":\"fs.read\",\"arguments\":{\"path\":\"facts.txt\",\"limit_lines\":20}}"</tool_call>"#.to_string(),
+            content: text(
+                r#"<tool_call>"{\"name\":\"fs.read\",\"arguments\":{\"path\":\"facts.txt\",\"limit_lines\":20}}"</tool_call>"#,
+            ),
             name: None,
             tool_calls: Vec::new(),
         };
         let mut same_prefill = canonical.clone();
-        same_prefill.content = format!("{DISABLED_THINKING_PREFILL}{}", canonical.content);
+        same_prefill.content = text(format!(
+            "{DISABLED_THINKING_PREFILL}{}",
+            rendered_message_content(&canonical).unwrap()
+        ));
 
         assert!(rendered_history_is_prefix(
             std::slice::from_ref(&recorded),
@@ -1729,13 +1851,13 @@ mod tests {
             messages: vec![
                 RenderedMessage {
                     role: RenderedMessageRole::System,
-                    content: "demo system".to_string(),
+                    content: text("demo system"),
                     name: None,
                     tool_calls: Vec::new(),
                 },
                 RenderedMessage {
                     role: RenderedMessageRole::User,
-                    content: "hello".to_string(),
+                    content: text("hello"),
                     name: None,
                     tool_calls: Vec::new(),
                 },
