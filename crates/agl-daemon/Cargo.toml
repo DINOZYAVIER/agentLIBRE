@@ -11,6 +11,7 @@ agl-chat.workspace = true
 agl-cron.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
+agl-inference.workspace = true
 agl-protocol.workspace = true
 agl-runtime.workspace = true
 agl-session.workspace = true
@@ -23,3 +24,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 agl-client.workspace = true
+agl-config.workspace = true

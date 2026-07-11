@@ -20,6 +20,7 @@ agl-cron.workspace = true
 agl-daemon.workspace = true
 agl-functions.workspace = true
 agl-ids.workspace = true
+agl-inference.workspace = true
 agl-protocol.workspace = true
 agl-memory.workspace = true
 agl-notes.workspace = true

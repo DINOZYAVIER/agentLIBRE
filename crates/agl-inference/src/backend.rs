@@ -1,13 +1,6 @@
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_oven::RenderedModelRequest;
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-
-pub trait InferenceBackend {
-    fn backend_name(&self) -> &'static str;
-
-    fn generate(&mut self, request: InferenceRequest) -> Result<InferenceResponse>;
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

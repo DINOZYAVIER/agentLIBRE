@@ -9,7 +9,8 @@ use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    ChatLoopHost, ChatOptions, InferenceSession, ToolAccessMode, assistant_text_for_terminal,
+    ChatLoopHost, ChatOptions, InferenceClientHandle, InferenceSession, ToolAccessMode,
+    assistant_text_for_terminal,
 };
 
 const MAX_TOOL_CALLS_PER_TURN: usize = 8;
@@ -63,11 +64,16 @@ pub struct ChatService {
     chat_history: Option<ChatSessionStore>,
     loop_host: ChatLoopHost,
     messages: Vec<TurnMessage>,
+    context_released: bool,
     session_finished: bool,
 }
 
 impl ChatService {
-    pub fn open(options: ChatOptions, runtime: &AgentLibreRuntimeConfig) -> Result<Self> {
+    pub fn open(
+        options: ChatOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+    ) -> Result<Self> {
         if options.new_session && options.session_id.is_some() {
             bail!("new session cannot be requested with a specific session id");
         }
@@ -92,7 +98,13 @@ impl ChatService {
         } else {
             explicit_artifact_root
         };
-        let session = InferenceSession::new(options.inference, runtime, artifact_root_override)?;
+        let session = InferenceSession::new(
+            options.inference,
+            runtime,
+            artifact_root_override,
+            session_id.clone(),
+            inference_client,
+        )?;
         let (chat_history, replay) = if history_enabled {
             if resumed_session {
                 let history =
@@ -127,6 +139,7 @@ impl ChatService {
             chat_history,
             loop_host,
             messages,
+            context_released: false,
             session_finished: false,
         })
     }
@@ -156,18 +169,27 @@ impl ChatService {
     }
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
+        if self.context_released {
+            bail!("cannot change workspace root after the chat session context was released");
+        }
         self.loop_host.set_workspace_root(workspace_root)
     }
 
     pub fn reload_runtime_context(&mut self) -> Result<usize> {
+        if self.context_released {
+            bail!("cannot reload a released chat session context");
+        }
         self.loop_host.reload_runtime_context()?;
         Ok(self.loop_host.session().turn_visible_tools().len())
     }
 
     pub fn clear_context(&mut self) -> Result<usize> {
+        if self.context_released {
+            bail!("cannot clear a released chat session context");
+        }
         let cleared_messages = self.messages.len();
-        self.messages.clear();
         self.loop_host.clear_context()?;
+        self.messages.clear();
         if let Some(history) = &mut self.chat_history {
             history.append_context_cleared()?;
         }
@@ -175,20 +197,35 @@ impl ChatService {
     }
 
     pub fn request_exit(&mut self) -> Result<()> {
+        if self.session_finished {
+            return Ok(());
+        }
+        self.release_inference_context()?;
         if let Some(history) = &mut self.chat_history {
             history.request_exit()?;
-            self.session_finished = true;
         }
+        self.session_finished = true;
         Ok(())
     }
 
     pub fn finish_eof_if_needed(&mut self) -> Result<()> {
-        if !self.session_finished
-            && let Some(history) = &mut self.chat_history
-        {
-            history.finish_eof()?;
-            self.session_finished = true;
+        if self.session_finished {
+            return Ok(());
         }
+        self.release_inference_context()?;
+        if let Some(history) = &mut self.chat_history {
+            history.finish_eof()?;
+        }
+        self.session_finished = true;
+        Ok(())
+    }
+
+    fn release_inference_context(&mut self) -> Result<()> {
+        if self.context_released {
+            return Ok(());
+        }
+        self.loop_host.release_context()?;
+        self.context_released = true;
         Ok(())
     }
 
@@ -203,6 +240,9 @@ impl ChatService {
         request_id: Option<RequestId>,
         input: &str,
     ) -> Result<ChatTurnOutput> {
+        if self.context_released {
+            bail!("cannot run a turn after the chat session context was released");
+        }
         self.loop_host
             .begin_turn(&self.session_id, &run_id, &turn_id, request_id)?;
         let user_message_id = MessageId::generate();
@@ -380,13 +420,15 @@ impl ChatService {
                 "failed to record chat session failure"
             );
         }
-        self.session_finished = true;
         self.loop_host
             .append_failed_terminal_event()
             .with_context(|| {
                 format!("failed to append terminal event after turn failure: {message}")
             })?;
         let runtime_events = self.loop_host.take_runtime_events()?;
+        self.release_inference_context()
+            .context("failed to release inference context after turn failure")?;
+        self.session_finished = true;
         Ok(ChatTurnOutput {
             run_id,
             turn_id,
@@ -395,6 +437,24 @@ impl ChatService {
             status: ChatTurnStatus::Failed { message },
             generated_requests,
         })
+    }
+}
+
+impl Drop for ChatService {
+    fn drop(&mut self) {
+        if self.context_released {
+            return;
+        }
+        if let Err(error) = self.loop_host.release_context_for_teardown() {
+            tracing::warn!(
+                target: "agentlibre::app",
+                session_id = %self.session_id,
+                error = %error,
+                "failed to release inference context while dropping chat session"
+            );
+        } else {
+            self.context_released = true;
+        }
     }
 }
 
@@ -667,12 +727,17 @@ fn log_action_result_metadata(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use agl_capabilities::{CapabilityId, DispatchDenialCode};
+    use agl_config::LocalInferenceConfig;
     use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus};
     use agl_ids::{EventId, MessageId, RequestId, RunId, SessionId, TurnId};
+    use agl_inference::{InferenceResponse, ModelManagerStatus};
     use agl_loop::AgentLoopHost;
     use agl_turn::{TurnPhase, TurnTerminalStatus, TurnTransition, TurnTransitionRecord};
+
+    use crate::{ChatInferenceJob, InferenceClient};
 
     use super::*;
 
@@ -747,6 +812,18 @@ mod tests {
     }
 
     fn test_chat_service_with_history(label: &str, history_enabled: bool) -> TestChatService {
+        test_chat_service_with_client(
+            label,
+            history_enabled,
+            crate::inference_client::test_inference_client(),
+        )
+    }
+
+    fn test_chat_service_with_client(
+        label: &str,
+        history_enabled: bool,
+        inference_client: InferenceClientHandle,
+    ) -> TestChatService {
         let counter = TEST_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "agl-chat-service-{label}-{}-{counter}",
@@ -797,8 +874,86 @@ tool_call_format = "hermes_json"
             no_history: !history_enabled,
             new_session: true,
         };
-        let service = ChatService::open(options, &runtime).unwrap();
+        let service = ChatService::open(options, &runtime, inference_client).unwrap();
         TestChatService { service, root }
+    }
+
+    #[derive(Default)]
+    struct ContextLifecycleCalls {
+        cleared: Vec<SessionId>,
+        released: Vec<SessionId>,
+    }
+
+    struct ContextLifecycleClient {
+        calls: Arc<Mutex<ContextLifecycleCalls>>,
+    }
+
+    impl InferenceClient for ContextLifecycleClient {
+        fn generate(&self, _job: ChatInferenceJob) -> Result<InferenceResponse> {
+            bail!("context lifecycle test does not generate")
+        }
+
+        fn clear_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            session_id: &SessionId,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().cleared.push(session_id.clone());
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            session_id: &SessionId,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().released.push(session_id.clone());
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+    }
+
+    #[test]
+    fn clear_and_finish_target_the_session_managed_context_once() {
+        let calls = Arc::new(Mutex::new(ContextLifecycleCalls::default()));
+        let client = InferenceClientHandle::new(ContextLifecycleClient {
+            calls: Arc::clone(&calls),
+        });
+        let mut chat = test_chat_service_with_client("context-lifecycle", false, client);
+        let session_id = chat.service.session_id().clone();
+        chat.service.messages.push(TurnMessage::User {
+            content: "discard me".to_string(),
+        });
+
+        assert_eq!(chat.service.clear_context().unwrap(), 1);
+        assert!(chat.service.messages.is_empty());
+        chat.service.request_exit().unwrap();
+        chat.service.request_exit().unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.cleared, vec![session_id.clone()]);
+        assert_eq!(calls.released, vec![session_id]);
+    }
+
+    #[test]
+    fn dropping_an_active_turn_releases_its_managed_context() {
+        let calls = Arc::new(Mutex::new(ContextLifecycleCalls::default()));
+        let client = InferenceClientHandle::new(ContextLifecycleClient {
+            calls: Arc::clone(&calls),
+        });
+        let mut chat = test_chat_service_with_client("active-drop", false, client);
+        let session_id = chat.service.session_id().clone();
+        chat.service
+            .loop_host
+            .begin_turn(&session_id, &run_id(), &turn_id(), Some(request_id()))
+            .unwrap();
+
+        drop(chat);
+
+        assert_eq!(calls.lock().unwrap().released, vec![session_id]);
     }
 
     #[test]

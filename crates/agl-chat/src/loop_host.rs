@@ -66,8 +66,19 @@ impl ChatLoopHost {
             self.active_effective_capabilities.is_none(),
             "cannot clear context during an active turn"
         );
-        self.session.clear_context();
-        Ok(())
+        self.session.clear_context()
+    }
+
+    pub fn release_context(&self) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot release context during an active turn"
+        );
+        self.session.release_context()
+    }
+
+    pub(crate) fn release_context_for_teardown(&self) -> Result<()> {
+        self.session.release_context()
     }
 
     pub fn begin_turn(

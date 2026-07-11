@@ -1,4 +1,7 @@
-use agl_chat::{ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, ToolAccessMode};
+use agl_chat::{
+    ChatOptions, ChatService, ChatTurnStatus, InferenceClientHandle, InferenceOptions,
+    ToolAccessMode,
+};
 use agl_cron::{CronJob, CronRepository, CronRun, CronRunAdmission, CronRunStatus};
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::AglStore;
@@ -89,6 +92,7 @@ pub fn run_cron_skill_chat_turn(
     job: &CronJob,
     runtime: &AgentLibreRuntimeConfig,
     mut inference: InferenceOptions,
+    inference_client: InferenceClientHandle,
     context_label: Option<&str>,
 ) -> Result<String> {
     let prompt = render_cron_skill_prompt(job)?;
@@ -103,15 +107,18 @@ pub fn run_cron_skill_chat_turn(
             new_session: true,
         },
         runtime,
+        inference_client,
     )
     .with_context(|| cron_skill_context("open", context_label, "chat session"))?;
     let summary = service.summary();
     let output = service
         .run_user_turn(&prompt)
-        .with_context(|| cron_skill_context("run", context_label, "turn"))?;
-    service
+        .with_context(|| cron_skill_context("run", context_label, "turn"));
+    let finish = service
         .finish_eof_if_needed()
-        .with_context(|| cron_skill_context("finish", context_label, "session"))?;
+        .with_context(|| cron_skill_context("finish", context_label, "session"));
+    let output = output?;
+    finish?;
     match output.status {
         ChatTurnStatus::Answered { .. } => Ok(format!(
             "skill:{}:session:{}:run:{}",
