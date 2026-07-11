@@ -146,6 +146,11 @@ unsafe extern "C" {
         model: *mut c_void,
         params: llama_context_params,
     ) -> *mut c_void;
+    pub(crate) fn llama_set_abort_callback(
+        ctx: *mut c_void,
+        abort_callback: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+        abort_callback_data: *mut c_void,
+    );
     pub(crate) fn llama_free(ctx: *mut c_void);
     pub(crate) fn llama_model_get_vocab(model: *const c_void) -> *const c_void;
     pub(crate) fn llama_model_desc(model: *const c_void, buf: *mut c_char, buf_size: usize) -> i32;

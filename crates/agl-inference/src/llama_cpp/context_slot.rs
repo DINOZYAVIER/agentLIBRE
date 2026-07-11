@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::PathBuf;
+use std::marker::PhantomData;
 use std::ptr;
+use std::rc::Rc;
 
 use agl_actions::{ModelAction, ToolCall, ToolJsonRepair, parse_model_action};
 use agl_config::{InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig, RuntimeSwitch};
@@ -10,6 +11,10 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::InferenceFinishReason;
 
 use super::ffi;
+use super::generation::{
+    LlamaCppGenerationCancelled, LlamaCppGenerationControl, LlamaCppGenerationOutput,
+};
+use super::model::LlamaCppModel;
 
 const DISABLED_THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
 const QWEN_ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
@@ -18,124 +23,84 @@ const GEMMA_MODEL_HEADER: &str = "<|turn>model\n";
 const GEMMA_THOUGHT_PREFIX: &str = "<|turn>model\n<|channel>thought\n<channel|>";
 const AGL_LLAMA_MTP_OK: i32 = 0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LlamaCppModelState {
-    Loaded,
-    Reused,
-}
-
-impl LlamaCppModelState {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Loaded => "loaded",
-            Self::Reused => "reused",
-        }
-    }
-}
-
-pub(super) struct LlamaCppSession {
-    key: LlamaCppSessionKey,
+/// Mutable, per-conversation llama.cpp state owned by the native worker.
+pub struct LlamaCppContextSlot {
+    runtime: InferenceRuntimeConfig,
+    // Declaration order keeps sampler/speculative/draft context ahead of the
+    // target context in Rust's field drop order.
     sampler: Sampler,
     mtp: Option<MtpState>,
     context: ContextHandle,
-    model: Model,
-    vocab: *const c_void,
+    cache: ContextCache,
+    prefill_batch_size: usize,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+#[derive(Default)]
+struct ContextCache {
     rendered_message_history_len: usize,
     messages: Vec<RenderedMessage>,
     token_history: Vec<ffi::llama_token>,
     formatted_history: String,
     normalized_history: String,
     cache_matches_transcript: bool,
-    load_native_log: String,
-    prefill_batch_size: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LlamaCppSessionKey {
-    model: PathBuf,
-    runtime: InferenceRuntimeConfig,
-}
+impl LlamaCppContextSlot {
+    pub(crate) fn new(
+        model: &LlamaCppModel,
+        config: &LocalInferenceConfig,
+        log: &mut String,
+    ) -> Result<Self> {
+        Self::from_runtime(model, &config.runtime, log)
+    }
 
-pub(super) struct LlamaCppSessionOutput {
-    pub(super) content: String,
-    pub(super) finish_reason: InferenceFinishReason,
-}
-
-impl LlamaCppSession {
-    pub(super) fn load(config: &LocalInferenceConfig, log: &mut String) -> Result<Self> {
-        let mut model_params = unsafe { ffi::llama_model_default_params() };
-        model_params.n_gpu_layers =
-            i32::try_from(config.runtime.gpu_layers).context("llama.cpp gpu_layers exceeds i32")?;
-        model_params.split_mode = ffi::LLAMA_SPLIT_MODE_LAYER;
-        if let Some(mmap) = config.runtime.mmap {
-            model_params.use_mmap = mmap;
-        }
-
-        let mut selected_devices = SelectedDevices::from_config(config.runtime.device.as_deref())?;
-        if let Some(device_name) = selected_devices.name() {
-            log.push_str("selected_device = ");
-            log.push_str(device_name);
-            log.push('\n');
-            model_params.devices = selected_devices.as_mut_ptr();
-        }
-
-        let model_path = path_cstring(&config.backend.model)?;
-        let model = Model::load(model_path.as_ptr(), model_params).with_context(|| {
-            format!(
-                "failed to load llama.cpp model {}",
-                config.backend.model.display()
-            )
-        })?;
-        log.push_str("model = ");
-        log.push_str(&model.description());
-        log.push('\n');
-
+    fn from_runtime(
+        model: &LlamaCppModel,
+        runtime: &InferenceRuntimeConfig,
+        log: &mut String,
+    ) -> Result<Self> {
         let mut context_params = unsafe { ffi::llama_context_default_params() };
-        context_params.n_ctx = config.runtime.context_tokens;
-        let prefill_batch_size = config
-            .runtime
-            .batch_size
-            .unwrap_or(config.runtime.context_tokens);
+        context_params.n_ctx = runtime.context_tokens;
+        let prefill_batch_size = runtime.batch_size.unwrap_or(runtime.context_tokens);
         context_params.n_batch = prefill_batch_size;
-        if let Some(ubatch_size) = config.runtime.ubatch_size {
+        if let Some(ubatch_size) = runtime.ubatch_size {
             context_params.n_ubatch = ubatch_size;
         }
         context_params.n_threads =
-            i32::try_from(config.runtime.threads).context("llama.cpp threads exceeds i32")?;
+            i32::try_from(runtime.threads).context("llama.cpp threads exceeds i32")?;
         context_params.n_threads_batch = context_params.n_threads;
-        context_params.flash_attn_type = map_flash_attention(config.runtime.flash_attention);
-        if let Some(kv_unified) = config.runtime.kv_unified {
+        context_params.flash_attn_type = map_flash_attention(runtime.flash_attention);
+        if let Some(kv_unified) = runtime.kv_unified {
             context_params.kv_unified = kv_unified;
         }
-        if let Some(cache_type) = config.runtime.cache_type_k {
+        if let Some(cache_type) = runtime.cache_type_k {
             context_params.type_k = map_cache_type(cache_type);
         }
-        if let Some(cache_type) = config.runtime.cache_type_v {
+        if let Some(cache_type) = runtime.cache_type_v {
             context_params.type_v = map_cache_type(cache_type);
         }
-        if config.runtime.mtp.enabled {
-            context_params.n_outputs_max = config.runtime.mtp.draft_tokens.saturating_add(1);
-            context_params.n_rs_seq = config.runtime.mtp.draft_tokens;
+        if runtime.mtp.enabled {
+            context_params.n_outputs_max = runtime.mtp.draft_tokens.saturating_add(1);
+            context_params.n_rs_seq = runtime.mtp.draft_tokens;
         }
 
-        let context = ContextHandle::new(model.as_ptr(), context_params)
+        let context = ContextHandle::new(model.main_ptr(), context_params)
             .context("failed to create llama.cpp context")?;
         log.push_str("n_ctx = ");
         log.push_str(&unsafe { ffi::llama_n_ctx(context.as_ptr()) }.to_string());
         log.push('\n');
 
         let sampler = Sampler::greedy().context("failed to create llama.cpp sampler")?;
-        let vocab = unsafe { ffi::llama_model_get_vocab(model.as_ptr().cast_const()) };
-        ensure!(!vocab.is_null(), "llama.cpp model has no vocab");
         let prefill_batch_size =
             usize::try_from(prefill_batch_size).context("llama.cpp n_batch exceeds usize")?;
         ensure!(
             prefill_batch_size > 0,
             "llama.cpp n_batch must be greater than zero"
         );
-        let mtp = if config.runtime.mtp.enabled {
+        let mtp = if runtime.mtp.enabled {
             Some(
-                MtpState::load(config, context.as_ptr(), prefill_batch_size, log)
+                MtpState::new(model, runtime, context.as_ptr(), prefill_batch_size, log)
                     .context("failed to initialize llama.cpp MTP state")?,
             )
         } else {
@@ -143,64 +108,84 @@ impl LlamaCppSession {
         };
 
         Ok(Self {
-            key: LlamaCppSessionKey {
-                model: config.backend.model.clone(),
-                runtime: config.runtime.clone(),
-            },
+            runtime: runtime.clone(),
             sampler,
             mtp,
             context,
-            model,
-            vocab,
-            rendered_message_history_len: 0,
-            messages: Vec::new(),
-            token_history: Vec::new(),
-            formatted_history: String::new(),
-            normalized_history: String::new(),
-            cache_matches_transcript: true,
-            load_native_log: String::new(),
+            cache: ContextCache {
+                cache_matches_transcript: true,
+                ..ContextCache::default()
+            },
             prefill_batch_size,
+            _thread_bound: PhantomData,
         })
     }
 
-    pub(super) fn matches_config(&self, config: &LocalInferenceConfig) -> bool {
-        self.key.model == config.backend.model && self.key.runtime == config.runtime
+    pub(crate) fn matches_config(&self, config: &LocalInferenceConfig) -> bool {
+        self.runtime == config.runtime
     }
 
-    pub(super) fn load_native_log(&self) -> &str {
-        &self.load_native_log
+    pub(crate) fn reset_cache(
+        &mut self,
+        model: &LlamaCppModel,
+        config: &LocalInferenceConfig,
+        log: &mut String,
+    ) -> Result<()> {
+        self.rebuild(model, &config.runtime, log)
     }
 
-    pub(super) fn rendered_append_error(&self, rendered: &RenderedModelRequest) -> Option<String> {
-        self.render_prompt_append(rendered)
+    pub(crate) fn clear_cache(&mut self, model: &LlamaCppModel, log: &mut String) -> Result<()> {
+        let runtime = self.runtime.clone();
+        self.rebuild(model, &runtime, log)
+    }
+
+    fn rebuild(
+        &mut self,
+        model: &LlamaCppModel,
+        runtime: &InferenceRuntimeConfig,
+        log: &mut String,
+    ) -> Result<()> {
+        let replacement = Self::from_runtime(model, runtime, log)?;
+        *self = replacement;
+        log.push_str("llama_cpp_context_cache = rebuilt\n");
+        Ok(())
+    }
+
+    pub(crate) fn rendered_append_error(
+        &self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+    ) -> Option<String> {
+        self.render_prompt_append(model, rendered)
             .err()
             .map(|error| format!("{error:#}"))
     }
 
     fn render_prompt_append(
         &self,
+        model: &LlamaCppModel,
         rendered: &RenderedModelRequest,
     ) -> Result<PromptTemplateAppend> {
         ensure!(
-            self.cache_matches_transcript,
+            self.cache.cache_matches_transcript,
             "cached generation contains a trimmed continuation"
         );
         if !rendered_history_is_prefix(
-            &self.messages,
+            &self.cache.messages,
             &rendered.messages,
-            self.rendered_message_history_len,
+            self.cache.rendered_message_history_len,
         ) {
             bail!("rendered_message_history_changed");
         }
 
-        let mut messages = self.messages.clone();
+        let mut messages = self.cache.messages.clone();
         messages.extend(
-            rendered.messages[self.rendered_message_history_len..]
+            rendered.messages[self.cache.rendered_message_history_len..]
                 .iter()
                 .cloned(),
         );
         let mut formatted =
-            apply_chat_template_messages(self.model.as_ptr().cast_const(), &messages, true)
+            apply_chat_template_messages(model.main_ptr().cast_const(), &messages, true)
                 .context("failed to render llama.cpp chat template")?;
         let injected_assistant_prefix = disable_qwen_thinking(&mut formatted);
         let assistant_context_prefix = if formatted.ends_with(DISABLED_THINKING_PREFILL) {
@@ -210,38 +195,39 @@ impl LlamaCppSession {
         };
         let normalized_formatted = normalize_assistant_context(&formatted);
         let common_prefix_bytes =
-            common_prefix_len(&self.normalized_history, &normalized_formatted);
-        if common_prefix_bytes != self.normalized_history.len() {
+            common_prefix_len(&self.cache.normalized_history, &normalized_formatted);
+        if common_prefix_bytes != self.cache.normalized_history.len() {
             bail!(
                 "chat template rewrote cached history: exact_history_bytes={}, normalized_history_bytes={}, incoming_bytes={}, common_prefix_bytes={common_prefix_bytes}, history_tail={:?}, incoming_tail={:?}",
-                self.formatted_history.len(),
-                self.normalized_history.len(),
+                self.cache.formatted_history.len(),
+                self.cache.normalized_history.len(),
                 formatted.len(),
-                mismatch_excerpt(&self.normalized_history, common_prefix_bytes),
+                mismatch_excerpt(&self.cache.normalized_history, common_prefix_bytes),
                 mismatch_excerpt(&normalized_formatted, common_prefix_bytes),
             );
         }
         let history_prefix_len =
-            source_index_after_normalized_prefix(&formatted, self.normalized_history.len())
+            source_index_after_normalized_prefix(&formatted, self.cache.normalized_history.len())
                 .context("llama.cpp normalized history is not a source prompt boundary")?;
         let prompt = formatted[history_prefix_len..].to_string();
         ensure!(!prompt.is_empty(), "llama.cpp prompt append is empty");
 
-        let formatted_prompt = format!("{}{prompt}", self.formatted_history);
-        let formatted_tokens = tokenize(self.vocab, &formatted_prompt, true)?;
+        let formatted_prompt = format!("{}{prompt}", self.cache.formatted_history);
+        let formatted_tokens = tokenize(model.vocab(), &formatted_prompt, true)?;
         let common_prefix_tokens = self
+            .cache
             .token_history
             .iter()
             .zip(&formatted_tokens)
             .take_while(|(recorded, incoming)| recorded == incoming)
             .count();
         ensure!(
-            common_prefix_tokens == self.token_history.len(),
+            common_prefix_tokens == self.cache.token_history.len(),
             "chat template retokenized cached prompt: cached_tokens={}, incoming_tokens={}, common_prefix_tokens={common_prefix_tokens}",
-            self.token_history.len(),
+            self.cache.token_history.len(),
             formatted_tokens.len(),
         );
-        let tokens = formatted_tokens[self.token_history.len()..].to_vec();
+        let tokens = formatted_tokens[self.cache.token_history.len()..].to_vec();
         ensure!(!tokens.is_empty(), "llama.cpp prompt append has no tokens");
 
         Ok(PromptTemplateAppend {
@@ -255,17 +241,39 @@ impl LlamaCppSession {
         })
     }
 
-    pub(super) fn set_load_native_log(&mut self, log: String) {
-        self.load_native_log = log;
-    }
-
-    pub(super) fn generate(
+    pub(crate) fn generate(
         &mut self,
+        model: &LlamaCppModel,
         rendered: &RenderedModelRequest,
         max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
-    ) -> Result<LlamaCppSessionOutput> {
-        let prepared = self.prepare_prompt_append(rendered, log)?;
+    ) -> Result<LlamaCppGenerationOutput> {
+        control.ensure_running()?;
+        let draft_context = self.mtp.as_ref().map(MtpState::draft_context_ptr);
+        let abort_guard = control.install_abort_callback(self.context.as_ptr(), draft_context);
+        let result = self.generate_inner(model, rendered, max_output_tokens, control, log);
+        drop(abort_guard);
+
+        if control.should_abort() {
+            self.cache.cache_matches_transcript = false;
+            return Err(LlamaCppGenerationCancelled.into());
+        }
+        if result.is_err() {
+            self.cache.cache_matches_transcript = false;
+        }
+        result
+    }
+
+    fn generate_inner(
+        &mut self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+        max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
+        log: &mut String,
+    ) -> Result<LlamaCppGenerationOutput> {
+        let prepared = self.prepare_prompt_append(model, rendered, log)?;
 
         ensure!(
             !prepared.tokens.is_empty(),
@@ -278,7 +286,14 @@ impl LlamaCppSession {
             "llama.cpp prompt exceeds remaining context"
         );
         if self.mtp.is_some() {
-            return self.generate_with_mtp(rendered, prepared, max_output_tokens, log);
+            return self.generate_with_mtp(
+                model,
+                rendered,
+                prepared,
+                max_output_tokens,
+                control,
+                log,
+            );
         }
         let PreparedPrompt {
             tokens: mut prompt_tokens,
@@ -293,12 +308,13 @@ impl LlamaCppSession {
             log,
         )
         .context("failed to decode prompt")?;
-        self.token_history.extend_from_slice(&prompt_tokens);
+        self.cache.token_history.extend_from_slice(&prompt_tokens);
 
         let mut content = String::new();
         let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         for _ in 0..max_output_tokens {
+            control.ensure_running()?;
             if !has_context_space(self.context.as_ptr(), 1) {
                 finish_reason = InferenceFinishReason::Length;
                 break;
@@ -306,16 +322,16 @@ impl LlamaCppSession {
             let token = unsafe {
                 ffi::llama_sampler_sample(self.sampler.as_ptr(), self.context.as_ptr(), -1)
             };
-            if unsafe { ffi::llama_vocab_is_eog(self.vocab, token) } {
+            if unsafe { ffi::llama_vocab_is_eog(model.vocab(), token) } {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
             }
 
-            let piece = token_to_piece(self.vocab, token)?;
+            let piece = token_to_piece(model.vocab(), token)?;
             let mut next_token = [token];
             decode_tokens(self.context.as_ptr(), &mut next_token)
                 .context("failed to decode generated token")?;
-            self.token_history.push(token);
+            self.cache.token_history.push(token);
             decoded_content.push_str(&piece);
             content.push_str(&piece);
             if isolated_tool_call(&content).is_some() {
@@ -336,7 +352,7 @@ impl LlamaCppSession {
             &content,
         )?;
 
-        Ok(LlamaCppSessionOutput {
+        Ok(LlamaCppGenerationOutput {
             content,
             finish_reason,
         })
@@ -344,11 +360,40 @@ impl LlamaCppSession {
 
     fn generate_with_mtp(
         &mut self,
+        model: &LlamaCppModel,
         rendered: &RenderedModelRequest,
         prepared: PreparedPrompt,
         max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
-    ) -> Result<LlamaCppSessionOutput> {
+    ) -> Result<LlamaCppGenerationOutput> {
+        let Some(mut mtp) = self.mtp.take() else {
+            bail!("llama.cpp MTP state is missing");
+        };
+        let result = self.generate_with_mtp_state(
+            model,
+            rendered,
+            prepared,
+            max_output_tokens,
+            control,
+            log,
+            &mut mtp,
+        );
+        self.mtp = Some(mtp);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_with_mtp_state(
+        &mut self,
+        model: &LlamaCppModel,
+        rendered: &RenderedModelRequest,
+        prepared: PreparedPrompt,
+        max_output_tokens: u32,
+        control: &LlamaCppGenerationControl<'_>,
+        log: &mut String,
+        mtp: &mut MtpState,
+    ) -> Result<LlamaCppGenerationOutput> {
         let PreparedPrompt {
             tokens: prompt_tokens,
             messages: prompt_messages,
@@ -357,9 +402,6 @@ impl LlamaCppSession {
         log.push_str("mtp_generation_mode = draft-mtp\n");
         log.push_str("mtp_sequence_mode = seq0-temporary\n");
 
-        let Some(mut mtp) = self.mtp.take() else {
-            bail!("llama.cpp MTP state is missing");
-        };
         let Some(mut id_last) = prompt_tokens.last().copied() else {
             bail!("llama.cpp MTP prompt produced no tokens");
         };
@@ -397,7 +439,7 @@ impl LlamaCppSession {
                         })?;
                 mtp.process(&mut batch)
                     .context("failed to process MTP prompt batch")?;
-                self.token_history.extend_from_slice(chunk);
+                self.cache.token_history.extend_from_slice(chunk);
                 start_pos += i32::try_from(chunk.len()).context("MTP prompt chunk too large")?;
             }
         } else {
@@ -406,7 +448,7 @@ impl LlamaCppSession {
             log.push_str("prefill_chunks = 0\n");
         }
 
-        mtp.begin(&self.token_history)
+        mtp.begin(&self.cache.token_history)
             .context("failed to begin MTP speculation")?;
 
         let mut content = String::new();
@@ -418,6 +460,7 @@ impl LlamaCppSession {
         let mut tool_call_completed = false;
 
         while emitted < max_output_tokens {
+            control.ensure_running()?;
             if context_remaining(self.context.as_ptr()) < 2 {
                 finish_reason = InferenceFinishReason::Length;
                 break;
@@ -431,16 +474,16 @@ impl LlamaCppSession {
                         .context("MTP draft token count exceeds i32")?;
             let draft = if can_use_draft {
                 mtp.draft(
-                    history_len_as_pos(&self.token_history)?,
+                    history_len_as_pos(&self.cache.token_history)?,
                     id_last,
-                    &self.token_history,
+                    &self.cache.token_history,
                 )
                 .context("failed to draft MTP tokens")?
             } else {
                 Vec::new()
             };
 
-            let n_past = history_len_as_pos(&self.token_history)?;
+            let n_past = history_len_as_pos(&self.cache.token_history)?;
             let mut verify_tokens = Vec::with_capacity(draft.len() + 1);
             verify_tokens.push(id_last);
             verify_tokens.extend_from_slice(&draft);
@@ -465,21 +508,22 @@ impl LlamaCppSession {
                 .context("failed to accept MTP draft tokens")?;
             }
 
-            self.token_history.push(id_last);
-            self.token_history
+            self.cache.token_history.push(id_last);
+            self.cache
+                .token_history
                 .extend(accepted.iter().take(n_accepted).copied());
             pending_needs_flush = true;
 
             for token in &accepted {
                 id_last = *token;
-                if unsafe { ffi::llama_vocab_is_eog(self.vocab, id_last) } {
+                if unsafe { ffi::llama_vocab_is_eog(model.vocab(), id_last) } {
                     finish_reason = InferenceFinishReason::Stop;
                     stopped_on_eog = true;
                     pending_needs_flush = false;
                     break;
                 }
 
-                let piece = token_to_piece(self.vocab, id_last)?;
+                let piece = token_to_piece(model.vocab(), id_last)?;
                 decoded_content.push_str(&piece);
                 emitted += 1;
                 if tool_call_completed {
@@ -509,15 +553,14 @@ impl LlamaCppSession {
         if pending_needs_flush && !stopped_on_eog {
             flush_mtp_pending_token(
                 self.context.as_ptr(),
-                &mut mtp,
-                &mut self.token_history,
+                mtp,
+                &mut self.cache.token_history,
                 id_last,
             )
             .context("failed to flush final MTP token")?;
         }
 
         mtp.write_stats_log(log);
-        self.mtp = Some(mtp);
 
         self.record_generated_assistant(
             rendered,
@@ -527,7 +570,7 @@ impl LlamaCppSession {
             &content,
         )?;
 
-        Ok(LlamaCppSessionOutput {
+        Ok(LlamaCppGenerationOutput {
             content,
             finish_reason,
         })
@@ -535,14 +578,15 @@ impl LlamaCppSession {
 
     fn prepare_prompt_append(
         &mut self,
+        model: &LlamaCppModel,
         rendered: &RenderedModelRequest,
         log: &mut String,
     ) -> Result<PreparedPrompt> {
-        if rendered.messages.len() < self.rendered_message_history_len {
+        if rendered.messages.len() < self.cache.rendered_message_history_len {
             bail!(
                 "llama.cpp session cannot append {} rendered messages after {} were recorded",
                 rendered.messages.len(),
-                self.rendered_message_history_len
+                self.cache.rendered_message_history_len
             );
         }
         let PromptTemplateAppend {
@@ -550,16 +594,16 @@ impl LlamaCppSession {
             tokens: prompt_tokens,
             history,
             messages,
-        } = self.render_prompt_append(rendered)?;
+        } = self.render_prompt_append(model, rendered)?;
         if !history.assistant_context_prefix.is_empty() {
             log.push_str("thinking_prefill = disabled\n");
         }
 
         log.push_str("rendered_message_history_len = ");
-        log.push_str(&self.rendered_message_history_len.to_string());
+        log.push_str(&self.cache.rendered_message_history_len.to_string());
         log.push('\n');
         log.push_str("cached_prompt_tokens = ");
-        log.push_str(&self.token_history.len().to_string());
+        log.push_str(&self.cache.token_history.len().to_string());
         log.push('\n');
         log.push_str("prompt_append_tokens = ");
         log.push_str(&prompt_tokens.len().to_string());
@@ -595,11 +639,11 @@ impl LlamaCppSession {
             name: None,
             tool_calls: Vec::new(),
         });
-        self.messages = messages;
-        self.formatted_history = format!("{formatted_prompt}{decoded_content}");
-        self.normalized_history = normalize_assistant_context(&self.formatted_history);
-        self.cache_matches_transcript = decoded_content == content;
-        self.rendered_message_history_len = rendered.messages.len() + 1;
+        self.cache.messages = messages;
+        self.cache.formatted_history = format!("{formatted_prompt}{decoded_content}");
+        self.cache.normalized_history = normalize_assistant_context(&self.cache.formatted_history);
+        self.cache.cache_matches_transcript = decoded_content == content;
+        self.cache.rendered_message_history_len = rendered.messages.len() + 1;
         Ok(())
     }
 }
@@ -759,104 +803,60 @@ struct PromptTemplateAppend {
 
 struct MtpState {
     speculative: MtpSpeculative,
-    _draft_context: ContextHandle,
-    _draft_model: Model,
+    draft_context: ContextHandle,
     draft_tokens: usize,
 }
 
 impl MtpState {
-    fn load(
-        config: &LocalInferenceConfig,
+    fn new(
+        model: &LlamaCppModel,
+        runtime: &InferenceRuntimeConfig,
         target_context: *mut c_void,
         prefill_batch_size: usize,
         log: &mut String,
     ) -> Result<Self> {
-        let Some(draft_model_path) = &config.runtime.mtp.draft_model else {
-            bail!("runtime.mtp enabled requires draft_model");
-        };
         ensure!(
-            config.runtime.mtp.draft_tokens > 0,
+            runtime.mtp.draft_tokens > 0,
             "runtime.mtp draft_tokens must be greater than zero"
         );
-        let draft_tokens = usize::try_from(config.runtime.mtp.draft_tokens)
+        let draft_tokens = usize::try_from(runtime.mtp.draft_tokens)
             .context("runtime.mtp draft_tokens exceeds usize")?;
-
-        let mut model_params = unsafe { ffi::llama_model_default_params() };
-        model_params.n_gpu_layers = i32::try_from(
-            config
-                .runtime
-                .mtp
-                .gpu_layers
-                .unwrap_or(config.runtime.gpu_layers),
-        )
-        .context("llama.cpp MTP gpu_layers exceeds i32")?;
-        model_params.split_mode = ffi::LLAMA_SPLIT_MODE_LAYER;
-        if let Some(mmap) = config.runtime.mmap {
-            model_params.use_mmap = mmap;
-        }
-
-        let mut selected_devices = SelectedDevices::from_config(config.runtime.device.as_deref())?;
-        if let Some(device_name) = selected_devices.name() {
-            log.push_str("mtp_selected_device = ");
-            log.push_str(device_name);
-            log.push('\n');
-            model_params.devices = selected_devices.as_mut_ptr();
-        }
-
-        let draft_model_path_c = path_cstring(draft_model_path)?;
-        let draft_model =
-            Model::load(draft_model_path_c.as_ptr(), model_params).with_context(|| {
-                format!(
-                    "failed to load llama.cpp MTP draft model {}",
-                    draft_model_path.display()
-                )
-            })?;
-        log.push_str("mtp_draft_model_desc = ");
-        log.push_str(&draft_model.description());
-        log.push('\n');
+        let draft_model = model
+            .draft_ptr()
+            .context("runtime.mtp enabled model has no draft weights")?;
 
         let mut context_params = unsafe { ffi::llama_context_default_params() };
-        context_params.n_ctx = config.runtime.context_tokens;
+        context_params.n_ctx = runtime.context_tokens;
         context_params.n_batch =
             u32::try_from(prefill_batch_size).context("llama.cpp MTP n_batch exceeds u32")?;
-        if let Some(ubatch_size) = config.runtime.ubatch_size {
+        if let Some(ubatch_size) = runtime.ubatch_size {
             context_params.n_ubatch = ubatch_size;
         }
         context_params.n_threads =
-            i32::try_from(config.runtime.threads).context("llama.cpp MTP threads exceeds i32")?;
+            i32::try_from(runtime.threads).context("llama.cpp MTP threads exceeds i32")?;
         context_params.n_threads_batch = context_params.n_threads;
-        context_params.flash_attn_type = map_flash_attention(config.runtime.flash_attention);
+        context_params.flash_attn_type = map_flash_attention(runtime.flash_attention);
         context_params.ctx_type = ffi::LLAMA_CONTEXT_TYPE_MTP;
         context_params.n_rs_seq = 0;
         context_params.n_outputs_max = 1;
         context_params.ctx_other = target_context;
-        if let Some(kv_unified) = config.runtime.kv_unified {
+        if let Some(kv_unified) = runtime.kv_unified {
             context_params.kv_unified = kv_unified;
         }
-        if let Some(cache_type) = config
-            .runtime
-            .mtp
-            .cache_type_k
-            .or(config.runtime.cache_type_k)
-        {
+        if let Some(cache_type) = runtime.mtp.cache_type_k.or(runtime.cache_type_k) {
             context_params.type_k = map_cache_type(cache_type);
         }
-        if let Some(cache_type) = config
-            .runtime
-            .mtp
-            .cache_type_v
-            .or(config.runtime.cache_type_v)
-        {
+        if let Some(cache_type) = runtime.mtp.cache_type_v.or(runtime.cache_type_v) {
             context_params.type_v = map_cache_type(cache_type);
         }
 
-        let draft_context = ContextHandle::new(draft_model.as_ptr(), context_params)
+        let draft_context = ContextHandle::new(draft_model, context_params)
             .context("failed to create llama.cpp MTP draft context")?;
         let speculative = MtpSpeculative::new(
             target_context,
             draft_context.as_ptr(),
             i32::try_from(draft_tokens).context("runtime.mtp draft_tokens exceeds i32")?,
-            config.runtime.mtp.p_min.as_f32(),
+            runtime.mtp.p_min.as_f32(),
         )?;
 
         log.push_str("mtp_runtime_state = active\n");
@@ -864,10 +864,13 @@ impl MtpState {
 
         Ok(Self {
             speculative,
-            _draft_context: draft_context,
-            _draft_model: draft_model,
+            draft_context,
             draft_tokens,
         })
+    }
+
+    fn draft_context_ptr(&self) -> *mut c_void {
+        self.draft_context.as_ptr()
     }
 
     fn begin(&mut self, prompt_tokens: &[ffi::llama_token]) -> Result<()> {
@@ -1080,77 +1083,6 @@ impl LlamaTokenBatch {
             seq_id: self.seq_id_ptrs.as_mut_ptr(),
             logits: self.logits.as_mut_ptr(),
         }
-    }
-}
-
-struct SelectedDevices {
-    name: Option<String>,
-    devices: Vec<ffi::ggml_backend_dev_t>,
-}
-
-impl SelectedDevices {
-    fn from_config(device_name: Option<&str>) -> Result<Self> {
-        let Some(device_name) = device_name else {
-            return Ok(Self {
-                name: None,
-                devices: Vec::new(),
-            });
-        };
-
-        let device_name_c = CString::new(device_name).context("llama.cpp device contains NUL")?;
-        let device = unsafe { ffi::ggml_backend_dev_by_name(device_name_c.as_ptr()) };
-        if device.is_null() {
-            bail!("configured llama.cpp device {device_name:?} was not found");
-        }
-        Ok(Self {
-            name: Some(device_name.to_string()),
-            devices: vec![device, ptr::null_mut()],
-        })
-    }
-
-    fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut ffi::ggml_backend_dev_t {
-        self.devices.as_mut_ptr()
-    }
-}
-
-struct Model(*mut c_void);
-
-impl Model {
-    fn load(path: *const c_char, params: ffi::llama_model_params) -> Result<Self> {
-        let model = unsafe { ffi::llama_model_load_from_file(path, params) };
-        ensure!(!model.is_null(), "llama.cpp returned null model");
-        Ok(Self(model))
-    }
-
-    fn as_ptr(&self) -> *mut c_void {
-        self.0
-    }
-
-    fn description(&self) -> String {
-        let mut buf = vec![0_i8; 512];
-        let len =
-            unsafe { ffi::llama_model_desc(self.0.cast_const(), buf.as_mut_ptr(), buf.len()) };
-        if len <= 0 {
-            return "unknown".to_string();
-        }
-        let len = usize::try_from(len).unwrap_or(0).min(buf.len());
-        let bytes = buf[..len]
-            .iter()
-            .map(|value| *value as u8)
-            .collect::<Vec<_>>();
-        String::from_utf8_lossy(&bytes)
-            .trim_end_matches('\0')
-            .to_string()
-    }
-}
-
-impl Drop for Model {
-    fn drop(&mut self) {
-        unsafe { ffi::llama_model_free(self.0) };
     }
 }
 
@@ -1576,13 +1508,6 @@ fn map_cache_type(value: KvCacheType) -> i32 {
     }
 }
 
-#[cfg(unix)]
-fn path_cstring(path: &std::path::Path) -> Result<CString> {
-    use std::os::unix::ffi::OsStrExt;
-
-    CString::new(path.as_os_str().as_bytes()).context("path contains NUL")
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
@@ -1592,6 +1517,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn context_caches_keep_conversation_state_isolated() {
+        let mut first = ContextCache {
+            cache_matches_transcript: true,
+            ..ContextCache::default()
+        };
+        let second = ContextCache {
+            cache_matches_transcript: true,
+            ..ContextCache::default()
+        };
+
+        first.messages.push(RenderedMessage {
+            role: RenderedMessageRole::User,
+            content: "first conversation".to_string(),
+            name: None,
+            tool_calls: Vec::new(),
+        });
+        first.token_history.extend([11, 12, 13]);
+        first.formatted_history.push_str("first conversation");
+        first.rendered_message_history_len = 1;
+
+        assert!(second.messages.is_empty());
+        assert!(second.token_history.is_empty());
+        assert!(second.formatted_history.is_empty());
+        assert_eq!(second.rendered_message_history_len, 0);
+        assert!(second.cache_matches_transcript);
+    }
 
     #[test]
     fn rendered_message_content_includes_tool_calls() {

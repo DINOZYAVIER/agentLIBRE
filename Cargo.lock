@@ -107,6 +107,7 @@ dependencies = [
  "agl-daemon",
  "agl-functions",
  "agl-ids",
+ "agl-inference",
  "agl-memory",
  "agl-notes",
  "agl-protocol",
@@ -156,9 +157,11 @@ version = "1.0.0-alpha.10"
 dependencies = [
  "agl-chat",
  "agl-client",
+ "agl-config",
  "agl-cron",
  "agl-events",
  "agl-ids",
+ "agl-inference",
  "agl-protocol",
  "agl-runtime",
  "agl-session",
@@ -237,6 +240,7 @@ dependencies = [
  "cc",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 

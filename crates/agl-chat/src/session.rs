@@ -8,7 +8,8 @@ use agl_capabilities::{
     StateEffect, render_canonical_json,
 };
 use agl_config::{
-    ModelConfig, ToolCallFormat, load_local_inference_config, load_local_inference_config_from_str,
+    LocalInferenceConfig, ModelConfig, ToolCallFormat, load_local_inference_config,
+    load_local_inference_config_from_str,
 };
 use agl_functions::{
     IdentityContractMode, RuntimeFunction, RuntimeIdentityContract, resolve_runtime_function,
@@ -16,7 +17,7 @@ use agl_functions::{
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
-use agl_inference::{InferenceBackend, InferenceRequest, InferenceResponse, LlamaCppBackend};
+use agl_inference::{InferenceRequest, InferenceResponse};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_oven::render_model_request;
 use agl_runtime::{
@@ -35,14 +36,17 @@ use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::{InferenceOptions, ToolAccessMode};
+use crate::{ChatInferenceJob, InferenceClientHandle, InferenceOptions, ToolAccessMode};
 
 const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 const MEMORY_CONTEXT_ENTRY_LIMIT: usize = 8;
 
 pub struct InferenceSession {
-    backend: LlamaCppBackend,
+    inference_client: InferenceClientHandle,
+    inference_config: LocalInferenceConfig,
+    session_id: SessionId,
+    max_output_tokens: u32,
     model_config: ModelConfig,
     system_prompt: Option<String>,
     runtime_feature_context: Option<String>,
@@ -97,6 +101,8 @@ impl InferenceSession {
         options: InferenceOptions,
         runtime: &AgentLibreRuntimeConfig,
         artifact_root_override: Option<PathBuf>,
+        session_id: SessionId,
+        inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         let artifact_root = artifact_root_override
             .or(options
@@ -210,11 +216,11 @@ impl InferenceSession {
             run_id: None,
             store_root: &store_root,
         })?;
-        let backend = LlamaCppBackend::new(config, InferenceArtifactRoot::new(&artifact_root))?
-            .with_max_output_tokens(options.max_output_tokens);
-
         Ok(Self {
-            backend,
+            inference_client,
+            inference_config: config,
+            session_id,
+            max_output_tokens: options.max_output_tokens,
             model_config,
             system_prompt,
             runtime_feature_context: Some(runtime_features.content),
@@ -279,7 +285,7 @@ impl InferenceSession {
     }
 
     pub fn backend_name(&self) -> &'static str {
-        self.backend.backend_name()
+        self.inference_config.backend.kind.as_str()
     }
 
     pub fn event_stream_path(&self, run_id: &RunId) -> PathBuf {
@@ -386,6 +392,10 @@ impl InferenceSession {
         request_id: Option<RequestId>,
         effective_capabilities: &EffectiveCapabilitySet,
     ) -> Result<InferenceResponse> {
+        ensure!(
+            session_id.as_ref() == Some(&self.session_id),
+            "inference request session does not match its managed context"
+        );
         if let Some(evidence) = &self.runtime_feature_evidence {
             write_runtime_feature_context_evidence(&self.artifact_root, &request.run_id, evidence)?;
         }
@@ -404,11 +414,25 @@ impl InferenceSession {
                 effective_capabilities: Some(effective_capabilities),
             },
         )?;
-        self.backend.generate(request)
+        self.inference_client.generate(ChatInferenceJob {
+            config: self.inference_config.clone(),
+            artifact_root: InferenceArtifactRoot::new(self.artifact_root.clone()),
+            max_output_tokens: self.max_output_tokens,
+            session_id: self.session_id.clone(),
+            request,
+        })
     }
 
-    pub fn clear_context(&mut self) {
-        self.backend.clear_context();
+    pub fn clear_context(&self) -> Result<()> {
+        self.inference_client
+            .clear_context(&self.inference_config, &self.session_id)
+            .context("failed to clear managed inference context")
+    }
+
+    pub fn release_context(&self) -> Result<()> {
+        self.inference_client
+            .release_context(&self.inference_config, &self.session_id)
+            .context("failed to release managed inference context")
     }
 
     pub(crate) fn set_workspace_root_and_refresh(
