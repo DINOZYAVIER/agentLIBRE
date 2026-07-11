@@ -1,15 +1,21 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, TurnId};
-use agl_loop::{TurnInput, TurnOutput, run_turn};
+use agl_inference::{InferenceCancellation, ModelManagerError};
+use agl_loop::{
+    EffectFailure, EffectFailureCode, EffectOutcome, HookEffectOutput, TurnAdvance,
+    TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor, TurnInput,
+    TurnOutput, TurnTerminal,
+};
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
 use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail};
 
 use crate::{
-    ChatLoopHost, ChatOptions, InferenceClientHandle, InferenceSession, ToolAccessMode,
+    ChatOptions, ChatTurnRuntime, InferenceClientHandle, InferenceSession, ToolAccessMode,
     assistant_text_for_terminal,
 };
 
@@ -41,6 +47,68 @@ pub enum ChatTurnStatus {
     Answered { answer: String },
     Stopped { reason: StopReason },
     Failed { message: String },
+    Cancelled,
+}
+
+pub struct ChatTurnExecution {
+    run_id: RunId,
+    turn_id: TurnId,
+    executor: TurnExecutor,
+    advance: TurnAdvance,
+    cancellation: InferenceCancellation,
+    deadline: Option<Instant>,
+    previous_message_count: usize,
+    attempt_ids: Vec<AttemptId>,
+    emitted_events: Vec<SafeRuntimeEventEnvelope>,
+    event_sequence: u64,
+    output: Option<ChatTurnOutput>,
+}
+
+impl ChatTurnExecution {
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn turn_id(&self) -> &TurnId {
+        &self.turn_id
+    }
+
+    pub fn checkpoint(&self) -> TurnCheckpoint {
+        self.executor.checkpoint()
+    }
+
+    pub fn pending_effect(&self) -> Option<&TurnEffect> {
+        match &self.advance.state {
+            TurnAdvanceState::Pending { effect } => Some(effect),
+            TurnAdvanceState::Terminal { .. } => None,
+        }
+    }
+
+    pub fn cancellation_handle(&self) -> InferenceCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn request_cancellation(&mut self) -> Result<()> {
+        self.cancellation.cancel();
+        self.executor.request_cancellation()?;
+        Ok(())
+    }
+
+    pub fn set_deadline(&mut self, deadline: Instant) {
+        self.deadline = Some(deadline);
+    }
+
+    pub fn take_events(&mut self) -> Vec<SafeRuntimeEventEnvelope> {
+        std::mem::take(&mut self.emitted_events)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.advance.state, TurnAdvanceState::Terminal { .. })
+    }
+
+    pub fn take_output(&mut self) -> Option<ChatTurnOutput> {
+        self.output.take()
+    }
 }
 
 pub(crate) struct TurnInputSpec<'a> {
@@ -52,6 +120,7 @@ pub(crate) struct TurnInputSpec<'a> {
     hook_payload: serde_json::Value,
     max_hook_repair_attempts: usize,
     visible_tools: &'a [VisibleTool],
+    capability_policy_hash: Option<String>,
     user_input: &'a str,
 }
 
@@ -62,7 +131,7 @@ pub struct ChatService {
     history_enabled: bool,
     resumed_session: bool,
     chat_history: Option<ChatSessionStore>,
-    loop_host: ChatLoopHost,
+    turn_runtime: ChatTurnRuntime,
     messages: Vec<TurnMessage>,
     context_released: bool,
     session_finished: bool,
@@ -125,7 +194,7 @@ impl ChatService {
         } else {
             (None, None)
         };
-        let loop_host = ChatLoopHost::new(session, &workspace_root)?;
+        let turn_runtime = ChatTurnRuntime::new(session, &workspace_root)?;
         let messages = replay
             .as_ref()
             .map(replay_turn_messages)
@@ -137,7 +206,7 @@ impl ChatService {
             history_enabled,
             resumed_session,
             chat_history,
-            loop_host,
+            turn_runtime,
             messages,
             context_released: false,
             session_finished: false,
@@ -147,8 +216,8 @@ impl ChatService {
     pub fn summary(&self) -> ChatSessionSummary {
         ChatSessionSummary {
             session_id: self.session_id.clone(),
-            artifact_root: self.loop_host.session().artifact_root().to_path_buf(),
-            workspace_root: self.loop_host.workspace_root().to_path_buf(),
+            artifact_root: self.turn_runtime.session().artifact_root().to_path_buf(),
+            workspace_root: self.turn_runtime.workspace_root().to_path_buf(),
             tool_mode: self.tool_mode.as_str(),
             history_enabled: self.history_enabled,
             resumed: self.resumed_session,
@@ -161,26 +230,26 @@ impl ChatService {
     }
 
     pub fn artifact_root(&self) -> &Path {
-        self.loop_host.session().artifact_root()
+        self.turn_runtime.session().artifact_root()
     }
 
     pub fn workspace_root(&self) -> &Path {
-        self.loop_host.workspace_root()
+        self.turn_runtime.workspace_root()
     }
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         if self.context_released {
             bail!("cannot change workspace root after the chat session context was released");
         }
-        self.loop_host.set_workspace_root(workspace_root)
+        self.turn_runtime.set_workspace_root(workspace_root)
     }
 
     pub fn reload_runtime_context(&mut self) -> Result<usize> {
         if self.context_released {
             bail!("cannot reload a released chat session context");
         }
-        self.loop_host.reload_runtime_context()?;
-        Ok(self.loop_host.session().turn_visible_tools().len())
+        self.turn_runtime.reload_runtime_context()?;
+        Ok(self.turn_runtime.session().turn_visible_tools().len())
     }
 
     pub fn clear_context(&mut self) -> Result<usize> {
@@ -188,7 +257,7 @@ impl ChatService {
             bail!("cannot clear a released chat session context");
         }
         let cleared_messages = self.messages.len();
-        self.loop_host.clear_context()?;
+        self.turn_runtime.clear_context()?;
         self.messages.clear();
         if let Some(history) = &mut self.chat_history {
             history.append_context_cleared()?;
@@ -224,7 +293,7 @@ impl ChatService {
         if self.context_released {
             return Ok(());
         }
-        self.loop_host.release_context()?;
+        self.turn_runtime.release_context()?;
         self.context_released = true;
         Ok(())
     }
@@ -240,10 +309,37 @@ impl ChatService {
         request_id: Option<RequestId>,
         input: &str,
     ) -> Result<ChatTurnOutput> {
+        let mut execution = self.start_user_turn_with_ids(run_id, turn_id, request_id, input)?;
+        while !execution.is_terminal() {
+            if let Err(error) = self.advance_user_turn(&mut execution) {
+                let attempt_ids = execution.attempt_ids.clone();
+                let generated_requests = self.turn_runtime.generated_requests();
+                return self.finish_failed_turn(
+                    execution.run_id.clone(),
+                    execution.turn_id.clone(),
+                    attempt_ids,
+                    generated_requests,
+                    format!("turn driver failed: {error:#}"),
+                    true,
+                );
+            }
+        }
+        execution
+            .take_output()
+            .context("terminal chat execution has no output")
+    }
+
+    pub fn start_user_turn_with_ids(
+        &mut self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        input: &str,
+    ) -> Result<ChatTurnExecution> {
         if self.context_released {
             bail!("cannot run a turn after the chat session context was released");
         }
-        self.loop_host
+        self.turn_runtime
             .begin_turn(&self.session_id, &run_id, &turn_id, request_id)?;
         let user_message_id = MessageId::generate();
         log_message_metadata(
@@ -254,7 +350,7 @@ impl ChatService {
             &self.runtime,
         );
         let envelope = self
-            .loop_host
+            .turn_runtime
             .append_runtime_event(RuntimeEvent::UserMessage {
                 message_id: user_message_id,
                 content: input.to_string(),
@@ -262,121 +358,236 @@ impl ChatService {
         if let Some(history) = &mut self.chat_history
             && let Err(error) = history.append_user_message(envelope)
         {
-            return self.finish_failed_turn(
-                run_id,
-                turn_id,
-                Vec::new(),
-                0,
-                format!("failed to record user message: {error:#}"),
-            );
+            bail!("failed to record user message: {error:#}");
         }
+        let capability_policy_hash = Some(self.turn_runtime.policy_hash()?);
         let turn_input = build_turn_input(TurnInputSpec {
             run_id: &run_id,
             turn_id: &turn_id,
             request_index: 0,
             context_messages: &self.messages,
-            hook_batches: self.loop_host.session().turn_hook_batches(),
-            hook_payload: self.loop_host.session().turn_hook_payload(),
-            max_hook_repair_attempts: self.loop_host.session().max_hook_repair_attempts(),
-            visible_tools: self.loop_host.session().turn_visible_tools(),
+            hook_batches: self.turn_runtime.session().turn_hook_batches(),
+            hook_payload: self.turn_runtime.session().turn_hook_payload(),
+            max_hook_repair_attempts: self.turn_runtime.session().max_hook_repair_attempts(),
+            visible_tools: self.turn_runtime.session().turn_visible_tools(),
+            capability_policy_hash,
             user_input: input,
         });
-        let output = match run_turn(&mut self.loop_host, turn_input) {
-            Ok(output) => output,
-            Err(error) => {
-                let generated_requests = self.loop_host.generated_requests();
-                let attempt_ids = self.loop_host.take_attempt_ids();
-                return self.finish_failed_turn(
-                    run_id,
-                    turn_id,
-                    attempt_ids,
-                    generated_requests,
-                    format!("{error:#}"),
-                );
-            }
-        };
-        let generated_requests = self.loop_host.generated_requests();
-        let attempt_ids = self.loop_host.take_attempt_ids();
         let previous_message_count = self.messages.len();
-        let mut turn_messages = self.loop_host.take_turn_messages();
-        if turn_messages.is_empty() {
-            turn_messages = self.messages.clone();
-            turn_messages.push(TurnMessage::User {
-                content: input.to_string(),
-            });
-        }
-        let status_result: Result<ChatTurnStatus> = {
-            let mut turn_recording = CompletedTurnRecording {
-                session_id: &self.session_id,
-                remaining_attempt_ids: attempt_ids.iter(),
-                runtime: &self.runtime,
-            };
-            (|| match output {
-                TurnOutput::Answered { answer } => {
-                    let content = assistant_text_for_terminal(&answer);
-                    ensure_final_assistant_message(&mut turn_messages, content.clone());
-                    record_completed_turn_messages(
-                        &mut self.chat_history,
-                        &mut self.loop_host,
-                        &mut turn_recording,
-                        turn_messages
-                            .get(previous_message_count..)
-                            .context("turn transcript is shorter than prior chat context")?,
-                        None,
-                    )?;
-                    Ok(ChatTurnStatus::Answered { answer: content })
-                }
-                TurnOutput::Stopped { reason, detail } => {
-                    let content = stopped_turn_context_message(
-                        reason,
-                        detail.as_ref(),
-                        self.loop_host.session().turn_visible_tools(),
-                    );
-                    turn_messages.push(TurnMessage::Assistant { content });
-                    record_completed_turn_messages(
-                        &mut self.chat_history,
-                        &mut self.loop_host,
-                        &mut turn_recording,
-                        turn_messages
-                            .get(previous_message_count..)
-                            .context("turn transcript is shorter than prior chat context")?,
-                        Some(reason),
-                    )?;
-                    Ok(ChatTurnStatus::Stopped { reason })
-                }
-            })()
-        };
-        let status = match status_result {
-            Ok(status) => status,
-            Err(error) => {
-                return self.finish_failed_turn(
-                    run_id,
-                    turn_id,
-                    attempt_ids,
-                    generated_requests,
-                    format!("failed to record completed turn: {error:#}"),
-                );
-            }
-        };
-        if let Err(error) = self.loop_host.append_pending_terminal_event() {
-            return self.finish_failed_turn(
-                run_id,
-                turn_id,
-                attempt_ids,
-                generated_requests,
-                format!("failed to append turn terminal event: {error:#}"),
-            );
-        }
-        self.messages = turn_messages;
-        let runtime_events = self.loop_host.take_runtime_events()?;
-        Ok(ChatTurnOutput {
+        let mut executor = TurnExecutor::new(turn_input);
+        let advance = executor.next_effect()?;
+        self.turn_runtime
+            .append_executor_events(advance.events.clone())?;
+        let emitted_events = self.turn_runtime.read_runtime_events_after(0)?;
+        let event_sequence = emitted_events.last().map_or(0, |event| event.sequence);
+        Ok(ChatTurnExecution {
             run_id,
             turn_id,
-            attempt_ids,
-            runtime_events,
-            status,
-            generated_requests,
+            executor,
+            advance,
+            cancellation: InferenceCancellation::new(),
+            deadline: None,
+            previous_message_count,
+            attempt_ids: Vec::new(),
+            emitted_events,
+            event_sequence,
+            output: None,
         })
+    }
+
+    pub fn advance_user_turn(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
+        if execution.is_terminal() {
+            bail!("cannot advance a terminal chat execution");
+        }
+        let effect = match &execution.advance.state {
+            TurnAdvanceState::Pending { effect } => effect.clone(),
+            TurnAdvanceState::Terminal { .. } => unreachable!("terminal state was rejected above"),
+        };
+        let result = self.execute_turn_effect(execution, effect);
+        execution
+            .attempt_ids
+            .extend(self.turn_runtime.take_attempt_ids());
+        let advance = execution.executor.resume(result)?;
+        if matches!(
+            advance.state,
+            TurnAdvanceState::Terminal {
+                terminal: TurnTerminal::Failed { .. }
+            }
+        ) {
+            self.link_failed_attempts(&execution.attempt_ids, "turn effect failed")?;
+        }
+        self.turn_runtime
+            .append_executor_events(advance.events.clone())?;
+        execution.advance = advance;
+        self.collect_execution_events(execution)?;
+        if matches!(execution.advance.state, TurnAdvanceState::Terminal { .. }) {
+            self.finish_execution(execution)?;
+        }
+        Ok(())
+    }
+
+    fn execute_turn_effect(
+        &mut self,
+        execution: &mut ChatTurnExecution,
+        effect: TurnEffect,
+    ) -> TurnEffectResult {
+        if execution.cancellation.is_cancelled() {
+            return cancelled_effect_result(effect);
+        }
+        match effect {
+            TurnEffect::HookBatch { key, request } => {
+                let started = Instant::now();
+                let outcome = match self.turn_runtime.execute_hooks(request) {
+                    Ok(result) => EffectOutcome::Succeeded(HookEffectOutput {
+                        result,
+                        duration_ms: u64::try_from(started.elapsed().as_millis()).ok(),
+                    }),
+                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
+                        EffectFailureCode::Hook,
+                        format!("{error:#}"),
+                        false,
+                    )),
+                };
+                TurnEffectResult::HookBatch { key, outcome }
+            }
+            TurnEffect::ModelGeneration { key, request } => {
+                let outcome = match self.turn_runtime.execute_model(
+                    request,
+                    execution.cancellation.clone(),
+                    execution.deadline,
+                ) {
+                    Ok(response) => EffectOutcome::Succeeded(response),
+                    Err(error) => model_effect_failure(error),
+                };
+                TurnEffectResult::ModelGeneration { key, outcome }
+            }
+            TurnEffect::CapabilityDispatch { key, request } => {
+                let outcome = match self.turn_runtime.execute_capability(request) {
+                    Ok(response) => EffectOutcome::Succeeded(response),
+                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
+                        EffectFailureCode::Capability,
+                        format!("{error:#}"),
+                        false,
+                    )),
+                };
+                TurnEffectResult::CapabilityDispatch { key, outcome }
+            }
+            TurnEffect::TranscriptAppend {
+                key,
+                messages,
+                output,
+            } => {
+                let outcome = match self.record_transcript_effect(execution, messages, &output) {
+                    Ok(()) => EffectOutcome::Succeeded(()),
+                    Err(error) => EffectOutcome::Failed(EffectFailure::new(
+                        EffectFailureCode::Transcript,
+                        format!("{error:#}"),
+                        false,
+                    )),
+                };
+                TurnEffectResult::TranscriptAppend { key, outcome }
+            }
+        }
+    }
+
+    fn record_transcript_effect(
+        &mut self,
+        execution: &ChatTurnExecution,
+        mut messages: Vec<TurnMessage>,
+        output: &TurnOutput,
+    ) -> Result<()> {
+        let stop_reason = match output {
+            TurnOutput::Answered { answer } => {
+                ensure_final_assistant_message(&mut messages, assistant_text_for_terminal(answer));
+                None
+            }
+            TurnOutput::Stopped { reason, detail } => {
+                messages.push(TurnMessage::Assistant {
+                    content: stopped_turn_context_message(
+                        *reason,
+                        detail.as_ref(),
+                        self.turn_runtime.session().turn_visible_tools(),
+                    ),
+                });
+                Some(*reason)
+            }
+        };
+        let mut recording = CompletedTurnRecording {
+            session_id: &self.session_id,
+            remaining_attempt_ids: execution.attempt_ids.iter(),
+            runtime: &self.runtime,
+        };
+        record_completed_turn_messages(
+            &mut self.chat_history,
+            &mut self.turn_runtime,
+            &mut recording,
+            messages
+                .get(execution.previous_message_count..)
+                .context("turn transcript is shorter than prior chat context")?,
+            stop_reason,
+        )?;
+        self.messages = messages;
+        Ok(())
+    }
+
+    fn collect_execution_events(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
+        let events = self
+            .turn_runtime
+            .read_runtime_events_after(execution.event_sequence)?;
+        if let Some(last) = events.last() {
+            execution.event_sequence = last.sequence;
+        }
+        execution.emitted_events.extend(events);
+        Ok(())
+    }
+
+    fn finish_execution(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
+        let terminal = match &execution.advance.state {
+            TurnAdvanceState::Terminal { terminal } => terminal.clone(),
+            TurnAdvanceState::Pending { .. } => bail!("chat execution still has a pending effect"),
+        };
+        let generated_requests = self.turn_runtime.generated_requests();
+        let output = match terminal {
+            TurnTerminal::Completed { output } => {
+                let status = match output {
+                    TurnOutput::Answered { answer } => ChatTurnStatus::Answered {
+                        answer: assistant_text_for_terminal(&answer),
+                    },
+                    TurnOutput::Stopped { reason, .. } => ChatTurnStatus::Stopped { reason },
+                };
+                let runtime_events = self.turn_runtime.take_runtime_events()?;
+                ChatTurnOutput {
+                    run_id: execution.run_id.clone(),
+                    turn_id: execution.turn_id.clone(),
+                    attempt_ids: execution.attempt_ids.clone(),
+                    runtime_events,
+                    status,
+                    generated_requests,
+                }
+            }
+            TurnTerminal::Failed { failure } => self.finish_failed_turn(
+                execution.run_id.clone(),
+                execution.turn_id.clone(),
+                execution.attempt_ids.clone(),
+                generated_requests,
+                failure.message,
+                false,
+            )?,
+            TurnTerminal::Cancelled => {
+                self.messages = execution.executor.checkpoint().state().messages.clone();
+                let runtime_events = self.turn_runtime.take_runtime_events()?;
+                ChatTurnOutput {
+                    run_id: execution.run_id.clone(),
+                    turn_id: execution.turn_id.clone(),
+                    attempt_ids: execution.attempt_ids.clone(),
+                    runtime_events,
+                    status: ChatTurnStatus::Cancelled,
+                    generated_requests,
+                }
+            }
+        };
+        execution.output = Some(output);
+        Ok(())
     }
 
     fn finish_failed_turn(
@@ -386,13 +597,48 @@ impl ChatService {
         attempt_ids: Vec<AttemptId>,
         generated_requests: usize,
         message: String,
+        append_terminal_event: bool,
     ) -> Result<ChatTurnOutput> {
-        for attempt_id in &attempt_ids {
-            if self.loop_host.has_linked_attempt(attempt_id) {
+        self.link_failed_attempts(&attempt_ids, &message)?;
+        if let Some(history) = &mut self.chat_history
+            && let Err(error) = history.fail(message.clone())
+        {
+            tracing::warn!(
+                target: "agentlibre::app",
+                session_id = %self.session_id,
+                turn_error = %message,
+                history_error = %error,
+                "failed to record chat session failure"
+            );
+        }
+        if append_terminal_event {
+            self.turn_runtime
+                .append_failed_terminal_event()
+                .with_context(|| {
+                    format!("failed to append terminal event after turn failure: {message}")
+                })?;
+        }
+        let runtime_events = self.turn_runtime.take_runtime_events()?;
+        self.release_inference_context()
+            .context("failed to release inference context after turn failure")?;
+        self.session_finished = true;
+        Ok(ChatTurnOutput {
+            run_id,
+            turn_id,
+            attempt_ids,
+            runtime_events,
+            status: ChatTurnStatus::Failed { message },
+            generated_requests,
+        })
+    }
+
+    fn link_failed_attempts(&mut self, attempt_ids: &[AttemptId], message: &str) -> Result<()> {
+        for attempt_id in attempt_ids {
+            if self.turn_runtime.has_linked_attempt(attempt_id) {
                 continue;
             }
             let envelope = self
-                .loop_host
+                .turn_runtime
                 .append_attempt_linked_event(attempt_id)
                 .with_context(|| {
                     format!("failed to link model attempt after turn failure: {message}")
@@ -409,34 +655,7 @@ impl ChatService {
                 );
             }
         }
-        if let Some(history) = &mut self.chat_history
-            && let Err(error) = history.fail(message.clone())
-        {
-            tracing::warn!(
-                target: "agentlibre::app",
-                session_id = %self.session_id,
-                turn_error = %message,
-                history_error = %error,
-                "failed to record chat session failure"
-            );
-        }
-        self.loop_host
-            .append_failed_terminal_event()
-            .with_context(|| {
-                format!("failed to append terminal event after turn failure: {message}")
-            })?;
-        let runtime_events = self.loop_host.take_runtime_events()?;
-        self.release_inference_context()
-            .context("failed to release inference context after turn failure")?;
-        self.session_finished = true;
-        Ok(ChatTurnOutput {
-            run_id,
-            turn_id,
-            attempt_ids,
-            runtime_events,
-            status: ChatTurnStatus::Failed { message },
-            generated_requests,
-        })
+        Ok(())
     }
 }
 
@@ -445,7 +664,7 @@ impl Drop for ChatService {
         if self.context_released {
             return;
         }
-        if let Err(error) = self.loop_host.release_context_for_teardown() {
+        if let Err(error) = self.turn_runtime.release_context_for_teardown() {
             tracing::warn!(
                 target: "agentlibre::app",
                 session_id = %self.session_id,
@@ -458,6 +677,50 @@ impl Drop for ChatService {
     }
 }
 
+fn cancelled_effect_result(effect: TurnEffect) -> TurnEffectResult {
+    match effect {
+        TurnEffect::HookBatch { key, .. } => TurnEffectResult::HookBatch {
+            key,
+            outcome: EffectOutcome::Cancelled,
+        },
+        TurnEffect::ModelGeneration { key, .. } => TurnEffectResult::ModelGeneration {
+            key,
+            outcome: EffectOutcome::Cancelled,
+        },
+        TurnEffect::CapabilityDispatch { key, .. } => TurnEffectResult::CapabilityDispatch {
+            key,
+            outcome: EffectOutcome::Cancelled,
+        },
+        TurnEffect::TranscriptAppend { key, .. } => TurnEffectResult::TranscriptAppend {
+            key,
+            outcome: EffectOutcome::Cancelled,
+        },
+    }
+}
+
+fn model_effect_failure(error: anyhow::Error) -> EffectOutcome<agl_turn::ModelResponse> {
+    if let Some(manager_error) = error.downcast_ref::<ModelManagerError>() {
+        return match manager_error {
+            ModelManagerError::Cancelled => EffectOutcome::Cancelled,
+            ModelManagerError::DeadlineExceeded => EffectOutcome::Failed(EffectFailure::new(
+                EffectFailureCode::Deadline,
+                format!("model request failed: {manager_error}"),
+                false,
+            )),
+            _ => EffectOutcome::Failed(EffectFailure::new(
+                EffectFailureCode::Inference,
+                format!("model request failed: {manager_error}"),
+                manager_error.retryable(),
+            )),
+        };
+    }
+    EffectOutcome::Failed(EffectFailure::new(
+        EffectFailureCode::Inference,
+        format!("model request failed: {error:#}"),
+        false,
+    ))
+}
+
 pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     let mut input = TurnInput::user(
         spec.run_id.clone(),
@@ -468,6 +731,9 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     .with_request_index_start(spec.request_index)
     .with_hook_payload(spec.hook_payload)
     .with_max_hook_repair_attempts(spec.max_hook_repair_attempts);
+    if let Some(policy_hash) = spec.capability_policy_hash {
+        input = input.with_capability_policy_hash(policy_hash);
+    }
     for hook_batch in spec.hook_batches {
         input = input.with_hook_batch(hook_batch.clone());
     }
@@ -495,7 +761,7 @@ struct CompletedTurnRecording<'a> {
 
 fn record_completed_turn_messages(
     chat_history: &mut Option<ChatSessionStore>,
-    loop_host: &mut ChatLoopHost,
+    turn_runtime: &mut ChatTurnRuntime,
     recording: &mut CompletedTurnRecording<'_>,
     messages: &[TurnMessage],
     stop_reason: Option<StopReason>,
@@ -505,7 +771,7 @@ fn record_completed_turn_messages(
         match message {
             TurnMessage::System { .. } | TurnMessage::User { .. } => {}
             TurnMessage::Assistant { content } => {
-                link_next_attempt(chat_history, loop_host, recording)?;
+                link_next_attempt(chat_history, turn_runtime, recording)?;
                 let message_id = MessageId::generate();
                 let is_stop_marker = pending_stop_reason.take().is_some();
                 log_message_metadata(
@@ -515,10 +781,11 @@ fn record_completed_turn_messages(
                     content,
                     recording.runtime,
                 );
-                let envelope = loop_host.append_runtime_event(RuntimeEvent::AssistantMessage {
-                    message_id,
-                    content: content.clone(),
-                })?;
+                let envelope =
+                    turn_runtime.append_runtime_event(RuntimeEvent::AssistantMessage {
+                        message_id,
+                        content: content.clone(),
+                    })?;
                 if let Some(history) = chat_history.as_mut() {
                     if is_stop_marker {
                         history.append_assistant_stop_marker(envelope)?;
@@ -528,7 +795,7 @@ fn record_completed_turn_messages(
                 }
             }
             TurnMessage::AssistantToolCall { name, arguments } => {
-                link_next_attempt(chat_history, loop_host, recording)?;
+                link_next_attempt(chat_history, turn_runtime, recording)?;
                 let message_id = MessageId::generate();
                 log_message_metadata(
                     "assistant_tool_call",
@@ -537,11 +804,12 @@ fn record_completed_turn_messages(
                     &arguments.to_string(),
                     recording.runtime,
                 );
-                let envelope = loop_host.append_runtime_event(RuntimeEvent::AssistantToolCall {
-                    message_id,
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                })?;
+                let envelope =
+                    turn_runtime.append_runtime_event(RuntimeEvent::AssistantToolCall {
+                        message_id,
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    })?;
                 if let Some(history) = chat_history.as_mut() {
                     history.append_assistant_tool_call(envelope)?;
                 }
@@ -555,7 +823,7 @@ fn record_completed_turn_messages(
                     result,
                     recording.runtime,
                 );
-                let envelope = loop_host.append_runtime_event(RuntimeEvent::ToolMessage {
+                let envelope = turn_runtime.append_runtime_event(RuntimeEvent::ToolMessage {
                     message_id,
                     name: name.clone(),
                     data: result.data.clone(),
@@ -567,20 +835,20 @@ fn record_completed_turn_messages(
         }
     }
     while recording.remaining_attempt_ids.len() > 0 {
-        link_next_attempt(chat_history, loop_host, recording)?;
+        link_next_attempt(chat_history, turn_runtime, recording)?;
     }
     Ok(())
 }
 
 fn link_next_attempt(
     chat_history: &mut Option<ChatSessionStore>,
-    loop_host: &mut ChatLoopHost,
+    turn_runtime: &mut ChatTurnRuntime,
     recording: &mut CompletedTurnRecording<'_>,
 ) -> Result<()> {
     let Some(attempt_id) = recording.remaining_attempt_ids.next() else {
         return Ok(());
     };
-    let envelope = loop_host.append_attempt_linked_event(attempt_id)?;
+    let envelope = turn_runtime.append_attempt_linked_event(attempt_id)?;
     if let Some(history) = chat_history.as_mut() {
         history.link_attempt(envelope)?;
     }
@@ -726,16 +994,19 @@ fn log_action_result_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use agl_capabilities::{CapabilityId, DispatchDenialCode};
+    use agl_capabilities::DispatchDenialCode;
     use agl_config::LocalInferenceConfig;
-    use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus};
+    use agl_events::{
+        EVENT_SCHEMA, EventDraft, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus,
+    };
     use agl_ids::{EventId, MessageId, RequestId, RunId, SessionId, TurnId};
-    use agl_inference::{InferenceResponse, ModelManagerStatus};
-    use agl_loop::AgentLoopHost;
-    use agl_turn::{TurnPhase, TurnTerminalStatus, TurnTransition, TurnTransitionRecord};
+    use agl_inference::{
+        InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
+    };
 
     use crate::{ChatInferenceJob, InferenceClient};
 
@@ -916,6 +1187,165 @@ tool_call_format = "hermes_json"
         }
     }
 
+    struct ScriptedInferenceClient {
+        responses: Mutex<VecDeque<String>>,
+    }
+
+    impl InferenceClient for ScriptedInferenceClient {
+        fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse> {
+            let content = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("scripted inference response was not configured")?;
+            Ok(InferenceResponse {
+                attempt_id: job.request.attempt_id,
+                content,
+                finish_reason: InferenceFinishReason::Stop,
+                metadata: InferenceResponseMetadata {
+                    model_state: Some("scripted".to_string()),
+                    selected_device: None,
+                    duration_ms: 0,
+                },
+            })
+        }
+
+        fn clear_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &LocalInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+    }
+
+    fn scripted_inference_client(responses: &[&str]) -> InferenceClientHandle {
+        InferenceClientHandle::new(ScriptedInferenceClient {
+            responses: Mutex::new(responses.iter().map(|value| value.to_string()).collect()),
+        })
+    }
+
+    #[test]
+    fn stepping_driver_exposes_initial_events_before_answer_terminal() {
+        let mut chat = test_chat_service_with_client(
+            "stepping-answer",
+            false,
+            scripted_inference_client(&["done"]),
+        );
+        let mut execution = chat
+            .service
+            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), "hello")
+            .unwrap();
+
+        let initial = execution.take_events();
+        assert!(
+            initial
+                .iter()
+                .any(|event| matches!(event.payload, SafeRuntimeEvent::TurnStarted { .. }))
+        );
+        assert!(
+            initial
+                .iter()
+                .all(|event| !matches!(event.payload, SafeRuntimeEvent::TurnFinished { .. }))
+        );
+        assert!(matches!(
+            execution.pending_effect(),
+            Some(TurnEffect::ModelGeneration { .. })
+        ));
+
+        while !execution.is_terminal() {
+            chat.service.advance_user_turn(&mut execution).unwrap();
+        }
+        let output = execution.take_output().unwrap();
+        assert_eq!(
+            output.status,
+            ChatTurnStatus::Answered {
+                answer: "done".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn direct_driver_executes_tools_and_stops_hidden_calls() {
+        let mut tool_chat = test_chat_service_with_client(
+            "stepping-tool",
+            false,
+            scripted_inference_client(&[
+                r#"<tool_call>{"name":"fs.read","arguments":{"path":"inference.toml"}}</tool_call>"#,
+                "tool complete",
+            ]),
+        );
+        let tool_output = tool_chat.service.run_user_turn("read config").unwrap();
+        assert!(matches!(
+            tool_output.status,
+            ChatTurnStatus::Answered { ref answer } if answer == "tool complete"
+        ));
+        assert!(tool_output.runtime_events.iter().any(|event| matches!(
+            event.payload,
+            SafeRuntimeEvent::ToolCallFinished { .. }
+                | SafeRuntimeEvent::CapabilityCallAdmitted { .. }
+        )));
+
+        let mut stop_chat = test_chat_service_with_client(
+            "stepping-stop",
+            false,
+            scripted_inference_client(&[
+                r#"<tool_call>{"name":"hidden.write","arguments":{}}</tool_call>"#,
+            ]),
+        );
+        let stop_output = stop_chat.service.run_user_turn("write").unwrap();
+        assert!(matches!(
+            stop_output.status,
+            ChatTurnStatus::Stopped {
+                reason: StopReason::HiddenTool
+            }
+        ));
+    }
+
+    #[test]
+    fn stepping_driver_cancels_before_pending_model_effect() {
+        let mut chat = test_chat_service_with_client(
+            "stepping-cancel",
+            false,
+            scripted_inference_client(&["unused"]),
+        );
+        let mut execution = chat
+            .service
+            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), "cancel")
+            .unwrap();
+
+        execution.request_cancellation().unwrap();
+        chat.service.advance_user_turn(&mut execution).unwrap();
+
+        let output = execution.take_output().unwrap();
+        assert_eq!(output.status, ChatTurnStatus::Cancelled);
+        assert!(
+            output
+                .runtime_events
+                .iter()
+                .any(|event| matches!(event.payload, SafeRuntimeEvent::TurnCancelled { .. }))
+        );
+        assert!(matches!(
+            output.runtime_events.last().unwrap().payload,
+            SafeRuntimeEvent::TurnFinished {
+                status: TurnFinishStatus::Cancelled
+            }
+        ));
+    }
+
     #[test]
     fn clear_and_finish_target_the_session_managed_context_once() {
         let calls = Arc::new(Mutex::new(ContextLifecycleCalls::default()));
@@ -947,7 +1377,7 @@ tool_call_format = "hermes_json"
         let mut chat = test_chat_service_with_client("active-drop", false, client);
         let session_id = chat.service.session_id().clone();
         chat.service
-            .loop_host
+            .turn_runtime
             .begin_turn(&session_id, &run_id(), &turn_id(), Some(request_id()))
             .unwrap();
 
@@ -957,53 +1387,43 @@ tool_call_format = "hermes_json"
     }
 
     #[test]
-    fn pending_terminal_envelope_is_appended_after_transcript_events() {
+    fn executor_terminal_envelope_is_appended_after_transcript_events() {
         let mut chat = test_chat_service("terminal-last");
         let run_id = run_id();
         let turn_id = turn_id();
         let session_id = chat.service.session_id().clone();
         chat.service
-            .loop_host
+            .turn_runtime
             .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
             .unwrap();
         chat.service
-            .loop_host
+            .turn_runtime
             .append_runtime_event(RuntimeEvent::UserMessage {
                 message_id: message_id('4'),
                 content: "hello".to_string(),
             })
             .unwrap();
-        let terminal = RuntimeEvent::TurnFinished {
-            status: TurnFinishStatus::Answered,
-        };
-        AgentLoopHost::emit_transition(
-            &mut chat.service.loop_host,
-            &TurnTransitionRecord {
-                run_id: run_id.clone(),
-                turn_id: turn_id.clone(),
-                sequence: 1,
-                from: TurnPhase::AnswerReady,
-                to: TurnPhase::Finished,
-                transition: TurnTransition::Finish {
-                    status: TurnTerminalStatus::Answered,
-                },
-            },
-            &terminal,
-        )
-        .unwrap();
         chat.service
-            .loop_host
+            .turn_runtime
             .append_runtime_event(RuntimeEvent::AssistantMessage {
                 message_id: message_id('5'),
                 content: "answer".to_string(),
             })
             .unwrap();
         chat.service
-            .loop_host
-            .append_pending_terminal_event()
+            .turn_runtime
+            .append_executor_events(vec![EventDraft::new(
+                EventScope::builder(run_id.clone())
+                    .turn_id(turn_id.clone())
+                    .build()
+                    .unwrap(),
+                RuntimeEvent::TurnFinished {
+                    status: TurnFinishStatus::Answered,
+                },
+            )])
             .unwrap();
 
-        let events = chat.service.loop_host.take_runtime_events().unwrap();
+        let events = chat.service.turn_runtime.take_runtime_events().unwrap();
         let terminal = events.last().unwrap();
         assert!(matches!(
             terminal.payload,
@@ -1028,22 +1448,31 @@ tool_call_format = "hermes_json"
         let turn_id = turn_id();
         let session_id = chat.service.session_id().clone();
         chat.service
-            .loop_host
+            .turn_runtime
             .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
             .unwrap();
-        let policy_hash = chat.service.loop_host.active_policy_hash().unwrap().clone();
+        let policy_hash = chat
+            .service
+            .turn_runtime
+            .active_policy_hash()
+            .unwrap()
+            .clone();
 
-        let reload_error = chat.service.loop_host.reload_runtime_context().unwrap_err();
+        let reload_error = chat
+            .service
+            .turn_runtime
+            .reload_runtime_context()
+            .unwrap_err();
         let workspace_error = chat
             .service
-            .loop_host
+            .turn_runtime
             .set_workspace_root(chat.root.join("other"))
             .unwrap_err();
 
         assert!(reload_error.to_string().contains("active turn"));
         assert!(workspace_error.to_string().contains("active turn"));
         assert_eq!(
-            chat.service.loop_host.active_policy_hash(),
+            chat.service.turn_runtime.active_policy_hash(),
             Some(&policy_hash)
         );
     }
@@ -1055,26 +1484,34 @@ tool_call_format = "hermes_json"
         let turn_id = turn_id();
         let session_id = chat.service.session_id().clone();
         chat.service
-            .loop_host
+            .turn_runtime
             .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
             .unwrap();
         let policy_hash = chat
             .service
-            .loop_host
+            .turn_runtime
             .active_policy_hash()
             .unwrap()
             .as_str()
             .to_string();
 
         let raw_name = "model-controlled-secret\ninvalid-capability";
-        AgentLoopHost::record_capability_denial(
-            &mut chat.service.loop_host,
-            CapabilityId::new(raw_name.to_string()).ok(),
-            DispatchDenialCode::InvalidArguments,
-        )
-        .unwrap();
+        chat.service
+            .turn_runtime
+            .append_executor_events(vec![EventDraft::new(
+                EventScope::builder(run_id)
+                    .turn_id(turn_id)
+                    .build()
+                    .unwrap(),
+                RuntimeEvent::CapabilityCallDenied {
+                    policy_hash: policy_hash.clone(),
+                    capability_id: None,
+                    reason_code: DispatchDenialCode::InvalidArguments.as_str().to_string(),
+                },
+            )])
+            .unwrap();
 
-        let events = chat.service.loop_host.take_runtime_events().unwrap();
+        let events = chat.service.turn_runtime.take_runtime_events().unwrap();
         let denial = events
             .iter()
             .find_map(|event| match &event.payload {
@@ -1321,6 +1758,7 @@ tool_call_format = "hermes_json"
             hook_payload: serde_json::json!({"runtime_identity": {"skills": []}}),
             max_hook_repair_attempts: 1,
             visible_tools: &visible_tools,
+            capability_policy_hash: Some("sha256:test".to_string()),
             user_input: "new",
         });
 
@@ -1337,6 +1775,7 @@ tool_call_format = "hermes_json"
         assert_eq!(input.visible_tools, visible_tools);
         assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
         assert_eq!(input.max_hook_repair_attempts, 1);
+        assert_eq!(input.capability_policy_hash.as_deref(), Some("sha256:test"));
     }
 
     #[test]
@@ -1352,6 +1791,7 @@ tool_call_format = "hermes_json"
             hook_payload: serde_json::json!({}),
             max_hook_repair_attempts: 0,
             visible_tools: &[],
+            capability_policy_hash: None,
             user_input: "new",
         });
 

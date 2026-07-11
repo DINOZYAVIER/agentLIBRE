@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use agl_capabilities::{
     CapabilityGrant, CapabilityId, CapabilityPolicyInput, EffectiveCapabilitySet,
@@ -17,7 +18,7 @@ use agl_functions::{
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
-use agl_inference::{InferenceRequest, InferenceResponse};
+use agl_inference::{InferenceCancellation, InferenceRequest, InferenceResponse};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_oven::render_model_request;
 use agl_runtime::{
@@ -75,6 +76,11 @@ pub struct InferenceSession {
     memory_enabled: bool,
     config_path: PathBuf,
     artifact_root: PathBuf,
+}
+
+pub(crate) struct InferenceExecutionControl {
+    pub cancellation: InferenceCancellation,
+    pub deadline: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -391,6 +397,7 @@ impl InferenceSession {
         session_id: Option<SessionId>,
         request_id: Option<RequestId>,
         effective_capabilities: &EffectiveCapabilitySet,
+        control: InferenceExecutionControl,
     ) -> Result<InferenceResponse> {
         ensure!(
             session_id.as_ref() == Some(&self.session_id),
@@ -420,6 +427,8 @@ impl InferenceSession {
             max_output_tokens: self.max_output_tokens,
             session_id: self.session_id.clone(),
             request,
+            cancellation: control.cancellation,
+            deadline: control.deadline,
         })
     }
 

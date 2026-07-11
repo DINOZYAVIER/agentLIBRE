@@ -466,6 +466,7 @@ fn protocol_terminal_status(status: &TurnFinishStatus) -> TurnTerminalStatus {
         TurnFinishStatus::Answered => TurnTerminalStatus::Answered,
         TurnFinishStatus::Stopped => TurnTerminalStatus::Stopped,
         TurnFinishStatus::Failed => TurnTerminalStatus::Failed,
+        TurnFinishStatus::Cancelled => TurnTerminalStatus::Cancelled,
     }
 }
 

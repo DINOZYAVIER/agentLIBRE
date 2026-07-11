@@ -349,6 +349,7 @@ pub enum TurnTerminalStatus {
     Answered,
     Stopped,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

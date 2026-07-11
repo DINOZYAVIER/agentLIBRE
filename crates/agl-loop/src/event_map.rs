@@ -144,6 +144,12 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> RuntimeEvent {
                 name: name.clone(),
                 message: message.clone(),
             },
+            TurnFailureOperation::TranscriptAppend => RuntimeEvent::TranscriptAppendFailed {
+                reason_code: message.clone(),
+            },
+        },
+        TurnTransition::Cancel => RuntimeEvent::TurnCancelled {
+            reason_code: "turn.cancelled".to_string(),
         },
         TurnTransition::Finish { status } => RuntimeEvent::TurnFinished {
             status: finish_status_event(*status),
@@ -215,5 +221,6 @@ fn finish_status_event(status: TurnTerminalStatus) -> TurnFinishStatus {
         TurnTerminalStatus::Answered => TurnFinishStatus::Answered,
         TurnTerminalStatus::Stopped => TurnFinishStatus::Stopped,
         TurnTerminalStatus::Failed => TurnFinishStatus::Failed,
+        TurnTerminalStatus::Cancelled => TurnFinishStatus::Cancelled,
     }
 }

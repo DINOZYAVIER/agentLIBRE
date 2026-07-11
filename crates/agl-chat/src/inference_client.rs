@@ -1,11 +1,12 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use agl_config::LocalInferenceConfig;
 use agl_ids::SessionId;
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    ContextKey, InferenceJob, InferenceRequest, InferenceResponse, ModelManagerHandle,
-    ModelManagerStatus,
+    ContextKey, InferenceCancellation, InferenceJob, InferenceRequest, InferenceResponse,
+    ModelManagerHandle, ModelManagerStatus,
 };
 use anyhow::{Result, ensure};
 
@@ -16,6 +17,8 @@ pub struct ChatInferenceJob {
     pub max_output_tokens: u32,
     pub session_id: SessionId,
     pub request: InferenceRequest,
+    pub cancellation: InferenceCancellation,
+    pub deadline: Option<Instant>,
 }
 
 pub trait InferenceClient: Send + Sync + 'static {
@@ -69,14 +72,18 @@ impl InferenceClient for ModelManagerHandle {
     fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse> {
         ensure_managed_session(&job.session_id, job.request.session_id.as_ref())?;
         let context_key = ContextKey::for_conversation(&job.config, job.session_id.as_str())?;
-        let job = InferenceJob::new(
+        let mut inference_job = InferenceJob::new(
             job.config,
             job.request,
             context_key,
             job.artifact_root,
             job.max_output_tokens,
-        )?;
-        Ok(ModelManagerHandle::generate(self, job)?)
+        )?
+        .with_cancellation(job.cancellation);
+        if let Some(deadline) = job.deadline {
+            inference_job = inference_job.with_deadline(deadline);
+        }
+        Ok(ModelManagerHandle::generate(self, inference_job)?)
     }
 
     fn clear_context(&self, config: &LocalInferenceConfig, session_id: &SessionId) -> Result<()> {

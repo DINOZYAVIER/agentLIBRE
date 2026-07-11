@@ -1,4 +1,7 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnOutput {
     Answered {
         answer: String,
@@ -9,7 +12,8 @@ pub enum TurnOutput {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopReason {
     ToolJsonUnrepairable,
     ToolLimitReached,
@@ -28,7 +32,8 @@ impl StopReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StopDetail {
     HiddenTool { name: String },
     ToolLimitReached { limit: usize },

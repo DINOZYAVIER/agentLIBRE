@@ -120,7 +120,9 @@ where
         })?;
         match response.status {
             TurnTerminalStatus::Answered => Ok(response.assistant_text),
-            TurnTerminalStatus::Stopped | TurnTerminalStatus::Failed => {
+            TurnTerminalStatus::Stopped
+            | TurnTerminalStatus::Failed
+            | TurnTerminalStatus::Cancelled => {
                 bail!("daemon turn ended with {:?}", response.status)
             }
         }
