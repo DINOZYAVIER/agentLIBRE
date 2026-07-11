@@ -1525,6 +1525,7 @@ fn parse_state_effects(values: &[String]) -> std::result::Result<BTreeSet<StateE
         .iter()
         .map(|value| match value.as_str() {
             "host_screen_capture" => Ok(StateEffect::HostScreenCapture),
+            "spawn_subagent" => Ok(StateEffect::SpawnSubagent),
             "repo_files" => Ok(StateEffect::RepoFiles),
             "repo_workspace" => Ok(StateEffect::RepoWorkspace),
             "repo_hooks" => Ok(StateEffect::RepoHooks),

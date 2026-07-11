@@ -12,3 +12,4 @@ agl-config.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+sha2.workspace = true

@@ -157,6 +157,7 @@ pub struct CapabilityPolicyInput {
     pub selected_skills: Vec<SkillCapabilityPolicy>,
     pub grants: Vec<CapabilityGrant>,
     pub unavailable_capabilities: BTreeSet<CapabilityId>,
+    pub authority_ceiling: Option<BTreeSet<CapabilityId>>,
     pub function_policy: Option<FunctionToolPolicy>,
     pub tool_mode: ToolAccessMode,
 }
@@ -173,6 +174,7 @@ impl CapabilityPolicyInput {
             selected_skills: Vec::new(),
             grants: Vec::new(),
             unavailable_capabilities: BTreeSet::new(),
+            authority_ceiling: None,
             function_policy: None,
             tool_mode,
         }
@@ -204,6 +206,14 @@ impl CapabilityPolicyInput {
         self
     }
 
+    pub fn with_authority_ceiling(
+        mut self,
+        capabilities: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.authority_ceiling = Some(capabilities.into_iter().collect());
+        self
+    }
+
     pub fn resolve(self) -> Result<EffectiveCapabilitySet, PolicyResolutionError> {
         EffectiveCapabilitySet::resolve(self)
     }
@@ -223,6 +233,7 @@ pub enum CapabilityExclusionReason {
     GrantStateEffectDenied,
     GrantSensitiveInputDenied,
     ProviderUnavailable,
+    ParentAuthorityDenied,
 }
 
 impl CapabilityExclusionReason {
@@ -239,6 +250,7 @@ impl CapabilityExclusionReason {
             Self::GrantStateEffectDenied => "grant_state_effect_denied",
             Self::GrantSensitiveInputDenied => "grant_sensitive_input_denied",
             Self::ProviderUnavailable => "provider_unavailable",
+            Self::ParentAuthorityDenied => "parent_authority_denied",
         }
     }
 }
@@ -334,6 +346,18 @@ impl EffectiveCapabilitySet {
                     &mut exclusions,
                     capability_id,
                     CapabilityExclusionReason::ProviderUnavailable,
+                );
+                continue;
+            }
+            if input
+                .authority_ceiling
+                .as_ref()
+                .is_some_and(|ceiling| !ceiling.contains(&capability_id))
+            {
+                exclude(
+                    &mut exclusions,
+                    capability_id,
+                    CapabilityExclusionReason::ParentAuthorityDenied,
                 );
                 continue;
             }
@@ -433,6 +457,7 @@ impl EffectiveCapabilitySet {
             selected_skills: BTreeMap<&'a SkillId, SkillHashMaterial<'a>>,
             grants: BTreeSet<&'a CapabilityGrant>,
             unavailable_capabilities: &'a BTreeSet<CapabilityId>,
+            authority_ceiling: &'a Option<BTreeSet<CapabilityId>>,
             function_policy: &'a Option<FunctionToolPolicy>,
             capabilities: &'a BTreeMap<CapabilityId, EffectiveCapability>,
             exclusions: &'a BTreeMap<CapabilityId, CapabilityExclusion>,
@@ -496,6 +521,7 @@ impl EffectiveCapabilitySet {
             selected_skills,
             grants: input.grants.iter().collect(),
             unavailable_capabilities: &input.unavailable_capabilities,
+            authority_ceiling: &input.authority_ceiling,
             function_policy: &input.function_policy,
             capabilities: &capabilities,
             exclusions: &exclusions,

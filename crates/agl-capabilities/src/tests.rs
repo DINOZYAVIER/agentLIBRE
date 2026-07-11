@@ -337,6 +337,80 @@ fn tool_mode_is_an_operation_ceiling_even_for_grants() {
 }
 
 #[test]
+fn parent_authority_ceiling_is_an_immutable_subset_boundary() {
+    let read = capability("fs.read");
+    let write = capability("fs.edit");
+    let set = CapabilityPolicyInput::new(
+        [provider()],
+        [read.clone(), write.clone()],
+        ToolAccessMode::Admin,
+    )
+    .with_selected_skills([SkillCapabilityPolicy::new(
+        SkillId::new("editor").unwrap(),
+        [write.clone()],
+    )])
+    .with_grants([CapabilityGrant::new(write.clone(), OperationKind::Admin)])
+    .with_authority_ceiling([read.clone()])
+    .resolve()
+    .unwrap();
+
+    assert!(set.contains(&read));
+    assert!(!set.contains(&write));
+    assert_eq!(
+        set.exclusion(&write).unwrap().reason,
+        CapabilityExclusionReason::ParentAuthorityDenied
+    );
+    assert!(
+        set.capabilities()
+            .all(|entry| entry.declaration().id == read)
+    );
+}
+
+#[test]
+fn delegation_declaration_has_strict_bounded_arguments() {
+    let provider = delegation_provider();
+    let declaration = provider
+        .actions
+        .iter()
+        .find(|action| action.id.as_str() == AGENT_DELEGATE_CAPABILITY_ID)
+        .unwrap();
+    let schema = declaration.compile_schema().unwrap();
+
+    schema
+        .validate(&json!({"subagent_id": "reviewer", "task": "Review this patch"}))
+        .unwrap();
+    assert!(
+        schema
+            .validate(&json!({"subagent_id": "reviewer", "task": "x", "extra": true}))
+            .is_err()
+    );
+    assert!(
+        DelegateActionArgs {
+            subagent_id: " reviewer".to_string(),
+            task: "Review".to_string(),
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        DelegateActionArgs {
+            subagent_id: "reviewer".to_string(),
+            task: " ".to_string(),
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        DelegateActionArgs {
+            subagent_id: "reviewer".to_string(),
+            task: "x".repeat(MAX_DELEGATED_TASK_BYTES + 1),
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
 fn read_only_mode_requires_explicit_visibility_for_mutating_actions() {
     let id = capability("permissions.request");
     let hidden = ActionDeclaration::from_schema::<EmptyArgs>(

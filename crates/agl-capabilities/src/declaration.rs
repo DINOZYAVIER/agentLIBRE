@@ -72,6 +72,7 @@ impl OperationKind {
 #[serde(rename_all = "snake_case")]
 pub enum StateEffect {
     HostScreenCapture,
+    SpawnSubagent,
     RepoFiles,
     RepoWorkspace,
     RepoHooks,
@@ -92,6 +93,7 @@ impl StateEffect {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::HostScreenCapture => "host_screen_capture",
+            Self::SpawnSubagent => "spawn_subagent",
             Self::RepoFiles => "repo_files",
             Self::RepoWorkspace => "repo_workspace",
             Self::RepoHooks => "repo_hooks",
