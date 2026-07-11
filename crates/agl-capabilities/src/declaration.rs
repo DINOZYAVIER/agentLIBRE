@@ -71,6 +71,7 @@ impl OperationKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StateEffect {
+    HostScreenCapture,
     RepoFiles,
     RepoWorkspace,
     RepoHooks,
@@ -90,6 +91,7 @@ pub enum StateEffect {
 impl StateEffect {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::HostScreenCapture => "host_screen_capture",
             Self::RepoFiles => "repo_files",
             Self::RepoWorkspace => "repo_workspace",
             Self::RepoHooks => "repo_hooks",
@@ -104,6 +106,20 @@ impl StateEffect {
             Self::StorePermissionRequests => "store_permission_requests",
             Self::StorePermissionGrants => "store_permission_grants",
             Self::SkillTrust => "skill_trust",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveInput {
+    ScreenCapture,
+}
+
+impl SensitiveInput {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ScreenCapture => "screen_capture",
         }
     }
 }
@@ -131,6 +147,7 @@ pub struct ActionDeclaration {
     pub operation_kind: OperationKind,
     pub delivery: ActionDelivery,
     pub state_effects: BTreeSet<StateEffect>,
+    pub sensitive_inputs: BTreeSet<SensitiveInput>,
     pub visibility: ActionVisibility,
 }
 
@@ -148,6 +165,7 @@ impl ActionDeclaration {
             operation_kind,
             delivery: ActionDelivery::for_operation(operation_kind),
             state_effects: BTreeSet::new(),
+            sensitive_inputs: BTreeSet::new(),
             visibility: ActionVisibility::for_operation(operation_kind),
         };
         declaration.validate_shape()?;
@@ -172,6 +190,14 @@ impl ActionDeclaration {
         self
     }
 
+    pub fn with_sensitive_inputs(
+        mut self,
+        inputs: impl IntoIterator<Item = SensitiveInput>,
+    ) -> Self {
+        self.sensitive_inputs = inputs.into_iter().collect();
+        self
+    }
+
     pub fn with_run_step_idempotency(mut self) -> Self {
         self.delivery = ActionDelivery::IdempotentRunStep;
         self
@@ -190,10 +216,25 @@ impl ActionDeclaration {
                 message: "state-mutating operations must declare state effects",
             });
         }
-        if !self.operation_kind.is_state_mutating() && !self.state_effects.is_empty() {
+        if !self.operation_kind.is_state_mutating()
+            && self
+                .state_effects
+                .iter()
+                .any(|effect| *effect != StateEffect::HostScreenCapture)
+        {
             return Err(DeclarationError::InvalidOperation {
                 id: self.id.clone(),
-                message: "read operations must not declare state effects",
+                message: "read operations may only declare host input effects",
+            });
+        }
+        let screen_effect = self.state_effects.contains(&StateEffect::HostScreenCapture);
+        let screen_input = self
+            .sensitive_inputs
+            .contains(&SensitiveInput::ScreenCapture);
+        if screen_effect != screen_input {
+            return Err(DeclarationError::InvalidOperation {
+                id: self.id.clone(),
+                message: "screen capture effect and sensitive input must be declared together",
             });
         }
         match (self.operation_kind.is_state_mutating(), self.delivery) {

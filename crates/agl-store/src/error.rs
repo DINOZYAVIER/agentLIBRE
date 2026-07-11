@@ -41,6 +41,15 @@ pub enum StoreError {
         existing_fingerprint: String,
         requested_fingerprint: String,
     },
+    ArtifactAccessDenied,
+    ArtifactUnavailable {
+        artifact_id: String,
+    },
+    ArtifactIntegrityFailed {
+        artifact_id: String,
+        reason: String,
+    },
+    Content(agl_content::ContentError),
 }
 
 impl fmt::Display for StoreError {
@@ -82,6 +91,18 @@ impl fmt::Display for StoreError {
                 f,
                 "idempotency conflict for {namespace}/{key}: existing fingerprint {existing_fingerprint}, requested {requested_fingerprint}"
             ),
+            Self::ArtifactAccessDenied => f.write_str("artifact access denied"),
+            Self::ArtifactUnavailable { artifact_id } => {
+                write!(f, "artifact {artifact_id} is unavailable")
+            }
+            Self::ArtifactIntegrityFailed {
+                artifact_id,
+                reason,
+            } => write!(
+                f,
+                "artifact {artifact_id} failed integrity validation: {reason}"
+            ),
+            Self::Content(error) => write!(f, "{error}"),
         }
     }
 }
@@ -103,5 +124,11 @@ impl From<rusqlite::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(err: serde_json::Error) -> Self {
         Self::Json(err)
+    }
+}
+
+impl From<agl_content::ContentError> for StoreError {
+    fn from(error: agl_content::ContentError) -> Self {
+        Self::Content(error)
     }
 }

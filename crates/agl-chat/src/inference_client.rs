@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,6 +15,7 @@ use anyhow::{Result, ensure};
 pub struct ChatInferenceJob {
     pub config: LocalInferenceConfig,
     pub artifact_root: InferenceArtifactRoot,
+    pub content_store_root: PathBuf,
     pub max_output_tokens: u32,
     pub session_id: SessionId,
     pub request: InferenceRequest,
@@ -77,6 +79,7 @@ impl InferenceClient for ModelManagerHandle {
             job.request,
             context_key,
             job.artifact_root,
+            job.content_store_root,
             job.max_output_tokens,
         )?
         .with_cancellation(job.cancellation);

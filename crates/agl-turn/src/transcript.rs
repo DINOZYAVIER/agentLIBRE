@@ -1,4 +1,5 @@
 use agl_capabilities::ActionResult;
+use agl_content::Content;
 use agl_ids::{RunId, TurnId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,9 +9,9 @@ use crate::VisibleTool;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnMessage {
-    System { content: String },
-    User { content: String },
-    Assistant { content: String },
+    System { content: Content },
+    User { content: Content },
+    Assistant { content: Content },
     AssistantToolCall { name: String, arguments: Value },
     ToolObservation { name: String, result: ActionResult },
 }
@@ -28,5 +29,5 @@ pub struct ModelRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelResponse {
-    pub content: String,
+    pub content: Content,
 }

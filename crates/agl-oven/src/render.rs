@@ -1,4 +1,5 @@
 use agl_config::{ModelConfig, ModelDialect, ToolCallFormat};
+use agl_content::{Content, ContentPart};
 use agl_ids::{RunId, TurnId};
 use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{Result, bail, ensure};
@@ -18,7 +19,7 @@ pub struct RenderedModelRequest {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub role: RenderedMessageRole,
-    pub content: String,
+    pub content: Option<Content>,
     pub name: Option<String>,
     pub tool_calls: Vec<RenderedToolCall>,
 }
@@ -103,7 +104,7 @@ fn render_message(
         }
         TurnMessage::ToolObservation { name, result } => Ok(rendered_text_message(
             RenderedMessageRole::Tool,
-            result.render_observation(),
+            tool_observation_content(result)?,
             Some(name.clone()),
         )),
     }
@@ -111,12 +112,12 @@ fn render_message(
 
 fn rendered_text_message(
     role: RenderedMessageRole,
-    content: String,
+    content: Content,
     name: Option<String>,
 ) -> RenderedMessage {
     RenderedMessage {
         role,
-        content,
+        content: Some(content),
         name,
         tool_calls: Vec::new(),
     }
@@ -130,7 +131,7 @@ fn render_assistant_tool_call(
     match tool_call_format {
         ToolCallFormat::StructuredToolCalls => Ok(RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: String::new(),
+            content: None,
             name: None,
             tool_calls: vec![RenderedToolCall {
                 name: name.to_string(),
@@ -139,15 +140,23 @@ fn render_assistant_tool_call(
         }),
         ToolCallFormat::HermesJson => Ok(rendered_text_message(
             RenderedMessageRole::Assistant,
-            render_hermes_tool_call(name, arguments)?,
+            Content::text(render_hermes_tool_call(name, arguments)?)?,
             Some(name.to_string()),
         )),
         ToolCallFormat::GemmaFunctionCall => Ok(rendered_text_message(
             RenderedMessageRole::Assistant,
-            render_gemma_function_call(name, arguments)?,
+            Content::text(render_gemma_function_call(name, arguments)?)?,
             Some(name.to_string()),
         )),
     }
+}
+
+fn tool_observation_content(result: &agl_capabilities::ActionResult) -> Result<Content> {
+    let mut parts = vec![ContentPart::text(result.render_observation())?];
+    if let Some(content) = &result.content {
+        parts.extend(content.parts.iter().cloned());
+    }
+    Ok(Content::new(parts)?)
 }
 
 fn render_hermes_tool_call(name: &str, arguments: &serde_json::Value) -> Result<String> {

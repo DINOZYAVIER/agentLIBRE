@@ -29,16 +29,18 @@ impl AglStore {
         let now = timestamp();
         let requested_tools_json = serde_json::to_string(&draft.requested_tools)?;
         let state_effects_json = serde_json::to_string(&draft.state_effects)?;
+        let sensitive_inputs_json = serde_json::to_string(&draft.sensitive_inputs)?;
         let scope_json = serde_json::to_string(&draft.scope)?;
         self.conn.execute(
             "INSERT INTO permission_requests
-             (id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?9, NULL, NULL, NULL)",
+             (id, requested_tools_json, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?10, NULL, NULL, NULL)",
             params![
                 &id,
                 &requested_tools_json,
                 &draft.max_operation_kind,
                 &state_effects_json,
+                &sensitive_inputs_json,
                 &scope_json,
                 &draft.duration,
                 &draft.reason,
@@ -65,7 +67,7 @@ impl AglStore {
         status: PermissionRequestStatus,
     ) -> Result<Vec<PermissionRequestRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+            "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
              FROM permission_requests
              WHERE status = ?1
              ORDER BY updated_at ASC, id ASC",
@@ -115,6 +117,7 @@ impl AglStore {
                         tool_id: tool_id.clone(),
                         max_operation_kind: request.max_operation_kind.clone(),
                         state_effects: request.state_effects.clone(),
+                        sensitive_inputs: request.sensitive_inputs.clone(),
                         scope: request.scope.clone(),
                         duration: request.duration.clone(),
                         granted_by_ref: granted_by_ref.to_string(),
@@ -176,7 +179,7 @@ impl AglStore {
 
     pub fn active_permission_grants(&self) -> Result<Vec<PermissionGrantRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
+            "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
              FROM permission_grants
              WHERE status = 'active'
              ORDER BY updated_at ASC, id ASC",
@@ -239,7 +242,7 @@ fn permission_request_by_id(
 ) -> Result<Option<PermissionRequestRecord>> {
     validate_non_blank(id, "permission_requests.id")?;
     conn.query_row(
-        "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
+        "SELECT id, requested_tools_json, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, reason, requester_ref, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note
          FROM permission_requests
          WHERE id = ?1",
         params![id],
@@ -267,17 +270,19 @@ fn insert_permission_grant(
     let id = store_id("permission_grant");
     let now = timestamp();
     let state_effects_json = serde_json::to_string(&draft.state_effects)?;
+    let sensitive_inputs_json = serde_json::to_string(&draft.sensitive_inputs)?;
     let scope_json = serde_json::to_string(&draft.scope)?;
     conn.execute(
         "INSERT INTO permission_grants
-         (id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, ?9, NULL, NULL)",
+         (id, request_id, tool_id, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10, NULL, NULL)",
         params![
             &id,
             &draft.request_id,
             &draft.tool_id,
             &draft.max_operation_kind,
             &state_effects_json,
+            &sensitive_inputs_json,
             &scope_json,
             &draft.duration,
             &draft.granted_by_ref,
@@ -312,7 +317,7 @@ fn resolve_permission_request_on(
 fn permission_grant_by_id(conn: &Connection, id: &str) -> Result<Option<PermissionGrantRecord>> {
     validate_non_blank(id, "permission_grants.id")?;
     conn.query_row(
-        "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
+        "SELECT id, request_id, tool_id, max_operation_kind, state_effects_json, sensitive_inputs_json, scope_json, duration, granted_by_ref, status, created_at, updated_at, revoked_at, revoke_ref, admitted_at, last_admitted_run_id, consumed_at
          FROM permission_grants
          WHERE id = ?1",
         params![id],
@@ -327,24 +332,26 @@ fn permission_request_from_row(
 ) -> rusqlite::Result<Result<PermissionRequestRecord>> {
     let requested_tools_json: String = row.get(1)?;
     let state_effects_json: String = row.get(3)?;
-    let scope_json: String = row.get(4)?;
-    let status: String = row.get(8)?;
+    let sensitive_inputs_json: String = row.get(4)?;
+    let scope_json: String = row.get(5)?;
+    let status: String = row.get(9)?;
     Ok((|| {
         Ok(PermissionRequestRecord {
             id: row.get(0)?,
             requested_tools: parse_json_store(&requested_tools_json)?,
             max_operation_kind: row.get(2)?,
             state_effects: parse_json_store(&state_effects_json)?,
+            sensitive_inputs: parse_json_store(&sensitive_inputs_json)?,
             scope: parse_json_store(&scope_json)?,
-            duration: row.get(5)?,
-            reason: row.get(6)?,
-            requester_ref: row.get(7)?,
+            duration: row.get(6)?,
+            reason: row.get(7)?,
+            requester_ref: row.get(8)?,
             status: PermissionRequestStatus::parse(&status)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
-            resolved_at: row.get(11)?,
-            resolution_ref: row.get(12)?,
-            resolution_note: row.get(13)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+            resolved_at: row.get(12)?,
+            resolution_ref: row.get(13)?,
+            resolution_note: row.get(14)?,
         })
     })())
 }
@@ -353,8 +360,9 @@ fn permission_grant_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<PermissionGrantRecord>> {
     let state_effects_json: String = row.get(4)?;
-    let scope_json: String = row.get(5)?;
-    let status: String = row.get(8)?;
+    let sensitive_inputs_json: String = row.get(5)?;
+    let scope_json: String = row.get(6)?;
+    let status: String = row.get(9)?;
     Ok((|| {
         Ok(PermissionGrantRecord {
             id: row.get(0)?,
@@ -362,17 +370,18 @@ fn permission_grant_from_row(
             tool_id: row.get(2)?,
             max_operation_kind: row.get(3)?,
             state_effects: parse_json_store(&state_effects_json)?,
+            sensitive_inputs: parse_json_store(&sensitive_inputs_json)?,
             scope: parse_json_store(&scope_json)?,
-            duration: row.get(6)?,
-            granted_by_ref: row.get(7)?,
+            duration: row.get(7)?,
+            granted_by_ref: row.get(8)?,
             status: PermissionGrantStatus::parse(&status)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
-            revoked_at: row.get(11)?,
-            revoke_ref: row.get(12)?,
-            admitted_at: row.get(13)?,
-            last_admitted_run_id: row.get(14)?,
-            consumed_at: row.get(15)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+            revoked_at: row.get(12)?,
+            revoke_ref: row.get(13)?,
+            admitted_at: row.get(14)?,
+            last_admitted_run_id: row.get(15)?,
+            consumed_at: row.get(16)?,
         })
     })())
 }

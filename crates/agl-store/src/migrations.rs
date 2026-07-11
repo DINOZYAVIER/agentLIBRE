@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -330,6 +330,47 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ON cron_runs(supervisor_run_id);
             CREATE UNIQUE INDEX cron_runs_schedule_unique_idx
                 ON cron_runs(job_id, scheduled_for);
+        "#,
+    },
+    StoreMigration {
+        version: 11,
+        name: "011_content_artifacts",
+        sql: r#"
+            CREATE TABLE content_blobs (
+                digest TEXT PRIMARY KEY,
+                media_type TEXT NOT NULL,
+                byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+                created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE artifacts (
+                id TEXT PRIMARY KEY,
+                blob_digest TEXT NOT NULL REFERENCES content_blobs(digest),
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                media_type TEXT NOT NULL,
+                byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+                width INTEGER,
+                height INTEGER,
+                sensitivity TEXT NOT NULL CHECK (sensitivity IN ('private', 'sensitive')),
+                source_json TEXT NOT NULL,
+                retention TEXT NOT NULL CHECK (retention IN ('run_scoped', 'persistent')),
+                state TEXT NOT NULL CHECK (state IN ('live', 'tombstoned')),
+                created_at_ms INTEGER NOT NULL,
+                tombstoned_at_ms INTEGER,
+                CHECK ((width IS NULL) = (height IS NULL))
+            );
+            CREATE INDEX artifacts_run_idx ON artifacts(run_id, state, created_at_ms);
+            CREATE INDEX artifacts_blob_idx ON artifacts(blob_digest, state);
+            CREATE INDEX artifacts_gc_idx ON artifacts(state, tombstoned_at_ms);
+        "#,
+    },
+    StoreMigration {
+        version: 12,
+        name: "012_permission_sensitive_inputs",
+        sql: r#"
+            ALTER TABLE permission_requests
+                ADD COLUMN sensitive_inputs_json TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE permission_grants
+                ADD COLUMN sensitive_inputs_json TEXT NOT NULL DEFAULT '[]';
         "#,
     },
 ];

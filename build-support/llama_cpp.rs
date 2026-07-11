@@ -2,8 +2,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REQUIRED_LIBRARIES: [&str; 6] = [
+const REQUIRED_LIBRARIES: [&str; 7] = [
     "libllama-common.so",
+    "libmtmd.so",
     "libllama.so",
     "libggml.so",
     "libggml-base.so",

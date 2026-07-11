@@ -8,6 +8,10 @@ use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, LocalInferenceConfig, ModelConfig,
     ModelDialect, MtpRuntimeConfig, PromptConfig, ToolCallFormat,
 };
+use agl_content::{
+    ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
+    ContentPart, ImageDimensions, MediaType,
+};
 use agl_ids::{AttemptId, RunId, TurnId};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
 
@@ -26,6 +30,7 @@ struct FakeState {
     block_generation: bool,
     started_generations: usize,
     panic_on_generate: bool,
+    resolved_images: Vec<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -146,6 +151,15 @@ impl ModelRuntime for FakeRuntime {
         let attempt = job.request().attempt_id.as_str().to_string();
         let mut state = self.control.state.lock().unwrap();
         state.operations.push(format!("generate:{attempt}"));
+        if let Some(content) = job.resolved_content() {
+            for message in content.messages() {
+                for part in message.parts() {
+                    if let Some((_, bytes)) = part.image() {
+                        state.resolved_images.push(bytes.to_vec());
+                    }
+                }
+            }
+        }
         state.started_generations += 1;
         self.control.changed.notify_all();
         while state.block_generation && !job.should_abort() {
@@ -272,6 +286,134 @@ fn manager_reuses_weights_and_keeps_conversation_evidence_isolated() {
 
     manager.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
+    let root = temp_root("vision-resolution");
+    let store = agl_store::AglStore::open_at(&root).unwrap();
+    let run_id = RunId::parse(RUN_ID).unwrap();
+    store
+        .admit_run(&agl_store::DurableRunDraft {
+            run_id: run_id.clone(),
+            session_id: None,
+            turn_id: None,
+            kind: agl_store::RunKind::Cron,
+            priority: 0,
+            input: serde_json::json!({}),
+            checkpoint: None,
+            effective_policy_hash: None,
+            budget: agl_store::RunBudget::default(),
+            not_before_ms: None,
+        })
+        .unwrap();
+    let private_bytes = b"private fake image bytes";
+    let stored = store
+        .write_artifact(
+            &run_id,
+            MediaType::ImagePng,
+            private_bytes,
+            Some(ImageDimensions::new(2, 2).unwrap()),
+            ArtifactSensitivity::Sensitive,
+            ArtifactSource {
+                kind: ArtifactSourceKind::ScreenCapture,
+                provider: Some("fake-portal".to_string()),
+            },
+            ArtifactRetention::RunScoped,
+        )
+        .unwrap();
+    let mut config = config("vision.gguf");
+    config.backend.multimodal_projector = Some(PathBuf::from("/models/mmproj.gguf"));
+    let request = InferenceRequest {
+        run_id: run_id.clone(),
+        turn_id: TurnId::parse(TURN_ID).unwrap(),
+        attempt_id: attempt_id(90),
+        session_id: None,
+        request_id: None,
+        rendered: RenderedModelRequest {
+            run_id,
+            turn_id: TurnId::parse(TURN_ID).unwrap(),
+            request_index: 0,
+            dialect: ModelDialect::Qwen3,
+            tool_call_format: ToolCallFormat::HermesJson,
+            messages: vec![RenderedMessage {
+                role: RenderedMessageRole::User,
+                content: Some(
+                    Content::new([
+                        ContentPart::text("what is shown?").unwrap(),
+                        ContentPart::artifact(stored.reference),
+                    ])
+                    .unwrap(),
+                ),
+                name: None,
+                tool_calls: Vec::new(),
+            }],
+            tools: Vec::new(),
+        },
+    };
+    let inference_job = InferenceJob::new(
+        config.clone(),
+        request,
+        ContextKey::for_conversation(&config, "vision").unwrap(),
+        InferenceArtifactRoot::new(&root),
+        root.clone(),
+        32,
+    )
+    .unwrap();
+    let control = Arc::new(FakeControl::default());
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+
+    manager.handle().generate(inference_job).unwrap();
+
+    assert_eq!(
+        control.state.lock().unwrap().resolved_images,
+        [private_bytes.to_vec()]
+    );
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn text_only_profile_rejects_artifact_content_before_queue_admission() {
+    let mut request = job(
+        &temp_root("unsupported-content"),
+        &config("text.gguf"),
+        "text",
+        91,
+    )
+    .request()
+    .clone();
+    let artifact = agl_content::ArtifactRef::new(
+        agl_content::ArtifactId::generate(),
+        agl_content::BlobDigest::from_bytes(b"image"),
+        MediaType::ImagePng,
+        5,
+        Some(ImageDimensions::new(1, 1).unwrap()),
+        ArtifactSensitivity::Sensitive,
+        ArtifactSource {
+            kind: ArtifactSourceKind::ScreenCapture,
+            provider: None,
+        },
+    )
+    .unwrap();
+    request.rendered.messages[0].content =
+        Some(Content::new([ContentPart::artifact(artifact)]).unwrap());
+    let config = config("text.gguf");
+    let error = InferenceJob::new(
+        config.clone(),
+        request,
+        ContextKey::for_conversation(&config, "text").unwrap(),
+        InferenceArtifactRoot::new("/tmp/unused"),
+        PathBuf::from("/tmp/unused-store"),
+        32,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ModelManagerError::UnsupportedContent { .. }
+    ));
+    assert_eq!(error.code(), "unsupported_content");
 }
 
 #[test]
@@ -482,6 +624,7 @@ fn config(model: &str) -> LocalInferenceConfig {
         backend: InferenceBackendConfig {
             kind: BackendKind::LlamaCpp,
             model: PathBuf::from("/models").join(model),
+            multimodal_projector: None,
         },
         runtime: InferenceRuntimeConfig {
             gpu_layers: 0,
@@ -525,7 +668,7 @@ fn job(
             tool_call_format: ToolCallFormat::HermesJson,
             messages: vec![RenderedMessage {
                 role: RenderedMessageRole::User,
-                content: format!("message {attempt}"),
+                content: Some(agl_content::Content::text(format!("message {attempt}")).unwrap()),
                 name: None,
                 tool_calls: Vec::new(),
             }],
@@ -537,6 +680,7 @@ fn job(
         request,
         ContextKey::for_conversation(config, conversation).unwrap(),
         InferenceArtifactRoot::new(root),
+        root.to_path_buf(),
         32,
     )
     .unwrap()

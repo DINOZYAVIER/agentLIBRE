@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use agl_capabilities::{ActionHandler, CapabilityId, ProviderDeclaration};
+use agl_ids::RunId;
 use agl_tools::{ToolCatalog, ToolCatalogError, ToolRuntime};
 use anyhow::{Context, Result};
 
@@ -10,6 +11,7 @@ pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub trust_store_path: &'a Path,
     pub workspace_root: &'a Path,
     pub permission_status: agl_tools::PermissionRuntimeStatus,
+    pub screen_admitted_run: Option<RunId>,
 }
 
 pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
@@ -90,6 +92,12 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         ),
         "builtin skill",
     )?;
+    register_handlers(
+        &mut runtime,
+        SCREEN_TOOL_IDS,
+        agl_host_tools::ScreenTools::new(config.store_root, config.screen_admitted_run),
+        "builtin screen",
+    )?;
 
     Ok(runtime)
 }
@@ -112,6 +120,7 @@ pub(crate) fn chat_tool_provider_declarations() -> Vec<ProviderDeclaration> {
         agl_tools::repo::declaration(),
         agl_tools::skills::declaration(),
         agl_tools::store::declaration(),
+        agl_host_tools::screen::declaration(),
     ]
 }
 
@@ -209,6 +218,8 @@ const SKILL_TOOL_IDS: &[&str] = &[
     agl_tools::SKILL_REVOKE_TOOL_ID,
 ];
 
+const SCREEN_TOOL_IDS: &[&str] = &[agl_host_tools::SCREEN_CAPTURE_TOOL_ID];
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -234,6 +245,7 @@ mod tests {
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: &root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
+            screen_admitted_run: None,
         })
         .unwrap();
 
@@ -347,6 +359,7 @@ mod tests {
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
+            screen_admitted_run: None,
         })
         .unwrap()
     }

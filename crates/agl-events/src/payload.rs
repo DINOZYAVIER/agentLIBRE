@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use agl_content::Content;
 use agl_ids::MessageId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +17,7 @@ pub type SafeRuntimeEventEnvelope = EventEnvelope<SafeRuntimeEvent>;
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum RuntimeEvent {
     #[serde(rename = "turn.started")]
-    TurnStarted { user_input: String },
+    TurnStarted { user_input: Content },
     #[serde(rename = "model.request_prepared")]
     ModelRequestPrepared { message_count: usize },
     #[serde(rename = "hook.batch_prepared")]
@@ -69,7 +70,7 @@ pub enum RuntimeEvent {
     #[serde(rename = "model.response_received")]
     ModelResponseReceived {
         request_index: usize,
-        content: String,
+        content: Content,
     },
     #[serde(rename = "model.request_failed")]
     ModelRequestFailed {
@@ -143,12 +144,12 @@ pub enum RuntimeEvent {
     #[serde(rename = "user_message")]
     UserMessage {
         message_id: MessageId,
-        content: String,
+        content: Content,
     },
     #[serde(rename = "assistant_message")]
     AssistantMessage {
         message_id: MessageId,
-        content: String,
+        content: Content,
     },
     #[serde(rename = "assistant_tool_call")]
     AssistantToolCall {
@@ -526,7 +527,7 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
     fn from(event: &RuntimeEvent) -> Self {
         match event {
             RuntimeEvent::TurnStarted { user_input } => Self::TurnStarted {
-                user_input_bytes: user_input.len(),
+                user_input_bytes: user_input.text_byte_len(),
             },
             RuntimeEvent::ModelRequestPrepared { message_count } => Self::ModelRequestPrepared {
                 message_count: *message_count,
@@ -614,7 +615,7 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 content,
             } => Self::ModelResponseReceived {
                 request_index: *request_index,
-                content_bytes: content.len(),
+                content_bytes: content.text_byte_len(),
             },
             RuntimeEvent::ModelRequestFailed {
                 request_index,
@@ -732,14 +733,14 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 content,
             } => Self::UserMessage {
                 message_id: message_id.clone(),
-                content_bytes: content.len(),
+                content_bytes: content.text_byte_len(),
             },
             RuntimeEvent::AssistantMessage {
                 message_id,
                 content,
             } => Self::AssistantMessage {
                 message_id: message_id.clone(),
-                content_bytes: content.len(),
+                content_bytes: content.text_byte_len(),
             },
             RuntimeEvent::AssistantToolCall {
                 message_id,

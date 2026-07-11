@@ -7,8 +7,17 @@ repository.workspace = true
 
 [dependencies]
 agl-capabilities.workspace = true
+agl-content.workspace = true
+agl-ids.workspace = true
 agl-skills.workspace = true
+agl-store.workspace = true
 agl-tools.workspace = true
 anyhow.workspace = true
+ashpd.workspace = true
+image.workspace = true
+libc.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true

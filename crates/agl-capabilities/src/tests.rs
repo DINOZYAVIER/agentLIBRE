@@ -55,6 +55,17 @@ fn admin_action() -> ActionDeclaration {
     .with_state_effects([StateEffect::StoreSchema])
 }
 
+fn screen_action() -> ActionDeclaration {
+    ActionDeclaration::from_schema::<EmptyArgs>(
+        capability("screen.capture"),
+        "Capture the screen",
+        OperationKind::Read,
+    )
+    .unwrap()
+    .with_state_effects([StateEffect::HostScreenCapture])
+    .with_sensitive_inputs([SensitiveInput::ScreenCapture])
+}
+
 fn provider() -> ProviderDeclaration {
     ProviderDeclaration::builtin(provider_id("core"), "Core", "1")
         .unwrap()
@@ -577,4 +588,51 @@ fn capability_collections_are_exposed_in_stable_id_order() {
         .collect::<Vec<_>>();
     assert_eq!(ids, ["fs.edit", "fs.read"]);
     assert_eq!(BTreeSet::from_iter(ids).len(), 2);
+}
+
+#[test]
+fn sensitive_input_requires_matching_grant_and_availability() {
+    let id = capability("screen.capture");
+    let provider = provider().with_action(screen_action());
+    let denied =
+        CapabilityPolicyInput::new([provider.clone()], [id.clone()], ToolAccessMode::ReadOnly)
+            .resolve()
+            .unwrap();
+    assert_eq!(
+        denied.exclusion(&id).unwrap().reason,
+        CapabilityExclusionReason::GrantSensitiveInputDenied
+    );
+
+    let missing_effect = CapabilityGrant::new(id.clone(), OperationKind::Read)
+        .with_sensitive_inputs([SensitiveInput::ScreenCapture]);
+    let denied =
+        CapabilityPolicyInput::new([provider.clone()], [id.clone()], ToolAccessMode::ReadOnly)
+            .with_grants([missing_effect])
+            .resolve()
+            .unwrap();
+    assert_eq!(
+        denied.exclusion(&id).unwrap().reason,
+        CapabilityExclusionReason::GrantStateEffectDenied
+    );
+
+    let grant = CapabilityGrant::new(id.clone(), OperationKind::Read)
+        .with_state_effects([StateEffect::HostScreenCapture])
+        .with_sensitive_inputs([SensitiveInput::ScreenCapture]);
+    let admitted =
+        CapabilityPolicyInput::new([provider.clone()], [id.clone()], ToolAccessMode::ReadOnly)
+            .with_grants([grant.clone()])
+            .resolve()
+            .unwrap();
+    assert!(admitted.contains(&id));
+
+    let unavailable =
+        CapabilityPolicyInput::new([provider], [id.clone()], ToolAccessMode::ReadOnly)
+            .with_grants([grant])
+            .with_unavailable_capabilities([id.clone()])
+            .resolve()
+            .unwrap();
+    assert_eq!(
+        unavailable.exclusion(&id).unwrap().reason,
+        CapabilityExclusionReason::ProviderUnavailable
+    );
 }

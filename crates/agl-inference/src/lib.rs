@@ -16,8 +16,8 @@ pub use model_manager::{
     ContextKey, DEFAULT_IDLE_CONTEXT_RETENTION, DEFAULT_MAX_CONTEXTS_PER_MODEL,
     DEFAULT_MAX_LOADED_MODELS, DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY, InferenceCancellation,
     InferenceJob, InferenceJobScope, ModelGeneration, ModelKey, ModelManager, ModelManagerError,
-    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime, RuntimeFailure,
-    RuntimeOperation,
+    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime, ResolvedContentPart,
+    ResolvedMessageContent, ResolvedModelContent, RuntimeFailure, RuntimeOperation,
 };
 
 #[cfg(test)]

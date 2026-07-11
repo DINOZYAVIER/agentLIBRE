@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_config::{ModelDialect, ToolCallFormat};
+use agl_content::{Content, ContentPart};
 use agl_ids::{RequestId, RunId, SessionId, TurnId};
 
 use super::*;
@@ -24,6 +25,28 @@ fn session_id() -> SessionId {
 
 fn request_id() -> RequestId {
     RequestId::parse(TEST_REQUEST_ID).unwrap()
+}
+
+fn text(value: impl Into<String>) -> Content {
+    Content::text(value).unwrap()
+}
+
+trait TestRenderedContent {
+    fn as_str(&self) -> &str;
+
+    fn contains(&self, needle: &str) -> bool {
+        self.as_str().contains(needle)
+    }
+}
+
+impl TestRenderedContent for Option<Content> {
+    fn as_str(&self) -> &str {
+        let content = self.as_ref().expect("expected rendered content");
+        match content.parts.as_slice() {
+            [ContentPart::Text { text }] => text,
+            _ => panic!("expected one rendered text part"),
+        }
+    }
 }
 
 fn effective_capabilities(ids: &[&str]) -> EffectiveCapabilitySet {
@@ -53,7 +76,7 @@ fn build_request_uses_agentlibre_boundaries() {
             turn_id: turn_id(),
             request_index: 7,
             messages: vec![TurnMessage::User {
-                content: "hello".to_string(),
+                content: text("hello"),
             }],
             visible_tools: Vec::new(),
         },
@@ -98,7 +121,7 @@ fn build_request_prepends_configured_system_prompt() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "hello".to_string(),
+                content: text("hello"),
             }],
             visible_tools: Vec::new(),
         },
@@ -117,12 +140,15 @@ fn build_request_prepends_configured_system_prompt() {
         request.rendered.messages[0].role,
         agl_oven::RenderedMessageRole::System
     );
-    assert_eq!(request.rendered.messages[0].content, "demo system");
+    assert_eq!(
+        request.rendered.messages[0].content,
+        Some(text("demo system"))
+    );
     assert_eq!(
         request.rendered.messages[1].role,
         agl_oven::RenderedMessageRole::User
     );
-    assert_eq!(request.rendered.messages[1].content, "hello");
+    assert_eq!(request.rendered.messages[1].content, Some(text("hello")));
 }
 
 #[test]
@@ -139,7 +165,7 @@ fn build_request_prepends_skill_context_after_system_prompt() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "hello".to_string(),
+                content: text("hello"),
             }],
             visible_tools: Vec::new(),
         },
@@ -155,9 +181,12 @@ fn build_request_prepends_skill_context_after_system_prompt() {
     .unwrap();
 
     assert_eq!(request.rendered.messages.len(), 3);
-    assert_eq!(request.rendered.messages[0].content, "system");
-    assert_eq!(request.rendered.messages[1].content, "skill context");
-    assert_eq!(request.rendered.messages[2].content, "hello");
+    assert_eq!(request.rendered.messages[0].content, Some(text("system")));
+    assert_eq!(
+        request.rendered.messages[1].content,
+        Some(text("skill context"))
+    );
+    assert_eq!(request.rendered.messages[2].content, Some(text("hello")));
 }
 
 #[test]
@@ -174,7 +203,7 @@ fn build_request_prepends_memory_context_before_skill_context() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "hello".to_string(),
+                content: text("hello"),
             }],
             visible_tools: Vec::new(),
         },
@@ -191,10 +220,16 @@ fn build_request_prepends_memory_context_before_skill_context() {
     .unwrap();
 
     assert_eq!(request.rendered.messages.len(), 4);
-    assert_eq!(request.rendered.messages[0].content, "system");
-    assert_eq!(request.rendered.messages[1].content, "memory context");
-    assert_eq!(request.rendered.messages[2].content, "skill context");
-    assert_eq!(request.rendered.messages[3].content, "hello");
+    assert_eq!(request.rendered.messages[0].content, Some(text("system")));
+    assert_eq!(
+        request.rendered.messages[1].content,
+        Some(text("memory context"))
+    );
+    assert_eq!(
+        request.rendered.messages[2].content,
+        Some(text("skill context"))
+    );
+    assert_eq!(request.rendered.messages[3].content, Some(text("hello")));
 }
 
 #[test]
@@ -217,7 +252,7 @@ fn build_request_injects_runtime_features_before_tools() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "can you run cron jobs?".to_string(),
+                content: text("can you run cron jobs?"),
             }],
             visible_tools,
         },
@@ -235,7 +270,7 @@ fn build_request_injects_runtime_features_before_tools() {
     .unwrap();
 
     assert_eq!(request.rendered.messages.len(), 6);
-    assert_eq!(request.rendered.messages[0].content, "system");
+    assert_eq!(request.rendered.messages[0].content, Some(text("system")));
     assert!(
         request.rendered.messages[1]
             .content
@@ -257,8 +292,14 @@ fn build_request_injects_runtime_features_before_tools() {
             .content
             .contains("write: add, delete, run, tick")
     );
-    assert_eq!(request.rendered.messages[2].content, "memory context");
-    assert_eq!(request.rendered.messages[3].content, "skill context");
+    assert_eq!(
+        request.rendered.messages[2].content,
+        Some(text("memory context"))
+    );
+    assert_eq!(
+        request.rendered.messages[3].content,
+        Some(text("skill context"))
+    );
     assert!(
         request.rendered.messages[4]
             .content
@@ -266,7 +307,7 @@ fn build_request_injects_runtime_features_before_tools() {
     );
     assert_eq!(
         request.rendered.messages[5].content,
-        "can you run cron jobs?"
+        Some(text("can you run cron jobs?"))
     );
 }
 
@@ -284,7 +325,7 @@ fn build_request_injects_visible_tool_context_for_hermes() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "read README".to_string(),
+                content: text("read README"),
             }],
             visible_tools: visible_tools_from_effective(&effective),
         },
@@ -300,11 +341,17 @@ fn build_request_injects_visible_tool_context_for_hermes() {
     .unwrap();
 
     assert_eq!(request.rendered.messages.len(), 4);
-    assert_eq!(request.rendered.messages[0].content, "system");
-    assert_eq!(request.rendered.messages[1].content, "skill context");
+    assert_eq!(request.rendered.messages[0].content, Some(text("system")));
+    assert_eq!(
+        request.rendered.messages[1].content,
+        Some(text("skill context"))
+    );
     assert!(request.rendered.messages[2].content.contains("fs.read"));
     assert!(request.rendered.messages[2].content.contains("<tool_call>"));
-    assert_eq!(request.rendered.messages[3].content, "read README");
+    assert_eq!(
+        request.rendered.messages[3].content,
+        Some(text("read README"))
+    );
     assert_eq!(request.rendered.tools[0].name, "fs.read");
 }
 
@@ -322,7 +369,7 @@ fn build_request_injects_visible_tool_context_for_gemma() {
             turn_id: turn_id(),
             request_index: 0,
             messages: vec![TurnMessage::User {
-                content: "read README".to_string(),
+                content: text("read README"),
             }],
             visible_tools: visible_tools_from_effective(&effective),
         },
@@ -343,7 +390,10 @@ fn build_request_injects_visible_tool_context_for_gemma() {
     assert!(tool_context.contains("<|tool_call>call:TOOL_NAME"));
     assert!(tool_context.contains("fs.read"));
     assert!(!tool_context.contains(r#"{"name":"TOOL_NAME""#));
-    assert_eq!(request.rendered.messages[3].content, "read README");
+    assert_eq!(
+        request.rendered.messages[3].content,
+        Some(text("read README"))
+    );
     assert_eq!(request.rendered.tools[0].name, "fs.read");
 }
 
@@ -770,7 +820,7 @@ tool_call_format = "hermes_json"
                 turn_id: turn_id(),
                 request_index: 0,
                 messages: vec![TurnMessage::User {
-                    content: "test policy".to_string(),
+                    content: text("test policy"),
                 }],
                 visible_tools: session.turn_visible_tools().to_vec(),
             },
@@ -834,6 +884,8 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
             capability_id: cron_add.clone(),
             max_operation_kind: OperationKind::Write,
             state_effects: BTreeSet::from([StateEffect::StoreCron]),
+            sensitive_inputs: BTreeSet::new(),
+            run_id: run_id(),
         }],
         ignored: Vec::new(),
     };
@@ -930,6 +982,7 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
             tool_id: "cron.add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: serde_json::json!({}),
             duration: "one_turn".to_string(),
             granted_by_ref: "test".to_string(),
@@ -968,6 +1021,71 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
 }
 
 #[test]
+fn screen_grant_requires_sensitive_input_and_host_effect_together() {
+    let root = temp_store_root("grant-screen-exact");
+    let store = AglStore::open_at(&root).unwrap();
+    let missing_effect = store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: agl_host_tools::SCREEN_CAPTURE_TOOL_ID.to_string(),
+            max_operation_kind: "read".to_string(),
+            state_effects: Vec::new(),
+            sensitive_inputs: vec!["screen_capture".to_string()],
+            scope: serde_json::json!({}),
+            duration: "one_turn".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let exact = store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: agl_host_tools::SCREEN_CAPTURE_TOOL_ID.to_string(),
+            max_operation_kind: "read".to_string(),
+            state_effects: vec!["host_screen_capture".to_string()],
+            sensitive_inputs: vec!["screen_capture".to_string()],
+            scope: serde_json::json!({}),
+            duration: "one_turn".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let mut catalog = full_tool_catalog();
+    catalog
+        .register(agl_host_tools::screen::declaration())
+        .unwrap();
+    let policy = SelectedSkillGrantPolicy::default();
+
+    assert_eq!(
+        evaluate_permission_grant(
+            &missing_effect,
+            &catalog,
+            &policy,
+            std::path::Path::new("/repo"),
+            &run_id(),
+        )
+        .unwrap_err(),
+        "state_effect_denied"
+    );
+    let admitted = evaluate_permission_grant(
+        &exact,
+        &catalog,
+        &policy,
+        std::path::Path::new("/repo"),
+        &run_id(),
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.state_effects,
+        BTreeSet::from([StateEffect::HostScreenCapture])
+    );
+    assert_eq!(
+        admitted.sensitive_inputs,
+        BTreeSet::from([SensitiveInput::ScreenCapture])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
     let root = temp_store_root("grant-mode-blocked");
     let store = AglStore::open_at(&root).unwrap();
@@ -977,6 +1095,7 @@ fn dynamic_grant_blocked_by_tool_mode_is_not_consumed() {
             tool_id: "cron.add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: serde_json::json!({}),
             duration: "one_turn".to_string(),
             granted_by_ref: "test".to_string(),
@@ -1019,6 +1138,7 @@ fn dynamic_grant_denied_by_selected_skill_is_ignored() {
             tool_id: "notes.delete".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_notes".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: serde_json::json!({}),
             duration: "one_turn".to_string(),
             granted_by_ref: "test".to_string(),
@@ -1061,6 +1181,7 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
             tool_id: "cron.add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: serde_json::json!({}),
             duration: "one_turn".to_string(),
             granted_by_ref: "test".to_string(),
@@ -1146,6 +1267,7 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
             tool_id: "cron.add".to_string(),
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: serde_json::json!({}),
             duration: "one_turn".to_string(),
             granted_by_ref: "test".to_string(),

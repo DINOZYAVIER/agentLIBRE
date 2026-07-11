@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 agl-chat.workspace = true
 agl-cron.workspace = true
+agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 agl-inference.workspace = true

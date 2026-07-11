@@ -3,9 +3,12 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use crate::model_manager::{
-    InferenceJob, ModelGeneration, ModelKey, ModelRuntime, RuntimeFailure, RuntimeOperation,
+    InferenceJob, ModelGeneration, ModelKey, ModelRuntime, ResolvedContentPart,
+    ResolvedModelContent, RuntimeFailure, RuntimeOperation,
 };
 use agl_config::{KvCacheType, LocalInferenceConfig, MtpRuntimeConfig};
+use agl_content::Content;
+use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
 
 use super::context_slot::LlamaCppContextSlot;
@@ -84,7 +87,8 @@ impl ModelRuntime for LlamaCppModelRuntime {
         context: &mut Self::Context,
         job: &InferenceJob,
     ) -> std::result::Result<RuntimeOperation<ModelGeneration>, RuntimeFailure> {
-        capture_operation(|log| {
+        let has_media = resolved_image_count(job.resolved_content()) > 0;
+        let result = capture_operation(|log| {
             let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
             log.push_str(&runtime_log_header(job.config(), supports_gpu_offload));
             log.push_str("llama_cpp_operation = generate\n");
@@ -92,7 +96,10 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 model.matches_config(job.config()),
                 "loaded llama.cpp model resources do not match the inference job"
             );
-            if !context.matches_config(job.config()) {
+            if has_media {
+                log.push_str("llama_cpp_context_reset_reason = multimodal_request_rebuild\n");
+                context.reset_cache(model, job.config(), log)?;
+            } else if !context.matches_config(job.config()) {
                 log.push_str("llama_cpp_context_reset_reason = context_config_changed\n");
                 context.reset_cache(model, job.config(), log)?;
             } else if let Some(reason) =
@@ -108,13 +115,33 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 job.cancellation().atomic_flag(),
                 job.deadline(),
             );
-            let output = context.generate(
-                model,
-                &job.request().rendered,
-                job.max_output_tokens(),
-                &control,
-                log,
-            )?;
+            let output = if has_media {
+                let marker = model
+                    .vision_marker()
+                    .ok_or_else(|| anyhow::anyhow!("llama.cpp model has no vision marker"))?;
+                let prepared = prepare_vision_request(
+                    &job.request().rendered,
+                    job.resolved_content()
+                        .ok_or_else(|| anyhow::anyhow!("resolved multimodal content is missing"))?,
+                    marker,
+                )?;
+                context.generate_vision(
+                    model,
+                    &prepared.rendered,
+                    &prepared.images,
+                    job.max_output_tokens(),
+                    &control,
+                    log,
+                )?
+            } else {
+                context.generate(
+                    model,
+                    &job.request().rendered,
+                    job.max_output_tokens(),
+                    &control,
+                    log,
+                )?
+            };
             Ok(ModelGeneration {
                 content: output.content,
                 finish_reason: output.finish_reason,
@@ -122,7 +149,12 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 input_tokens: output.input_tokens,
                 output_tokens: output.output_tokens,
             })
-        })
+        });
+        if has_media {
+            result.map_err(RuntimeFailure::into_multimodal_encode)
+        } else {
+            result
+        }
     }
 
     fn clear_context(
@@ -134,6 +166,73 @@ impl ModelRuntime for LlamaCppModelRuntime {
             log.push_str("llama_cpp_operation = clear_context\n");
             context.clear_cache(model, log)
         })
+    }
+}
+
+struct PreparedVisionRequest<'a> {
+    rendered: RenderedModelRequest,
+    images: Vec<&'a [u8]>,
+}
+
+fn resolved_image_count(content: Option<&ResolvedModelContent>) -> usize {
+    content
+        .into_iter()
+        .flat_map(ResolvedModelContent::messages)
+        .flat_map(|message| message.parts())
+        .filter(|part| matches!(part, ResolvedContentPart::Image { .. }))
+        .count()
+}
+
+fn prepare_vision_request<'a>(
+    rendered: &RenderedModelRequest,
+    resolved: &'a ResolvedModelContent,
+    marker: &str,
+) -> Result<PreparedVisionRequest<'a>> {
+    ensure!(!marker.is_empty(), "llama.cpp vision marker is empty");
+    ensure!(
+        rendered.messages.len() == resolved.messages().len(),
+        "resolved content does not match the rendered message count"
+    );
+    let mut prepared = rendered.clone();
+    let mut images = Vec::new();
+    for (message, resolved_message) in prepared.messages.iter_mut().zip(resolved.messages()) {
+        message.content = render_vision_content(resolved_message.parts(), marker, &mut images)?;
+    }
+    ensure!(
+        !images.is_empty(),
+        "resolved multimodal content has no images"
+    );
+    Ok(PreparedVisionRequest {
+        rendered: prepared,
+        images,
+    })
+}
+
+fn render_vision_content<'a>(
+    parts: &'a [ResolvedContentPart],
+    marker: &str,
+    images: &mut Vec<&'a [u8]>,
+) -> Result<Option<Content>> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            ResolvedContentPart::Text { text: part } => {
+                ensure!(
+                    !part.contains(marker),
+                    "text content contains the reserved llama.cpp vision marker"
+                );
+                text.push_str(part);
+            }
+            ResolvedContentPart::Image { bytes, .. } => {
+                text.push_str(marker);
+                images.push(bytes.as_slice());
+            }
+        }
+    }
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Content::text(text)?))
     }
 }
 
@@ -378,7 +477,78 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use agl_content::{
+        ArtifactId, ArtifactRef, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind,
+        BlobDigest, ImageDimensions, MediaType,
+    };
+
     use super::*;
+
+    static NATIVE_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn native_log_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        NATIVE_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn image_part(bytes: Vec<u8>) -> ResolvedContentPart {
+        let artifact = ArtifactRef::new(
+            ArtifactId::generate(),
+            BlobDigest::from_bytes(&bytes),
+            MediaType::ImagePng,
+            u64::try_from(bytes.len()).unwrap(),
+            Some(ImageDimensions::new(1, 1).unwrap()),
+            ArtifactSensitivity::Sensitive,
+            ArtifactSource {
+                kind: ArtifactSourceKind::ScreenCapture,
+                provider: Some("test".to_string()),
+            },
+        )
+        .unwrap();
+        ResolvedContentPart::Image { artifact, bytes }
+    }
+
+    #[test]
+    fn vision_content_preserves_interleaved_text_and_image_order() {
+        let parts = vec![
+            ResolvedContentPart::Text {
+                text: "before ".to_string(),
+            },
+            image_part(vec![1]),
+            ResolvedContentPart::Text {
+                text: " middle ".to_string(),
+            },
+            image_part(vec![2, 3]),
+            ResolvedContentPart::Text {
+                text: " after".to_string(),
+            },
+        ];
+        let mut images = Vec::new();
+
+        let content = render_vision_content(&parts, "<image>", &mut images)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            content.text_only().as_deref(),
+            Some("before <image> middle <image> after")
+        );
+        assert_eq!(images, vec![&[1][..], &[2, 3][..]]);
+    }
+
+    #[test]
+    fn vision_content_rejects_literal_reserved_marker() {
+        let parts = [ResolvedContentPart::Text {
+            text: "literal <image> marker".to_string(),
+        }];
+        let mut images = Vec::new();
+
+        let error = render_vision_content(&parts, "<image>", &mut images).unwrap_err();
+
+        assert!(error.to_string().contains("reserved"));
+        assert!(images.is_empty());
+    }
 
     fn assert_send<T: Send>() {}
 
@@ -440,6 +610,7 @@ load_tensors: offloaded 34/34 layers to GPU
 
     #[test]
     fn sequential_native_log_captures_do_not_cross_boundaries() {
+        let _guard = native_log_test_guard();
         let first = NativeLogCapture::begin().unwrap();
         let first_message = CString::new("first operation\n").unwrap();
         unsafe { llama_log_callback(0, first_message.as_ptr(), ptr::null_mut()) };
@@ -459,6 +630,7 @@ load_tensors: offloaded 34/34 layers to GPU
 
     #[test]
     fn native_log_capture_rejects_overlapping_operations() {
+        let _guard = native_log_test_guard();
         let capture = NativeLogCapture::begin().unwrap();
 
         let error = NativeLogCapture::begin().err().unwrap();
@@ -474,6 +646,7 @@ load_tensors: offloaded 34/34 layers to GPU
 
     #[test]
     fn dropped_native_log_capture_discards_partial_operation_log() {
+        let _guard = native_log_test_guard();
         let abandoned = NativeLogCapture::begin().unwrap();
         let abandoned_message = CString::new("abandoned operation\n").unwrap();
         unsafe { llama_log_callback(0, abandoned_message.as_ptr(), ptr::null_mut()) };
@@ -488,6 +661,7 @@ load_tensors: offloaded 34/34 layers to GPU
 
     #[test]
     fn runtime_operation_keeps_only_its_scoped_native_log() {
+        let _guard = native_log_test_guard();
         let operation = capture_operation(|log| {
             log.push_str("logical operation\n");
             let native = CString::new("native operation\n").unwrap();
@@ -503,6 +677,7 @@ load_tensors: offloaded 34/34 layers to GPU
 
     #[test]
     fn runtime_failure_preserves_the_failed_operation_log() {
+        let _guard = native_log_test_guard();
         let failure = capture_operation::<()>(|log| {
             log.push_str("before failure\n");
             anyhow::bail!("native failure")

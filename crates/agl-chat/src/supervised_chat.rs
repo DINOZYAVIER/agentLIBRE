@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agl_content::Content;
 use agl_ids::{AttemptId, RunId, SessionId, TurnId};
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{DurableRunDraft, RunBudget, RunKind, RunState};
@@ -114,7 +115,7 @@ impl SupervisedChat {
                 kind: RunKind::Turn,
                 priority: 0,
                 input: serde_json::to_value(ChatRunInput {
-                    text: input.to_string(),
+                    content: Content::text(input)?,
                     request_id: None,
                     options: self.options.clone(),
                 })?,

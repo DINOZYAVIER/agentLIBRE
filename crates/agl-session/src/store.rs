@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_content::Content;
 use agl_events::{EventEnvelope, RuntimeEvent, RuntimeEventEnvelope};
 use agl_ids::{MessageId, RunId, SessionId, TurnId};
 use anyhow::{Context, Result, bail, ensure};
@@ -467,7 +468,7 @@ fn control_event_from_transition(record: &ChatSessionTransitionRecord) -> Option
     }
 }
 
-fn assistant_message(envelope: &RuntimeEventEnvelope) -> Result<(MessageId, String)> {
+fn assistant_message(envelope: &RuntimeEventEnvelope) -> Result<(MessageId, Content)> {
     match &envelope.payload {
         RuntimeEvent::AssistantMessage {
             message_id,

@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use agl_content::Content;
 use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use serde_json::json;
 
@@ -23,6 +24,10 @@ fn run_id() -> RunId {
 
 fn turn_id() -> TurnId {
     TurnId::parse(TURN_ID).unwrap()
+}
+
+fn text(value: impl Into<String>) -> Content {
+    Content::text(value).unwrap()
 }
 
 fn event_scope() -> EventScope {
@@ -78,7 +83,7 @@ fn event_scope_requires_a_run_and_rejects_attempt_without_turn() {
 #[test]
 fn envelope_has_a_stable_serde_shape() {
     let envelope = envelope(RuntimeEvent::TurnStarted {
-        user_input: "read README".to_string(),
+        user_input: text("read README"),
     });
 
     let value = serde_json::to_value(&envelope).unwrap();
@@ -98,7 +103,9 @@ fn envelope_has_a_stable_serde_shape() {
             "caused_by": CAUSED_BY,
             "payload": {
                 "kind": "turn.started",
-                "user_input": "read README",
+                "user_input": {
+                    "parts": [{"kind": "text", "text": "read README"}],
+                },
             },
         })
     );
@@ -252,7 +259,7 @@ fn writer_assigns_sequence_causation_and_resumes_after_restart() {
             .append(EventDraft::new(
                 event_scope(),
                 RuntimeEvent::TurnStarted {
-                    user_input: "secret prompt".to_string(),
+                    user_input: text("secret prompt"),
                 },
             ))
             .unwrap();
@@ -306,7 +313,7 @@ fn writer_returns_full_and_safe_views_of_one_envelope() {
                 event_scope(),
                 RuntimeEvent::AssistantMessage {
                     message_id: MessageId::parse(MESSAGE_ID).unwrap(),
-                    content: "private answer".to_string(),
+                    content: text("private answer"),
                 },
             )
             .with_request_id(RequestId::parse(REQUEST_ID).unwrap()),

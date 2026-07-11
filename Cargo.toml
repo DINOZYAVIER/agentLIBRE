@@ -23,6 +23,7 @@ members = [
     "crates/agl-skills",
     "crates/agl-turn",
     "crates/agl-config",
+    "crates/agl-content",
     "crates/agl-events",
     "crates/agl-actions",
     "crates/agl-runtime",
@@ -50,6 +51,7 @@ agl-daemon = { path = "crates/agl-daemon" }
 agl-functions = { path = "crates/agl-functions" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
+agl-content = { path = "crates/agl-content" }
 agl-tools = { path = "crates/agl-tools" }
 agl-hooks = { path = "crates/agl-hooks" }
 agl-host-tools = { path = "crates/agl-host-tools" }
@@ -67,10 +69,13 @@ agl-skills = { path = "crates/agl-skills" }
 agl-store = { path = "crates/agl-store" }
 agl-supervisor = { path = "crates/agl-supervisor" }
 anyhow = "1.0"
+ashpd = { version = "0.13.12", default-features = false, features = ["documents", "screenshot", "tokio"] }
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 directories = "6"
 futures-util = "0.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2"
 matrix-sdk = { version = "=0.14.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption", "rustls-tls"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -85,3 +90,4 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["serde", "v7"] }
+url = "2"

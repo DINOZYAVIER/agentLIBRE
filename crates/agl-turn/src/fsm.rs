@@ -4,6 +4,7 @@ use std::fmt;
 use agl_ids::{RunId, TurnId};
 
 use agl_capabilities::ActionResult;
+use agl_content::Content;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -58,7 +59,7 @@ impl TurnPhase {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnTransition {
     Start {
-        user_input: String,
+        user_input: Content,
     },
     PrepareModelRequest {
         message_count: usize,
@@ -85,7 +86,7 @@ pub enum TurnTransition {
     },
     ReceiveModelResponse {
         request_index: usize,
-        content: String,
+        content: Content,
     },
     ParseAnswer,
     ParseToolCall {

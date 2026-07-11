@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 agl-actions.workspace = true
 agl-capabilities.workspace = true
+agl-content.workspace = true
 agl-ids.workspace = true
 serde.workspace = true
 serde_json.workspace = true
