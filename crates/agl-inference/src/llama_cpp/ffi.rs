@@ -204,6 +204,30 @@ unsafe extern "C" {
     ) -> c_int;
     pub(crate) fn agl_llama_mtp_accept(spec: *mut c_void, n_accepted: u16) -> c_int;
     pub(crate) fn agl_llama_mtp_get_stats(spec: *const c_void) -> agl_llama_mtp_stats;
+    pub(crate) fn agl_mtmd_init(
+        projector_path: *const c_char,
+        model: *const c_void,
+        use_gpu: bool,
+        threads: c_int,
+        flash_attn_type: c_int,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> *mut c_void;
+    pub(crate) fn agl_mtmd_marker(context: *const c_void) -> *const c_char;
+    pub(crate) fn agl_mtmd_free(context: *mut c_void);
+    pub(crate) fn agl_mtmd_eval_images(
+        context: *mut c_void,
+        llama_context: *mut c_void,
+        prompt: *const c_char,
+        image_data: *const *const u8,
+        image_lengths: *const usize,
+        image_count: usize,
+        batch_size: c_int,
+        out_positions: *mut llama_pos,
+        out_tokens: *mut usize,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> c_int;
     pub(crate) fn llama_tokenize(
         vocab: *const c_void,
         text: *const c_char,

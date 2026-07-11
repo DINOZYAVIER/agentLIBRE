@@ -177,7 +177,7 @@ fn submit(
 ) -> agl_protocol::RunAcceptedEvent {
     let event = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id: session_id.clone(),
-        text: text.to_string(),
+        content: agl_content::Content::text(text).unwrap(),
         idempotency_key: idempotency_key.map(str::to_string),
         budget: RunBudgetRequest::default(),
     })));
@@ -328,7 +328,7 @@ fn conflicting_idempotency_fingerprint_fails_without_second_run() {
 
     let conflict = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id,
-        text: "different".to_string(),
+        content: agl_content::Content::text("different").unwrap(),
         idempotency_key: Some("same-key".to_string()),
         budget: RunBudgetRequest::default(),
     })));

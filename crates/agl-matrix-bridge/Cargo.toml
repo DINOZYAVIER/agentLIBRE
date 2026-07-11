@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 agl-capabilities.workspace = true
 agl-client.workspace = true
+agl-content.workspace = true
 agl-ids.workspace = true
 agl-protocol.workspace = true
 agl-store.workspace = true

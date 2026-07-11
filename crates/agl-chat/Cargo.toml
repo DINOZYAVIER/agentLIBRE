@@ -10,6 +10,7 @@ build = "build.rs"
 agl-capabilities.workspace = true
 agl-assets.workspace = true
 agl-config.workspace = true
+agl-content.workspace = true
 agl-events.workspace = true
 agl-functions.workspace = true
 agl-host-tools.workspace = true

@@ -27,6 +27,9 @@ impl LocalInferenceConfig {
     pub fn validate(&self) -> Result<()> {
         self.backend.validate()?;
         self.runtime.validate()?;
+        if self.backend.multimodal_projector.is_some() && self.runtime.mtp.enabled {
+            bail!("multimodal projector profiles cannot enable speculative MTP");
+        }
         self.model.validate()?;
         self.prompt.validate()
     }
@@ -37,6 +40,8 @@ impl LocalInferenceConfig {
 pub struct InferenceBackendConfig {
     pub kind: BackendKind,
     pub model: PathBuf,
+    #[serde(default)]
+    pub multimodal_projector: Option<PathBuf>,
 }
 
 impl InferenceBackendConfig {
@@ -45,6 +50,12 @@ impl InferenceBackendConfig {
             !path_is_blank(&self.model),
             "backend model path cannot be empty"
         );
+        if let Some(projector) = &self.multimodal_projector {
+            ensure!(
+                !path_is_blank(projector),
+                "backend multimodal_projector path cannot be empty"
+            );
+        }
         Ok(())
     }
 }

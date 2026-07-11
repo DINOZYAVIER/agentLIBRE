@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agl_content::Content;
 use agl_ids::{AttemptId, RequestId, SessionId};
 use agl_loop::{EffectOutcome, TurnEffect, TurnEffectResult};
 use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
@@ -20,7 +21,7 @@ use crate::{ChatService, ChatTurnExecution, ChatTurnStatus};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatRunInput {
-    pub text: String,
+    pub content: Content,
     pub request_id: Option<RequestId>,
     pub options: crate::ChatOptions,
 }
@@ -155,7 +156,7 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                     run.run_id.clone(),
                     turn_id,
                     input.request_id,
-                    &input.text,
+                    input.content,
                 )
                 .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?
         };

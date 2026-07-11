@@ -1,4 +1,9 @@
 use super::*;
+use crate::artifacts::ArtifactWriteFailpoint;
+use agl_content::{
+    ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, ImageDimensions,
+    MediaType,
+};
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
 use serde_json::json;
@@ -323,6 +328,206 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
 }
 
 #[test]
+fn artifacts_are_private_deduplicated_and_run_scoped() {
+    let (root, store) = open_temp_store("artifacts");
+    let first_run = run_draft(None);
+    let second_run = run_draft(None);
+    store.admit_run(&first_run).unwrap();
+    store.admit_run(&second_run).unwrap();
+    let bytes = b"validated-png-bytes";
+    let source = ArtifactSource {
+        kind: ArtifactSourceKind::ScreenCapture,
+        provider: Some("fake-portal".to_string()),
+    };
+    let first = store
+        .write_artifact(
+            &first_run.run_id,
+            MediaType::ImagePng,
+            bytes,
+            Some(ImageDimensions::new(2, 2).unwrap()),
+            ArtifactSensitivity::Sensitive,
+            source.clone(),
+            ArtifactRetention::RunScoped,
+        )
+        .unwrap();
+    let second = store
+        .write_artifact(
+            &second_run.run_id,
+            MediaType::ImagePng,
+            bytes,
+            Some(ImageDimensions::new(2, 2).unwrap()),
+            ArtifactSensitivity::Sensitive,
+            source,
+            ArtifactRetention::RunScoped,
+        )
+        .unwrap();
+
+    assert_ne!(first.reference.artifact_id, second.reference.artifact_id);
+    assert_eq!(first.reference.digest, second.reference.digest);
+    let blob_count: u64 = store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM content_blobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(blob_count, 1);
+    assert_eq!(
+        store
+            .resolve_artifact(&first_run.run_id, &first.reference)
+            .unwrap()
+            .bytes,
+        bytes
+    );
+    assert!(matches!(
+        store.resolve_artifact(&second_run.run_id, &first.reference),
+        Err(StoreError::ArtifactAccessDenied)
+    ));
+    let encoded = serde_json::to_string(&first.reference).unwrap();
+    assert!(!encoded.contains(root.to_string_lossy().as_ref()));
+    assert!(!encoded.contains("validated-png-bytes"));
+
+    store.tombstone_run_artifacts(&first_run.run_id).unwrap();
+    let first_gc = store.garbage_collect_artifacts().unwrap();
+    assert_eq!(first_gc.artifact_records_deleted, 1);
+    assert_eq!(first_gc.blob_records_deleted, 0);
+    assert!(
+        store
+            .resolve_artifact(&second_run.run_id, &second.reference)
+            .is_ok()
+    );
+    store.tombstone_run_artifacts(&second_run.run_id).unwrap();
+    let second_gc = store.garbage_collect_artifacts().unwrap();
+    assert_eq!(second_gc.blob_records_deleted, 1);
+    assert_eq!(second_gc.blob_files_deleted, 1);
+}
+
+#[test]
+fn concurrent_identical_artifact_writes_share_one_complete_blob() {
+    let (root, store) = open_temp_store("artifact-concurrency");
+    let first = run_draft(None);
+    let second = run_draft(None);
+    store.admit_run(&first).unwrap();
+    store.admit_run(&second).unwrap();
+    drop(store);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = [first.run_id, second.run_id].map(|run_id| {
+        let root = root.path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let store = AglStore::open_current_at(root).unwrap();
+            barrier.wait();
+            store
+                .write_artifact(
+                    &run_id,
+                    MediaType::ImagePng,
+                    b"same-private-image",
+                    Some(ImageDimensions::new(1, 1).unwrap()),
+                    ArtifactSensitivity::Sensitive,
+                    ArtifactSource {
+                        kind: ArtifactSourceKind::ScreenCapture,
+                        provider: Some("fake".to_string()),
+                    },
+                    ArtifactRetention::RunScoped,
+                )
+                .unwrap()
+        })
+    });
+    let artifacts = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(artifacts[0].reference.digest, artifacts[1].reference.digest);
+    let store = AglStore::open_current_at(&root).unwrap();
+    let blob_count: u64 = store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM content_blobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(blob_count, 1);
+}
+
+#[test]
+fn artifact_write_failpoints_leave_valid_metadata_or_collectable_orphans() {
+    let (root, store) = open_temp_store("artifact-failpoints");
+    let run = run_draft(None);
+    store.admit_run(&run).unwrap();
+    let write_at = |bytes: &[u8], failpoint| {
+        store.write_artifact_injected(
+            &run.run_id,
+            MediaType::ImagePng,
+            bytes,
+            Some(ImageDimensions::new(1, 1).unwrap()),
+            ArtifactSensitivity::Sensitive,
+            ArtifactSource {
+                kind: ArtifactSourceKind::ScreenCapture,
+                provider: Some("fake".to_string()),
+            },
+            ArtifactRetention::RunScoped,
+            failpoint,
+        )
+    };
+
+    assert!(write_at(b"before-blob", ArtifactWriteFailpoint::BeforeBlobWrite).is_err());
+    assert_eq!(
+        store
+            .garbage_collect_artifacts()
+            .unwrap()
+            .orphan_files_deleted,
+        0
+    );
+
+    for (bytes, failpoint) in [
+        (
+            b"after-blob".as_slice(),
+            ArtifactWriteFailpoint::AfterBlobWrite,
+        ),
+        (
+            b"before-metadata".as_slice(),
+            ArtifactWriteFailpoint::BeforeMetadataCommit,
+        ),
+    ] {
+        assert!(write_at(bytes, failpoint).is_err());
+        let report = store.garbage_collect_artifacts().unwrap();
+        assert_eq!(report.orphan_files_deleted, 1);
+    }
+
+    assert!(
+        write_at(
+            b"after-metadata",
+            ArtifactWriteFailpoint::AfterMetadataCommit,
+        )
+        .is_err()
+    );
+    let artifact_id: String = store
+        .connection()
+        .query_row("SELECT id FROM artifacts", [], |row| row.get(0))
+        .unwrap();
+    let stored = store
+        .artifact(&agl_content::ArtifactId::parse(artifact_id).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_artifact(&run.run_id, &stored.reference)
+            .unwrap()
+            .bytes,
+        b"after-metadata"
+    );
+    assert_eq!(
+        store
+            .garbage_collect_artifacts()
+            .unwrap()
+            .orphan_files_deleted,
+        0
+    );
+
+    let temp_root = root.join("blobs/.tmp");
+    std::fs::create_dir_all(&temp_root).unwrap();
+    std::fs::write(temp_root.join("stale-private-temp"), b"partial").unwrap();
+    assert_eq!(
+        store
+            .garbage_collect_artifacts()
+            .unwrap()
+            .orphan_files_deleted,
+        1
+    );
+}
+
+#[test]
 fn idempotent_admission_has_one_durable_run() {
     let (root, _store) = open_temp_store("idempotent-run");
     let root = root.path.clone();
@@ -599,6 +804,7 @@ fn permission_requests_grants_and_revokes_are_persisted() {
             requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: json!({"repo": "/tmp/repo", "matrix_room": "!room:server"}),
             duration: "one_turn".to_string(),
             reason: "Schedule a daily Matrix greeting.".to_string(),
@@ -659,6 +865,7 @@ fn grant_permission_request_rolls_back_grants_when_resolution_fails() {
             requested_tools: vec!["cron.add".to_string(), "matrix.outbox.enqueue".to_string()],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_cron".to_string(), "matrix_outbox".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: json!({"repo": "/tmp/repo", "matrix_room": "!room:server"}),
             duration: "one_turn".to_string(),
             reason: "Schedule a daily Matrix greeting.".to_string(),
@@ -697,6 +904,7 @@ fn permission_export_reports_pending_and_historical_records() {
             requested_tools: vec!["notes.add".to_string()],
             max_operation_kind: "write".to_string(),
             state_effects: vec!["store_notes".to_string()],
+            sensitive_inputs: Vec::new(),
             scope: json!({"repo": "/tmp/repo"}),
             duration: "one_turn".to_string(),
             reason: "Create one explicit note.".to_string(),

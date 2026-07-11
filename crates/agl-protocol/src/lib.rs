@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, TurnId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -223,7 +224,7 @@ pub struct SessionOpenedEvent {
 #[serde(deny_unknown_fields)]
 pub struct RunSubmitRequest {
     pub session_id: SessionId,
-    pub text: String,
+    pub content: Content,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(default)]
@@ -482,14 +483,14 @@ pub enum TranscriptEvent {
         turn_id: TurnId,
         message_id: MessageId,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<String>,
+        content: Option<Content>,
     },
     AssistantMessage {
         run_id: RunId,
         turn_id: TurnId,
         message_id: MessageId,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content: Option<String>,
+        content: Option<Content>,
     },
     AssistantToolCall {
         run_id: RunId,
@@ -597,7 +598,7 @@ mod tests {
             request_id(),
             DaemonRequestKind::RunSubmit(RunSubmitRequest {
                 session_id: session_id(),
-                text: "hello".to_string(),
+                content: Content::text("hello").unwrap(),
                 idempotency_key: Some("matrix-event-001".to_string()),
                 budget: RunBudgetRequest::default(),
             }),

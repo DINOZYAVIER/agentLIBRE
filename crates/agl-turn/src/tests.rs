@@ -1,5 +1,6 @@
 use agl_actions::ToolCall;
 use agl_capabilities::{ActionDeclaration, ActionResult, CapabilityId, OperationKind};
+use agl_content::Content;
 use agl_ids::{RunId, TurnId};
 use serde_json::json;
 
@@ -18,7 +19,11 @@ fn turn_id() -> TurnId {
 }
 
 fn test_input(user_input: impl Into<String>) -> TurnInput {
-    TurnInput::user(run_id(), turn_id(), user_input)
+    TurnInput::user(run_id(), turn_id(), text(user_input))
+}
+
+fn text(value: impl Into<String>) -> Content {
+    Content::text(value).unwrap()
 }
 
 fn test_machine() -> TurnMachine {
@@ -86,7 +91,7 @@ fn initializes_turn_state_with_user_message() {
     assert_eq!(
         state.messages,
         [TurnMessage::User {
-            content: "hello".to_string(),
+            content: text("hello"),
         }]
     );
 }
@@ -97,10 +102,10 @@ fn initializes_turn_state_with_context_and_request_index() {
         test_input("new")
             .with_context_messages(vec![
                 TurnMessage::User {
-                    content: "old".to_string(),
+                    content: text("old"),
                 },
                 TurnMessage::Assistant {
-                    content: "previous".to_string(),
+                    content: text("previous"),
                 },
             ])
             .with_request_index_start(7),
@@ -113,13 +118,13 @@ fn initializes_turn_state_with_context_and_request_index() {
         state.messages,
         [
             TurnMessage::User {
-                content: "old".to_string(),
+                content: text("old"),
             },
             TurnMessage::Assistant {
-                content: "previous".to_string(),
+                content: text("previous"),
             },
             TurnMessage::User {
-                content: "new".to_string(),
+                content: text("new"),
             },
         ]
     );
@@ -282,7 +287,7 @@ fn turn_machine_accepts_answer_path() {
         apply(
             &mut machine,
             TurnTransition::Start {
-                user_input: "hello".to_string(),
+                user_input: text("hello"),
             },
         ),
         TurnPhase::Started
@@ -306,7 +311,7 @@ fn turn_machine_accepts_answer_path() {
             &mut machine,
             TurnTransition::ReceiveModelResponse {
                 request_index: 1,
-                content: "done".to_string(),
+                content: text("done"),
             },
         ),
         TurnPhase::ModelResponded
@@ -343,7 +348,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "read".to_string(),
+            user_input: text("read"),
         },
     );
     apply(
@@ -358,7 +363,7 @@ fn turn_machine_accepts_tool_loop_back_to_model() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 1,
-            content: tool_call("read_file", json!({"path": "README.MD"})).name,
+            content: text(tool_call("read_file", json!({"path": "README.MD"})).name),
         },
     );
     apply(
@@ -415,7 +420,7 @@ fn turn_machine_accepts_repaired_malformed_tool_json() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "read".to_string(),
+            user_input: text("read"),
         },
     );
     apply(
@@ -430,7 +435,7 @@ fn turn_machine_accepts_repaired_malformed_tool_json() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 1,
-            content: "<tool_call>".to_string(),
+            content: text("<tool_call>"),
         },
     );
     apply(
@@ -496,7 +501,7 @@ fn turn_machine_accepts_hook_batch_before_model_response_parse() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "answer".to_string(),
+            user_input: text("answer"),
         },
     );
     apply(
@@ -511,7 +516,7 @@ fn turn_machine_accepts_hook_batch_before_model_response_parse() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 1,
-            content: "done".to_string(),
+            content: text("done"),
         },
     );
     assert_eq!(
@@ -564,7 +569,7 @@ fn turn_machine_accepts_artifact_write_hook_before_finish() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "answer".to_string(),
+            user_input: text("answer"),
         },
     );
     apply(
@@ -579,7 +584,7 @@ fn turn_machine_accepts_artifact_write_hook_before_finish() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 0,
-            content: "done".to_string(),
+            content: text("done"),
         },
     );
     apply(&mut machine, TurnTransition::ParseAnswer);
@@ -652,7 +657,7 @@ fn turn_machine_accepts_failed_required_hook_terminal_path() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "answer".to_string(),
+            user_input: text("answer"),
         },
     );
     apply(
@@ -667,7 +672,7 @@ fn turn_machine_accepts_failed_required_hook_terminal_path() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 1,
-            content: "done".to_string(),
+            content: text("done"),
         },
     );
     apply(
@@ -714,7 +719,7 @@ fn turn_machine_accepts_stopped_tool_path() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "read".to_string(),
+            user_input: text("read"),
         },
     );
     apply(
@@ -729,7 +734,7 @@ fn turn_machine_accepts_stopped_tool_path() {
         &mut machine,
         TurnTransition::ReceiveModelResponse {
             request_index: 1,
-            content: "tool".to_string(),
+            content: text("tool"),
         },
     );
     apply(
@@ -767,7 +772,7 @@ fn turn_machine_accepts_model_failure_path() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "hello".to_string(),
+            user_input: text("hello"),
         },
     );
     apply(
@@ -812,7 +817,7 @@ fn turn_machine_rejects_illegal_transition_and_finished_is_terminal() {
     apply(
         &mut machine,
         TurnTransition::Start {
-            user_input: "hello".to_string(),
+            user_input: text("hello"),
         },
     );
     apply(

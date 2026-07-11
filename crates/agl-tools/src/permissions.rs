@@ -80,6 +80,7 @@ impl PermissionTools {
                     "request_id": request.id,
                     "tools": request.requested_tools,
                     "max_operation_kind": request.max_operation_kind,
+                    "sensitive_inputs": request.sensitive_inputs,
                     "duration": request.duration,
                     "status": request.status.as_str(),
                 })
@@ -92,6 +93,7 @@ impl PermissionTools {
                     "grant_id": grant.id,
                     "tool_id": grant.tool_id,
                     "max_operation_kind": grant.max_operation_kind,
+                    "sensitive_inputs": grant.sensitive_inputs,
                     "duration": grant.duration,
                     "status": grant.status.as_str(),
                 })
@@ -130,6 +132,7 @@ impl PermissionTools {
             requested_tools,
             max_operation_kind,
             state_effects: args.state_effects.unwrap_or_default(),
+            sensitive_inputs: args.sensitive_inputs.unwrap_or_default(),
             scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
             duration,
             reason: args.reason,
@@ -162,6 +165,7 @@ impl PermissionTools {
                         tool_id: args.tool_id,
                         max_operation_kind,
                         state_effects: args.state_effects.unwrap_or_default(),
+                        sensitive_inputs: args.sensitive_inputs.unwrap_or_default(),
                         scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
                         duration: args.duration.unwrap_or_else(|| "one_turn".to_string()),
                         granted_by_ref: args
@@ -178,6 +182,7 @@ impl PermissionTools {
                     "grant_id": grant.id,
                     "tool_id": grant.tool_id,
                     "max_operation_kind": grant.max_operation_kind,
+                    "sensitive_inputs": grant.sensitive_inputs,
                     "duration": grant.duration,
                     "status": grant.status.as_str(),
                 })
@@ -321,6 +326,7 @@ fn render_permission_request_result(request: &PermissionRequestRecord) -> Value 
         "status": request.status.as_str(),
         "tools": request.requested_tools,
         "max_operation_kind": request.max_operation_kind,
+        "sensitive_inputs": request.sensitive_inputs,
         "duration": request.duration,
         "result": "pending_approval",
     })
@@ -359,6 +365,7 @@ struct RequestArgs {
     reason: String,
     max_operation_kind: Option<OperationKindArg>,
     state_effects: Option<Vec<String>>,
+    sensitive_inputs: Option<Vec<String>>,
     scope: Option<Value>,
     duration: Option<String>,
     requester_ref: Option<String>,
@@ -385,6 +392,7 @@ struct GrantDirectArgs {
     tool_id: String,
     max_operation_kind: Option<OperationKindArg>,
     state_effects: Option<Vec<String>>,
+    sensitive_inputs: Option<Vec<String>>,
     scope: Option<Value>,
     duration: Option<String>,
     granted_by_ref: Option<String>,

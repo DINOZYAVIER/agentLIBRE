@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
+mod artifacts;
 mod connection;
 mod error;
 mod export;
@@ -16,6 +17,7 @@ mod status;
 mod types;
 mod util;
 
+pub use artifacts::{ArtifactGcReport, ResolvedArtifact, StoredArtifact};
 pub use error::{Result, StoreError};
 pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
 #[cfg(test)]

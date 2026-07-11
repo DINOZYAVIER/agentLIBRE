@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use agl_content::{Content, ContentPart};
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
@@ -121,7 +122,7 @@ pub(crate) struct TurnInputSpec<'a> {
     max_hook_repair_attempts: usize,
     visible_tools: &'a [VisibleTool],
     capability_policy_hash: Option<String>,
-    user_input: &'a str,
+    user_input: &'a Content,
 }
 
 pub struct ChatService {
@@ -322,7 +323,8 @@ impl ChatService {
         request_id: Option<RequestId>,
         input: &str,
     ) -> Result<ChatTurnOutput> {
-        let mut execution = self.start_user_turn_with_ids(run_id, turn_id, request_id, input)?;
+        let mut execution =
+            self.start_user_turn_with_ids(run_id, turn_id, request_id, Content::text(input)?)?;
         while !execution.is_terminal() {
             if let Err(error) = self.advance_user_turn(&mut execution) {
                 let attempt_ids = execution.attempt_ids.clone();
@@ -347,7 +349,7 @@ impl ChatService {
         run_id: RunId,
         turn_id: TurnId,
         request_id: Option<RequestId>,
-        input: &str,
+        input: Content,
     ) -> Result<ChatTurnExecution> {
         if self.context_released {
             bail!("cannot run a turn after the chat session context was released");
@@ -359,14 +361,14 @@ impl ChatService {
             "user",
             &self.session_id,
             &user_message_id,
-            input,
+            &input,
             &self.runtime,
         );
         let envelope = self
             .turn_runtime
             .append_runtime_event(RuntimeEvent::UserMessage {
                 message_id: user_message_id,
-                content: input.to_string(),
+                content: input.clone(),
             })?;
         if let Some(history) = &mut self.chat_history
             && let Err(error) = history.append_user_message(envelope)
@@ -384,7 +386,7 @@ impl ChatService {
             max_hook_repair_attempts: self.turn_runtime.session().max_hook_repair_attempts(),
             visible_tools: self.turn_runtime.session().turn_visible_tools(),
             capability_policy_hash,
-            user_input: input,
+            user_input: &input,
         });
         let previous_message_count = self.messages.len();
         let mut executor = TurnExecutor::new(turn_input);
@@ -586,16 +588,19 @@ impl ChatService {
     ) -> Result<()> {
         let stop_reason = match output {
             TurnOutput::Answered { answer } => {
-                ensure_final_assistant_message(&mut messages, assistant_text_for_terminal(answer));
+                ensure_final_assistant_message(
+                    &mut messages,
+                    Content::text(assistant_text_for_terminal(answer))?,
+                );
                 None
             }
             TurnOutput::Stopped { reason, detail } => {
                 messages.push(TurnMessage::Assistant {
-                    content: stopped_turn_context_message(
+                    content: Content::text(stopped_turn_context_message(
                         *reason,
                         detail.as_ref(),
                         self.turn_runtime.session().turn_visible_tools(),
-                    ),
+                    ))?,
                 });
                 Some(*reason)
             }
@@ -813,7 +818,7 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     let mut input = TurnInput::user(
         spec.run_id.clone(),
         spec.turn_id.clone(),
-        spec.user_input.to_string(),
+        spec.user_input.clone(),
     )
     .with_context_messages(spec.context_messages.to_vec())
     .with_request_index_start(spec.request_index)
@@ -834,7 +839,7 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     input
 }
 
-fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: String) {
+fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: Content) {
     match messages.last_mut() {
         Some(TurnMessage::Assistant { content: existing }) => *existing = content,
         _ => messages.push(TurnMessage::Assistant { content }),
@@ -885,11 +890,12 @@ fn record_completed_turn_messages(
             TurnMessage::AssistantToolCall { name, arguments } => {
                 link_next_attempt(chat_history, turn_runtime, recording)?;
                 let message_id = MessageId::generate();
+                let arguments_content = Content::text(arguments.to_string())?;
                 log_message_metadata(
                     "assistant_tool_call",
                     recording.session_id,
                     &message_id,
-                    &arguments.to_string(),
+                    &arguments_content,
                     recording.runtime,
                 );
                 let envelope =
@@ -1043,10 +1049,18 @@ fn log_message_metadata(
     role: &str,
     session_id: &SessionId,
     message_id: &MessageId,
-    content: &str,
+    content: &Content,
     runtime: &AgentLibreRuntimeConfig,
 ) {
-    let fields = logged_message_fields(role, content, runtime.logging.include_message_text);
+    let text = content
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            ContentPart::Artifact { .. } => None,
+        })
+        .collect::<String>();
+    let fields = logged_message_fields(role, &text, runtime.logging.include_message_text);
     tracing::info!(
         target: "agentlibre::app",
         session_id = %session_id,
@@ -1120,6 +1134,10 @@ mod tests {
 
     fn request_id() -> RequestId {
         RequestId::parse(TEST_REQUEST_ID).unwrap()
+    }
+
+    fn text(value: impl Into<String>) -> Content {
+        Content::text(value).unwrap()
     }
 
     fn visible_tool(id: &str) -> VisibleTool {
@@ -1337,7 +1355,7 @@ tool_call_format = "hermes_json"
         );
         let mut execution = chat
             .service
-            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), "hello")
+            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), text("hello"))
             .unwrap();
 
         let initial = execution.take_events();
@@ -1414,7 +1432,7 @@ tool_call_format = "hermes_json"
         );
         let mut execution = chat
             .service
-            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), "cancel")
+            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), text("cancel"))
             .unwrap();
 
         execution.request_cancellation().unwrap();
@@ -1445,7 +1463,7 @@ tool_call_format = "hermes_json"
         let mut chat = test_chat_service_with_client("context-lifecycle", false, client);
         let session_id = chat.service.session_id().clone();
         chat.service.messages.push(TurnMessage::User {
-            content: "discard me".to_string(),
+            content: text("discard me"),
         });
 
         assert_eq!(chat.service.clear_context().unwrap(), 1);
@@ -1490,14 +1508,14 @@ tool_call_format = "hermes_json"
             .turn_runtime
             .append_runtime_event(RuntimeEvent::UserMessage {
                 message_id: message_id('4'),
-                content: "hello".to_string(),
+                content: text("hello"),
             })
             .unwrap();
         chat.service
             .turn_runtime
             .append_runtime_event(RuntimeEvent::AssistantMessage {
                 message_id: message_id('5'),
-                content: "answer".to_string(),
+                content: text("answer"),
             })
             .unwrap();
         chat.service
@@ -1734,14 +1752,14 @@ tool_call_format = "hermes_json"
                     1,
                     RuntimeEvent::UserMessage {
                         message_id: message_id('4'),
-                        content: "hello".to_string(),
+                        content: text("hello"),
                     },
                 ),
                 runtime_event(
                     2,
                     RuntimeEvent::AssistantMessage {
                         message_id: message_id('5'),
-                        content: "hi".to_string(),
+                        content: text("hi"),
                     },
                 ),
                 runtime_event(
@@ -1767,10 +1785,10 @@ tool_call_format = "hermes_json"
             replay_turn_messages(&replay),
             vec![
                 TurnMessage::User {
-                    content: "hello".to_string()
+                    content: text("hello")
                 },
                 TurnMessage::Assistant {
-                    content: "hi".to_string()
+                    content: text("hi")
                 },
                 TurnMessage::AssistantToolCall {
                     name: "read_file".to_string(),
@@ -1795,7 +1813,7 @@ tool_call_format = "hermes_json"
                     1,
                     RuntimeEvent::UserMessage {
                         message_id: message_id('4'),
-                        content: "old".to_string(),
+                        content: text("old"),
                     },
                 ),
                 ChatSessionEvent::ContextCleared {
@@ -1805,7 +1823,7 @@ tool_call_format = "hermes_json"
                     2,
                     RuntimeEvent::UserMessage {
                         message_id: message_id('5'),
-                        content: "new".to_string(),
+                        content: text("new"),
                     },
                 ),
             ],
@@ -1814,7 +1832,7 @@ tool_call_format = "hermes_json"
         assert_eq!(
             replay_turn_messages(&replay),
             vec![TurnMessage::User {
-                content: "new".to_string()
+                content: text("new")
             }]
         );
     }
@@ -1825,10 +1843,10 @@ tool_call_format = "hermes_json"
         let turn_id = turn_id();
         let context = vec![
             TurnMessage::User {
-                content: "old".to_string(),
+                content: text("old"),
             },
             TurnMessage::Assistant {
-                content: "previous".to_string(),
+                content: text("previous"),
             },
         ];
 
@@ -1838,6 +1856,7 @@ tool_call_format = "hermes_json"
         ];
 
         let visible_tools = vec![visible_tool("fs.read")];
+        let user_input = text("new");
 
         let input = build_turn_input(TurnInputSpec {
             run_id: &run_id,
@@ -1849,12 +1868,12 @@ tool_call_format = "hermes_json"
             max_hook_repair_attempts: 1,
             visible_tools: &visible_tools,
             capability_policy_hash: Some("sha256:test".to_string()),
-            user_input: "new",
+            user_input: &user_input,
         });
 
         assert_eq!(input.run_id, run_id);
         assert_eq!(input.turn_id, turn_id);
-        assert_eq!(input.user_input, "new");
+        assert_eq!(input.user_input, text("new"));
         assert_eq!(input.context_messages, context);
         assert_eq!(input.hook_batches, hook_batches);
         assert_eq!(
@@ -1872,6 +1891,7 @@ tool_call_format = "hermes_json"
     fn build_turn_input_keeps_tools_disabled_without_visible_tools() {
         let run_id = run_id();
         let turn_id = turn_id();
+        let user_input = text("new");
         let input = build_turn_input(TurnInputSpec {
             run_id: &run_id,
             turn_id: &turn_id,
@@ -1882,7 +1902,7 @@ tool_call_format = "hermes_json"
             max_hook_repair_attempts: 0,
             visible_tools: &[],
             capability_policy_hash: None,
-            user_input: "new",
+            user_input: &user_input,
         });
 
         assert!(input.visible_tools.is_empty());

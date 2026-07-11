@@ -42,6 +42,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/llama_cpp/mtmd_bridge.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest_dir.join("src/llama_cpp/abi_guard.cpp").display()
     );
     llama_cpp_build::emit_llama_cpp_env_reruns();
@@ -51,11 +55,13 @@ fn main() {
         .std("c++17")
         .file(manifest_dir.join("src/llama_cpp/chat_template_bridge.cpp"))
         .file(manifest_dir.join("src/llama_cpp/mtp_speculative_bridge.cpp"))
+        .file(manifest_dir.join("src/llama_cpp/mtmd_bridge.cpp"))
         .file(manifest_dir.join("src/llama_cpp/abi_guard.cpp"))
         .include(repo_root.join("vendor/llama.cpp/include"))
         .include(repo_root.join("vendor/llama.cpp/common"))
         .include(repo_root.join("vendor/llama.cpp/ggml/include"))
         .include(repo_root.join("vendor/llama.cpp/vendor"))
+        .include(repo_root.join("vendor/llama.cpp/tools/mtmd"))
         .warnings(false)
         .compile("agl_llama_chat_template_bridge");
 
@@ -65,6 +71,7 @@ fn main() {
     );
     llama_cpp_build::emit_link_search_and_rpaths(&lib_dir);
     println!("cargo:rustc-link-lib=dylib=llama-common");
+    println!("cargo:rustc-link-lib=dylib=mtmd");
     println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml");
     println!("cargo:rustc-link-lib=dylib=ggml-base");

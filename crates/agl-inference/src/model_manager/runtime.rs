@@ -25,6 +25,13 @@ impl<T> RuntimeOperation<T> {
 pub struct RuntimeFailure {
     message: String,
     log: String,
+    kind: RuntimeFailureKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeFailureKind {
+    General,
+    MultimodalEncode,
 }
 
 impl RuntimeFailure {
@@ -32,7 +39,17 @@ impl RuntimeFailure {
         Self {
             message: message.into(),
             log: log.into(),
+            kind: RuntimeFailureKind::General,
         }
+    }
+
+    pub(crate) fn into_multimodal_encode(mut self) -> Self {
+        self.kind = RuntimeFailureKind::MultimodalEncode;
+        self
+    }
+
+    pub(crate) fn is_multimodal_encode(&self) -> bool {
+        self.kind == RuntimeFailureKind::MultimodalEncode
     }
 
     pub fn message(&self) -> &str {

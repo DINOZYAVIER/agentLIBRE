@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_capabilities::{DispatchDenialCode, HookBatchRequest, HookBatchResult, HookEvent};
+use agl_content::Content;
 use agl_events::{EventDraft, EventScope, RuntimeEvent};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
@@ -166,10 +167,10 @@ enum ExecutorPhase {
     },
     ModelResponseHook {
         request_index: usize,
-        content: String,
+        content: Content,
     },
     ParseModelResponse {
-        content: String,
+        content: Content,
     },
     ArtifactWriteHook {
         answer: String,
@@ -230,7 +231,7 @@ enum HookContinuation {
     },
     ModelResponse {
         request_index: usize,
-        content: String,
+        content: Content,
     },
     ArtifactWrite {
         answer: String,
@@ -419,7 +420,11 @@ impl TurnExecutor {
                 ExecutorPhase::CreateModelEffect { request_index } => {
                     let mut messages = self.checkpoint.state.messages.clone();
                     if let Some(message) = self.checkpoint.pending_repair_message.take() {
-                        messages.push(TurnMessage::System { content: message });
+                        messages.push(TurnMessage::System {
+                            content: Content::text(message).map_err(|error| {
+                                TurnExecutorError::Transition(error.to_string())
+                            })?,
+                        });
                     }
                     let request = ModelRequest {
                         run_id: self.checkpoint.state.input.run_id.clone(),
@@ -441,7 +446,7 @@ impl TurnExecutor {
                     let payload = model_response_payload(
                         &self.checkpoint.state,
                         request_index,
-                        content.len(),
+                        content.text_byte_len(),
                     );
                     if self.schedule_hook(
                         HookEvent::ModelResponse,
@@ -488,7 +493,7 @@ impl TurnExecutor {
                     )? {
                         return Ok(());
                     }
-                    self.schedule_answer_transcript(answer);
+                    self.schedule_answer_transcript(answer)?;
                 }
                 ExecutorPhase::ScheduleTranscript { output, messages } => {
                     let continuation = EffectContinuation::Transcript {
@@ -665,8 +670,7 @@ impl TurnExecutor {
                 )?;
                 match summary.outcome() {
                     HookBatchOutcome::Pass | HookBatchOutcome::Warn => {
-                        self.continue_after_hook(next);
-                        Ok(())
+                        self.continue_after_hook(next)
                     }
                     HookBatchOutcome::Repair => {
                         self.handle_hook_repair(next, summary, &result_for_repair, events)
@@ -685,7 +689,7 @@ impl TurnExecutor {
         }
     }
 
-    fn continue_after_hook(&mut self, next: HookContinuation) {
+    fn continue_after_hook(&mut self, next: HookContinuation) -> Result<(), TurnExecutorError> {
         self.checkpoint.phase = match next {
             HookContinuation::ContextPrepare => ExecutorPhase::PrepareModelRequest,
             HookContinuation::ModelRequest { request_index } => {
@@ -697,10 +701,11 @@ impl TurnExecutor {
             } => ExecutorPhase::ParseModelResponse { content },
             HookContinuation::ArtifactWrite { answer } => ExecutorPhase::TurnFinishHook { answer },
             HookContinuation::TurnFinish { answer } => {
-                self.schedule_answer_transcript(answer);
-                return;
+                self.schedule_answer_transcript(answer)?;
+                return Ok(());
             }
         };
+        Ok(())
     }
 
     fn handle_hook_repair(
@@ -759,10 +764,15 @@ impl TurnExecutor {
 
     fn parse_model_response(
         &mut self,
-        content: String,
+        content: Content,
         events: &mut Vec<EventDraft<RuntimeEvent>>,
     ) -> Result<(), TurnExecutorError> {
-        match agl_actions::parse_model_action(&content) {
+        let text = content.text_only().ok_or_else(|| {
+            TurnExecutorError::Transition(
+                "unsupported_content: model responses must be text-only".to_string(),
+            )
+        })?;
+        match agl_actions::parse_model_action(&text) {
             ModelAction::Answer(answer) => {
                 self.apply(TurnTransition::ParseAnswer, events)?;
                 self.apply(
@@ -903,15 +913,17 @@ impl TurnExecutor {
         Ok(true)
     }
 
-    fn schedule_answer_transcript(&mut self, answer: String) {
+    fn schedule_answer_transcript(&mut self, answer: String) -> Result<(), TurnExecutorError> {
         let mut messages = self.checkpoint.state.messages.clone();
         messages.push(TurnMessage::Assistant {
-            content: answer.clone(),
+            content: Content::text(answer.clone())
+                .map_err(|error| TurnExecutorError::Transition(error.to_string()))?,
         });
         self.checkpoint.phase = ExecutorPhase::ScheduleTranscript {
             output: TurnOutput::Answered { answer },
             messages,
         };
+        Ok(())
     }
 
     fn stop(

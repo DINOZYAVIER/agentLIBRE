@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use agl_content::Content;
 use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, RuntimeEvent, RuntimeEventEnvelope};
 use agl_ids::{AttemptId, EventId, MessageId, RunId, SessionId, TurnId};
 
@@ -67,6 +68,10 @@ fn event_id(last_hex: char) -> EventId {
     .unwrap()
 }
 
+fn text(value: impl Into<String>) -> Content {
+    Content::text(value).unwrap()
+}
+
 fn runtime_envelope(
     session_id: SessionId,
     run_id: RunId,
@@ -111,7 +116,7 @@ fn user_envelope(
         None,
         RuntimeEvent::UserMessage {
             message_id: message_id(message_suffix),
-            content: content.to_string(),
+            content: text(content),
         },
     )
 }
@@ -133,7 +138,7 @@ fn assistant_envelope(
         None,
         RuntimeEvent::AssistantMessage {
             message_id: message_id(message_suffix),
-            content: content.to_string(),
+            content: text(content),
         },
     )
 }
@@ -162,7 +167,7 @@ fn chat_session_machine_accepts_answer_turn_path() {
         .unwrap();
     machine
         .apply(ChatSessionTransition::ReadUserMessage {
-            content: "hello".to_string(),
+            content: text("hello"),
         })
         .unwrap();
     machine
@@ -170,7 +175,7 @@ fn chat_session_machine_accepts_answer_turn_path() {
             run_id: run_id(),
             turn_id: turn_id(),
             message_id: message_id('7'),
-            content: "hello".to_string(),
+            content: text("hello"),
         })
         .unwrap();
     machine
@@ -186,7 +191,7 @@ fn chat_session_machine_accepts_answer_turn_path() {
                 run_id: run_id(),
                 turn_id: turn_id(),
                 message_id: message_id('8'),
-                content: "hi".to_string(),
+                content: text("hi"),
             })
             .unwrap()
             .to,
@@ -202,7 +207,7 @@ fn chat_session_machine_rejects_illegal_transition_and_finished_is_terminal() {
             run_id: run_id(),
             turn_id: turn_id(),
             message_id: message_id('7'),
-            content: "hi".to_string(),
+            content: text("hi"),
         })
         .unwrap_err();
     assert_eq!(err.phase, ChatSessionPhase::Uninitialized);
@@ -471,7 +476,7 @@ fn replay_rejects_runtime_envelope_from_another_session() {
             None,
             RuntimeEvent::UserMessage {
                 message_id: message_id('7'),
-                content: "foreign".to_string(),
+                content: text("foreign"),
             },
         )),
     };

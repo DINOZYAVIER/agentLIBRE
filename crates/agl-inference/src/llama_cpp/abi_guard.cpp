@@ -1,4 +1,5 @@
 #include "llama.h"
+#include "mtmd.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,9 @@ static_assert(std::is_same_v<decltype(&llama_context_default_params), llama_cont
 static_assert(std::is_same_v<decltype(&llama_batch_get_one), llama_batch (*)(llama_token *, int32_t)>, "llama_batch_get_one signature changed");
 static_assert(std::is_same_v<decltype(&llama_decode), int32_t (*)(llama_context *, llama_batch)>, "llama_decode signature changed");
 static_assert(std::is_same_v<decltype(&llama_set_abort_callback), void (*)(llama_context *, ggml_abort_callback, void *)>, "llama_set_abort_callback signature changed");
+static_assert(std::is_standard_layout_v<mtmd_input_text>, "mtmd_input_text must remain C layout");
+static_assert(std::is_same_v<decltype(mtmd_input_text::text), const char *>, "mtmd_input_text.text ABI changed");
+static_assert(std::is_same_v<decltype(&mtmd_free), void (*)(mtmd_context *)>, "mtmd_free signature changed");
 
 extern "C" int agl_llama_cpp_abi_guard(void) {
     return 0;

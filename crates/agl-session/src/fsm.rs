@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
+use agl_content::Content;
 use agl_ids::{AttemptId, MessageId, RunId, SessionId, TurnId};
 
 use crate::AgentLibreSessionFinishReason;
@@ -42,7 +43,7 @@ pub enum ChatSessionTransition {
     ResumeSession,
     PromptForInput,
     ReadUserMessage {
-        content: String,
+        content: Content,
     },
     ReadCommandClear,
     ReadCommandExit,
@@ -50,7 +51,7 @@ pub enum ChatSessionTransition {
         run_id: RunId,
         turn_id: TurnId,
         message_id: MessageId,
-        content: String,
+        content: Content,
     },
     LinkModelAttempt {
         run_id: RunId,
@@ -61,13 +62,13 @@ pub enum ChatSessionTransition {
         run_id: RunId,
         turn_id: TurnId,
         message_id: MessageId,
-        content: String,
+        content: Content,
     },
     RecordAssistantStopMarker {
         run_id: RunId,
         turn_id: TurnId,
         message_id: MessageId,
-        content: String,
+        content: Content,
     },
     RecordAssistantToolCall {
         run_id: RunId,
