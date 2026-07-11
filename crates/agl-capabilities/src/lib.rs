@@ -1,5 +1,6 @@
 mod action;
 mod declaration;
+mod delegation;
 mod digest;
 mod hook;
 mod ids;
@@ -12,6 +13,10 @@ pub use action::{
 pub use declaration::{
     ActionDeclaration, ActionDelivery, ActionVisibility, DeclarationError, HookDeclaration,
     OperationKind, ProviderDeclaration, ProviderSource, ProviderTrust, SensitiveInput, StateEffect,
+};
+pub use delegation::{
+    AGENT_DELEGATE_CAPABILITY_ID, AGENT_DELEGATE_PROVIDER_ID, DelegateActionArgs,
+    MAX_DELEGATED_TASK_BYTES, delegation_provider,
 };
 pub use digest::{DeclarationDigest, DigestParseError, PolicyHash};
 pub use hook::{
