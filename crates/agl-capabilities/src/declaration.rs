@@ -20,6 +20,24 @@ pub enum OperationKind {
     Admin,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionDelivery {
+    ReplaySafe,
+    IdempotentRunStep,
+    AtMostOnce,
+}
+
+impl ActionDelivery {
+    fn for_operation(operation_kind: OperationKind) -> Self {
+        if operation_kind == OperationKind::Read {
+            Self::ReplaySafe
+        } else {
+            Self::AtMostOnce
+        }
+    }
+}
+
 impl OperationKind {
     pub fn rank(self) -> u8 {
         match self {
@@ -111,6 +129,7 @@ pub struct ActionDeclaration {
     pub description: String,
     pub input_schema: Value,
     pub operation_kind: OperationKind,
+    pub delivery: ActionDelivery,
     pub state_effects: BTreeSet<StateEffect>,
     pub visibility: ActionVisibility,
 }
@@ -127,6 +146,7 @@ impl ActionDeclaration {
             description: description.into(),
             input_schema,
             operation_kind,
+            delivery: ActionDelivery::for_operation(operation_kind),
             state_effects: BTreeSet::new(),
             visibility: ActionVisibility::for_operation(operation_kind),
         };
@@ -152,6 +172,11 @@ impl ActionDeclaration {
         self
     }
 
+    pub fn with_run_step_idempotency(mut self) -> Self {
+        self.delivery = ActionDelivery::IdempotentRunStep;
+        self
+    }
+
     pub fn with_visibility(mut self, visibility: ActionVisibility) -> Self {
         self.visibility = visibility;
         self
@@ -170,6 +195,22 @@ impl ActionDeclaration {
                 id: self.id.clone(),
                 message: "read operations must not declare state effects",
             });
+        }
+        match (self.operation_kind.is_state_mutating(), self.delivery) {
+            (false, ActionDelivery::ReplaySafe)
+            | (true, ActionDelivery::IdempotentRunStep | ActionDelivery::AtMostOnce) => {}
+            (false, _) => {
+                return Err(DeclarationError::InvalidOperation {
+                    id: self.id.clone(),
+                    message: "read operations must use replay-safe delivery",
+                });
+            }
+            (true, ActionDelivery::ReplaySafe) => {
+                return Err(DeclarationError::InvalidOperation {
+                    id: self.id.clone(),
+                    message: "state-mutating operations cannot use replay-safe delivery",
+                });
+            }
         }
         Ok(())
     }

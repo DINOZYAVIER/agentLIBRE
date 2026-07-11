@@ -165,11 +165,13 @@ impl AglStore {
         })?;
 
         let runs_sql = if include_deleted {
-            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error
+            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error,
+                    supervisor_run_id
              FROM cron_runs
              ORDER BY scheduled_for ASC, id ASC"
         } else {
-            "SELECT r.id, r.job_id, r.scheduled_for, r.started_at, r.finished_at, r.status, r.result_ref, r.error
+            "SELECT r.id, r.job_id, r.scheduled_for, r.started_at, r.finished_at, r.status,
+                    r.result_ref, r.error, r.supervisor_run_id
              FROM cron_runs r
              JOIN cron_jobs j ON j.id = r.job_id
              WHERE j.deleted_at IS NULL
@@ -187,6 +189,7 @@ impl AglStore {
                 "status": row.get::<_, String>(5)?,
                 "result_ref": row.get::<_, Option<String>>(6)?,
                 "error": row.get::<_, Option<String>>(7)?,
+                "supervisor_run_id": row.get::<_, Option<String>>(8)?,
             }))
         })?;
 

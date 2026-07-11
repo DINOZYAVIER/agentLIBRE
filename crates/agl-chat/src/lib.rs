@@ -3,6 +3,8 @@ mod options;
 mod prompt;
 mod service;
 mod session;
+mod supervised_chat;
+mod supervisor_driver;
 mod terminal;
 mod tools;
 mod turn_runtime;
@@ -14,5 +16,7 @@ pub use service::{
     chat_workspace_root, replay_turn_messages, stopped_turn_context_message,
 };
 pub use session::InferenceSession;
+pub use supervised_chat::SupervisedChat;
+pub use supervisor_driver::{ChatRunInput, ChatSupervisorFactory};
 pub use terminal::assistant_text_for_terminal;
 pub use turn_runtime::ChatTurnRuntime;

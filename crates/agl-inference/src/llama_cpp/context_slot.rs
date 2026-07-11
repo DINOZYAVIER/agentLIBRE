@@ -300,6 +300,7 @@ impl LlamaCppContextSlot {
             messages: prompt_messages,
             history: prompt_history,
         } = prepared;
+        let input_tokens = u64::try_from(prompt_tokens.len()).unwrap_or(u64::MAX);
 
         decode_prompt_tokens(
             self.context.as_ptr(),
@@ -313,6 +314,7 @@ impl LlamaCppContextSlot {
         let mut content = String::new();
         let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
+        let mut output_tokens = 0_u64;
         for _ in 0..max_output_tokens {
             control.ensure_running()?;
             if !has_context_space(self.context.as_ptr(), 1) {
@@ -332,6 +334,7 @@ impl LlamaCppContextSlot {
             decode_tokens(self.context.as_ptr(), &mut next_token)
                 .context("failed to decode generated token")?;
             self.cache.token_history.push(token);
+            output_tokens = output_tokens.saturating_add(1);
             decoded_content.push_str(&piece);
             content.push_str(&piece);
             if isolated_tool_call(&content).is_some() {
@@ -355,6 +358,8 @@ impl LlamaCppContextSlot {
         Ok(LlamaCppGenerationOutput {
             content,
             finish_reason,
+            input_tokens,
+            output_tokens,
         })
     }
 
@@ -399,6 +404,7 @@ impl LlamaCppContextSlot {
             messages: prompt_messages,
             history: prompt_history,
         } = prepared;
+        let input_tokens = u64::try_from(prompt_tokens.len()).unwrap_or(u64::MAX);
         log.push_str("mtp_generation_mode = draft-mtp\n");
         log.push_str("mtp_sequence_mode = seq0-temporary\n");
 
@@ -573,6 +579,8 @@ impl LlamaCppContextSlot {
         Ok(LlamaCppGenerationOutput {
             content,
             finish_reason,
+            input_tokens,
+            output_tokens: u64::from(emitted),
         })
     }
 

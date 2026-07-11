@@ -1,112 +1,121 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
-use agl_client::{AgentLibreClient, ClientError, DaemonTransport};
 use agl_config::LocalInferenceConfig;
-use agl_cron::{CronJob, CronJobDraft, CronRunStatus, CronTargetKind};
-use agl_events::{
-    EVENT_SCHEMA as RUNTIME_EVENT_SCHEMA, EventEnvelope, EventScope, RuntimeEvent,
-    RuntimeEventEnvelope, SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus,
+use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
+use agl_ids::{RequestId, RunId, SessionId};
+use agl_inference::{
+    InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
 };
-use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, TurnId};
-use agl_inference::InferenceResponse;
-use agl_inference::{InferenceFinishReason, InferenceResponseMetadata, ModelManagerStatus};
 use agl_protocol::{
-    AssistantMessageEvent, DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest,
-    DaemonRequestKind, EVENT_SCHEMA, HelloRequest, PROTOCOL_VERSION, ProtocolErrorCode,
-    ProtocolToolMode, REQUEST_SCHEMA, SessionClearRequest, SessionFinishReason,
-    SessionFinishRequest, SessionListEvent, SessionListRequest, SessionOpenRequest, SessionStatus,
-    SessionStatusRequest, SessionTranscriptRequest, SessionTurnRequest, TranscriptEvent,
-    TurnTerminalStatus,
+    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloRequest,
+    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
+    RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest, SessionListRequest,
+    SessionOpenRequest, SessionStatus, SessionStatusRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
     AgentLibreWorkspaceConfig,
 };
-use agl_session::ChatSessionStore;
-use agl_store::AglStore;
-use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use agl_store::RunState;
 
 use super::*;
 
 static TEST_RUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn runtime() -> AgentLibreRuntimeConfig {
-    let index = TEST_RUNTIME_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let root = std::env::temp_dir().join(format!(
-        "agl-daemon-test-{}-{}-{}",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("main"),
-        index
-    ));
-    AgentLibreRuntimeConfig {
-        paths: AgentLibrePaths::from_agl_home(root),
-        logging: AgentLibreLoggingConfig::from_env(),
-        history: AgentLibreHistoryConfig::default(),
-        workspace: AgentLibreWorkspaceConfig::default(),
+struct TestRuntime {
+    runtime: AgentLibreRuntimeConfig,
+    inference: InferenceOptions,
+}
+
+impl TestRuntime {
+    fn new() -> Self {
+        let index = TEST_RUNTIME_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "agl-daemon-test-{}-{}-{index}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("main")
+        ));
+        let paths = AgentLibrePaths::from_agl_home(root.clone());
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("inference.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+                root.join("unused-test-model.gguf").display()
+            ),
+        )
+        .unwrap();
+        Self {
+            runtime: AgentLibreRuntimeConfig {
+                paths,
+                logging: AgentLibreLoggingConfig::from_env(),
+                history: AgentLibreHistoryConfig::default(),
+                workspace: AgentLibreWorkspaceConfig::default(),
+            },
+            inference: InferenceOptions {
+                config: Some(config),
+                ..InferenceOptions::default()
+            },
+        }
     }
 }
 
-fn inference_client() -> InferenceClientHandle {
-    struct TestInferenceClient;
-
-    impl InferenceClient for TestInferenceClient {
-        fn generate(&self, _job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
-            anyhow::bail!("test inference client has no scripted response")
-        }
-
-        fn clear_context(
-            &self,
-            _config: &LocalInferenceConfig,
-            _session_id: &SessionId,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn release_context(
-            &self,
-            _config: &LocalInferenceConfig,
-            _session_id: &SessionId,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn status(&self) -> anyhow::Result<ModelManagerStatus> {
-            Ok(ModelManagerStatus::default())
+impl Drop for TestRuntime {
+    fn drop(&mut self) {
+        if let Some(root) = self.runtime.paths.config_dir.parent() {
+            let _ = std::fs::remove_dir_all(root);
         }
     }
-
-    InferenceClientHandle::new(TestInferenceClient)
 }
 
 #[derive(Default)]
-struct RecordingInferenceCalls {
-    generated: Vec<SessionId>,
-    cleared: Vec<SessionId>,
-    released: Vec<SessionId>,
+struct InferenceControl {
+    calls: AtomicUsize,
+    blocked: AtomicBool,
 }
 
 #[derive(Clone)]
-struct RecordingInferenceClient {
-    calls: Arc<Mutex<RecordingInferenceCalls>>,
+struct ControlledInferenceClient {
+    control: Arc<InferenceControl>,
 }
 
-impl InferenceClient for RecordingInferenceClient {
+impl InferenceClient for ControlledInferenceClient {
     fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
-        self.calls
-            .lock()
-            .unwrap()
-            .generated
-            .push(job.session_id.clone());
+        self.control.calls.fetch_add(1, Ordering::SeqCst);
+        while self.control.blocked.load(Ordering::Acquire) && !job.cancellation.is_cancelled() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if job.cancellation.is_cancelled() {
+            return Err(agl_inference::ModelManagerError::Cancelled.into());
+        }
         Ok(InferenceResponse {
             attempt_id: job.request.attempt_id,
-            content: "managed answer\n\nVerification: not run (fake inference).".to_string(),
+            content: "durable answer\n\nVerification: fake inference.".to_string(),
             finish_reason: InferenceFinishReason::Stop,
             metadata: InferenceResponseMetadata {
-                model_state: Some("fake_shared".to_string()),
+                model_state: Some("daemon-test".to_string()),
                 selected_device: None,
                 duration_ms: 0,
+                input_tokens: 4,
+                output_tokens: 2,
             },
         })
     }
@@ -114,18 +123,16 @@ impl InferenceClient for RecordingInferenceClient {
     fn clear_context(
         &self,
         _config: &LocalInferenceConfig,
-        session_id: &SessionId,
+        _session_id: &SessionId,
     ) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().cleared.push(session_id.clone());
         Ok(())
     }
 
     fn release_context(
         &self,
         _config: &LocalInferenceConfig,
-        session_id: &SessionId,
+        _session_id: &SessionId,
     ) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().released.push(session_id.clone());
         Ok(())
     }
 
@@ -134,1202 +141,341 @@ impl InferenceClient for RecordingInferenceClient {
     }
 }
 
+fn daemon(test: &TestRuntime, control: Arc<InferenceControl>) -> DaemonState {
+    DaemonState::new(
+        test.runtime.clone(),
+        test.inference.clone(),
+        InferenceClientHandle::new(ControlledInferenceClient { control }),
+    )
+}
+
 fn request(kind: DaemonRequestKind) -> DaemonRequest {
     DaemonRequest::new(RequestId::generate(), kind)
 }
 
-fn event_scope(
-    session_id: &SessionId,
-    run_id: &RunId,
-    turn_id: &TurnId,
-    attempt_id: Option<&AttemptId>,
-) -> EventScope {
-    let mut scope = EventScope::builder(run_id.clone())
-        .session_id(session_id.clone())
-        .turn_id(turn_id.clone());
-    if let Some(attempt_id) = attempt_id {
-        scope = scope.attempt_id(attempt_id.clone());
-    }
-    scope.build().unwrap()
-}
-
-fn runtime_envelope(
-    session_id: &SessionId,
-    run_id: &RunId,
-    turn_id: &TurnId,
-    attempt_id: Option<&AttemptId>,
-    sequence: u64,
-    payload: RuntimeEvent,
-) -> RuntimeEventEnvelope {
-    EventEnvelope {
-        schema: RUNTIME_EVENT_SCHEMA.to_string(),
-        event_id: EventId::generate(),
-        sequence,
-        occurred_at_unix_ms: sequence,
-        scope: event_scope(session_id, run_id, turn_id, attempt_id),
-        request_id: None,
-        caused_by: None,
-        payload,
+fn open_session(state: &mut DaemonState) -> SessionId {
+    let event = state.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+    match event.kind {
+        DaemonEventKind::SessionOpened(opened) => opened.session_id,
+        other => panic!("unexpected open event: {other:?}"),
     }
 }
 
-fn safe_runtime_envelope(
+fn submit(
+    state: &mut DaemonState,
     session_id: &SessionId,
-    run_id: &RunId,
-    turn_id: &TurnId,
-    request_id: &RequestId,
-    sequence: u64,
-    payload: SafeRuntimeEvent,
-) -> SafeRuntimeEventEnvelope {
-    EventEnvelope {
-        schema: RUNTIME_EVENT_SCHEMA.to_string(),
-        event_id: EventId::generate(),
-        sequence,
-        occurred_at_unix_ms: sequence,
-        scope: event_scope(session_id, run_id, turn_id, None),
-        request_id: Some(request_id.clone()),
-        caused_by: None,
-        payload,
+    text: &str,
+    idempotency_key: Option<&str>,
+) -> agl_protocol::RunAcceptedEvent {
+    let event = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
+        session_id: session_id.clone(),
+        text: text.to_string(),
+        idempotency_key: idempotency_key.map(str::to_string),
+        budget: RunBudgetRequest::default(),
+    })));
+    match event.kind {
+        DaemonEventKind::RunAccepted(accepted) => accepted,
+        other => panic!("unexpected admission event: {other:?}"),
     }
 }
 
-struct StateTransport {
-    state: DaemonState,
-    responses: VecDeque<String>,
+fn wait_for_calls(control: &InferenceControl, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while control.calls.load(Ordering::Acquire) < expected {
+        assert!(Instant::now() < deadline, "inference did not start");
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
-impl StateTransport {
-    fn new(state: DaemonState) -> Self {
-        Self {
-            state,
-            responses: VecDeque::new(),
+fn wait_for_terminal(state: &DaemonState, run_id: &RunId) -> agl_supervisor::RunOutcome {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let outcome = state.run_outcome(run_id.clone()).unwrap();
+        if outcome.status.state.is_terminal() {
+            return outcome;
         }
-    }
-}
-
-impl DaemonTransport for StateTransport {
-    fn write_line(&mut self, line: &str) -> Result<(), ClientError> {
-        let request = serde_json::from_str::<DaemonRequest>(line)?;
-        self.responses.extend(
-            self.state
-                .handle_request(request)
-                .into_iter()
-                .map(|event| serde_json::to_string(&event))
-                .collect::<Result<Vec<_>, _>>()?,
+        assert!(
+            Instant::now() < deadline,
+            "run did not reach terminal state"
         );
-        Ok(())
-    }
-
-    fn read_line(&mut self) -> Result<String, ClientError> {
-        self.responses.pop_front().ok_or(ClientError::EmptyResponse)
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
 #[test]
-fn hello_reports_alpha_capabilities_without_loading_model() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
+fn hello_declares_strict_run_capabilities() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
 
-    let events = state.handle_request(request(DaemonRequestKind::Hello(HelloRequest {
+    let event = state.handle_request(request(DaemonRequestKind::Hello(HelloRequest {
         client_name: Some("test".to_string()),
         accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
     })));
 
-    assert_eq!(events.len(), 1);
-    match &events[0].kind {
-        DaemonEventKind::Hello(event) => {
-            assert_eq!(event.protocol_version, PROTOCOL_VERSION);
-            assert!(event.capabilities.contains(&DaemonCapability::SessionOpen));
-            assert!(event.capabilities.contains(&DaemonCapability::SessionList));
+    match event.kind {
+        DaemonEventKind::Hello(hello) => {
+            assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+            assert!(hello.capabilities.contains(&DaemonCapability::RunSubmit));
+            assert!(hello.capabilities.contains(&DaemonCapability::RunStatus));
+            assert!(hello.capabilities.contains(&DaemonCapability::RunCancel));
+            assert!(hello.capabilities.contains(&DaemonCapability::RunReplay));
+            assert!(hello.capabilities.contains(&DaemonCapability::RunSubscribe));
         }
-        other => panic!("unexpected event: {other:?}"),
+        other => panic!("unexpected hello event: {other:?}"),
     }
 }
 
 #[test]
-fn daemon_sessions_share_one_inference_client_and_keep_context_commands_isolated() {
-    let runtime = runtime();
-    let root = runtime.paths.config_dir.parent().unwrap().to_path_buf();
-    let workspace = root.join("workspace");
-    let config_path = root.join("inference.toml");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[backend]
-kind = "llama_cpp"
-model = "{}"
+fn admission_status_and_cancel_stay_responsive_while_model_blocks() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.blocked.store(true, Ordering::Release);
+    let mut state = daemon(&test, control.clone());
+    let session_id = open_session(&mut state);
 
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
+    let started = Instant::now();
+    let accepted = submit(&mut state, &session_id, "block", None);
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert_eq!(accepted.state, ProtocolRunState::Queued);
+    wait_for_calls(&control, 1);
 
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-            root.join("missing-model.gguf").display()
-        ),
-    )
-    .unwrap();
-    let calls = Arc::new(Mutex::new(RecordingInferenceCalls::default()));
-    let client = InferenceClientHandle::new(RecordingInferenceClient {
-        calls: Arc::clone(&calls),
-    });
-    let mut state = DaemonState::new(
-        runtime.clone(),
-        InferenceOptions {
-            config: Some(config_path),
-            ..Default::default()
-        },
-        client,
-    );
-    let first = SessionId::generate();
-    let second = SessionId::generate();
+    let status = state.handle_request(request(DaemonRequestKind::RunStatus(RunStatusRequest {
+        run_id: accepted.run_id.clone(),
+    })));
+    assert!(matches!(
+        status.kind,
+        DaemonEventKind::RunStatus(ref status) if status.state == ProtocolRunState::Running
+    ));
 
-    for session_id in [&first, &second] {
-        let events = state.handle_request(request(DaemonRequestKind::SessionOpen(
-            SessionOpenRequest {
-                session_id: Some(session_id.clone()),
-                new_session: false,
-                workspace_root: Some(workspace.display().to_string()),
-                skills: Vec::new(),
-                tool_mode: ProtocolToolMode::ReadOnly,
-            },
-        )));
-        assert!(matches!(events[0].kind, DaemonEventKind::SessionOpened(_)));
-    }
+    let cancelled = state.handle_request(request(DaemonRequestKind::RunCancel(RunCancelRequest {
+        run_id: accepted.run_id.clone(),
+    })));
+    assert!(matches!(
+        cancelled.kind,
+        DaemonEventKind::RunStatus(ref status) if status.cancellation_requested
+    ));
+    let outcome = wait_for_terminal(&state, &accepted.run_id);
+    assert_eq!(outcome.status.state, RunState::Cancelled);
+}
 
-    for session_id in [&first, &second, &first] {
-        let events = state.handle_request(request(DaemonRequestKind::SessionTurn(
-            SessionTurnRequest {
-                session_id: session_id.clone(),
-                text: "hello".to_string(),
-                idempotency_key: None,
-            },
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event.kind,
-            DaemonEventKind::AssistantMessage(AssistantMessageEvent { ref content, .. })
-                if content.starts_with("managed answer")
-        )));
-    }
+#[test]
+fn replay_is_contiguous_and_idempotent_admission_returns_original_run() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let session_id = open_session(&mut state);
 
-    let _ = state.handle_request(request(DaemonRequestKind::SessionClear(
-        SessionClearRequest {
-            session_id: first.clone(),
-        },
-    )));
-    for session_id in [&second, &first] {
-        let _ = state.handle_request(request(DaemonRequestKind::SessionFinish(
-            SessionFinishRequest {
-                session_id: session_id.clone(),
-                reason: SessionFinishReason::HostShutdown,
-            },
-        )));
-    }
+    let accepted = submit(&mut state, &session_id, "hello", Some("event-1"));
+    let replayed = submit(&mut state, &session_id, "hello", Some("event-1"));
+    assert_eq!(replayed.run_id, accepted.run_id);
+    assert_eq!(replayed.turn_id, accepted.turn_id);
+    assert!(replayed.replayed);
 
-    let calls = calls.lock().unwrap();
+    let outcome = wait_for_terminal(&state, &accepted.run_id);
+    assert_eq!(outcome.status.state, RunState::Succeeded);
+    assert_eq!(outcome.status.usage.model_attempts, 1);
+    assert_eq!(outcome.status.usage.model_input_tokens, 4);
+    assert_eq!(outcome.status.usage.model_output_tokens, 2);
     assert_eq!(
-        calls.generated,
-        vec![first.clone(), second.clone(), first.clone()]
+        outcome.terminal_result.as_ref().unwrap()["status"],
+        "answered"
     );
-    assert_eq!(calls.cleared, vec![first.clone()]);
-    assert_eq!(calls.released, vec![second, first]);
-    drop(calls);
-    drop(state);
-    let _ = std::fs::remove_dir_all(root);
-}
 
-#[test]
-fn cron_skill_sessions_reuse_the_injected_inference_client() {
-    let runtime = runtime();
-    let root = runtime.paths.config_dir.parent().unwrap().to_path_buf();
-    let config_path = root.join("cron-inference.toml");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        &config_path,
-        format!(
-            r#"[backend]
-kind = "llama_cpp"
-model = "{}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#,
-            root.join("missing-cron-model.gguf").display()
-        ),
-    )
-    .unwrap();
-    let store = AglStore::open_at(runtime.paths.store_root()).unwrap();
-    let cron = agl_cron::CronRepository::new(&store);
-    let mut draft = CronJobDraft::new(
-        "managed cron",
-        CronTargetKind::Skill,
-        "repo-status",
-        "0 0 * * *",
-    );
-    draft.prompt = Some("Report repository status.".to_string());
-    let job = cron.add_job(draft).unwrap();
-    let calls = Arc::new(Mutex::new(RecordingInferenceCalls::default()));
-    let client = InferenceClientHandle::new(RecordingInferenceClient {
-        calls: Arc::clone(&calls),
-    });
-    let inference = InferenceOptions {
-        config: Some(config_path),
-        ..Default::default()
+    let replay = state.handle_request(request(DaemonRequestKind::RunEvents(RunEventsRequest {
+        run_id: accepted.run_id.clone(),
+        after_sequence: 0,
+        limit: 1_000,
+    })));
+    let events = match replay.kind {
+        DaemonEventKind::RunEvents(replay) => replay.events,
+        other => panic!("unexpected replay event: {other:?}"),
     };
+    assert!(!events.is_empty());
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.scope.run_id(), &accepted.run_id);
+        assert_eq!(event.scope.session_id(), Some(&session_id));
+        assert_eq!(event.scope.turn_id(), Some(&accepted.turn_id));
+        assert_eq!(event.sequence, u64::try_from(index).unwrap() + 1);
+    }
 
-    run_cron_skill_chat_turn(
-        &job,
-        &runtime,
-        inference.clone(),
-        client.clone(),
-        Some("test"),
-    )
-    .unwrap();
-    run_cron_skill_chat_turn(&job, &runtime, inference, client, Some("test")).unwrap();
-
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.generated.len(), 2);
-    assert_ne!(calls.generated[0], calls.generated[1]);
-    assert_eq!(calls.released, calls.generated);
-    drop(calls);
-    drop(store);
-    let _ = std::fs::remove_dir_all(root);
+    let suffix = state.handle_request(request(DaemonRequestKind::RunEvents(RunEventsRequest {
+        run_id: accepted.run_id,
+        after_sequence: 1,
+        limit: 1_000,
+    })));
+    assert!(matches!(
+        suffix.kind,
+        DaemonEventKind::RunEvents(ref replay)
+            if replay.events.first().is_none_or(|event| event.sequence == 2)
+    ));
 }
 
 #[test]
-fn status_for_unknown_session_returns_not_found() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let missing_session_id = SessionId::generate();
+fn conflicting_idempotency_fingerprint_fails_without_second_run() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.blocked.store(true, Ordering::Release);
+    let mut state = daemon(&test, control.clone());
+    let session_id = open_session(&mut state);
+    let accepted = submit(&mut state, &session_id, "first", Some("same-key"));
 
-    let events = state.handle_request(request(DaemonRequestKind::SessionStatus(
+    let conflict = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
+        session_id,
+        text: "different".to_string(),
+        idempotency_key: Some("same-key".to_string()),
+        budget: RunBudgetRequest::default(),
+    })));
+    assert!(matches!(
+        conflict.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::InvalidRequest
+    ));
+
+    state
+        .supervisor_handle()
+        .cancel(accepted.run_id.clone())
+        .unwrap();
+    wait_for_terminal(&state, &accepted.run_id);
+}
+
+#[test]
+fn turns_for_one_session_execute_in_submission_order() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.blocked.store(true, Ordering::Release);
+    let mut state = daemon(&test, control.clone());
+    let session_id = open_session(&mut state);
+
+    let first = submit(&mut state, &session_id, "first", None);
+    let second = submit(&mut state, &session_id, "second", None);
+    wait_for_calls(&control, 1);
+    std::thread::sleep(Duration::from_millis(75));
+    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+
+    control.blocked.store(false, Ordering::Release);
+    let first_outcome = wait_for_terminal(&state, &first.run_id);
+    let second_outcome = wait_for_terminal(&state, &second.run_id);
+    assert_eq!(control.calls.load(Ordering::Acquire), 2);
+    let first_finished = first_outcome.status.finished_at_ms.unwrap();
+    let second_started = second_outcome.status.started_at_ms.unwrap();
+    assert!(
+        first_finished <= second_started,
+        "first finished at {first_finished}, second started at {second_started}"
+    );
+}
+
+#[test]
+fn session_queries_and_unknown_runs_have_typed_responses() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let session_id = open_session(&mut state);
+
+    let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
         SessionStatusRequest {
-            session_id: missing_session_id,
+            session_id: session_id.clone(),
         },
     )));
-
-    match &events[0].kind {
-        DaemonEventKind::Error(error) => assert_eq!(error.code, ProtocolErrorCode::NotFound),
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn session_list_starts_empty() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-
-    let events = state.handle_request(request(DaemonRequestKind::SessionList(
+    assert!(matches!(
+        status.kind,
+        DaemonEventKind::SessionStatus(ref status)
+            if status.session_id == session_id && status.status == SessionStatus::Open
+    ));
+    let list = state.handle_request(request(DaemonRequestKind::SessionList(
         SessionListRequest::default(),
     )));
-
-    match &events[0].kind {
-        DaemonEventKind::SessionList(event) => assert!(event.sessions.is_empty()),
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn session_turn_idempotency_replays_without_rerunning_turn() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_test_session(
-        session_id.clone(),
-        vec![agl_chat::ChatTurnStatus::Answered {
-            answer: "hello".to_string(),
-        }],
-    );
-
-    let first = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "say hi".to_string(),
-            idempotency_key: Some("matrix-event-1".to_string()),
-        },
-    )));
-    let second = state.handle_request(DaemonRequest::new(
-        RequestId::generate(),
-        DaemonRequestKind::SessionTurn(SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "say hi".to_string(),
-            idempotency_key: Some("matrix-event-1".to_string()),
-        }),
-    ));
-
-    assert_eq!(state.test_session_turns(&session_id), 1);
-    let started = match &first[0].kind {
-        DaemonEventKind::TurnStarted(started) => started,
-        other => panic!("unexpected event: {other:?}"),
-    };
-    match &second[0].kind {
-        DaemonEventKind::TurnStarted(event) => {
-            assert_eq!(event.session_id, started.session_id);
-            assert_eq!(event.run_id, started.run_id);
-            assert_eq!(event.turn_id, started.turn_id);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
     assert!(matches!(
-        second[1].kind,
-        DaemonEventKind::AssistantMessage(AssistantMessageEvent { .. })
-    ));
-    match &second[1].kind {
-        DaemonEventKind::AssistantMessage(event) => {
-            assert_eq!(event.session_id, started.session_id);
-            assert_eq!(event.run_id, started.run_id);
-            assert_eq!(event.turn_id, started.turn_id);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-    match &second[2].kind {
-        DaemonEventKind::TurnFinished(event) => {
-            assert_eq!(event.status, TurnTerminalStatus::Answered);
-            assert_eq!(event.session_id, started.session_id);
-            assert_eq!(event.run_id, started.run_id);
-            assert_eq!(event.turn_id, started.turn_id);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn sequential_turns_share_session_and_have_distinct_run_and_turn_ids() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_test_session(
-        session_id.clone(),
-        vec![
-            agl_chat::ChatTurnStatus::Answered {
-                answer: "first".to_string(),
-            },
-            agl_chat::ChatTurnStatus::Answered {
-                answer: "second".to_string(),
-            },
-        ],
-    );
-
-    let first = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "first".to_string(),
-            idempotency_key: None,
-        },
-    )));
-    let second = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "second".to_string(),
-            idempotency_key: None,
-        },
-    )));
-
-    let first_started = match &first[0].kind {
-        DaemonEventKind::TurnStarted(event) => event,
-        other => panic!("unexpected event: {other:?}"),
-    };
-    let second_started = match &second[0].kind {
-        DaemonEventKind::TurnStarted(event) => event,
-        other => panic!("unexpected event: {other:?}"),
-    };
-    assert_eq!(first_started.session_id, session_id);
-    assert_eq!(second_started.session_id, session_id);
-    assert_ne!(first_started.run_id, second_started.run_id);
-    assert_ne!(first_started.turn_id, second_started.turn_id);
-
-    for (events, started) in [(&first, first_started), (&second, second_started)] {
-        let assistant = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                DaemonEventKind::AssistantMessage(event) => Some(event),
-                _ => None,
-            })
-            .expect("turn must emit an assistant message");
-        assert_eq!(assistant.session_id, started.session_id);
-        assert_eq!(assistant.run_id, started.run_id);
-        assert_eq!(assistant.turn_id, started.turn_id);
-
-        let finished = events
-            .iter()
-            .find_map(|event| match &event.kind {
-                DaemonEventKind::TurnFinished(event) => Some(event),
-                _ => None,
-            })
-            .expect("turn must emit a terminal control event");
-        assert_eq!(finished.session_id, started.session_id);
-        assert_eq!(finished.run_id, started.run_id);
-        assert_eq!(finished.turn_id, started.turn_id);
-    }
-}
-
-#[test]
-fn client_json_transport_keeps_two_turn_envelopes_exact() {
-    let session_id = SessionId::generate();
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    state.insert_test_session_with_runtime_events(
-        session_id.clone(),
-        vec![
-            agl_chat::ChatTurnStatus::Answered {
-                answer: "first answer".to_string(),
-            },
-            agl_chat::ChatTurnStatus::Answered {
-                answer: "second answer".to_string(),
-            },
-        ],
-    );
-    let mut client = AgentLibreClient::new(StateTransport::new(state));
-
-    let first = client
-        .send_turn(SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "first".to_string(),
-            idempotency_key: None,
-        })
-        .unwrap();
-    let second = client
-        .send_turn(SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "second".to_string(),
-            idempotency_key: None,
-        })
-        .unwrap();
-
-    assert_eq!(first.session_id, session_id);
-    assert_eq!(second.session_id, session_id);
-    assert_ne!(first.run_id, second.run_id);
-    assert_ne!(first.turn_id, second.turn_id);
-    assert_eq!(first.assistant_text, "first answer");
-    assert_eq!(second.assistant_text, "second answer");
-
-    let mut runtime_event_ids = HashSet::new();
-    for response in [&first, &second] {
-        assert_eq!(response.status, TurnTerminalStatus::Answered);
-        assert_eq!(response.events.len(), 5);
-        assert!(matches!(
-            response.events[0].kind,
-            DaemonEventKind::TurnStarted(_)
-        ));
-        assert!(matches!(
-            response.events[1].kind,
-            DaemonEventKind::RuntimeEvent(_)
-        ));
-        assert!(matches!(
-            response.events[2].kind,
-            DaemonEventKind::RuntimeEvent(_)
-        ));
-        assert!(matches!(
-            response.events[3].kind,
-            DaemonEventKind::AssistantMessage(_)
-        ));
-        assert!(matches!(
-            response.events[4].kind,
-            DaemonEventKind::TurnFinished(_)
-        ));
-
-        let request_id = response.events[0]
-            .request_id
-            .as_ref()
-            .expect("turn events must retain outer request correlation");
-        assert!(
-            response
-                .events
-                .iter()
-                .all(|event| event.request_id.as_ref() == Some(request_id))
-        );
-        let runtime_events = response
-            .events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                DaemonEventKind::RuntimeEvent(event) => Some(event.as_ref()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(runtime_events.len(), 2);
-        for (index, envelope) in runtime_events.iter().enumerate() {
-            assert_eq!(envelope.sequence, u64::try_from(index + 1).unwrap());
-            assert_eq!(envelope.request_id.as_ref(), Some(request_id));
-            assert_eq!(envelope.scope.session_id(), Some(&session_id));
-            assert_eq!(envelope.scope.run_id(), &response.run_id);
-            assert_eq!(envelope.scope.turn_id(), Some(&response.turn_id));
-            assert!(runtime_event_ids.insert(envelope.event_id.clone()));
-        }
-        assert!(matches!(
-            &runtime_events[0].payload,
-            SafeRuntimeEvent::TurnStarted { .. }
-        ));
-        assert!(matches!(
-            &runtime_events[1].payload,
-            SafeRuntimeEvent::TurnFinished {
-                status: TurnFinishStatus::Answered
-            }
-        ));
-    }
-}
-
-#[test]
-fn runtime_events_follow_admission_and_keep_outer_request_correlation() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    let request_id = RequestId::generate();
-    state.insert_test_session_with_runtime_events(
-        session_id.clone(),
-        vec![agl_chat::ChatTurnStatus::Answered {
-            answer: "hello".to_string(),
-        }],
-    );
-
-    let events = state.handle_request(DaemonRequest::new(
-        request_id.clone(),
-        DaemonRequestKind::SessionTurn(SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "say hi".to_string(),
-            idempotency_key: None,
-        }),
+        list.kind,
+        DaemonEventKind::SessionList(ref list) if list.sessions.len() == 1
     ));
 
-    assert_eq!(events.len(), 5);
-    let started = match &events[0].kind {
-        DaemonEventKind::TurnStarted(event) => event,
-        other => panic!("unexpected event: {other:?}"),
-    };
-    assert!(matches!(events[1].kind, DaemonEventKind::RuntimeEvent(_)));
-    assert!(matches!(events[2].kind, DaemonEventKind::RuntimeEvent(_)));
+    let missing = state.handle_request(request(DaemonRequestKind::RunStatus(RunStatusRequest {
+        run_id: RunId::generate(),
+    })));
     assert!(matches!(
-        events[3].kind,
-        DaemonEventKind::AssistantMessage(_)
-    ));
-    assert!(matches!(events[4].kind, DaemonEventKind::TurnFinished(_)));
-    assert_eq!(events[1].request_id.as_ref(), Some(&request_id));
-    match &events[1].kind {
-        DaemonEventKind::RuntimeEvent(event) => {
-            assert_eq!(event.request_id.as_ref(), Some(&request_id));
-            assert_eq!(event.scope.session_id(), Some(&session_id));
-            assert_eq!(event.scope.run_id(), &started.run_id);
-            assert_eq!(event.scope.turn_id(), Some(&started.turn_id));
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-    match &events[2].kind {
-        DaemonEventKind::RuntimeEvent(event) => {
-            assert_eq!(event.sequence, 2);
-            assert!(matches!(
-                event.payload,
-                SafeRuntimeEvent::TurnFinished {
-                    status: TurnFinishStatus::Answered
-                }
-            ));
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn failed_chat_output_emits_runtime_then_failed_control_terminal() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_test_session(
-        session_id.clone(),
-        vec![agl_chat::ChatTurnStatus::Failed {
-            message: "model failed".to_string(),
-        }],
-    );
-
-    let events = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "fail".to_string(),
-            idempotency_key: None,
-        },
-    )));
-
-    assert_eq!(events.len(), 4);
-    assert!(matches!(events[0].kind, DaemonEventKind::TurnStarted(_)));
-    assert!(matches!(events[1].kind, DaemonEventKind::RuntimeEvent(_)));
-    match &events[2].kind {
-        DaemonEventKind::TurnFailed(event) => assert_eq!(event.message, "model failed"),
-        other => panic!("unexpected event: {other:?}"),
-    }
-    match &events[3].kind {
-        DaemonEventKind::TurnFinished(event) => {
-            assert_eq!(event.status, TurnTerminalStatus::Failed);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-
-    let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
-        SessionStatusRequest {
-            session_id: session_id.clone(),
-        },
-    )));
-    match &status[0].kind {
-        DaemonEventKind::SessionStatus(event) => assert_eq!(event.status, SessionStatus::Failed),
-        other => panic!("unexpected event: {other:?}"),
-    }
-
-    let finish = || {
-        request(DaemonRequestKind::SessionFinish(SessionFinishRequest {
-            session_id: session_id.clone(),
-            reason: SessionFinishReason::HostShutdown,
-        }))
-    };
-    for _ in 0..2 {
-        let events = state.handle_request(finish());
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].kind,
-            DaemonEventKind::SessionFinished(_)
-        ));
-    }
-    let status = state.handle_request(request(DaemonRequestKind::SessionStatus(
-        SessionStatusRequest { session_id },
-    )));
-    match &status[0].kind {
-        DaemonEventKind::SessionStatus(event) => assert_eq!(event.status, SessionStatus::Failed),
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn runtime_envelope_validation_rejects_identity_drift() {
-    let session_id = SessionId::generate();
-    let run_id = RunId::generate();
-    let turn_id = TurnId::generate();
-    let request_id = RequestId::generate();
-    let valid = vec![
-        safe_runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            &request_id,
-            1,
-            SafeRuntimeEvent::TurnStarted {
-                user_input_bytes: 5,
-            },
-        ),
-        safe_runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            &request_id,
-            2,
-            SafeRuntimeEvent::TurnFinished {
-                status: TurnFinishStatus::Answered,
-            },
-        ),
-    ];
-    assert!(
-        crate::state::validate_runtime_envelopes(
-            &valid,
-            &request_id,
-            &session_id,
-            &run_id,
-            &turn_id,
-            TurnFinishStatus::Answered,
-        )
-        .is_ok()
-    );
-
-    let mut wrong_request = valid.clone();
-    wrong_request[0].request_id = Some(RequestId::generate());
-    let error = crate::state::validate_runtime_envelopes(
-        &wrong_request,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("request ID"));
-
-    let mut wrong_scope = valid;
-    wrong_scope[1].scope = event_scope(&SessionId::generate(), &run_id, &turn_id, None);
-    let error = crate::state::validate_runtime_envelopes(
-        &wrong_scope,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("scope"));
-}
-
-#[test]
-fn runtime_envelope_validation_rejects_stream_integrity_drift() {
-    let session_id = SessionId::generate();
-    let run_id = RunId::generate();
-    let turn_id = TurnId::generate();
-    let request_id = RequestId::generate();
-    let valid = vec![
-        safe_runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            &request_id,
-            1,
-            SafeRuntimeEvent::TurnStarted {
-                user_input_bytes: 5,
-            },
-        ),
-        safe_runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            &request_id,
-            2,
-            SafeRuntimeEvent::TurnFinished {
-                status: TurnFinishStatus::Answered,
-            },
-        ),
-    ];
-
-    let mut sequence_gap = valid.clone();
-    sequence_gap[1].sequence = 3;
-    let error = crate::state::validate_runtime_envelopes(
-        &sequence_gap,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("not contiguous"));
-
-    let mut duplicate_id = valid.clone();
-    duplicate_id[1].event_id = duplicate_id[0].event_id.clone();
-    let error = crate::state::validate_runtime_envelopes(
-        &duplicate_id,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("duplicate event ID"));
-
-    let mut wrong_status = valid.clone();
-    wrong_status[1].payload = SafeRuntimeEvent::TurnFinished {
-        status: TurnFinishStatus::Failed,
-    };
-    let error = crate::state::validate_runtime_envelopes(
-        &wrong_status,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("does not match"));
-
-    let mut terminal_not_last = valid;
-    terminal_not_last[0].payload = SafeRuntimeEvent::TurnFinished {
-        status: TurnFinishStatus::Answered,
-    };
-    terminal_not_last[1].payload = SafeRuntimeEvent::AnswerFinal { answer_bytes: 2 };
-    let error = crate::state::validate_runtime_envelopes(
-        &terminal_not_last,
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("is not last"));
-
-    let error = crate::state::validate_runtime_envelopes(
-        &[],
-        &request_id,
-        &session_id,
-        &run_id,
-        &turn_id,
-        TurnFinishStatus::Answered,
-    )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("did not produce runtime events"));
-}
-
-#[test]
-fn session_turn_idempotency_rejects_key_reuse_with_different_text() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_test_session(
-        session_id.clone(),
-        vec![agl_chat::ChatTurnStatus::Answered {
-            answer: "hello".to_string(),
-        }],
-    );
-
-    let _first = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "say hi".to_string(),
-            idempotency_key: Some("matrix-event-1".to_string()),
-        },
-    )));
-    let conflict = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "different".to_string(),
-            idempotency_key: Some("matrix-event-1".to_string()),
-        },
-    )));
-
-    assert_eq!(state.test_session_turns(&session_id), 1);
-    match &conflict[0].kind {
-        DaemonEventKind::Error(error) => {
-            assert_eq!(error.code, ProtocolErrorCode::InvalidRequest);
-            assert!(!error.retryable);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn session_turn_idempotency_reports_in_progress_key_as_busy() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_test_session(session_id.clone(), Vec::new());
-    state.begin_test_turn_idempotency(&session_id, "say hi", "matrix-event-1");
-
-    let events = state.handle_request(request(DaemonRequestKind::SessionTurn(
-        SessionTurnRequest {
-            session_id: session_id.clone(),
-            text: "say hi".to_string(),
-            idempotency_key: Some("matrix-event-1".to_string()),
-        },
-    )));
-
-    assert_eq!(state.test_session_turns(&session_id), 0);
-    match &events[0].kind {
-        DaemonEventKind::Error(error) => {
-            assert_eq!(error.code, ProtocolErrorCode::Busy);
-            assert!(error.retryable);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn shared_daemon_state_reports_busy_while_turn_runs() {
-    let state = SharedDaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let session_id = SessionId::generate();
-    state.insert_slow_test_session(
-        session_id.clone(),
-        vec![agl_chat::ChatTurnStatus::Answered {
-            answer: "done".to_string(),
-        }],
-        Duration::from_millis(300),
-    );
-    let worker_state = state.clone();
-    let worker_session_id = session_id.clone();
-    let worker = std::thread::spawn(move || {
-        worker_state.handle_request(DaemonRequest::new(
-            RequestId::generate(),
-            DaemonRequestKind::SessionTurn(SessionTurnRequest {
-                session_id: worker_session_id,
-                text: "slow".to_string(),
-                idempotency_key: None,
-            }),
-        ))
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut observed_busy = false;
-    while Instant::now() < deadline {
-        let events = state.handle_request(DaemonRequest::new(
-            RequestId::generate(),
-            DaemonRequestKind::SessionStatus(SessionStatusRequest {
-                session_id: session_id.clone(),
-            }),
-        ));
-        match &events[0].kind {
-            DaemonEventKind::SessionStatus(event) if event.status == SessionStatus::Busy => {
-                observed_busy = true;
-                break;
-            }
-            DaemonEventKind::SessionStatus(_) => std::thread::sleep(Duration::from_millis(10)),
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    let turn_events = worker.join().unwrap();
-
-    assert!(observed_busy, "status should be readable while turn runs");
-    assert!(matches!(
-        turn_events.last().map(|event| &event.kind),
-        Some(DaemonEventKind::TurnFinished(_))
+        missing.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::NotFound
     ));
 }
 
 #[test]
-fn transcript_read_omits_content_by_default() {
-    let runtime = runtime();
-    let session_id = SessionId::generate();
-    let run_id = RunId::generate();
-    let turn_id = TurnId::generate();
-    let attempt_id = AttemptId::generate();
-    let user_message_id = MessageId::generate();
-    let assistant_message_id = MessageId::generate();
-    let mut store = ChatSessionStore::start(
-        runtime.paths.sessions_root(),
-        session_id.clone(),
-        "/tmp/local.toml",
-        "test",
-    )
-    .unwrap();
-    store
-        .append_user_message(runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            None,
-            2,
-            RuntimeEvent::UserMessage {
-                message_id: user_message_id.clone(),
-                content: "secret".to_string(),
-            },
-        ))
-        .unwrap();
-    store
-        .link_attempt(runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            Some(&attempt_id),
-            7,
-            RuntimeEvent::ModelAttemptLinked,
-        ))
-        .unwrap();
-    store
-        .append_assistant_message(runtime_envelope(
-            &session_id,
-            &run_id,
-            &turn_id,
-            None,
-            11,
-            RuntimeEvent::AssistantMessage {
-                message_id: assistant_message_id.clone(),
-                content: "also secret".to_string(),
-            },
-        ))
-        .unwrap();
-    let mut state = DaemonState::new(
-        runtime.clone(),
-        InferenceOptions::default(),
-        inference_client(),
-    );
-
-    let events = state.handle_request(request(DaemonRequestKind::SessionTranscript(
-        SessionTranscriptRequest {
-            session_id,
-            include_content: false,
-        },
-    )));
-
-    match &events[0].kind {
-        DaemonEventKind::SessionTranscript(event) => {
-            assert!(!event.content_included);
-            assert_eq!(
-                event.events,
-                vec![
-                    TranscriptEvent::UserMessage {
-                        run_id: run_id.clone(),
-                        turn_id: turn_id.clone(),
-                        message_id: user_message_id,
-                        content: None,
-                    },
-                    TranscriptEvent::ModelAttemptLinked {
-                        run_id: run_id.clone(),
-                        turn_id: turn_id.clone(),
-                        attempt_id,
-                    },
-                    TranscriptEvent::AssistantMessage {
-                        run_id,
-                        turn_id,
-                        message_id: assistant_message_id,
-                        content: None,
-                    },
-                ]
-            );
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-    let _ = std::fs::remove_dir_all(runtime.paths.config_dir.parent().unwrap());
-}
-
-#[test]
-fn transcript_read_rejects_session_metadata_identity_drift() {
-    let runtime = runtime();
-    let session_id = SessionId::generate();
-    let store = ChatSessionStore::start(
-        runtime.paths.sessions_root(),
-        session_id.clone(),
-        "/tmp/local.toml",
-        "test",
-    )
-    .unwrap();
-    let metadata_path = store.session_dir().join("session.json");
-    let mut metadata: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
-    metadata["session_id"] = serde_json::json!(SessionId::generate());
-    std::fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-    let mut state = DaemonState::new(
-        runtime.clone(),
-        InferenceOptions::default(),
-        inference_client(),
-    );
-
-    let events = state.handle_request(request(DaemonRequestKind::SessionTranscript(
-        SessionTranscriptRequest {
-            session_id,
-            include_content: false,
-        },
-    )));
-
-    match &events[0].kind {
-        DaemonEventKind::Error(error) => {
-            assert_eq!(error.code, ProtocolErrorCode::RuntimeFailure);
-            assert!(error.message.contains("does not match requested session"));
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-    let _ = std::fs::remove_dir_all(runtime.paths.config_dir.parent().unwrap());
-}
-
-#[test]
-fn wrong_schema_returns_protocol_version_error() {
-    let mut state = DaemonState::new(runtime(), InferenceOptions::default(), inference_client());
-    let mut req = request(DaemonRequestKind::SessionList(SessionListRequest::default()));
-    req.schema = "agentlibre.daemon.request.v2".to_string();
-
-    let events = state.handle_request(req);
-
-    match &events[0].kind {
-        DaemonEventKind::Error(error) => {
-            assert_eq!(error.code, ProtocolErrorCode::UnsupportedProtocolVersion);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
-#[test]
-fn strict_protocol_decode_rejects_previous_alpha_and_untyped_ids() {
-    let request_id = RequestId::generate();
-    let session_id = SessionId::generate();
-    let previous_alpha = serde_json::json!({
-        "schema": "agentlibre.daemon.request.v1alpha",
-        "request_id": request_id,
-        "kind": "session_turn",
-        "payload": {
-            "session_id": session_id,
-            "text": "hello",
-        },
-    });
-    assert!(serde_json::from_value::<DaemonRequest>(previous_alpha).is_err());
-
-    let untyped = serde_json::json!({
-        "schema": REQUEST_SCHEMA,
-        "request_id": "req-1",
-        "kind": "session_turn",
-        "payload": {
-            "session_id": "session-1",
-            "text": "hello",
-        },
-    });
-    assert!(serde_json::from_value::<DaemonRequest>(untyped).is_err());
-
-    let unknown_payload_field = serde_json::json!({
-        "schema": REQUEST_SCHEMA,
-        "request_id": RequestId::generate(),
-        "kind": "session_list",
-        "payload": { "legacy": true },
-    });
-    assert!(serde_json::from_value::<DaemonRequest>(unknown_payload_field).is_err());
-}
-
-#[test]
-fn daemon_events_keep_current_schema() {
+fn daemon_event_constructor_keeps_current_schema() {
     let event = DaemonEvent::new(
         None,
-        DaemonEventKind::SessionList(SessionListEvent {
+        DaemonEventKind::SessionList(agl_protocol::SessionListEvent {
             sessions: Vec::new(),
         }),
     );
-
-    assert_eq!(event.schema, EVENT_SCHEMA);
+    assert_eq!(event.schema, agl_protocol::EVENT_SCHEMA);
 }
 
 #[test]
-fn cron_tick_records_due_run_and_notifies_once() {
-    let root = std::env::temp_dir().join(format!("agl-daemon-cron-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let store = AglStore::open_at(&root).unwrap();
-    let repo = agl_cron::CronRepository::new(&store);
+fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.blocked.store(true, Ordering::Release);
+    let state = SharedDaemonState::new(
+        test.runtime.clone(),
+        test.inference.clone(),
+        InferenceClientHandle::new(ControlledInferenceClient {
+            control: control.clone(),
+        }),
+    );
+    let store = agl_store::AglStore::open_current_at(test.runtime.paths.store_root()).unwrap();
+    let repository = CronRepository::new(&store);
     let mut draft = CronJobDraft::new(
-        "Store status",
-        CronTargetKind::Builtin,
-        "store-status",
+        "supervised cron",
+        CronTargetKind::Skill,
+        "repo-status",
         "hourly",
     );
-    draft.notify_ref = Some("matrix-room:!room".to_string());
-    let job = repo.add_job(draft).unwrap();
-    let mut executor = FakeCronExecutor::default();
-    let mut notifier = FakeCronNotifier::default();
+    draft.prompt = Some("Report repository status.".to_string());
+    draft.notify_ref = Some("matrix-room:!cron:test".to_string());
+    let job = repository.add_job(draft).unwrap();
+    let mut executor = SharedCronExecutor {
+        state: state.clone(),
+    };
+    let mut notifier = NoopCronNotifier;
 
+    let started = Instant::now();
     let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert_eq!(first.recorded_runs[0].status, CronRunStatus::Queued);
+    assert_eq!(first.notifications, 0);
+    wait_for_calls(&control, 1);
+
     let second = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
-
-    assert_eq!(first.due_jobs, 1);
-    assert_eq!(first.recorded_runs.len(), 1);
-    assert_eq!(first.recorded_runs[0].job_id, job.id);
-    assert_eq!(first.recorded_runs[0].status, CronRunStatus::Succeeded);
-    assert_eq!(first.notifications, 1);
     assert_eq!(second.recorded_runs[0].id, first.recorded_runs[0].id);
-    assert_eq!(second.notifications, 0);
-    assert_eq!(executor.executions, 1);
-    assert_eq!(notifier.notifications.len(), 1);
-    assert_eq!(notifier.notifications[0].notify_ref, "matrix-room:!room");
-    assert_eq!(notifier.notifications[0].run_id, first.recorded_runs[0].id);
+    assert_eq!(control.calls.load(Ordering::Acquire), 1);
+    assert!(store.queued_matrix_notifications(10).unwrap().is_empty());
 
-    std::fs::remove_dir_all(root).unwrap();
+    control.blocked.store(false, Ordering::Release);
+    crate::server::link_cron_run(
+        &test.runtime.paths.store_root(),
+        &state,
+        first.recorded_runs[0].clone(),
+        job,
+    )
+    .unwrap();
+    let history = repository.history(&first.recorded_runs[0].job_id).unwrap();
+    assert_eq!(history[0].status, CronRunStatus::Succeeded);
+    assert_eq!(store.queued_matrix_notifications(10).unwrap().len(), 1);
 }
 
-#[derive(Default)]
-struct FakeCronExecutor {
-    executions: usize,
+struct SharedCronExecutor {
+    state: SharedDaemonState,
 }
 
-impl CronTargetExecutor for FakeCronExecutor {
-    fn execute(&mut self, job: &CronJob) -> CronExecution {
-        self.executions += 1;
-        CronExecution::succeeded(format!("fake:{}", job.target_ref))
-    }
-}
-
-#[derive(Default)]
-struct FakeCronNotifier {
-    notifications: Vec<CronNotification>,
-}
-
-impl CronNotifier for FakeCronNotifier {
-    fn notify(&mut self, notification: CronNotification) -> anyhow::Result<()> {
-        self.notifications.push(notification);
-        Ok(())
+impl CronTargetExecutor for SharedCronExecutor {
+    fn execute(&mut self, job: &CronJob, scheduled_for: &str) -> CronExecution {
+        match self.state.submit_cron_job(job, scheduled_for) {
+            Ok(accepted) => CronExecution::queued(accepted.status.run_id),
+            Err(error) => CronExecution::failed(error.message),
+        }
     }
 }

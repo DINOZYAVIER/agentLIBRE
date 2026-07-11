@@ -2,6 +2,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
+use crate::connection::{configure_read_only, secure_database_files};
 use crate::path::default_database_path;
 use crate::{
     AglStore, AppliedStoreMigration, CURRENT_SCHEMA_VERSION, Result, STORE_MIGRATIONS, StoreError,
@@ -11,7 +12,9 @@ use crate::{
 impl AglStore {
     pub fn migrate_at(root: impl AsRef<Path>) -> Result<StoreMigrationReport> {
         let store = Self::open_for_migration_at(root)?;
-        store.migrate()
+        let report = store.migrate()?;
+        secure_database_files(store.database_path())?;
+        Ok(report)
     }
 
     pub fn schema_status_at(root: impl AsRef<Path>) -> Result<StoreSchemaStatus> {
@@ -27,6 +30,7 @@ impl AglStore {
             });
         }
         let conn = Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        configure_read_only(&conn)?;
         let store = Self {
             conn,
             database_path: database_path.clone(),

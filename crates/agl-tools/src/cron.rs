@@ -313,6 +313,7 @@ fn run_value(run: &CronRun) -> Value {
         "status": run.status.as_str(),
         "result_ref": run.result_ref,
         "error": run.error,
+        "supervisor_run_id": run.supervisor_run_id,
     })
 }
 

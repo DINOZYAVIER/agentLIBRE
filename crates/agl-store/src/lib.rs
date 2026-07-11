@@ -10,6 +10,7 @@ mod matrix_outbox;
 mod migrations;
 mod path;
 mod permissions;
+mod runs;
 mod schema;
 mod status;
 mod types;

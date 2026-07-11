@@ -28,6 +28,8 @@ pub struct InferenceResponseMetadata {
     pub model_state: Option<String>,
     pub selected_device: Option<String>,
     pub duration_ms: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

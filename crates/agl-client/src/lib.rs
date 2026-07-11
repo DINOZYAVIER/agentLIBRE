@@ -8,10 +8,11 @@ use agl_events::{SafeRuntimeEvent, TurnFinishStatus};
 use agl_ids::{EventId, RequestId, RunId, SessionId, TurnId};
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent, HelloRequest,
-    ProtocolError, ProtocolErrorCode, SessionClearRequest, SessionFinishRequest,
-    SessionFinishedEvent, SessionListEvent, SessionListRequest, SessionOpenRequest,
-    SessionOpenedEvent, SessionStatusEvent, SessionStatusRequest, SessionTranscriptEvent,
-    SessionTranscriptRequest, SessionTurnRequest, TurnTerminalStatus,
+    ProtocolError, ProtocolErrorCode, ProtocolRunState, RunCancelRequest, RunEventsEvent,
+    RunEventsRequest, RunStatusEvent, RunStatusRequest, RunSubmitRequest, RunSubscribeRequest,
+    SessionClearRequest, SessionFinishRequest, SessionFinishedEvent, SessionListEvent,
+    SessionListRequest, SessionOpenRequest, SessionOpenedEvent, SessionStatusEvent,
+    SessionStatusRequest, SessionTranscriptEvent, SessionTranscriptRequest, TurnTerminalStatus,
 };
 
 #[cfg(unix)]
@@ -166,49 +167,69 @@ where
         }
     }
 
-    pub fn send_turn(&mut self, request: SessionTurnRequest) -> Result<TurnResponse, ClientError> {
+    pub fn send_turn(&mut self, request: RunSubmitRequest) -> Result<TurnResponse, ClientError> {
         let session_id = request.session_id.clone();
-        let request_id = self.send(DaemonRequestKind::SessionTurn(request))?;
-        let mut events = Vec::new();
-        let mut assistant_text = String::new();
-        let mut admitted: Option<(RunId, TurnId)> = None;
-        let mut pending_failure: Option<ProtocolError> = None;
+        let admission_request_id = self.send(DaemonRequestKind::RunSubmit(request))?;
+        let accepted_event = self.read_correlated_event(&admission_request_id)?;
+        let accepted = match &accepted_event.kind {
+            DaemonEventKind::RunAccepted(accepted) if accepted.session_id == session_id => {
+                accepted.clone()
+            }
+            DaemonEventKind::RunAccepted(_) => {
+                return Err(ClientError::TurnIdentityMismatch(
+                    "run admission returned a different session".to_string(),
+                ));
+            }
+            DaemonEventKind::Error(error) => return Err(ClientError::Protocol(error.clone())),
+            other => return Err(unexpected("run_accepted", other)),
+        };
+        let run_id = accepted.run_id.clone();
+        let turn_id = accepted.turn_id.clone();
+        let subscription_request_id =
+            self.send(DaemonRequestKind::RunSubscribe(RunSubscribeRequest {
+                run_id: run_id.clone(),
+                after_sequence: 0,
+            }))?;
+        let mut events = vec![accepted_event];
         let mut runtime_terminal: Option<TurnTerminalStatus> = None;
-        let mut stopped = false;
         let mut runtime_sequence = 0_u64;
         let mut runtime_event_ids = HashSet::<EventId>::new();
+        let mut subscription_started = false;
         loop {
-            let event = self.read_correlated_event(&request_id)?;
+            let event = self.read_correlated_event(&subscription_request_id)?;
             match &event.kind {
-                DaemonEventKind::TurnStarted(started) => {
-                    if started.session_id != session_id || admitted.is_some() {
+                DaemonEventKind::RunSubscriptionStarted(started) => {
+                    if subscription_started
+                        || started.run_id != run_id
+                        || started.after_sequence != 0
+                    {
                         return Err(ClientError::TurnIdentityMismatch(
-                            "invalid or duplicate turn admission".to_string(),
+                            "invalid or duplicate run subscription admission".to_string(),
                         ));
                     }
-                    admitted = Some((started.run_id.clone(), started.turn_id.clone()));
+                    subscription_started = true;
                     events.push(event);
                 }
-                DaemonEventKind::RuntimeEvent(runtime) => {
+                DaemonEventKind::RunEvent(runtime) => {
+                    if !subscription_started {
+                        return Err(ClientError::TurnIdentityMismatch(
+                            "run event arrived before subscription admission".to_string(),
+                        ));
+                    }
                     if runtime_terminal.is_some() {
                         return Err(ClientError::TurnIdentityMismatch(
                             "runtime event arrived after the runtime terminal".to_string(),
                         ));
                     }
-                    let Some((run_id, turn_id)) = admitted.as_ref() else {
-                        return Err(ClientError::TurnIdentityMismatch(
-                            "runtime event arrived before admission".to_string(),
-                        ));
-                    };
-                    if runtime.scope.run_id() != run_id
-                        || runtime.scope.turn_id() != Some(turn_id)
+                    if runtime.scope.run_id() != &run_id
+                        || runtime.scope.turn_id() != Some(&turn_id)
                         || runtime.scope.session_id() != Some(&session_id)
                     {
                         return Err(ClientError::TurnIdentityMismatch(
                             "runtime envelope does not match admitted session/run/turn".to_string(),
                         ));
                     }
-                    if runtime.request_id.as_ref() != Some(&request_id) {
+                    if runtime.request_id.as_ref() != Some(&admission_request_id) {
                         return Err(ClientError::TurnIdentityMismatch(
                             "runtime envelope request_id does not match the outer request"
                                 .to_string(),
@@ -237,75 +258,40 @@ where
                     }
                     events.push(event);
                 }
-                DaemonEventKind::AssistantMessage(message) => {
-                    validate_control_identity(
-                        &session_id,
-                        admitted.as_ref(),
-                        &message.session_id,
-                        &message.run_id,
-                        &message.turn_id,
-                    )?;
-                    assistant_text.push_str(&message.content);
-                    events.push(event);
-                }
-                DaemonEventKind::TurnStopped(stopped_event) => {
-                    validate_control_identity(
-                        &session_id,
-                        admitted.as_ref(),
-                        &stopped_event.session_id,
-                        &stopped_event.run_id,
-                        &stopped_event.turn_id,
-                    )?;
-                    if stopped {
+                DaemonEventKind::RunSubscriptionFinished(finished) => {
+                    if !subscription_started || finished.run_id != run_id {
                         return Err(ClientError::TurnIdentityMismatch(
-                            "duplicate turn_stopped event".to_string(),
+                            "run subscription terminal does not match admission".to_string(),
                         ));
                     }
-                    stopped = true;
-                    events.push(event);
-                }
-                DaemonEventKind::TurnFinished(finished) => {
-                    validate_control_identity(
-                        &session_id,
-                        admitted.as_ref(),
-                        &finished.session_id,
-                        &finished.run_id,
-                        &finished.turn_id,
-                    )?;
-                    let status = finished.status;
-                    let (run_id, turn_id) = admitted.clone().ok_or_else(|| {
-                        ClientError::TurnIdentityMismatch(
-                            "terminal event arrived before turn admission".to_string(),
-                        )
-                    })?;
-                    if runtime_sequence != 0 && runtime_terminal != Some(status) {
+                    if finished.last_sequence != runtime_sequence {
                         return Err(ClientError::TurnIdentityMismatch(
-                            "runtime stream is incomplete or its terminal status does not match the control terminal"
+                            "subscription terminal sequence does not match the runtime stream"
                                 .to_string(),
                         ));
                     }
-                    if pending_failure.is_some() != (status == TurnTerminalStatus::Failed) {
+                    let status = terminal_status(finished.state, finished.terminal_result.as_ref());
+                    if runtime_terminal.is_some() && runtime_terminal != Some(status) {
                         return Err(ClientError::TurnIdentityMismatch(
-                            "turn_failed detail does not match the control terminal status"
-                                .to_string(),
+                            "runtime and subscription terminal statuses differ".to_string(),
                         ));
                     }
-                    if stopped != (status == TurnTerminalStatus::Stopped) {
-                        return Err(ClientError::TurnIdentityMismatch(
-                            "turn_stopped detail does not match the control terminal status"
-                                .to_string(),
-                        ));
-                    }
+                    let assistant_text = finished
+                        .terminal_result
+                        .as_ref()
+                        .and_then(|result| result.get("answer"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let failure_message = finished.error_message.clone();
                     events.push(event);
                     if status == TurnTerminalStatus::Failed {
-                        return Err(ClientError::Protocol(pending_failure.unwrap_or_else(
-                            || {
-                                ProtocolError::new(
-                                    ProtocolErrorCode::RuntimeFailure,
-                                    "turn failed without a preceding failure detail",
-                                    false,
-                                )
-                            },
+                        return Err(ClientError::Protocol(ProtocolError::new(
+                            ProtocolErrorCode::RuntimeFailure,
+                            failure_message.unwrap_or_else(|| {
+                                "run failed without terminal diagnostics".to_string()
+                            }),
+                            false,
                         )));
                     }
                     return Ok(TurnResponse {
@@ -317,25 +303,30 @@ where
                         status,
                     });
                 }
-                DaemonEventKind::TurnFailed(failed) => {
-                    validate_control_identity(
-                        &session_id,
-                        admitted.as_ref(),
-                        &failed.session_id,
-                        &failed.run_id,
-                        &failed.turn_id,
-                    )?;
-                    let message = failed.message.clone();
-                    events.push(event);
-                    pending_failure = Some(ProtocolError::new(
-                        ProtocolErrorCode::RuntimeFailure,
-                        message,
-                        false,
-                    ));
-                }
                 DaemonEventKind::Error(error) => return Err(ClientError::Protocol(error.clone())),
-                _ => events.push(event),
+                other => return Err(unexpected("run subscription event", other)),
             }
+        }
+    }
+
+    pub fn run_status(&mut self, run_id: RunId) -> Result<RunStatusEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::RunStatus(RunStatusRequest { run_id }))? {
+            DaemonEventKind::RunStatus(status) => Ok(status),
+            other => Err(unexpected("run_status", &other)),
+        }
+    }
+
+    pub fn cancel_run(&mut self, run_id: RunId) -> Result<RunStatusEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::RunCancel(RunCancelRequest { run_id }))? {
+            DaemonEventKind::RunStatus(status) => Ok(status),
+            other => Err(unexpected("run_status", &other)),
+        }
+    }
+
+    pub fn run_events(&mut self, request: RunEventsRequest) -> Result<RunEventsEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::RunEvents(request))? {
+            DaemonEventKind::RunEvents(events) => Ok(events),
+            other => Err(unexpected("run_events", &other)),
         }
     }
 
@@ -438,35 +429,32 @@ pub struct TurnResponse {
     pub status: TurnTerminalStatus,
 }
 
-fn validate_control_identity(
-    requested_session_id: &SessionId,
-    admitted: Option<&(RunId, TurnId)>,
-    actual_session_id: &SessionId,
-    actual_run_id: &RunId,
-    actual_turn_id: &TurnId,
-) -> Result<(), ClientError> {
-    let Some((run_id, turn_id)) = admitted else {
-        return Err(ClientError::TurnIdentityMismatch(
-            "turn event arrived before admission".to_string(),
-        ));
-    };
-    if actual_session_id != requested_session_id
-        || actual_run_id != run_id
-        || actual_turn_id != turn_id
-    {
-        return Err(ClientError::TurnIdentityMismatch(
-            "control event does not match admitted session/run/turn".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn protocol_terminal_status(status: &TurnFinishStatus) -> TurnTerminalStatus {
     match status {
         TurnFinishStatus::Answered => TurnTerminalStatus::Answered,
         TurnFinishStatus::Stopped => TurnTerminalStatus::Stopped,
         TurnFinishStatus::Failed => TurnTerminalStatus::Failed,
         TurnFinishStatus::Cancelled => TurnTerminalStatus::Cancelled,
+    }
+}
+
+fn terminal_status(
+    state: ProtocolRunState,
+    result: Option<&serde_json::Value>,
+) -> TurnTerminalStatus {
+    match state {
+        ProtocolRunState::Cancelled => TurnTerminalStatus::Cancelled,
+        ProtocolRunState::Failed => TurnTerminalStatus::Failed,
+        ProtocolRunState::Succeeded => match result
+            .and_then(|result| result.get("status"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("stopped") => TurnTerminalStatus::Stopped,
+            _ => TurnTerminalStatus::Answered,
+        },
+        ProtocolRunState::Queued | ProtocolRunState::Running | ProtocolRunState::Waiting => {
+            TurnTerminalStatus::Failed
+        }
     }
 }
 
@@ -481,42 +469,40 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
     match event {
         DaemonEventKind::Hello(_) => "hello",
         DaemonEventKind::SessionOpened(_) => "session_opened",
-        DaemonEventKind::TurnStarted(_) => "turn_started",
-        DaemonEventKind::RuntimeEvent(_) => "runtime_event",
-        DaemonEventKind::AssistantMessage(_) => "assistant_message",
-        DaemonEventKind::TurnStopped(_) => "turn_stopped",
-        DaemonEventKind::TurnFinished(_) => "turn_finished",
-        DaemonEventKind::TurnFailed(_) => "turn_failed",
         DaemonEventKind::SessionFinished(_) => "session_finished",
         DaemonEventKind::SessionStatus(_) => "session_status",
         DaemonEventKind::SessionList(_) => "session_list",
         DaemonEventKind::SessionTranscript(_) => "session_transcript",
+        DaemonEventKind::RunAccepted(_) => "run_accepted",
+        DaemonEventKind::RunStatus(_) => "run_status",
+        DaemonEventKind::RunEvents(_) => "run_events",
+        DaemonEventKind::RunSubscriptionStarted(_) => "run_subscription_started",
+        DaemonEventKind::RunEvent(_) => "run_event",
+        DaemonEventKind::RunSubscriptionFinished(_) => "run_subscription_finished",
         DaemonEventKind::Error(_) => "error",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::VecDeque;
 
     use agl_events::{EVENT_SCHEMA as RUNTIME_EVENT_SCHEMA, EventEnvelope, EventScope};
-    use agl_ids::{EventId, RunId, SessionId, TurnId};
     use agl_protocol::{
-        AssistantMessageEvent, DaemonCapability, EVENT_SCHEMA, PROTOCOL_VERSION, REQUEST_SCHEMA,
-        SessionStatus, TurnFailedEvent, TurnFinishedEvent, TurnStartedEvent, TurnStoppedEvent,
+        DaemonCapability, EVENT_SCHEMA, PROTOCOL_VERSION, REQUEST_SCHEMA, RunAcceptedEvent,
+        RunBudgetRequest, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent, RunUsageEvent,
     };
+
+    use super::*;
 
     const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
     const RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000002";
     const TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000003";
-    const OTHER_REQUEST_ID: &str = "req_01890f17-4a00-7000-8000-000000000004";
 
     #[derive(Default)]
     struct ScriptedTransport {
         writes: Vec<String>,
         reads: VecDeque<String>,
-        correlate_reads: bool,
     }
 
     impl ScriptedTransport {
@@ -527,14 +513,6 @@ mod tests {
                     .into_iter()
                     .map(|event| serde_json::to_string(&event).unwrap())
                     .collect(),
-                correlate_reads: true,
-            }
-        }
-
-        fn with_uncorrelated_events(events: Vec<DaemonEvent>) -> Self {
-            Self {
-                correlate_reads: false,
-                ..Self::with_events(events)
             }
         }
     }
@@ -542,18 +520,16 @@ mod tests {
     impl DaemonTransport for ScriptedTransport {
         fn write_line(&mut self, line: &str) -> Result<(), ClientError> {
             self.writes.push(line.to_string());
-            if self.correlate_reads {
-                let request: DaemonRequest = serde_json::from_str(line)?;
-                for encoded in &mut self.reads {
-                    let mut event: DaemonEvent = serde_json::from_str(encoded)?;
-                    event.request_id = Some(request.request_id.clone());
-                    if let DaemonEventKind::RuntimeEvent(runtime) = &mut event.kind
-                        && runtime.request_id.is_none()
-                    {
-                        runtime.request_id = Some(request.request_id.clone());
-                    }
-                    *encoded = serde_json::to_string(&event)?;
+            let request: DaemonRequest = serde_json::from_str(line)?;
+            for encoded in &mut self.reads {
+                let mut event: DaemonEvent = serde_json::from_str(encoded)?;
+                event.request_id = Some(request.request_id.clone());
+                if let DaemonEventKind::RunEvent(runtime) = &mut event.kind
+                    && runtime.request_id.is_none()
+                {
+                    runtime.request_id = Some(request.request_id.clone());
                 }
+                *encoded = serde_json::to_string(&event)?;
             }
             Ok(())
         }
@@ -564,367 +540,206 @@ mod tests {
     }
 
     #[test]
-    fn hello_writes_alpha_request_and_decodes_response() {
-        let event = DaemonEvent::new(
+    fn hello_writes_current_strict_request() {
+        let transport = ScriptedTransport::with_events(vec![DaemonEvent::new(
             None,
             DaemonEventKind::Hello(HelloEvent {
                 protocol_version: PROTOCOL_VERSION.to_string(),
-                product_version: "1.0.0-alpha.6".to_string(),
-                capabilities: vec![DaemonCapability::SessionOpen],
+                product_version: "test".to_string(),
+                capabilities: vec![DaemonCapability::RunSubmit],
             }),
-        );
-        let transport = ScriptedTransport::with_events(vec![event]);
+        )]);
         let mut client = AgentLibreClient::new(transport);
-
-        let response = client.hello(HelloRequest {
-            client_name: Some("matrix".to_string()),
-            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
-        });
-
-        assert_eq!(response.unwrap().protocol_version, PROTOCOL_VERSION);
-        let request: DaemonRequest =
-            serde_json::from_str(&client.transport.writes[0]).expect("request JSON");
-        assert_eq!(request.schema, REQUEST_SCHEMA);
-        assert!(request.request_id.as_str().starts_with("req_"));
-        assert!(matches!(request.kind, DaemonRequestKind::Hello(_)));
-    }
-
-    #[test]
-    fn turn_response_collects_stream_until_terminal_event() {
-        let events = vec![
-            DaemonEvent::new(
-                None,
-                DaemonEventKind::TurnStarted(TurnStartedEvent {
-                    session_id: SessionId::parse(SESSION_ID).unwrap(),
-                    run_id: RunId::parse(RUN_ID).unwrap(),
-                    turn_id: TurnId::parse(TURN_ID).unwrap(),
-                }),
-            ),
-            DaemonEvent::new(
-                None,
-                DaemonEventKind::AssistantMessage(AssistantMessageEvent {
-                    session_id: SessionId::parse(SESSION_ID).unwrap(),
-                    run_id: RunId::parse(RUN_ID).unwrap(),
-                    turn_id: TurnId::parse(TURN_ID).unwrap(),
-                    content: "hello ".to_string(),
-                }),
-            ),
-            DaemonEvent::new(
-                None,
-                DaemonEventKind::AssistantMessage(AssistantMessageEvent {
-                    session_id: SessionId::parse(SESSION_ID).unwrap(),
-                    run_id: RunId::parse(RUN_ID).unwrap(),
-                    turn_id: TurnId::parse(TURN_ID).unwrap(),
-                    content: "there".to_string(),
-                }),
-            ),
-            DaemonEvent::new(
-                None,
-                DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                    session_id: SessionId::parse(SESSION_ID).unwrap(),
-                    run_id: RunId::parse(RUN_ID).unwrap(),
-                    turn_id: TurnId::parse(TURN_ID).unwrap(),
-                    status: TurnTerminalStatus::Answered,
-                }),
-            ),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
         let response = client
-            .send_turn(SessionTurnRequest {
-                session_id: SessionId::parse(SESSION_ID).unwrap(),
-                text: "say hi".to_string(),
-                idempotency_key: None,
+            .hello(HelloRequest {
+                client_name: Some("test".to_string()),
+                accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
             })
             .unwrap();
+        assert_eq!(response.protocol_version, PROTOCOL_VERSION);
+        let request: DaemonRequest = serde_json::from_str(&client.transport.writes[0]).unwrap();
+        assert_eq!(request.schema, REQUEST_SCHEMA);
+        assert_eq!(EVENT_SCHEMA, agl_protocol::EVENT_SCHEMA);
+    }
 
-        assert_eq!(response.assistant_text, "hello there");
+    #[test]
+    fn turn_submission_collects_replay_and_live_events_until_terminal() {
+        let events = successful_run_events();
+        let transport = ScriptedTransport::with_events(events);
+        let mut client = AgentLibreClient::new(transport);
+
+        let response = client.send_turn(run_request()).unwrap();
+
+        assert_eq!(response.session_id, session_id());
+        assert_eq!(response.run_id, run_id());
+        assert_eq!(response.turn_id, turn_id());
         assert_eq!(response.status, TurnTerminalStatus::Answered);
-        assert_eq!(response.session_id.as_str(), SESSION_ID);
-        assert_eq!(response.run_id.as_str(), RUN_ID);
-        assert_eq!(response.turn_id.as_str(), TURN_ID);
-        assert_eq!(response.events.len(), 4);
-    }
-
-    #[test]
-    fn runtime_stream_accepts_exact_identity_and_contiguous_unique_events() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), Some(session_id()), None),
-            runtime_event_with_payload(
-                2,
-                SafeRuntimeEvent::TurnFinished {
-                    status: TurnFinishStatus::Answered,
-                },
-            ),
-            turn_finished_event(TurnTerminalStatus::Answered),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let response = client.send_turn(turn_request()).unwrap();
-
-        let runtime_events = response
-            .events
+        assert_eq!(response.assistant_text, "done");
+        assert_eq!(response.events.len(), 5);
+        let requests = client
+            .transport
+            .writes
             .iter()
-            .filter_map(|event| match &event.kind {
-                DaemonEventKind::RuntimeEvent(runtime) => Some(runtime.as_ref()),
-                _ => None,
-            })
+            .map(|line| serde_json::from_str::<DaemonRequest>(line).unwrap().kind)
             .collect::<Vec<_>>();
-        assert_eq!(
-            runtime_events
-                .iter()
-                .map(|event| event.sequence)
-                .collect::<Vec<_>>(),
-            [1, 2]
-        );
-        assert!(
-            runtime_events
-                .iter()
-                .all(|event| event.scope.session_id() == Some(&response.session_id))
-        );
+        assert!(matches!(requests[0], DaemonRequestKind::RunSubmit(_)));
+        assert!(matches!(requests[1], DaemonRequestKind::RunSubscribe(_)));
     }
 
     #[test]
-    fn runtime_stream_rejects_missing_session_scope() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), None, None),
-        ];
+    fn runtime_sequence_gap_fails_closed() {
+        let mut events = successful_run_events();
+        if let DaemonEventKind::RunEvent(event) = &mut events[2].kind {
+            event.sequence = 2;
+        }
         let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("session/run/turn"));
+        assert!(matches!(
+            client.send_turn(run_request()),
+            Err(ClientError::TurnIdentityMismatch(_))
+        ));
     }
 
     #[test]
-    fn runtime_stream_rejects_inner_request_mismatch() {
+    fn failed_subscription_terminal_returns_protocol_error() {
         let events = vec![
-            turn_started_event(),
-            runtime_event(
-                1,
-                EventId::generate(),
-                Some(session_id()),
-                Some(RequestId::parse(OTHER_REQUEST_ID).unwrap()),
-            ),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("outer request"));
-    }
-
-    #[test]
-    fn runtime_stream_rejects_sequence_gaps() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), Some(session_id()), None),
-            runtime_event(3, EventId::generate(), Some(session_id()), None),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("expected 2"));
-    }
-
-    #[test]
-    fn runtime_stream_sequence_must_start_at_one() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(2, EventId::generate(), Some(session_id()), None),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("expected 1"));
-    }
-
-    #[test]
-    fn runtime_stream_rejects_duplicate_event_ids() {
-        let event_id = EventId::generate();
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, event_id.clone(), Some(session_id()), None),
-            runtime_event(2, event_id, Some(session_id()), None),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("duplicate runtime event_id"));
-    }
-
-    #[test]
-    fn turn_stopped_requires_the_admitted_identity() {
-        let events = vec![
-            turn_started_event(),
+            accepted_event(),
+            subscription_started_event(),
             DaemonEvent::new(
                 None,
-                DaemonEventKind::TurnStopped(TurnStoppedEvent {
-                    session_id: SessionId::generate(),
+                DaemonEventKind::RunSubscriptionFinished(RunSubscriptionFinishedEvent {
                     run_id: run_id(),
-                    turn_id: turn_id(),
-                    reason: "hidden_tool".to_string(),
+                    state: ProtocolRunState::Failed,
+                    last_sequence: 0,
+                    terminal_result: None,
+                    error_code: Some("test.failure".to_string()),
+                    error_message: Some("failed safely".to_string()),
                 }),
             ),
         ];
         let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("control event"));
+        assert!(matches!(
+            client.send_turn(run_request()),
+            Err(ClientError::Protocol(ProtocolError { ref message, .. })) if message == "failed safely"
+        ));
     }
 
     #[test]
-    fn runtime_and_control_terminal_statuses_must_match() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), Some(session_id()), None),
-            runtime_event_with_payload(
-                2,
-                SafeRuntimeEvent::TurnFinished {
-                    status: TurnFinishStatus::Answered,
-                },
-            ),
-            turn_finished_event(TurnTerminalStatus::Stopped),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("terminal status"));
-    }
-
-    #[test]
-    fn partial_runtime_stream_requires_its_terminal_event() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), Some(session_id()), None),
-            turn_finished_event(TurnTerminalStatus::Answered),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        assert!(matches!(error, ClientError::TurnIdentityMismatch(_)));
-        assert!(error.to_string().contains("runtime stream is incomplete"));
-    }
-
-    #[test]
-    fn turn_failure_is_returned_only_after_matching_terminal_event() {
-        let events = vec![
-            turn_started_event(),
-            runtime_event(1, EventId::generate(), Some(session_id()), None),
-            runtime_event_with_payload(
-                2,
-                SafeRuntimeEvent::TurnFinished {
-                    status: TurnFinishStatus::Failed,
-                },
-            ),
-            DaemonEvent::new(
-                None,
-                DaemonEventKind::TurnFailed(TurnFailedEvent {
-                    session_id: session_id(),
-                    run_id: run_id(),
-                    turn_id: turn_id(),
-                    message: "model backend failed".to_string(),
-                }),
-            ),
-            turn_finished_event(TurnTerminalStatus::Failed),
-        ];
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(events));
-
-        let error = client.send_turn(turn_request()).unwrap_err();
-
-        match error {
-            ClientError::Protocol(error) => {
-                assert_eq!(error.code, ProtocolErrorCode::RuntimeFailure);
-                assert_eq!(error.message, "model backend failed");
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-        assert!(client.transport.reads.is_empty());
-    }
-
-    #[test]
-    fn protocol_error_is_returned_without_untyped_string_matching() {
-        let error = ProtocolError::new(ProtocolErrorCode::Busy, "session is busy", true);
-        let event = DaemonEvent::new(None, DaemonEventKind::Error(error));
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(vec![event]));
-
-        let result = client.session_status(SessionStatusRequest {
-            session_id: SessionId::parse(SESSION_ID).unwrap(),
-        });
-
-        match result.unwrap_err() {
-            ClientError::Protocol(error) => {
-                assert_eq!(error.code, ProtocolErrorCode::Busy);
-                assert!(error.retryable);
-            }
-            other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn list_sessions_uses_protocol_session_list_request() {
-        let event = DaemonEvent::new(
-            None,
-            DaemonEventKind::SessionList(SessionListEvent {
-                sessions: Vec::new(),
-            }),
-        );
-        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(vec![event]));
-
-        let response = client.list_sessions(SessionListRequest::default()).unwrap();
-
-        assert!(response.sessions.is_empty());
-        let request: DaemonRequest =
-            serde_json::from_str(&client.transport.writes[0]).expect("request JSON");
-        assert!(matches!(request.kind, DaemonRequestKind::SessionList(_)));
-    }
-
-    #[test]
-    fn request_id_mismatch_fails_closed() {
-        let event = DaemonEvent {
-            schema: EVENT_SCHEMA.to_string(),
-            request_id: Some(RequestId::parse(OTHER_REQUEST_ID).unwrap()),
-            safe_metadata: Default::default(),
-            kind: DaemonEventKind::SessionStatus(SessionStatusEvent {
-                session_id: SessionId::parse(SESSION_ID).unwrap(),
-                status: SessionStatus::Open,
-            }),
+    fn status_cancel_and_replay_use_run_requests() {
+        let status = RunStatusEvent {
+            session_id: Some(session_id()),
+            run_id: run_id(),
+            turn_id: Some(turn_id()),
+            state: ProtocolRunState::Running,
+            usage: RunUsageEvent::default(),
+            cancellation_requested: false,
+            attempts: 1,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(2),
+            finished_at_ms: None,
+            error_code: None,
+            terminal_result: None,
+            error_message: None,
         };
-        let mut client =
-            AgentLibreClient::new(ScriptedTransport::with_uncorrelated_events(vec![event]));
-
-        let result = client.session_status(SessionStatusRequest {
-            session_id: SessionId::parse(SESSION_ID).unwrap(),
-        });
-
-        assert!(matches!(result, Err(ClientError::RequestMismatch { .. })));
+        let transport = ScriptedTransport::with_events(vec![DaemonEvent::new(
+            None,
+            DaemonEventKind::RunStatus(status.clone()),
+        )]);
+        let mut client = AgentLibreClient::new(transport);
+        assert_eq!(client.run_status(run_id()).unwrap(), status);
     }
 
     #[test]
     fn client_manifest_stays_on_protocol_boundary() {
         let manifest = include_str!("../Cargo.toml");
-
         assert!(manifest.contains("agl-protocol.workspace = true"));
-        for forbidden in ["agl-chat", "agl-loop", "agl-inference", "agl-cli"] {
-            assert!(
-                !has_dependency(manifest, forbidden),
-                "agl-client must not depend on {forbidden}"
-            );
+        assert!(!manifest.contains("agl-daemon.workspace = true"));
+        assert!(!manifest.contains("agl-chat.workspace = true"));
+    }
+
+    fn successful_run_events() -> Vec<DaemonEvent> {
+        vec![
+            accepted_event(),
+            subscription_started_event(),
+            runtime_event(
+                1,
+                SafeRuntimeEvent::TurnStarted {
+                    user_input_bytes: 4,
+                },
+            ),
+            runtime_event(
+                2,
+                SafeRuntimeEvent::TurnFinished {
+                    status: TurnFinishStatus::Answered,
+                },
+            ),
+            DaemonEvent::new(
+                None,
+                DaemonEventKind::RunSubscriptionFinished(RunSubscriptionFinishedEvent {
+                    run_id: run_id(),
+                    state: ProtocolRunState::Succeeded,
+                    last_sequence: 2,
+                    terminal_result: Some(serde_json::json!({
+                        "status": "answered",
+                        "answer": "done"
+                    })),
+                    error_code: None,
+                    error_message: None,
+                }),
+            ),
+        ]
+    }
+
+    fn accepted_event() -> DaemonEvent {
+        DaemonEvent::new(
+            None,
+            DaemonEventKind::RunAccepted(RunAcceptedEvent {
+                session_id: session_id(),
+                run_id: run_id(),
+                turn_id: turn_id(),
+                state: ProtocolRunState::Queued,
+                replayed: false,
+            }),
+        )
+    }
+
+    fn subscription_started_event() -> DaemonEvent {
+        DaemonEvent::new(
+            None,
+            DaemonEventKind::RunSubscriptionStarted(RunSubscriptionStartedEvent {
+                run_id: run_id(),
+                after_sequence: 0,
+                replay_boundary: 0,
+            }),
+        )
+    }
+
+    fn runtime_event(sequence: u64, payload: SafeRuntimeEvent) -> DaemonEvent {
+        DaemonEvent::new(
+            None,
+            DaemonEventKind::RunEvent(Box::new(EventEnvelope {
+                schema: RUNTIME_EVENT_SCHEMA.to_string(),
+                event_id: EventId::generate(),
+                sequence,
+                occurred_at_unix_ms: sequence,
+                scope: EventScope::builder(run_id())
+                    .session_id(session_id())
+                    .turn_id(turn_id())
+                    .build()
+                    .unwrap(),
+                request_id: None,
+                caused_by: None,
+                payload,
+            })),
+        )
+    }
+
+    fn run_request() -> RunSubmitRequest {
+        RunSubmitRequest {
+            session_id: session_id(),
+            text: "test".to_string(),
+            idempotency_key: Some("key".to_string()),
+            budget: RunBudgetRequest::default(),
         }
     }
 
@@ -938,91 +753,5 @@ mod tests {
 
     fn turn_id() -> TurnId {
         TurnId::parse(TURN_ID).unwrap()
-    }
-
-    fn turn_request() -> SessionTurnRequest {
-        SessionTurnRequest {
-            session_id: session_id(),
-            text: "test input".to_string(),
-            idempotency_key: None,
-        }
-    }
-
-    fn turn_started_event() -> DaemonEvent {
-        DaemonEvent::new(
-            None,
-            DaemonEventKind::TurnStarted(TurnStartedEvent {
-                session_id: session_id(),
-                run_id: run_id(),
-                turn_id: turn_id(),
-            }),
-        )
-    }
-
-    fn turn_finished_event(status: TurnTerminalStatus) -> DaemonEvent {
-        DaemonEvent::new(
-            None,
-            DaemonEventKind::TurnFinished(TurnFinishedEvent {
-                session_id: session_id(),
-                run_id: run_id(),
-                turn_id: turn_id(),
-                status,
-            }),
-        )
-    }
-
-    fn runtime_event(
-        sequence: u64,
-        event_id: EventId,
-        session_id: Option<SessionId>,
-        request_id: Option<RequestId>,
-    ) -> DaemonEvent {
-        let mut scope = EventScope::builder(run_id()).turn_id(turn_id());
-        if let Some(session_id) = session_id {
-            scope = scope.session_id(session_id);
-        }
-        DaemonEvent::new(
-            None,
-            DaemonEventKind::RuntimeEvent(Box::new(EventEnvelope {
-                schema: RUNTIME_EVENT_SCHEMA.to_string(),
-                event_id,
-                sequence,
-                occurred_at_unix_ms: 1,
-                scope: scope.build().unwrap(),
-                request_id,
-                caused_by: None,
-                payload: SafeRuntimeEvent::ModelRequested {
-                    request_index: sequence as usize,
-                },
-            })),
-        )
-    }
-
-    fn runtime_event_with_payload(sequence: u64, payload: SafeRuntimeEvent) -> DaemonEvent {
-        DaemonEvent::new(
-            None,
-            DaemonEventKind::RuntimeEvent(Box::new(EventEnvelope {
-                schema: RUNTIME_EVENT_SCHEMA.to_string(),
-                event_id: EventId::generate(),
-                sequence,
-                occurred_at_unix_ms: 1,
-                scope: EventScope::builder(run_id())
-                    .session_id(session_id())
-                    .turn_id(turn_id())
-                    .build()
-                    .unwrap(),
-                request_id: None,
-                caused_by: None,
-                payload,
-            })),
-        )
-    }
-
-    fn has_dependency(manifest: &str, crate_name: &str) -> bool {
-        manifest.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with(&format!("{crate_name}."))
-                || line.starts_with(&format!("{crate_name} ="))
-        })
     }
 }

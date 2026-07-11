@@ -48,6 +48,27 @@ impl RuntimeEventWriter {
         })
     }
 
+    pub fn open_evidence_at_sequence(
+        events_jsonl: impl Into<PathBuf>,
+        run_id: &RunId,
+        durable_sequence: u64,
+    ) -> Result<Self> {
+        let writer = Self::open(events_jsonl)?;
+        let mut state = writer
+            .state
+            .lock()
+            .map_err(|_| anyhow!("runtime event writer state is poisoned"))?;
+        let evidence_sequence = state.sequences.get(run_id).copied().unwrap_or(0);
+        if evidence_sequence > durable_sequence {
+            bail!(
+                "runtime event evidence for run {run_id} is ahead of durable sequence {durable_sequence}"
+            );
+        }
+        state.sequences.insert(run_id.clone(), durable_sequence);
+        drop(state);
+        Ok(writer)
+    }
+
     pub fn path(&self) -> &Path {
         &self.events_jsonl
     }
