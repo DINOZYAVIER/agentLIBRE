@@ -119,6 +119,8 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 content: output.content,
                 finish_reason: output.finish_reason,
                 selected_device: model.metadata().selected_device.clone(),
+                input_tokens: output.input_tokens,
+                output_tokens: output.output_tokens,
             })
         })
     }

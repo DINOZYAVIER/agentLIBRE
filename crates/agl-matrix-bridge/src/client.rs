@@ -6,8 +6,8 @@ use agl_client::UnixTransport;
 use agl_client::{AgentLibreClient, DaemonTransport};
 use agl_ids::SessionId;
 use agl_protocol::{
-    HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, SessionOpenRequest, SessionStatus,
-    SessionStatusRequest, SessionTurnRequest, TurnTerminalStatus,
+    HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
+    SessionOpenRequest, SessionStatus, SessionStatusRequest, TurnTerminalStatus,
 };
 #[cfg(unix)]
 use anyhow::Context;
@@ -113,10 +113,11 @@ where
         message: &str,
         idempotency_key: &str,
     ) -> Result<String> {
-        let response = self.send_turn(SessionTurnRequest {
+        let response = self.send_turn(RunSubmitRequest {
             session_id: session_id.clone(),
             text: message.to_string(),
             idempotency_key: Some(idempotency_key.to_string()),
+            budget: RunBudgetRequest::default(),
         })?;
         match response.status {
             TurnTerminalStatus::Answered => Ok(response.assistant_text),

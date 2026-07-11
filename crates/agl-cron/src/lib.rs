@@ -1,6 +1,7 @@
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_ids::RunId;
 use agl_store::{AglStore, IdempotencyOutcome, StoreError};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -247,6 +248,7 @@ pub struct CronRun {
     pub status: CronRunStatus,
     pub result_ref: Option<String>,
     pub error: Option<String>,
+    pub supervisor_run_id: Option<RunId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -536,10 +538,127 @@ impl<'a> CronRepository<'a> {
         Ok(run)
     }
 
+    pub fn record_admitted_supervisor_run(
+        &self,
+        job_id: &str,
+        scheduled_for: &str,
+        supervisor_run_id: &RunId,
+    ) -> Result<CronRun> {
+        validate_non_blank("job_id", job_id)?;
+        validate_non_blank("scheduled_for", scheduled_for)?;
+        if let Some(existing) = self.run_for_schedule(job_id, scheduled_for)? {
+            if existing.supervisor_run_id.as_ref() == Some(supervisor_run_id) {
+                return Ok(existing);
+            }
+            return Err(CronError::InvalidValue {
+                field: "supervisor_run_id",
+                value: supervisor_run_id.to_string(),
+                reason: "scheduled cron run is linked to another supervisor run",
+            });
+        }
+
+        let id = cron_id("cron_run");
+        let result_ref = format!("run:{supervisor_run_id}");
+        self.store.connection().execute(
+            "INSERT INTO cron_runs
+             (id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error,
+              supervisor_run_id)
+             VALUES (?1, ?2, ?3, NULL, NULL, 'queued', ?4, NULL, ?5)",
+            params![
+                id,
+                job_id,
+                scheduled_for,
+                result_ref,
+                supervisor_run_id.as_str()
+            ],
+        )?;
+        let idempotency_key = idempotency_key(job_id, scheduled_for);
+        self.store.connection().execute(
+            "UPDATE idempotency_keys SET result_ref = ?3, updated_at = ?4
+             WHERE namespace = ?1 AND key = ?2 AND status = 'in_progress'",
+            params![IDEMPOTENCY_NAMESPACE, idempotency_key, id, timestamp()],
+        )?;
+        self.run(&id)?.ok_or_else(|| CronError::NotFound { id })
+    }
+
+    pub fn active_supervisor_runs(&self) -> Result<Vec<CronRun>> {
+        let mut statement = self.store.connection().prepare(
+            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref,
+                    error, supervisor_run_id
+             FROM cron_runs
+             WHERE status IN ('queued', 'running') AND supervisor_run_id IS NOT NULL
+             ORDER BY scheduled_for, id",
+        )?;
+        let rows = statement.query_map([], run_from_row)?;
+        let mut runs = Vec::new();
+        for row in rows {
+            runs.push(row??);
+        }
+        Ok(runs)
+    }
+
+    pub fn finish_supervisor_run(
+        &self,
+        supervisor_run_id: &RunId,
+        status: CronRunStatus,
+        result_ref: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<CronRun> {
+        if !matches!(
+            status,
+            CronRunStatus::Succeeded | CronRunStatus::Failed | CronRunStatus::Skipped
+        ) {
+            return Err(CronError::InvalidValue {
+                field: "status",
+                value: status.as_str().to_string(),
+                reason: "linked supervisor completion must be terminal",
+            });
+        }
+        let now = timestamp();
+        let changed = self.store.connection().execute(
+            "UPDATE cron_runs
+             SET status = ?2, started_at = COALESCE(started_at, ?3), finished_at = ?3,
+                 result_ref = ?4, error = ?5
+             WHERE supervisor_run_id = ?1 AND status IN ('queued', 'running')",
+            params![
+                supervisor_run_id.as_str(),
+                status.as_str(),
+                now,
+                result_ref,
+                error
+            ],
+        )?;
+        let run =
+            self.run_for_supervisor(supervisor_run_id)?
+                .ok_or_else(|| CronError::NotFound {
+                    id: supervisor_run_id.to_string(),
+                })?;
+        if changed > 0 {
+            let key = idempotency_key(&run.job_id, &run.scheduled_for);
+            match status {
+                CronRunStatus::Succeeded => {
+                    self.store
+                        .complete_idempotency(IDEMPOTENCY_NAMESPACE, &key, Some(&run.id))?;
+                }
+                CronRunStatus::Failed => {
+                    self.store
+                        .fail_idempotency(IDEMPOTENCY_NAMESPACE, &key, Some(&run.id))?;
+                }
+                CronRunStatus::Skipped => {
+                    self.store
+                        .skip_idempotency(IDEMPOTENCY_NAMESPACE, &key, Some(&run.id))?;
+                }
+                CronRunStatus::Queued | CronRunStatus::Running => unreachable!(),
+            }
+        }
+        Ok(run)
+    }
+
     pub fn history(&self, job_id: &str) -> Result<Vec<CronRun>> {
         validate_non_blank("job_id", job_id)?;
         let mut stmt = self.store.connection().prepare(
-            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error
+            "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error,
+                    supervisor_run_id
              FROM cron_runs
              WHERE job_id = ?1
              ORDER BY scheduled_for DESC, id DESC",
@@ -580,10 +699,39 @@ impl<'a> CronRepository<'a> {
         self.store
             .connection()
             .query_row(
-                "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error
+                "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref,
+                        error, supervisor_run_id
                  FROM cron_runs
                  WHERE id = ?1",
                 params![id],
+                run_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
+    fn run_for_schedule(&self, job_id: &str, scheduled_for: &str) -> Result<Option<CronRun>> {
+        self.store
+            .connection()
+            .query_row(
+                "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref,
+                        error, supervisor_run_id
+                 FROM cron_runs WHERE job_id = ?1 AND scheduled_for = ?2",
+                params![job_id, scheduled_for],
+                run_from_row,
+            )
+            .optional()?
+            .transpose()
+    }
+
+    fn run_for_supervisor(&self, run_id: &RunId) -> Result<Option<CronRun>> {
+        self.store
+            .connection()
+            .query_row(
+                "SELECT id, job_id, scheduled_for, started_at, finished_at, status, result_ref,
+                        error, supervisor_run_id
+                 FROM cron_runs WHERE supervisor_run_id = ?1",
+                [run_id.as_str()],
                 run_from_row,
             )
             .optional()?
@@ -707,6 +855,7 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CronJob>> {
 
 fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CronRun>> {
     let status: String = row.get(5)?;
+    let supervisor_run_id: Option<String> = row.get(8)?;
     Ok((|| {
         Ok(CronRun {
             id: row.get(0)?,
@@ -717,8 +866,20 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CronRun>> {
             status: CronRunStatus::parse(&status)?,
             result_ref: row.get(6)?,
             error: row.get(7)?,
+            supervisor_run_id: supervisor_run_id
+                .as_deref()
+                .map(parse_supervisor_run_id)
+                .transpose()?,
         })
     })())
+}
+
+fn parse_supervisor_run_id(value: &str) -> Result<RunId> {
+    RunId::parse(value).map_err(|_| CronError::InvalidValue {
+        field: "supervisor_run_id",
+        value: value.to_string(),
+        reason: "invalid typed run ID",
+    })
 }
 
 fn validate_non_blank(field: &'static str, value: &str) -> Result<()> {

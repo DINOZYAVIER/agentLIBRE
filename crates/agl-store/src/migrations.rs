@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -231,6 +231,105 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             ALTER TABLE permission_grants ADD COLUMN admitted_at TEXT;
             ALTER TABLE permission_grants ADD COLUMN last_admitted_run_id TEXT;
             ALTER TABLE permission_grants ADD COLUMN consumed_at TEXT;
+        "#,
+    },
+    StoreMigration {
+        version: 10,
+        name: "010_durable_runs",
+        sql: r#"
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                kind TEXT NOT NULL CHECK (kind IN ('turn', 'cron')),
+                state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
+                priority INTEGER NOT NULL,
+                input_json TEXT NOT NULL,
+                checkpoint_json TEXT,
+                effective_policy_hash TEXT,
+                budget_json TEXT NOT NULL,
+                usage_json TEXT NOT NULL,
+                lease_owner TEXT,
+                lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+                lease_expires_at_ms INTEGER,
+                cancellation_requested_at_ms INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                not_before_ms INTEGER,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                started_at_ms INTEGER,
+                finished_at_ms INTEGER,
+                terminal_result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                CHECK ((session_id IS NULL) = (turn_id IS NULL)),
+                CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL))
+            );
+            CREATE INDEX runs_runnable_idx
+                ON runs(state, not_before_ms, priority DESC, created_at_ms);
+            CREATE INDEX runs_lease_idx
+                ON runs(state, lease_expires_at_ms);
+            CREATE INDEX runs_session_fifo_idx
+                ON runs(session_id, created_at_ms, state);
+
+            CREATE TABLE run_steps (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                turn_id TEXT,
+                effect_sequence INTEGER NOT NULL CHECK (effect_sequence > 0),
+                effect_kind TEXT NOT NULL,
+                delivery_class TEXT NOT NULL CHECK (delivery_class IN ('replay_safe', 'idempotent', 'at_most_once')),
+                request_json TEXT NOT NULL,
+                result_json TEXT,
+                state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'outcome_unknown')),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                lease_owner TEXT,
+                lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+                lease_expires_at_ms INTEGER,
+                not_before_ms INTEGER,
+                error_code TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                finished_at_ms INTEGER,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                UNIQUE(run_id, effect_sequence),
+                CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL))
+            );
+            CREATE INDEX run_steps_runnable_idx
+                ON run_steps(state, not_before_ms, created_at_ms);
+            CREATE INDEX run_steps_lease_idx
+                ON run_steps(state, lease_expires_at_ms);
+            CREATE INDEX run_steps_run_idx
+                ON run_steps(run_id, effect_sequence);
+
+            CREATE TABLE run_events (
+                event_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence > 0),
+                kind TEXT NOT NULL,
+                occurred_at_unix_ms INTEGER NOT NULL,
+                envelope_json TEXT NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+                UNIQUE(run_id, sequence)
+            );
+            CREATE INDEX run_events_replay_idx
+                ON run_events(run_id, sequence);
+
+            ALTER TABLE idempotency_keys ADD COLUMN lease_owner TEXT;
+            ALTER TABLE idempotency_keys ADD COLUMN lease_expires_at_ms INTEGER;
+            ALTER TABLE idempotency_keys ADD COLUMN admitted_run_id TEXT REFERENCES runs(id);
+            ALTER TABLE idempotency_keys ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE idempotency_keys ADD COLUMN last_error_code TEXT;
+            CREATE INDEX idempotency_lease_idx
+                ON idempotency_keys(status, lease_expires_at_ms);
+            CREATE INDEX idempotency_run_idx
+                ON idempotency_keys(admitted_run_id);
+
+            ALTER TABLE cron_runs ADD COLUMN supervisor_run_id TEXT REFERENCES runs(id);
+            CREATE INDEX cron_runs_supervisor_run_idx
+                ON cron_runs(supervisor_run_id);
+            CREATE UNIQUE INDEX cron_runs_schedule_unique_idx
+                ON cron_runs(job_id, scheduled_for);
         "#,
     },
 ];

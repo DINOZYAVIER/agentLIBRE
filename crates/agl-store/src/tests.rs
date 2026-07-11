@@ -1,4 +1,6 @@
 use super::*;
+use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
+use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
 use serde_json::json;
 
 #[test]
@@ -89,6 +91,270 @@ fn transaction_commits_and_rolls_back() {
         .query_row("SELECT COUNT(*) FROM tx_probe", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn connections_enforce_durable_pragmas() {
+    let (root, store) = open_temp_store("connection-pragmas");
+    let (journal, foreign_keys, synchronous, busy_timeout) =
+        crate::connection::connection_pragmas(store.connection()).unwrap();
+    assert_eq!(journal, "wal");
+    assert!(foreign_keys);
+    assert_eq!(synchronous, 2);
+    assert_eq!(busy_timeout, 5_000);
+
+    drop(store);
+    let read_only = AglStore::open_current_read_only_at(&root).unwrap();
+    let (journal, foreign_keys, _synchronous, busy_timeout) =
+        crate::connection::connection_pragmas(read_only.connection()).unwrap();
+    assert_eq!(journal, "wal");
+    assert!(foreign_keys);
+    assert_eq!(busy_timeout, 5_000);
+}
+
+#[cfg(unix)]
+#[test]
+fn database_and_wal_sidecars_remain_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (root, store) = open_temp_store("private-sidecars");
+    store
+        .transaction(|tx| {
+            tx.execute(
+                "INSERT INTO runs
+                 (id, kind, state, priority, input_json, budget_json, usage_json,
+                  lease_generation, attempts, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'cron', 'queued', 0, '{}', '{}', '{}', 0, 0, 1, 1)",
+                [RunId::generate().as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let database = store.database_path().to_path_buf();
+    for path in [
+        database.clone(),
+        PathBuf::from(format!("{}-wal", database.display())),
+        PathBuf::from(format!("{}-shm", database.display())),
+    ] {
+        assert!(path.exists(), "{} should exist", path.display());
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
+    let (_root, store) = open_temp_store("durable-run");
+    let session_id = SessionId::generate();
+    let first = run_draft(Some(session_id.clone()));
+    let second = run_draft(Some(session_id));
+    store.admit_run_at(&first, 10).unwrap();
+    store.admit_run_at(&second, 11).unwrap();
+
+    let lease = store.claim_next_run("owner-a", 20, 100).unwrap().unwrap();
+    assert_eq!(lease.run_id, first.run_id);
+    assert!(store.claim_next_run("owner-b", 20, 100).unwrap().is_none());
+
+    let event = safe_event(
+        &first,
+        1,
+        SafeRuntimeEvent::TurnStarted {
+            user_input_bytes: 5,
+        },
+    );
+    let step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: first.turn_id.clone(),
+        effect_sequence: 1,
+        effect_kind: "model_generation".to_string(),
+        delivery_class: EffectDeliveryClass::ReplaySafe,
+        request: json!({"effect": "model_generation"}),
+    };
+    store
+        .publish_run_step(&lease, &json!({"phase": "pending"}), &step, &[event], 21)
+        .unwrap();
+    let step_lease = store
+        .claim_run_step(&lease, &step.step_id, 120, 22)
+        .unwrap();
+    store
+        .complete_run_step(
+            &lease,
+            &step_lease,
+            RunStepState::Succeeded,
+            Some(&json!({"ok": true})),
+            &json!({"phase": "complete"}),
+            &RunUsage::default(),
+            &[],
+            None,
+            23,
+        )
+        .unwrap();
+    assert!(matches!(
+        store.complete_run_step(
+            &lease,
+            &step_lease,
+            RunStepState::Succeeded,
+            None,
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            None,
+            24,
+        ),
+        Err(StoreError::LeaseLost { .. })
+    ));
+    store
+        .finish_run(
+            &lease,
+            RunState::Succeeded,
+            Some(&json!({"terminal": true})),
+            &RunUsage::default(),
+            Some(&json!({"status": "answered"})),
+            None,
+            None,
+            &[],
+            25,
+        )
+        .unwrap();
+
+    let second_lease = store.claim_next_run("owner-b", 26, 100).unwrap().unwrap();
+    assert_eq!(second_lease.run_id, second.run_id);
+    let events = store.run_events_after(&first.run_id, 0, 10).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].sequence, 1);
+}
+
+#[test]
+fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
+    let (_root, store) = open_temp_store("recovery");
+    let safe = run_draft(None);
+    store.admit_run_at(&safe, 1).unwrap();
+    let safe_lease = store.claim_next_run("owner", 2, 10).unwrap().unwrap();
+    let safe_step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: None,
+        effect_sequence: 1,
+        effect_kind: "hook_batch".to_string(),
+        delivery_class: EffectDeliveryClass::ReplaySafe,
+        request: json!({}),
+    };
+    store
+        .publish_run_step(&safe_lease, &json!({}), &safe_step, &[], 3)
+        .unwrap();
+    store
+        .claim_run_step(&safe_lease, &safe_step.step_id, 12, 4)
+        .unwrap();
+
+    let uncertain = run_draft(None);
+    store.admit_run_at(&uncertain, 5).unwrap();
+    let report = store.recover_expired_work(13).unwrap();
+    assert_eq!(report.requeued_steps, 1);
+    assert_eq!(report.requeued_runs, 1);
+    assert_eq!(
+        store.run_steps(&safe.run_id).unwrap()[0].state,
+        RunStepState::Pending
+    );
+
+    let recovered_safe_lease = store.claim_next_run("owner", 14, 10).unwrap().unwrap();
+    let recovered_step_lease = store
+        .claim_run_step(&recovered_safe_lease, &safe_step.step_id, 24, 15)
+        .unwrap();
+    store
+        .complete_run_step(
+            &recovered_safe_lease,
+            &recovered_step_lease,
+            RunStepState::Succeeded,
+            Some(&json!({"ok": true})),
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            None,
+            16,
+        )
+        .unwrap();
+    store
+        .finish_run(
+            &recovered_safe_lease,
+            RunState::Succeeded,
+            None,
+            &RunUsage::default(),
+            None,
+            None,
+            None,
+            &[],
+            17,
+        )
+        .unwrap();
+
+    let uncertain_lease = store.claim_next_run("owner", 18, 10).unwrap().unwrap();
+    assert_eq!(uncertain_lease.run_id, uncertain.run_id);
+    let uncertain_step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: None,
+        effect_sequence: 1,
+        effect_kind: "capability_dispatch".to_string(),
+        delivery_class: EffectDeliveryClass::AtMostOnce,
+        request: json!({}),
+    };
+    store
+        .publish_run_step(&uncertain_lease, &json!({}), &uncertain_step, &[], 19)
+        .unwrap();
+    store
+        .claim_run_step(&uncertain_lease, &uncertain_step.step_id, 28, 20)
+        .unwrap();
+    let report = store.recover_expired_work(29).unwrap();
+    assert_eq!(report.outcome_unknown_steps, 1);
+    assert_eq!(report.failed_runs, 1);
+    assert_eq!(
+        store
+            .safe_run_status(&uncertain.run_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        RunState::Failed
+    );
+}
+
+#[test]
+fn idempotent_admission_has_one_durable_run() {
+    let (root, _store) = open_temp_store("idempotent-run");
+    let root = root.path.clone();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let root = root.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let store = AglStore::open_current_at(root).unwrap();
+                let draft = run_draft(None);
+                barrier.wait();
+                store
+                    .admit_idempotent_run(
+                        &draft,
+                        "run.submit",
+                        "same-key",
+                        "same-fingerprint",
+                        "owner",
+                        100,
+                        1,
+                    )
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let admissions = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(admissions[0].run.run_id, admissions[1].run.run_id);
+    assert_eq!(admissions.iter().filter(|entry| !entry.replayed).count(), 1);
 }
 
 #[test]
@@ -671,6 +937,51 @@ fn temp_root(label: &str) -> TempRoot {
     let root = std::env::temp_dir().join(format!("agl-store-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     TempRoot { path: root }
+}
+
+fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
+    let turn_id = session_id.as_ref().map(|_| TurnId::generate());
+    let kind = if turn_id.is_some() {
+        RunKind::Turn
+    } else {
+        RunKind::Cron
+    };
+    DurableRunDraft {
+        run_id: RunId::generate(),
+        session_id,
+        turn_id,
+        kind,
+        priority: 0,
+        input: json!({"prompt": "test"}),
+        checkpoint: None,
+        effective_policy_hash: None,
+        budget: RunBudget::default(),
+        not_before_ms: None,
+    }
+}
+
+fn safe_event(
+    draft: &DurableRunDraft,
+    sequence: u64,
+    payload: SafeRuntimeEvent,
+) -> SafeRuntimeEventEnvelope {
+    let mut scope = EventScope::builder(draft.run_id.clone());
+    if let Some(session_id) = &draft.session_id {
+        scope = scope.session_id(session_id.clone());
+    }
+    if let Some(turn_id) = &draft.turn_id {
+        scope = scope.turn_id(turn_id.clone());
+    }
+    SafeRuntimeEventEnvelope {
+        schema: agl_events::EVENT_SCHEMA.to_string(),
+        event_id: EventId::generate(),
+        sequence,
+        occurred_at_unix_ms: sequence,
+        scope: scope.build().unwrap(),
+        request_id: None,
+        caused_by: None,
+        payload,
+    }
 }
 
 struct TempRoot {

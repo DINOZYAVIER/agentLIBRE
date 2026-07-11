@@ -342,6 +342,8 @@ impl<R: ModelRuntime> Worker<R> {
                             }),
                             selected_device: generation.selected_device,
                             duration_ms: elapsed_millis(started),
+                            input_tokens: generation.input_tokens,
+                            output_tokens: generation.output_tokens,
                         },
                     };
                     match evidence.succeed(&response, log) {

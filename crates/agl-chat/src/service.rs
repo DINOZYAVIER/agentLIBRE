@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, TurnId};
+use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
 use agl_loop::{
     EffectFailure, EffectFailureCode, EffectOutcome, HookEffectOutput, TurnAdvance,
@@ -237,6 +237,17 @@ impl ChatService {
         self.turn_runtime.workspace_root()
     }
 
+    pub(crate) fn capability_delivery_class(
+        &self,
+        capability_id: &agl_capabilities::CapabilityId,
+    ) -> Result<agl_store::EffectDeliveryClass> {
+        self.turn_runtime.capability_delivery_class(capability_id)
+    }
+
+    pub(crate) fn model_token_usage(&self) -> (u64, u64) {
+        self.turn_runtime.model_token_usage()
+    }
+
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         if self.context_released {
             bail!("cannot change workspace root after the chat session context was released");
@@ -298,10 +309,12 @@ impl ChatService {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn run_user_turn(&mut self, input: &str) -> Result<ChatTurnOutput> {
         self.run_user_turn_with_ids(RunId::generate(), TurnId::generate(), None, input)
     }
 
+    #[cfg(test)]
     pub fn run_user_turn_with_ids(
         &mut self,
         run_id: RunId,
@@ -395,18 +408,92 @@ impl ChatService {
         })
     }
 
-    pub fn advance_user_turn(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
+    pub fn resume_user_turn_from_checkpoint(
+        &mut self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        checkpoint: TurnCheckpoint,
+        event_sequence: u64,
+        attempt_ids: Vec<AttemptId>,
+    ) -> Result<ChatTurnExecution> {
+        if self.context_released {
+            bail!("cannot resume a turn after the chat session context was released");
+        }
+        if checkpoint.state().input.run_id != run_id || checkpoint.state().input.turn_id != turn_id
+        {
+            bail!("turn checkpoint identity does not match the durable run");
+        }
+        self.turn_runtime.resume_turn(
+            &self.session_id,
+            &run_id,
+            &turn_id,
+            request_id,
+            event_sequence,
+        )?;
+        let previous_message_count = checkpoint.state().input.context_messages.len();
+        let mut executor = TurnExecutor::from_checkpoint(checkpoint)?;
+        let advance = executor.next_effect()?;
+        let mut execution = ChatTurnExecution {
+            run_id,
+            turn_id,
+            executor,
+            advance,
+            cancellation: InferenceCancellation::new(),
+            deadline: None,
+            previous_message_count,
+            attempt_ids,
+            emitted_events: Vec::new(),
+            event_sequence,
+            output: None,
+        };
         if execution.is_terminal() {
-            bail!("cannot advance a terminal chat execution");
+            self.finish_execution(&mut execution)?;
+        }
+        Ok(execution)
+    }
+
+    #[cfg(test)]
+    pub fn advance_user_turn(&mut self, execution: &mut ChatTurnExecution) -> Result<()> {
+        let result = self.execute_user_turn_effect(execution)?;
+        self.resume_user_turn_effect(execution, result)
+    }
+
+    pub fn execute_user_turn_effect(
+        &mut self,
+        execution: &mut ChatTurnExecution,
+    ) -> Result<TurnEffectResult> {
+        self.execute_user_turn_effect_with_step(execution, None)
+    }
+
+    pub(crate) fn execute_user_turn_effect_with_step(
+        &mut self,
+        execution: &mut ChatTurnExecution,
+        step_id: Option<&StepId>,
+    ) -> Result<TurnEffectResult> {
+        if execution.is_terminal() {
+            bail!("cannot execute an effect for a terminal chat execution");
         }
         let effect = match &execution.advance.state {
             TurnAdvanceState::Pending { effect } => effect.clone(),
             TurnAdvanceState::Terminal { .. } => unreachable!("terminal state was rejected above"),
         };
-        let result = self.execute_turn_effect(execution, effect);
+        let result = self.execute_turn_effect(execution, effect, step_id);
         execution
             .attempt_ids
             .extend(self.turn_runtime.take_attempt_ids());
+        self.collect_execution_events(execution)?;
+        Ok(result)
+    }
+
+    pub fn resume_user_turn_effect(
+        &mut self,
+        execution: &mut ChatTurnExecution,
+        result: TurnEffectResult,
+    ) -> Result<()> {
+        if execution.is_terminal() {
+            bail!("cannot resume a terminal chat execution");
+        }
         let advance = execution.executor.resume(result)?;
         if matches!(
             advance.state,
@@ -430,6 +517,7 @@ impl ChatService {
         &mut self,
         execution: &mut ChatTurnExecution,
         effect: TurnEffect,
+        step_id: Option<&StepId>,
     ) -> TurnEffectResult {
         if execution.cancellation.is_cancelled() {
             return cancelled_effect_result(effect);
@@ -462,7 +550,7 @@ impl ChatService {
                 TurnEffectResult::ModelGeneration { key, outcome }
             }
             TurnEffect::CapabilityDispatch { key, request } => {
-                let outcome = match self.turn_runtime.execute_capability(request) {
+                let outcome = match self.turn_runtime.execute_capability(request, step_id) {
                     Ok(response) => EffectOutcome::Succeeded(response),
                     Err(error) => EffectOutcome::Failed(EffectFailure::new(
                         EffectFailureCode::Capability,
@@ -1207,6 +1295,8 @@ tool_call_format = "hermes_json"
                     model_state: Some("scripted".to_string()),
                     selected_device: None,
                     duration_ms: 0,
+                    input_tokens: 4,
+                    output_tokens: 2,
                 },
             })
         }

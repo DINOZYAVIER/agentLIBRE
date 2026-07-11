@@ -10,8 +10,8 @@ pub use action::{
     ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, render_canonical_json,
 };
 pub use declaration::{
-    ActionDeclaration, ActionVisibility, DeclarationError, HookDeclaration, OperationKind,
-    ProviderDeclaration, ProviderSource, ProviderTrust, StateEffect,
+    ActionDeclaration, ActionDelivery, ActionVisibility, DeclarationError, HookDeclaration,
+    OperationKind, ProviderDeclaration, ProviderSource, ProviderTrust, StateEffect,
 };
 pub use digest::{DeclarationDigest, DigestParseError, PolicyHash};
 pub use hook::{

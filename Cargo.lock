@@ -87,6 +87,7 @@ dependencies = [
  "agl-session",
  "agl-skills",
  "agl-store",
+ "agl-supervisor",
  "agl-tools",
  "agl-turn",
  "anyhow",
@@ -146,6 +147,7 @@ dependencies = [
 name = "agl-cron"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-ids",
  "agl-store",
  "rusqlite",
  "serde",
@@ -166,6 +168,7 @@ dependencies = [
  "agl-runtime",
  "agl-session",
  "agl-store",
+ "agl-supervisor",
  "anyhow",
  "serde",
  "serde_json",
@@ -376,7 +379,20 @@ dependencies = [
 name = "agl-store"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-events",
+ "agl-ids",
  "rusqlite",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agl-supervisor"
+version = "1.0.0-alpha.10"
+dependencies = [
+ "agl-events",
+ "agl-ids",
+ "agl-store",
  "serde",
  "serde_json",
 ]

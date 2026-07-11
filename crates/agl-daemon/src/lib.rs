@@ -1,5 +1,5 @@
-mod error;
 mod options;
+mod run_factory;
 mod scheduler;
 mod server;
 mod state;
@@ -10,8 +10,7 @@ mod transcript;
 pub use options::{DEFAULT_SOCKET_FILE, DaemonOptions, default_socket_path};
 pub use scheduler::{
     CronExecution, CronNotification, CronNotifier, CronSchedulerReport, CronTargetExecutor,
-    NoopCronNotifier, render_cron_notification_body, render_cron_skill_prompt,
-    run_cron_skill_chat_turn, run_cron_tick,
+    NoopCronNotifier, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 pub use server::DaemonServer;
 pub use state::{DaemonState, SharedDaemonState};

@@ -16,6 +16,7 @@ agl-protocol.workspace = true
 agl-runtime.workspace = true
 agl-session.workspace = true
 agl-store.workspace = true
+agl-supervisor.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -115,6 +115,8 @@ impl Error for LlamaCppGenerationCancelled {}
 pub(crate) struct LlamaCppGenerationOutput {
     pub(crate) content: String,
     pub(crate) finish_reason: InferenceFinishReason,
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 pub(super) struct NativeAbortGuard<'control> {
