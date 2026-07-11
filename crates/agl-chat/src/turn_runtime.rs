@@ -1,41 +1,38 @@
 use std::path::Path;
+use std::time::Instant;
 
-use agl_capabilities::{
-    ActionInvocation, CapabilityId, DispatchDenial, DispatchDenialCode, HookInput,
-};
+use agl_capabilities::{ActionInvocation, DispatchDenial, DispatchDenialCode, HookInput};
 use agl_events::{
     CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeEventWriter, SafeRuntimeEventEnvelope,
 };
 use agl_ids::{AttemptId, ExecutionScope, RequestId, RunId, SessionId, TurnId};
+use agl_inference::InferenceCancellation;
 use agl_loop::{
-    AgentLoopHost, HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus,
-    ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnMessage,
-    TurnTransitionRecord,
+    HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, ModelRequest,
+    ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
 };
 use agl_tools::ToolRuntime;
 use anyhow::{Context, Result, ensure};
 
-use crate::session::InferenceSession;
+use crate::session::{InferenceExecutionControl, InferenceSession};
 use crate::tools::{ChatToolRuntimeConfig, chat_tool_runtime};
 
-pub struct ChatLoopHost {
+pub struct ChatTurnRuntime {
     session: InferenceSession,
     active_effective_capabilities: Option<agl_capabilities::EffectiveCapabilitySet>,
     event_sink: Option<RuntimeEventWriter>,
     event_scope: Option<EventScope>,
     request_id: Option<RequestId>,
     runtime_events: Vec<SafeRuntimeEventEnvelope>,
-    pending_terminal_event: Option<RuntimeEvent>,
     attempt_ids: Vec<AttemptId>,
     core_guards: agl_tools::guards::CoreGuards,
     core_tools: agl_tools::CoreTools,
     tool_runtime: ToolRuntime,
     generated_requests: usize,
-    turn_messages: Vec<TurnMessage>,
 }
 
-impl ChatLoopHost {
+impl ChatTurnRuntime {
     pub fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
@@ -47,13 +44,11 @@ impl ChatLoopHost {
             event_scope: None,
             request_id: None,
             runtime_events: Vec::new(),
-            pending_terminal_event: None,
             attempt_ids: Vec::new(),
             core_guards: agl_tools::guards::CoreGuards::new(),
             core_tools,
             tool_runtime,
             generated_requests: 0,
-            turn_messages: Vec::new(),
         })
     }
 
@@ -101,9 +96,7 @@ impl ChatLoopHost {
         );
         self.request_id = request_id;
         self.generated_requests = 0;
-        self.turn_messages.clear();
         self.runtime_events.clear();
-        self.pending_terminal_event = None;
         self.attempt_ids.clear();
         self.append_runtime_event(capability_policy_resolved_event(
             self.active_effective_capabilities
@@ -124,10 +117,6 @@ impl ChatLoopHost {
             .map(agl_capabilities::EffectiveCapabilitySet::policy_hash)
     }
 
-    pub fn take_turn_messages(&mut self) -> Vec<TurnMessage> {
-        std::mem::take(&mut self.turn_messages)
-    }
-
     pub fn take_attempt_ids(&mut self) -> Vec<AttemptId> {
         std::mem::take(&mut self.attempt_ids)
     }
@@ -142,6 +131,16 @@ impl ChatLoopHost {
     }
 
     pub fn take_runtime_events(&mut self) -> Result<Vec<SafeRuntimeEventEnvelope>> {
+        let events = self.read_runtime_events_after(0)?;
+        self.runtime_events.clear();
+        self.active_effective_capabilities = None;
+        Ok(events)
+    }
+
+    pub(crate) fn read_runtime_events_after(
+        &self,
+        sequence: u64,
+    ) -> Result<Vec<SafeRuntimeEventEnvelope>> {
         let path = self
             .event_sink
             .as_ref()
@@ -149,17 +148,20 @@ impl ChatLoopHost {
             .path();
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read runtime event stream {}", path.display()))?;
-        let events = content
+        content
             .lines()
             .map(|line| {
                 serde_json::from_str(line).with_context(|| {
                     format!("failed to decode runtime event from {}", path.display())
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
-        self.runtime_events.clear();
-        self.active_effective_capabilities = None;
-        Ok(events)
+            .collect::<Result<Vec<_>>>()
+            .map(|events| {
+                events
+                    .into_iter()
+                    .filter(|event: &SafeRuntimeEventEnvelope| event.sequence > sequence)
+                    .collect()
+            })
     }
 
     pub fn append_runtime_event(&mut self, event: RuntimeEvent) -> Result<RuntimeEventEnvelope> {
@@ -191,16 +193,7 @@ impl ChatLoopHost {
         self.append_event(EventDraft::new(scope, RuntimeEvent::ModelAttemptLinked))
     }
 
-    pub fn append_pending_terminal_event(&mut self) -> Result<RuntimeEventEnvelope> {
-        let event = self
-            .pending_terminal_event
-            .take()
-            .context("turn terminal event is not pending")?;
-        self.append_runtime_event(event)
-    }
-
     pub fn append_failed_terminal_event(&mut self) -> Result<RuntimeEventEnvelope> {
-        self.pending_terminal_event = None;
         self.append_runtime_event(RuntimeEvent::TurnFinished {
             status: agl_events::TurnFinishStatus::Failed,
         })
@@ -270,28 +263,38 @@ impl ChatLoopHost {
     }
 }
 
-impl AgentLoopHost for ChatLoopHost {
-    fn record_capability_denial(
-        &mut self,
-        capability_id: Option<CapabilityId>,
-        code: DispatchDenialCode,
-    ) -> Result<()> {
-        let policy_hash = self
+impl ChatTurnRuntime {
+    pub(crate) fn policy_hash(&self) -> Result<String> {
+        Ok(self
             .active_effective_capabilities
             .as_ref()
             .context("turn capability snapshot is not initialized")?
             .policy_hash()
             .as_str()
-            .to_string();
-        self.append_runtime_event(RuntimeEvent::CapabilityCallDenied {
-            policy_hash,
-            capability_id: capability_id.map(|id| id.as_str().to_string()),
-            reason_code: code.as_str().to_string(),
-        })?;
+            .to_string())
+    }
+
+    pub(crate) fn append_executor_events(
+        &mut self,
+        drafts: Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<()> {
+        let active = self
+            .event_scope
+            .as_ref()
+            .context("turn event scope is not initialized")?
+            .clone();
+        for draft in drafts {
+            ensure!(
+                draft.scope.run_id() == active.run_id()
+                    && draft.scope.turn_id() == active.turn_id(),
+                "turn event draft identity does not match the active event scope"
+            );
+            self.append_event(EventDraft::new(active.clone(), draft.payload))?;
+        }
         Ok(())
     }
 
-    fn run_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
+    pub(crate) fn execute_hooks(&mut self, request: HookBatchRequest) -> Result<HookBatchResult> {
         let results = request
             .hooks
             .iter()
@@ -319,7 +322,12 @@ impl AgentLoopHost for ChatLoopHost {
         })
     }
 
-    fn generate(&mut self, request: ModelRequest) -> Result<ModelResponse> {
+    pub(crate) fn execute_model(
+        &mut self,
+        request: ModelRequest,
+        cancellation: InferenceCancellation,
+        deadline: Option<Instant>,
+    ) -> Result<ModelResponse> {
         self.generated_requests += 1;
         let (session_id, request_id) = inference_correlation(
             self.event_scope.as_ref(),
@@ -336,6 +344,10 @@ impl AgentLoopHost for ChatLoopHost {
             self.active_effective_capabilities
                 .as_ref()
                 .context("turn capability snapshot is not initialized")?,
+            InferenceExecutionControl {
+                cancellation,
+                deadline,
+            },
         )?;
         ensure!(
             response.attempt_id == attempt_id,
@@ -346,7 +358,10 @@ impl AgentLoopHost for ChatLoopHost {
         })
     }
 
-    fn dispatch_tool(&mut self, request: ToolDispatchRequest) -> Result<ToolDispatchResponse> {
+    pub(crate) fn execute_capability(
+        &mut self,
+        request: ToolDispatchRequest,
+    ) -> Result<ToolDispatchResponse> {
         let active_scope = self
             .event_scope
             .as_ref()
@@ -417,36 +432,6 @@ impl AgentLoopHost for ChatLoopHost {
                     .context(format!("capability `{}` failed", request.capability_id))
             })?;
         Ok(ToolDispatchResponse { result: output })
-    }
-
-    fn record_turn_messages(&mut self, messages: &[TurnMessage]) -> Result<()> {
-        self.turn_messages = messages.to_vec();
-        Ok(())
-    }
-
-    fn emit_transition(
-        &mut self,
-        record: &TurnTransitionRecord,
-        event: &RuntimeEvent,
-    ) -> Result<()> {
-        let scope = self
-            .event_scope
-            .as_ref()
-            .context("turn event scope is not initialized")?;
-        ensure!(
-            scope.run_id() == &record.run_id && scope.turn_id() == Some(&record.turn_id),
-            "turn transition identity does not match the active event scope"
-        );
-        if matches!(event, RuntimeEvent::TurnFinished { .. }) {
-            ensure!(
-                self.pending_terminal_event.is_none(),
-                "turn terminal event is already pending"
-            );
-            self.pending_terminal_event = Some(event.clone());
-            return Ok(());
-        }
-        self.append_event(EventDraft::new(scope.clone(), event.clone()))
-            .map(|_| ())
     }
 }
 

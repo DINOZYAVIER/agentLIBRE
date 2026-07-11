@@ -6,8 +6,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use agl_chat::{
-    ChatOptions, ChatService, ChatSessionSummary, ChatTurnOutput, ChatTurnStatus,
-    InferenceClientHandle, InferenceOptions, ToolAccessMode as ChatToolMode,
+    ChatOptions, ChatService, ChatSessionSummary, ChatTurnExecution, ChatTurnOutput,
+    ChatTurnStatus, InferenceClientHandle, InferenceOptions, ToolAccessMode as ChatToolMode,
 };
 use agl_events::{SafeRuntimeEvent, SafeRuntimeEventEnvelope, TurnFinishStatus};
 #[cfg(test)]
@@ -114,7 +114,9 @@ impl DaemonState {
             DaemonRequestKind::SessionOpen(request) => {
                 self.open_session(request_id.clone(), request)
             }
-            DaemonRequestKind::SessionTurn(request) => self.run_turn(request_id.clone(), request),
+            DaemonRequestKind::SessionTurn(request) => {
+                self.handle_session_turn(request_id.clone(), request)
+            }
             DaemonRequestKind::SessionClear(request) => {
                 match self.sessions.get_mut(&request.session_id) {
                     Some(session) if session.status == SessionStatus::Busy => Err(busy_error()),
@@ -268,7 +270,7 @@ impl DaemonState {
         )])
     }
 
-    fn run_turn(
+    fn handle_session_turn(
         &mut self,
         request_id: RequestId,
         request: SessionTurnRequest,
@@ -358,6 +360,7 @@ impl DaemonState {
                 ChatTurnStatus::Answered { .. } => TurnFinishStatus::Answered,
                 ChatTurnStatus::Stopped { .. } => TurnFinishStatus::Stopped,
                 ChatTurnStatus::Failed { .. } => TurnFinishStatus::Failed,
+                ChatTurnStatus::Cancelled => TurnFinishStatus::Cancelled,
             };
             validate_runtime_envelopes(
                 &output.runtime_events,
@@ -450,6 +453,19 @@ impl DaemonState {
                             }),
                         ));
                         (terminal, SessionStatus::Failed)
+                    }
+                    ChatTurnStatus::Cancelled => {
+                        let terminal = TurnReplayTerminal::Cancelled;
+                        turn.events.push(DaemonEvent::new(
+                            Some(turn.request_id.clone()),
+                            DaemonEventKind::TurnFinished(TurnFinishedEvent {
+                                session_id: turn.session_id.clone(),
+                                run_id: turn.run_id.clone(),
+                                turn_id: turn.turn_id.clone(),
+                                status: TurnTerminalStatus::Cancelled,
+                            }),
+                        ));
+                        (terminal, SessionStatus::Open)
                     }
                 };
                 let idempotency_result = self.finish_turn_idempotency(
@@ -602,9 +618,13 @@ impl DaemonState {
                 &key.key,
                 Some(&payload),
             ),
-            TurnReplayTerminal::Answered { .. } | TurnReplayTerminal::Stopped { .. } => self
-                .store
-                .complete_idempotency(SESSION_TURN_IDEMPOTENCY_NAMESPACE, &key.key, Some(&payload)),
+            TurnReplayTerminal::Answered { .. }
+            | TurnReplayTerminal::Stopped { .. }
+            | TurnReplayTerminal::Cancelled => self.store.complete_idempotency(
+                SESSION_TURN_IDEMPOTENCY_NAMESPACE,
+                &key.key,
+                Some(&payload),
+            ),
         };
         result.map(|_| ()).map_err(runtime_error)
     }
@@ -836,12 +856,15 @@ struct SessionEndpoint {
 }
 
 enum SessionCommand {
-    RunTurn {
+    BeginTurn {
         run_id: RunId,
         turn_id: TurnId,
         request_id: Option<RequestId>,
         text: String,
-        reply: mpsc::Sender<WorkerResult<ChatTurnOutput>>,
+        reply: mpsc::Sender<WorkerResult<Vec<SafeRuntimeEventEnvelope>>>,
+    },
+    AdvanceTurn {
+        reply: mpsc::Sender<WorkerResult<WorkerTurnStep>>,
     },
     ClearContext {
         reply: mpsc::Sender<WorkerResult<usize>>,
@@ -849,6 +872,11 @@ enum SessionCommand {
     RequestExit {
         reply: mpsc::Sender<WorkerResult<()>>,
     },
+}
+
+struct WorkerTurnStep {
+    events: Vec<SafeRuntimeEventEnvelope>,
+    output: Option<ChatTurnOutput>,
 }
 
 type WorkerResult<T> = std::result::Result<T, String>;
@@ -899,17 +927,42 @@ impl SessionEndpoint {
         request_id: Option<RequestId>,
         input: &str,
     ) -> Result<ChatTurnOutput> {
+        let _initial_events = self.begin_user_turn(run_id, turn_id, request_id, input)?;
+        loop {
+            let step = self.advance_user_turn()?;
+            let _incremental_events = step.events;
+            if let Some(output) = step.output {
+                return Ok(output);
+            }
+        }
+    }
+
+    fn begin_user_turn(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        input: &str,
+    ) -> Result<Vec<SafeRuntimeEventEnvelope>> {
         let (reply, receiver) = mpsc::channel();
         self.commands
-            .send(SessionCommand::RunTurn {
+            .send(SessionCommand::BeginTurn {
                 run_id,
                 turn_id,
                 request_id,
                 text: input.to_string(),
                 reply,
             })
-            .context("failed to send daemon session turn command")?;
-        receive_worker_result(receiver, "turn")
+            .context("failed to send daemon session begin-turn command")?;
+        receive_worker_result(receiver, "begin turn")
+    }
+
+    fn advance_user_turn(&self) -> Result<WorkerTurnStep> {
+        let (reply, receiver) = mpsc::channel();
+        self.commands
+            .send(SessionCommand::AdvanceTurn { reply })
+            .context("failed to send daemon session advance-turn command")?;
+        receive_worker_result(receiver, "advance turn")
     }
 
     fn clear_context(&mut self) -> Result<usize> {
@@ -963,26 +1016,61 @@ impl SessionEndpoint {
 }
 
 fn run_session_worker(mut service: ChatService, receiver: mpsc::Receiver<SessionCommand>) {
+    let mut active_execution: Option<ChatTurnExecution> = None;
     while let Ok(command) = receiver.recv() {
         match command {
-            SessionCommand::RunTurn {
+            SessionCommand::BeginTurn {
                 run_id,
                 turn_id,
                 request_id,
                 text,
                 reply,
             } => {
-                let _ = reply.send(
+                let result = if active_execution.is_some() {
+                    Err("daemon session already has an active turn".to_string())
+                } else {
                     service
-                        .run_user_turn_with_ids(run_id, turn_id, request_id, &text)
+                        .start_user_turn_with_ids(run_id, turn_id, request_id, &text)
+                        .map(|mut execution| {
+                            let events = execution.take_events();
+                            active_execution = Some(execution);
+                            events
+                        })
+                        .map_err(|err| format!("{err:#}"))
+                };
+                let _ = reply.send(result);
+            }
+            SessionCommand::AdvanceTurn { reply } => {
+                let result = match active_execution.as_mut() {
+                    Some(execution) => service
+                        .advance_user_turn(execution)
+                        .map(|()| {
+                            let events = execution.take_events();
+                            let output = execution.take_output();
+                            WorkerTurnStep { events, output }
+                        })
                         .map_err(|err| format!("{err:#}")),
-                );
+                    None => Err("daemon session has no active turn".to_string()),
+                };
+                if result.as_ref().is_ok_and(|step| step.output.is_some()) {
+                    active_execution = None;
+                }
+                let _ = reply.send(result);
             }
             SessionCommand::ClearContext { reply } => {
-                let _ = reply.send(service.clear_context().map_err(|err| format!("{err:#}")));
+                let result = if active_execution.is_some() {
+                    Err("cannot clear context during an active turn".to_string())
+                } else {
+                    service.clear_context().map_err(|err| format!("{err:#}"))
+                };
+                let _ = reply.send(result);
             }
             SessionCommand::RequestExit { reply } => {
-                let result = service.request_exit().map_err(|err| format!("{err:#}"));
+                let result = if active_execution.is_some() {
+                    Err("cannot finish session during an active turn".to_string())
+                } else {
+                    service.request_exit().map_err(|err| format!("{err:#}"))
+                };
                 let finished = result.is_ok();
                 let _ = reply.send(result);
                 if finished {
@@ -1010,16 +1098,58 @@ fn run_test_session_worker(
     emit_runtime_events: bool,
     turns: Arc<AtomicUsize>,
 ) {
+    let mut active_turn: Option<(
+        RunId,
+        TurnId,
+        Option<RequestId>,
+        Vec<SafeRuntimeEventEnvelope>,
+    )> = None;
     while let Ok(command) = receiver.recv() {
         match command {
-            SessionCommand::RunTurn {
+            SessionCommand::BeginTurn {
                 run_id,
                 turn_id,
                 request_id,
                 text,
                 reply,
             } => {
-                turns.fetch_add(1, Ordering::SeqCst);
+                let result = if active_turn.is_some() {
+                    Err("test session already has an active turn".to_string())
+                } else {
+                    turns.fetch_add(1, Ordering::SeqCst);
+                    let mut runtime_events = Vec::new();
+                    if emit_runtime_events {
+                        runtime_events.push(
+                            serde_json::from_value(serde_json::json!({
+                                "schema": "agentlibre.event.v1alpha",
+                                "event_id": EventId::generate(),
+                                "sequence": 1,
+                                "occurred_at_unix_ms": 1,
+                                "scope": {
+                                    "run_id": run_id,
+                                    "session_id": session_id,
+                                    "turn_id": turn_id,
+                                },
+                                "request_id": request_id,
+                                "payload": {
+                                    "kind": "turn.started",
+                                    "user_input_bytes": text.len(),
+                                },
+                            }))
+                            .expect("test runtime event must deserialize"),
+                        );
+                    }
+                    active_turn = Some((run_id, turn_id, request_id, runtime_events.clone()));
+                    Ok(runtime_events)
+                };
+                let _ = reply.send(result);
+            }
+            SessionCommand::AdvanceTurn { reply } => {
+                let Some((run_id, turn_id, request_id, mut runtime_events)) = active_turn.take()
+                else {
+                    let _ = reply.send(Err("test session has no active turn".to_string()));
+                    continue;
+                };
                 if let Some(delay) = delay {
                     std::thread::sleep(delay);
                 }
@@ -1034,29 +1164,9 @@ fn run_test_session_worker(
                     ChatTurnStatus::Answered { .. } => TurnFinishStatus::Answered,
                     ChatTurnStatus::Stopped { .. } => TurnFinishStatus::Stopped,
                     ChatTurnStatus::Failed { .. } => TurnFinishStatus::Failed,
+                    ChatTurnStatus::Cancelled => TurnFinishStatus::Cancelled,
                 };
-                let mut runtime_events = Vec::new();
-                if emit_runtime_events {
-                    runtime_events.push(
-                        serde_json::from_value(serde_json::json!({
-                            "schema": "agentlibre.event.v1alpha",
-                            "event_id": EventId::generate(),
-                            "sequence": 1,
-                            "occurred_at_unix_ms": 1,
-                            "scope": {
-                                "run_id": run_id,
-                                "session_id": session_id,
-                                "turn_id": turn_id,
-                            },
-                            "request_id": request_id,
-                            "payload": {
-                                "kind": "turn.started",
-                                "user_input_bytes": text.len(),
-                            },
-                        }))
-                        .expect("test runtime event must deserialize"),
-                    );
-                }
+                let emitted_count = runtime_events.len();
                 runtime_events.push(
                     serde_json::from_value(serde_json::json!({
                         "schema": "agentlibre.event.v1alpha",
@@ -1076,13 +1186,16 @@ fn run_test_session_worker(
                     }))
                     .expect("test terminal runtime event must deserialize"),
                 );
-                let _ = reply.send(Ok(ChatTurnOutput {
-                    run_id,
-                    turn_id,
-                    attempt_ids: Vec::new(),
-                    runtime_events,
-                    status,
-                    generated_requests: 1,
+                let _ = reply.send(Ok(WorkerTurnStep {
+                    events: runtime_events[emitted_count..].to_vec(),
+                    output: Some(ChatTurnOutput {
+                        run_id,
+                        turn_id,
+                        attempt_ids: Vec::new(),
+                        runtime_events,
+                        status,
+                        generated_requests: 1,
+                    }),
                 }));
             }
             SessionCommand::ClearContext { reply } => {
@@ -1147,6 +1260,7 @@ enum TurnReplayTerminal {
     Answered { answer: String },
     Stopped { reason: String },
     Failed { message: String },
+    Cancelled,
 }
 
 pub(crate) fn validate_runtime_envelopes(
@@ -1341,6 +1455,25 @@ fn replay_events(
                 }),
             ),
         ],
+        TurnReplayTerminal::Cancelled => vec![
+            DaemonEvent::new(
+                Some(request_id.clone()),
+                DaemonEventKind::TurnStarted(TurnStartedEvent {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                }),
+            ),
+            DaemonEvent::new(
+                Some(request_id.clone()),
+                DaemonEventKind::TurnFinished(TurnFinishedEvent {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                    status: TurnTerminalStatus::Cancelled,
+                }),
+            ),
+        ],
     }
 }
 
@@ -1390,5 +1523,46 @@ fn chat_tool_mode(mode: ProtocolToolMode) -> ChatToolMode {
         ProtocolToolMode::Execute => ChatToolMode::Execute,
         ProtocolToolMode::Approve => ChatToolMode::Approve,
         ProtocolToolMode::Admin => ChatToolMode::Admin,
+    }
+}
+
+#[cfg(test)]
+mod stepping_tests {
+    use super::*;
+
+    #[test]
+    fn session_endpoint_observes_runtime_events_before_terminal_output() {
+        let session_id = SessionId::generate();
+        let endpoint = SessionEndpoint::spawn_test(
+            session_id,
+            vec![ChatTurnStatus::Answered {
+                answer: "done".to_string(),
+            }],
+            None,
+            true,
+        );
+
+        let initial = endpoint
+            .begin_user_turn(
+                RunId::generate(),
+                TurnId::generate(),
+                Some(RequestId::generate()),
+                "hello",
+            )
+            .unwrap();
+
+        assert!(
+            initial
+                .iter()
+                .any(|event| matches!(event.payload, SafeRuntimeEvent::TurnStarted { .. }))
+        );
+        assert!(
+            initial
+                .iter()
+                .all(|event| !matches!(event.payload, SafeRuntimeEvent::TurnFinished { .. }))
+        );
+
+        let terminal = endpoint.advance_user_turn().unwrap();
+        assert!(terminal.output.is_some());
     }
 }

@@ -1,11 +1,13 @@
 use agl_actions::ToolCall;
 use agl_capabilities::ActionResult;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     TurnInput, TurnMachine, TurnMessage, TurnTransition, TurnTransitionError, TurnTransitionRecord,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnState {
     pub input: TurnInput,
     pub messages: Vec<TurnMessage>,

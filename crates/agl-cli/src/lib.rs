@@ -1304,6 +1304,7 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
             println!("stopped=true reason={}", reason.as_str());
         }
         ChatTurnStatus::Failed { message } => bail!("turn failed: {message}"),
+        ChatTurnStatus::Cancelled => bail!("turn cancelled"),
     }
     Ok(())
 }
@@ -1964,6 +1965,7 @@ fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
                 println!("stopped=true reason={}", reason.as_str());
             }
             ChatTurnStatus::Failed { message } => bail!("turn failed: {message}"),
+            ChatTurnStatus::Cancelled => bail!("turn cancelled"),
         }
     }
 

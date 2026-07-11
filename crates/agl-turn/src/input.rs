@@ -1,9 +1,11 @@
 use agl_capabilities::{ActionDeclaration, ActionSchema, CapabilityId, SchemaValidationError};
 use agl_ids::{RunId, TurnId};
+use serde::{Deserialize, Serialize};
 
 use crate::{TurnHookBatch, transcript::TurnMessage};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnInput {
     pub run_id: RunId,
     pub turn_id: TurnId,
@@ -15,6 +17,8 @@ pub struct TurnInput {
     pub request_index_start: usize,
     pub max_tool_calls: usize,
     pub max_hook_repair_attempts: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_policy_hash: Option<String>,
 }
 
 impl TurnInput {
@@ -30,6 +34,7 @@ impl TurnInput {
             request_index_start: 0,
             max_tool_calls: 0,
             max_hook_repair_attempts: 0,
+            capability_policy_hash: None,
         }
     }
 
@@ -67,9 +72,15 @@ impl TurnInput {
         self.max_hook_repair_attempts = max_hook_repair_attempts;
         self
     }
+
+    pub fn with_capability_policy_hash(mut self, policy_hash: impl Into<String>) -> Self {
+        self.capability_policy_hash = Some(policy_hash.into());
+        self
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VisibleTool {
     pub id: CapabilityId,
     pub description: String,

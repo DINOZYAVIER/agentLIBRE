@@ -126,6 +126,7 @@ pub fn run_cron_skill_chat_turn(
         )),
         ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
         ChatTurnStatus::Failed { message } => bail!("cron skill turn failed: {message}"),
+        ChatTurnStatus::Cancelled => bail!("cron skill turn was cancelled"),
     }
 }
 

@@ -4,11 +4,13 @@ use std::fmt;
 use agl_ids::{RunId, TurnId};
 
 use agl_capabilities::ActionResult;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{HookBatchSummary, HookEvent, StopReason};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnPhase {
     Initialized,
     Started,
@@ -25,6 +27,7 @@ pub enum TurnPhase {
     AnswerReady,
     Stopped,
     Failed,
+    Cancelled,
     Finished,
 }
 
@@ -46,6 +49,7 @@ impl TurnPhase {
             TurnPhase::AnswerReady => "answer_ready",
             TurnPhase::Stopped => "stopped",
             TurnPhase::Failed => "failed",
+            TurnPhase::Cancelled => "cancelled",
             TurnPhase::Finished => "finished",
         }
     }
@@ -139,6 +143,7 @@ pub enum TurnTransition {
         operation: TurnFailureOperation,
         message: String,
     },
+    Cancel,
     Finish {
         status: TurnTerminalStatus,
     },
@@ -172,12 +177,14 @@ impl TurnTransition {
             TurnTransition::FinalAnswer { .. } => "final_answer",
             TurnTransition::Stop { .. } => "stop",
             TurnTransition::Fail { .. } => "fail",
+            TurnTransition::Cancel => "cancel",
             TurnTransition::Finish { .. } => "finish",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolJsonMalformedClassification {
     MissingTerminator,
     Syntax,
@@ -194,10 +201,12 @@ impl ToolJsonMalformedClassification {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnFailureOperation {
     ModelRequest { request_index: usize },
     ToolDispatch { name: String },
+    TranscriptAppend,
 }
 
 impl TurnFailureOperation {
@@ -205,15 +214,18 @@ impl TurnFailureOperation {
         match self {
             TurnFailureOperation::ModelRequest { .. } => "model_request",
             TurnFailureOperation::ToolDispatch { .. } => "tool_dispatch",
+            TurnFailureOperation::TranscriptAppend => "transcript_append",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnTerminalStatus {
     Answered,
     Stopped,
     Failed,
+    Cancelled,
 }
 
 impl TurnTerminalStatus {
@@ -222,6 +234,7 @@ impl TurnTerminalStatus {
             TurnTerminalStatus::Answered => "answered",
             TurnTerminalStatus::Stopped => "stopped",
             TurnTerminalStatus::Failed => "failed",
+            TurnTerminalStatus::Cancelled => "cancelled",
         }
     }
 }
@@ -236,7 +249,8 @@ pub struct TurnTransitionRecord {
     pub transition: TurnTransition,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnMachine {
     run_id: RunId,
     turn_id: TurnId,
@@ -245,7 +259,8 @@ pub struct TurnMachine {
     hook_context: Option<HookTransitionContext>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HookTransitionContext {
     event: HookEvent,
     return_phase: TurnPhase,
@@ -345,6 +360,14 @@ fn phase_update(
     hook_context: Option<HookTransitionContext>,
     transition: &TurnTransition,
 ) -> Option<PhaseUpdate> {
+    if matches!(transition, TurnTransition::Cancel)
+        && !matches!(from, TurnPhase::Finished | TurnPhase::Cancelled)
+    {
+        return Some(PhaseUpdate {
+            to: TurnPhase::Cancelled,
+            hook_context: HookContextUpdate::Clear,
+        });
+    }
     if let Some(update) = hook_phase_update(from, hook_context, transition) {
         return Some(update);
     }
@@ -480,6 +503,19 @@ fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnP
                 status: TurnTerminalStatus::Failed,
             },
         ) => Some(Finished),
+        (
+            Cancelled,
+            Finish {
+                status: TurnTerminalStatus::Cancelled,
+            },
+        ) => Some(Finished),
+        (
+            AnswerReady | Stopped,
+            Fail {
+                operation: TurnFailureOperation::TranscriptAppend,
+                ..
+            },
+        ) => Some(Failed),
         _ => None,
     }
 }

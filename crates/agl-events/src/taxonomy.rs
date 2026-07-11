@@ -46,6 +46,7 @@ pub enum TurnFinishStatus {
     Answered,
     Stopped,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
