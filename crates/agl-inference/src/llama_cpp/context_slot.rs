@@ -23,6 +23,7 @@ const DISABLED_THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
 const QWEN_ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
 const QWEN_DISABLED_THINKING_PREFIX: &str = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 const GEMMA_MODEL_HEADER: &str = "<|turn>model\n";
+const GEMMA_THOUGHT_CHANNEL_PREFIX: &str = "<|channel>thought\n<channel|>";
 const GEMMA_THOUGHT_PREFIX: &str = "<|turn>model\n<|channel>thought\n<channel|>";
 const AGL_LLAMA_MTP_OK: i32 = 0;
 
@@ -440,6 +441,7 @@ impl LlamaCppContextSlot {
             output_tokens = output_tokens.saturating_add(1);
             decoded_content.push_str(&piece);
             content.push_str(&piece);
+            strip_generated_assistant_prefix(&mut content);
             if isolated_tool_call(&content).is_some() {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
@@ -639,6 +641,7 @@ impl LlamaCppContextSlot {
                     continue;
                 }
                 content.push_str(&piece);
+                strip_generated_assistant_prefix(&mut content);
                 if isolated_tool_call(&content).is_some() {
                     finish_reason = InferenceFinishReason::Stop;
                     tool_call_completed = true;
@@ -846,7 +849,20 @@ fn normalize_assistant_context(value: &str) -> String {
     value
         .replace(QWEN_DISABLED_THINKING_PREFIX, QWEN_ASSISTANT_HEADER)
         .replace(GEMMA_THOUGHT_PREFIX, "")
+        .replace(GEMMA_THOUGHT_CHANNEL_PREFIX, "")
         .replace(GEMMA_MODEL_HEADER, "")
+}
+
+fn strip_generated_assistant_prefix(content: &mut String) {
+    for prefix in [
+        GEMMA_THOUGHT_PREFIX,
+        GEMMA_THOUGHT_CHANNEL_PREFIX,
+        GEMMA_MODEL_HEADER,
+    ] {
+        if content.starts_with(prefix) {
+            content.drain(..prefix.len());
+        }
+    }
 }
 
 fn source_index_after_normalized_prefix(
@@ -884,6 +900,8 @@ fn assistant_context_rewrite(value: &str) -> Option<(usize, usize)> {
         ))
     } else if value.starts_with(GEMMA_THOUGHT_PREFIX) {
         Some((GEMMA_THOUGHT_PREFIX.len(), 0))
+    } else if value.starts_with(GEMMA_THOUGHT_CHANNEL_PREFIX) {
+        Some((GEMMA_THOUGHT_CHANNEL_PREFIX.len(), 0))
     } else if value.starts_with(GEMMA_MODEL_HEADER) {
         Some((GEMMA_MODEL_HEADER.len(), 0))
     } else {
@@ -1921,6 +1939,27 @@ mod tests {
         assert_eq!(
             &incoming[boundary..],
             format!("<turn|>\n<|turn>user\nnext\n{GEMMA_THOUGHT_PREFIX}")
+        );
+    }
+
+    #[test]
+    fn strips_generated_gemma_thought_channel_from_public_content() {
+        let mut content = format!("{GEMMA_THOUGHT_CHANNEL_PREFIX}G4V-7Q4M-9281");
+
+        strip_generated_assistant_prefix(&mut content);
+
+        assert_eq!(content, "G4V-7Q4M-9281");
+    }
+
+    #[test]
+    fn normalizes_standalone_generated_gemma_thought_channel() {
+        let source = format!("prompt{GEMMA_THOUGHT_CHANNEL_PREFIX}answer");
+        let normalized = normalize_assistant_context(&source);
+
+        assert_eq!(normalized, "promptanswer");
+        assert_eq!(
+            source_index_after_normalized_prefix(&source, normalized.len()),
+            Some(source.len())
         );
     }
 
