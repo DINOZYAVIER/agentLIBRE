@@ -609,6 +609,91 @@ fn depth_budget_is_enforced_against_persisted_relationships() {
 }
 
 #[test]
+fn absolute_tree_timeout_cancels_waiting_parent_and_queued_child() {
+    let (_root, store) = open_temp_store("child-tree-timeout");
+    let (parent, parent_lease, step, step_lease) = running_delegation_step(&store, 1);
+    let mut child = child_run_draft(&parent.run_id, &step.step_id);
+    child.tree_budget.timeout_ms = 5;
+    let child_run = store.admit_child_run_at(&child, 4).unwrap().run;
+    store
+        .retry_run_step(
+            &parent_lease,
+            &step_lease,
+            100,
+            "delegation.child_waiting",
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            5,
+        )
+        .unwrap();
+
+    let statuses = store.expire_delegation_trees(6).unwrap();
+    assert_eq!(statuses.len(), 2);
+    assert_eq!(
+        store.run(&parent.run_id).unwrap().unwrap().state,
+        RunState::Cancelled
+    );
+    assert_eq!(
+        store.run(&child_run.run_id).unwrap().unwrap().state,
+        RunState::Cancelled
+    );
+    let parent = store.run(&parent.run_id).unwrap().unwrap();
+    assert_eq!(parent.delegation_reserved_output_tokens, 0);
+    assert!(store.expire_delegation_trees(7).unwrap().is_empty());
+}
+
+#[test]
+fn startup_recovery_reconciles_an_undelivered_terminal_child() {
+    let (_root, store) = open_temp_store("child-terminal-recovery");
+    let (parent, parent_lease, step, step_lease) = running_delegation_step(&store, 1);
+    let child_draft = child_run_draft(&parent.run_id, &step.step_id);
+    let child = store.admit_child_run_at(&child_draft, 5).unwrap().run;
+    store
+        .retry_run_step(
+            &parent_lease,
+            &step_lease,
+            100,
+            "delegation.child_waiting",
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            6,
+        )
+        .unwrap();
+    let usage = RunUsage {
+        model_output_tokens: 7,
+        ..RunUsage::default()
+    };
+    store
+        .connection()
+        .execute(
+            "UPDATE runs
+             SET state = 'succeeded', usage_json = ?1, terminal_result_json = ?2,
+                 finished_at_ms = 7, updated_at_ms = 7
+             WHERE id = ?3",
+            rusqlite::params![
+                serde_json::to_string(&usage).unwrap(),
+                serde_json::to_string(&json!({"status": "answered", "answer": "done"})).unwrap(),
+                child.run_id.as_str()
+            ],
+        )
+        .unwrap();
+
+    store.recover_expired_work(8).unwrap();
+
+    let root = store.run(&parent.run_id).unwrap().unwrap();
+    assert_eq!(root.delegation_reserved_output_tokens, 0);
+    assert_eq!(root.delegation_used_output_tokens, 7);
+    assert_eq!(root.not_before_ms, Some(8));
+    let step = store.run_steps(&parent.run_id).unwrap().remove(0);
+    assert_eq!(step.not_before_ms, Some(8));
+    let child = store.run(&child.run_id).unwrap().unwrap();
+    assert_eq!(child.tree_usage_recorded_at_ms, Some(8));
+    assert!(child.result_delivered_at_ms.is_none());
+}
+
+#[test]
 fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     let (_root, store) = open_temp_store("recovery");
     let safe = run_draft(None);

@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use agl_capabilities::CapabilityId;
 use agl_content::{Content, ContentPart};
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
+use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
 use agl_loop::{
@@ -17,7 +20,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     ChatOptions, ChatTurnRuntime, InferenceClientHandle, InferenceSession, ToolAccessMode,
-    assistant_text_for_terminal,
+    assistant_text_for_terminal, session::SubagentSessionConfig,
 };
 
 const MAX_TOOL_CALLS_PER_TURN: usize = 8;
@@ -120,14 +123,26 @@ pub(crate) struct TurnInputSpec<'a> {
     hook_batches: &'a [TurnHookBatch],
     hook_payload: serde_json::Value,
     max_hook_repair_attempts: usize,
+    max_tool_calls: usize,
     visible_tools: &'a [VisibleTool],
     capability_policy_hash: Option<String>,
     user_input: &'a Content,
 }
 
+pub(crate) struct DurableTurnResume {
+    pub run_id: RunId,
+    pub turn_id: TurnId,
+    pub request_id: Option<RequestId>,
+    pub checkpoint: TurnCheckpoint,
+    pub event_sequence: u64,
+    pub attempt_ids: Vec<AttemptId>,
+    pub delegation_authority_ceiling: BTreeSet<CapabilityId>,
+}
+
 pub struct ChatService {
     runtime: AgentLibreRuntimeConfig,
     session_id: SessionId,
+    scope_session_id: Option<SessionId>,
     tool_mode: ToolAccessMode,
     history_enabled: bool,
     resumed_session: bool,
@@ -136,6 +151,7 @@ pub struct ChatService {
     messages: Vec<TurnMessage>,
     context_released: bool,
     session_finished: bool,
+    max_tool_calls: usize,
 }
 
 impl ChatService {
@@ -202,6 +218,7 @@ impl ChatService {
             .unwrap_or_default();
         Ok(Self {
             runtime: runtime.clone(),
+            scope_session_id: Some(session_id.clone()),
             session_id,
             tool_mode,
             history_enabled,
@@ -211,6 +228,35 @@ impl ChatService {
             messages,
             context_released: false,
             session_finished: false,
+            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
+        })
+    }
+
+    pub(crate) fn open_subagent(
+        config: SubagentSessionConfig,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+    ) -> Result<Self> {
+        let workspace_root = config.workspace_root.clone();
+        let execution_session_id = config.execution_session_id.clone();
+        let max_tool_calls =
+            usize::try_from(config.spec.limits.max_capability_calls).unwrap_or(usize::MAX);
+        let session = InferenceSession::new_subagent(config, runtime, inference_client)?;
+        let tool_mode = session.tool_mode();
+        let turn_runtime = ChatTurnRuntime::new(session, &workspace_root)?;
+        Ok(Self {
+            runtime: runtime.clone(),
+            session_id: execution_session_id,
+            scope_session_id: None,
+            tool_mode,
+            history_enabled: false,
+            resumed_session: false,
+            chat_history: None,
+            turn_runtime,
+            messages: Vec::new(),
+            context_released: false,
+            session_finished: false,
+            max_tool_calls,
         })
     }
 
@@ -230,6 +276,16 @@ impl ChatService {
         &self.session_id
     }
 
+    pub fn delegation_plan(&self) -> Option<RuntimeDelegationPlan> {
+        self.turn_runtime.session().delegation_plan().cloned()
+    }
+
+    pub(crate) fn install_root_delegation_plan(&mut self, plan: Option<RuntimeDelegationPlan>) {
+        self.turn_runtime
+            .session_mut()
+            .install_root_delegation_plan(plan);
+    }
+
     pub fn artifact_root(&self) -> &Path {
         self.turn_runtime.session().artifact_root()
     }
@@ -247,6 +303,27 @@ impl ChatService {
 
     pub(crate) fn model_token_usage(&self) -> (u64, u64) {
         self.turn_runtime.model_token_usage()
+    }
+
+    pub(crate) fn effective_policy_hash(&self) -> String {
+        self.turn_runtime
+            .session()
+            .effective_capabilities()
+            .policy_hash()
+            .as_str()
+            .to_string()
+    }
+
+    pub(crate) fn delegation_authority_ceiling(&self) -> &BTreeSet<CapabilityId> {
+        self.turn_runtime.session().delegation_authority_ceiling()
+    }
+
+    pub(crate) fn suspend_durable_turn(&mut self) {
+        self.turn_runtime.suspend_durable_turn();
+    }
+
+    pub(crate) fn is_session_scoped(&self) -> bool {
+        self.scope_session_id.is_some()
     }
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
@@ -354,8 +431,12 @@ impl ChatService {
         if self.context_released {
             bail!("cannot run a turn after the chat session context was released");
         }
-        self.turn_runtime
-            .begin_turn(&self.session_id, &run_id, &turn_id, request_id)?;
+        self.turn_runtime.begin_turn(
+            self.scope_session_id.as_ref(),
+            &run_id,
+            &turn_id,
+            request_id,
+        )?;
         let user_message_id = MessageId::generate();
         log_message_metadata(
             "user",
@@ -384,6 +465,7 @@ impl ChatService {
             hook_batches: self.turn_runtime.session().turn_hook_batches(),
             hook_payload: self.turn_runtime.session().turn_hook_payload(),
             max_hook_repair_attempts: self.turn_runtime.session().max_hook_repair_attempts(),
+            max_tool_calls: self.max_tool_calls,
             visible_tools: self.turn_runtime.session().turn_visible_tools(),
             capability_policy_hash,
             user_input: &input,
@@ -410,15 +492,19 @@ impl ChatService {
         })
     }
 
-    pub fn resume_user_turn_from_checkpoint(
+    pub(crate) fn resume_user_turn_from_checkpoint(
         &mut self,
-        run_id: RunId,
-        turn_id: TurnId,
-        request_id: Option<RequestId>,
-        checkpoint: TurnCheckpoint,
-        event_sequence: u64,
-        attempt_ids: Vec<AttemptId>,
+        resume: DurableTurnResume,
     ) -> Result<ChatTurnExecution> {
+        let DurableTurnResume {
+            run_id,
+            turn_id,
+            request_id,
+            checkpoint,
+            event_sequence,
+            attempt_ids,
+            delegation_authority_ceiling,
+        } = resume;
         if self.context_released {
             bail!("cannot resume a turn after the chat session context was released");
         }
@@ -427,11 +513,12 @@ impl ChatService {
             bail!("turn checkpoint identity does not match the durable run");
         }
         self.turn_runtime.resume_turn(
-            &self.session_id,
+            self.scope_session_id.as_ref(),
             &run_id,
             &turn_id,
             request_id,
             event_sequence,
+            delegation_authority_ceiling,
         )?;
         let previous_message_count = checkpoint.state().input.context_messages.len();
         let mut executor = TurnExecutor::from_checkpoint(checkpoint)?;
@@ -834,7 +921,7 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
         input = input.with_visible_tool(tool.clone());
     }
     if !spec.visible_tools.is_empty() {
-        input = input.with_max_tool_calls(MAX_TOOL_CALLS_PER_TURN);
+        input = input.with_max_tool_calls(spec.max_tool_calls);
     }
     input
 }
@@ -1486,7 +1573,7 @@ tool_call_format = "hermes_json"
         let session_id = chat.service.session_id().clone();
         chat.service
             .turn_runtime
-            .begin_turn(&session_id, &run_id(), &turn_id(), Some(request_id()))
+            .begin_turn(Some(&session_id), &run_id(), &turn_id(), Some(request_id()))
             .unwrap();
 
         drop(chat);
@@ -1502,7 +1589,7 @@ tool_call_format = "hermes_json"
         let session_id = chat.service.session_id().clone();
         chat.service
             .turn_runtime
-            .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
+            .begin_turn(Some(&session_id), &run_id, &turn_id, Some(request_id()))
             .unwrap();
         chat.service
             .turn_runtime
@@ -1557,7 +1644,7 @@ tool_call_format = "hermes_json"
         let session_id = chat.service.session_id().clone();
         chat.service
             .turn_runtime
-            .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
+            .begin_turn(Some(&session_id), &run_id, &turn_id, Some(request_id()))
             .unwrap();
         let policy_hash = chat
             .service
@@ -1593,7 +1680,7 @@ tool_call_format = "hermes_json"
         let session_id = chat.service.session_id().clone();
         chat.service
             .turn_runtime
-            .begin_turn(&session_id, &run_id, &turn_id, Some(request_id()))
+            .begin_turn(Some(&session_id), &run_id, &turn_id, Some(request_id()))
             .unwrap();
         let policy_hash = chat
             .service
@@ -1866,6 +1953,7 @@ tool_call_format = "hermes_json"
             hook_batches: &hook_batches,
             hook_payload: serde_json::json!({"runtime_identity": {"skills": []}}),
             max_hook_repair_attempts: 1,
+            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &visible_tools,
             capability_policy_hash: Some("sha256:test".to_string()),
             user_input: &user_input,
@@ -1900,6 +1988,7 @@ tool_call_format = "hermes_json"
             hook_batches: &[],
             hook_payload: serde_json::json!({}),
             max_hook_repair_attempts: 0,
+            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &[],
             capability_policy_hash: None,
             user_input: &user_input,

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agl_capabilities::{
     CapabilityGrant, CapabilityId, CapabilityPolicyInput, EffectiveCapabilitySet,
@@ -14,7 +14,8 @@ use agl_config::{
 };
 use agl_content::Content;
 use agl_functions::{
-    IdentityContractMode, RuntimeFunction, RuntimeIdentityContract, resolve_runtime_function,
+    FunctionToolMode, IdentityContractMode, RuntimeDelegationPlan, RuntimeFunction,
+    RuntimeIdentityContract, RuntimeSubagentSpec, resolve_runtime_function,
     resolve_runtime_function_allow_missing_profile,
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
@@ -77,6 +78,22 @@ pub struct InferenceSession {
     memory_enabled: bool,
     config_path: PathBuf,
     artifact_root: PathBuf,
+    delegation_plan: Option<RuntimeDelegationPlan>,
+    delegation_children: Vec<String>,
+    delegation_authority_ceiling: BTreeSet<CapabilityId>,
+    authority_ceiling: Option<BTreeSet<CapabilityId>>,
+    allow_dynamic_grants: bool,
+    tool_policy_override: Option<FunctionToolPolicy>,
+}
+
+pub(crate) struct SubagentSessionConfig {
+    pub inference_config: LocalInferenceConfig,
+    pub spec: RuntimeSubagentSpec,
+    pub delegation_plan: RuntimeDelegationPlan,
+    pub authority_ceiling: BTreeSet<CapabilityId>,
+    pub artifact_root: PathBuf,
+    pub workspace_root: PathBuf,
+    pub execution_session_id: SessionId,
 }
 
 pub(crate) struct InferenceExecutionControl {
@@ -183,6 +200,13 @@ impl InferenceSession {
         let function_context = runtime_function
             .as_ref()
             .map(|function| function.context.clone());
+        let delegation_plan = runtime_function
+            .as_ref()
+            .and_then(RuntimeFunction::delegation_plan);
+        let delegation_children = delegation_plan
+            .as_ref()
+            .map(|plan| plan.root_subagents.clone())
+            .unwrap_or_default();
         let skill_context = resolve_skill_context(SkillContextRequest {
             config_skills: &config.prompt.skills,
             function_skills: &function_skills,
@@ -196,6 +220,9 @@ impl InferenceSession {
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
+            authority_ceiling: None,
+            delegation_enabled: !delegation_children.is_empty(),
+            allow_dynamic_grants: true,
         })?;
         let runtime_identity = runtime_function.as_ref().map(|function| {
             build_runtime_identity(
@@ -206,6 +233,8 @@ impl InferenceSession {
             )
         });
         let identity_contract = effective_identity_contract(runtime_function.as_ref());
+        let delegation_authority_ceiling =
+            delegable_capability_ids(&skill_context.effective_capabilities);
         let mut hook_batches = skill_context.hook_batches;
         add_identity_hook_batch(&mut hook_batches, identity_contract.as_ref())?;
         let runtime_features =
@@ -256,6 +285,121 @@ impl InferenceSession {
             memory_enabled: options.memory,
             config_path,
             artifact_root,
+            delegation_plan,
+            delegation_children,
+            delegation_authority_ceiling,
+            authority_ceiling: None,
+            allow_dynamic_grants: true,
+            tool_policy_override: None,
+        })
+    }
+
+    pub(crate) fn new_subagent(
+        config: SubagentSessionConfig,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+    ) -> Result<Self> {
+        let SubagentSessionConfig {
+            inference_config,
+            spec,
+            delegation_plan,
+            authority_ceiling,
+            artifact_root,
+            workspace_root,
+            execution_session_id,
+        } = config;
+        inference_config.validate()?;
+        let max_output_tokens = u32::try_from(spec.limits.max_output_tokens)
+            .context("subagent max_output_tokens exceeds the inference limit")?;
+        let store_root = runtime.paths.store_root();
+        let config_dir = runtime.paths.config_dir.clone();
+        let trust_store_path = runtime.paths.state_dir.join("skill-trust.toml");
+        let function_skills = spec.skills.clone();
+        let config_skills = Vec::new();
+        let option_skills = Vec::new();
+        let tool_mode = subagent_tool_mode(spec.tool_mode);
+        let tool_policy = subagent_tool_policy(&spec)?;
+        let delegation_children = spec.children.clone();
+        let skill_context = resolve_skill_context(SkillContextRequest {
+            config_skills: &config_skills,
+            function_skills: &function_skills,
+            option_skills: &option_skills,
+            function_policy: Some(&tool_policy),
+            tool_mode,
+            artifact_root: &artifact_root,
+            run_id: None,
+            workspace_root: &workspace_root,
+            trust_store_path: &trust_store_path,
+            store_root: &store_root,
+            authority_ceiling: Some(&authority_ceiling),
+            delegation_enabled: !delegation_children.is_empty(),
+            allow_dynamic_grants: false,
+        })?;
+        let memory_enabled = spec
+            .memory
+            .as_ref()
+            .is_some_and(|memory| !memory.read.is_empty());
+        let memory_context = resolve_memory_context(MemoryContextRequest {
+            enabled: memory_enabled,
+            config_skills: &config_skills,
+            function_skills: &function_skills,
+            option_skills: &option_skills,
+            workspace_root: &workspace_root,
+            trust_store_path: &trust_store_path,
+            artifact_root: &artifact_root,
+            run_id: None,
+            store_root: &store_root,
+        })?;
+        let runtime_features =
+            build_runtime_feature_context(&workspace_root, tool_mode, &skill_context.visible_tools);
+        let delegation_authority_ceiling =
+            delegable_capability_ids(&skill_context.effective_capabilities);
+        let config_path = spec
+            .model
+            .profile_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("<inherited-subagent-profile>"));
+        let model_config = inference_config.model.clone();
+
+        Ok(Self {
+            inference_client,
+            inference_config,
+            session_id: execution_session_id,
+            max_output_tokens,
+            model_config,
+            system_prompt: Some(spec.system_body.clone()),
+            runtime_feature_context: Some(runtime_features.content),
+            runtime_feature_evidence: Some(runtime_features.evidence),
+            memory_context,
+            function_ref: None,
+            function_profile_required: false,
+            runtime_function: None,
+            function_context: None,
+            function_skills,
+            runtime_identity: None,
+            identity_contract: None,
+            skill_context: skill_context.context,
+            skill_hook_batches: skill_context.hook_batches,
+            visible_tools: skill_context.visible_tools,
+            effective_capabilities: skill_context.effective_capabilities,
+            permission_grants: skill_context.permission_grants,
+            tool_mode,
+            store_root,
+            config_dir,
+            workspace_root,
+            trust_store_path,
+            config_skills,
+            option_skills,
+            selected_skills: skill_context.selected_skills,
+            memory_enabled,
+            config_path,
+            artifact_root,
+            delegation_plan: Some(delegation_plan),
+            delegation_children,
+            delegation_authority_ceiling,
+            authority_ceiling: Some(authority_ceiling),
+            allow_dynamic_grants: false,
+            tool_policy_override: Some(tool_policy),
         })
     }
 
@@ -289,6 +433,42 @@ impl InferenceSession {
 
     pub fn artifact_root(&self) -> &std::path::Path {
         &self.artifact_root
+    }
+
+    pub(crate) fn delegation_plan(&self) -> Option<&RuntimeDelegationPlan> {
+        self.delegation_plan.as_ref()
+    }
+
+    pub(crate) fn delegation_children(&self) -> &[String] {
+        &self.delegation_children
+    }
+
+    pub(crate) fn delegation_authority_ceiling(&self) -> &BTreeSet<CapabilityId> {
+        &self.delegation_authority_ceiling
+    }
+
+    pub(crate) fn inference_config(&self) -> &LocalInferenceConfig {
+        &self.inference_config
+    }
+
+    pub(crate) fn install_root_delegation_plan(&mut self, plan: Option<RuntimeDelegationPlan>) {
+        self.delegation_children = plan
+            .as_ref()
+            .map(|plan| plan.root_subagents.clone())
+            .unwrap_or_default();
+        self.delegation_plan = plan;
+    }
+
+    pub(crate) fn freeze_delegation_authority(
+        &mut self,
+        persisted: Option<BTreeSet<CapabilityId>>,
+    ) {
+        self.delegation_authority_ceiling =
+            persisted.unwrap_or_else(|| delegable_capability_ids(&self.effective_capabilities));
+    }
+
+    pub(crate) fn dynamic_grants_enabled(&self) -> bool {
+        self.allow_dynamic_grants
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -352,6 +532,10 @@ impl InferenceSession {
         &self.trust_store_path
     }
 
+    pub(crate) fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
+
     pub(crate) fn prepare_artifact_write_for_tool(
         &self,
         run_id: &RunId,
@@ -400,10 +584,12 @@ impl InferenceSession {
         effective_capabilities: &EffectiveCapabilitySet,
         control: InferenceExecutionControl,
     ) -> Result<InferenceResponse> {
-        ensure!(
-            session_id.as_ref() == Some(&self.session_id),
-            "inference request session does not match its managed context"
-        );
+        if let Some(session_id) = &session_id {
+            ensure!(
+                session_id == &self.session_id,
+                "inference request session does not match its managed context"
+            );
+        }
         if let Some(evidence) = &self.runtime_feature_evidence {
             write_runtime_feature_context_evidence(&self.artifact_root, &request.run_id, evidence)?;
         }
@@ -412,7 +598,7 @@ impl InferenceSession {
             attempt_id,
             &self.model_config,
             InferenceRequestContexts {
-                session_id: session_id.as_ref(),
+                session_id: Some(&self.session_id),
                 request_id: request_id.as_ref(),
                 system_prompt: self.system_prompt.as_deref(),
                 runtime_feature_context: self.runtime_feature_context.as_deref(),
@@ -470,20 +656,25 @@ impl InferenceSession {
         if let (Some(run_id), Some(function)) = (run_id, self.runtime_function.as_ref()) {
             write_function_evidence(&self.artifact_root, run_id, function)?;
         }
+        let delegation_enabled = self.delegation_available(run_id)?;
         let skill_context = resolve_skill_context(SkillContextRequest {
             config_skills: &self.config_skills,
             function_skills: &self.function_skills,
             option_skills: &self.option_skills,
-            function_policy: self
-                .runtime_function
-                .as_ref()
-                .and_then(|function| function.tool_policy.as_ref()),
+            function_policy: self.tool_policy_override.as_ref().or_else(|| {
+                self.runtime_function
+                    .as_ref()
+                    .and_then(|function| function.tool_policy.as_ref())
+            }),
             tool_mode: self.tool_mode,
             artifact_root: &self.artifact_root,
             run_id,
             workspace_root: &self.workspace_root,
             trust_store_path: &self.trust_store_path,
             store_root: &self.store_root,
+            authority_ceiling: self.authority_ceiling.as_ref(),
+            delegation_enabled,
+            allow_dynamic_grants: self.allow_dynamic_grants,
         })?;
         self.runtime_identity = self.runtime_function.as_ref().map(|function| {
             build_runtime_identity(
@@ -531,6 +722,61 @@ impl InferenceSession {
         self.runtime_feature_context = Some(runtime_features.content);
         self.runtime_feature_evidence = Some(runtime_features.evidence);
         Ok(())
+    }
+
+    fn delegation_available(&self, run_id: Option<&RunId>) -> Result<bool> {
+        if self.delegation_children.is_empty() {
+            return Ok(false);
+        }
+        let Some(run_id) = run_id else {
+            return Ok(true);
+        };
+        let plan = self
+            .delegation_plan
+            .as_ref()
+            .context("delegation children require a persisted plan")?;
+        let store = AglStore::open_current_at(&self.store_root)
+            .context("failed to inspect delegation budget")?;
+        let run = store
+            .run(run_id)?
+            .with_context(|| format!("run {run_id} disappeared during context refresh"))?;
+        let root = store
+            .run(&run.root_run_id)?
+            .context("delegation root run disappeared")?;
+        let now_ms = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
+        let timeout_ms = plan.budget.timeout_seconds.saturating_mul(1_000);
+        let deadline_ms = root
+            .created_at_ms
+            .saturating_add(i64::try_from(timeout_ms).unwrap_or(i64::MAX));
+        let child_count = store.run_children(run_id)?.len();
+        let tree_output_remaining = plan
+            .budget
+            .max_total_output_tokens
+            .saturating_sub(root.delegation_used_output_tokens)
+            .saturating_sub(root.delegation_reserved_output_tokens);
+        let run_output_remaining = run
+            .budget
+            .model_output_tokens
+            .saturating_sub(run.usage.model_output_tokens)
+            .saturating_sub(run.delegation_used_output_tokens)
+            .saturating_sub(run.delegation_reserved_output_tokens);
+        Ok(run.cancellation_requested_at_ms.is_none()
+            && run.depth < plan.budget.max_depth
+            && child_count < plan.budget.max_children_per_run as usize
+            && root.delegation_reserved_descendants < plan.budget.max_descendants
+            && now_ms < deadline_ms
+            && tree_output_remaining > 0
+            && run_output_remaining > 0
+            && run.usage.wall_time_ms < run.budget.wall_time_ms
+            && run.usage.model_input_tokens < run.budget.model_input_tokens
+            && run.usage.model_attempts < run.budget.model_attempts
+            && run.usage.capability_calls < run.budget.capability_calls)
     }
 }
 
@@ -1011,6 +1257,9 @@ struct SkillContextRequest<'a> {
     workspace_root: &'a std::path::Path,
     trust_store_path: &'a std::path::Path,
     store_root: &'a std::path::Path,
+    authority_ceiling: Option<&'a BTreeSet<CapabilityId>>,
+    delegation_enabled: bool,
+    allow_dynamic_grants: bool,
 }
 
 fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<String>> {
@@ -1139,7 +1388,9 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         }
         (Some(bundle.content), hook_batches)
     };
-    let mut permission_grants = if let Some(run_id) = request.run_id {
+    let mut permission_grants = if request.allow_dynamic_grants
+        && let Some(run_id) = request.run_id
+    {
         admit_dynamic_permission_grants(
             &skill_registry,
             &tool_catalog,
@@ -1158,14 +1409,20 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         request.tool_mode,
         &permission_grants,
         request.function_policy.cloned(),
+        RuntimeCapabilityBoundary {
+            authority_ceiling: request.authority_ceiling,
+            delegation_enabled: request.delegation_enabled,
+        },
     )?;
     if let Some(run_id) = request.run_id {
-        finalize_permission_grants(
-            request.store_root,
-            run_id,
-            &effective_capabilities,
-            &mut permission_grants,
-        )?;
+        if request.allow_dynamic_grants {
+            finalize_permission_grants(
+                request.store_root,
+                run_id,
+                &effective_capabilities,
+                &mut permission_grants,
+            )?;
+        }
         write_capability_policy_evidence(request.artifact_root, run_id, &effective_capabilities)?;
     }
     let visible_tools = visible_tools_from_effective(&effective_capabilities);
@@ -1199,6 +1456,88 @@ fn selected_skill_ids(
         }
     }
     Ok(selected)
+}
+
+fn subagent_tool_mode(mode: FunctionToolMode) -> ToolAccessMode {
+    match mode {
+        FunctionToolMode::ReadOnly => ToolAccessMode::ReadOnly,
+        FunctionToolMode::Write => ToolAccessMode::Write,
+        FunctionToolMode::Execute => ToolAccessMode::Execute,
+        FunctionToolMode::Approve => ToolAccessMode::Approve,
+        FunctionToolMode::Admin => ToolAccessMode::Admin,
+    }
+}
+
+fn delegable_capability_ids(effective: &EffectiveCapabilitySet) -> BTreeSet<CapabilityId> {
+    let mut capabilities = effective
+        .capabilities()
+        .map(|capability| capability.declaration().id.clone())
+        .collect::<BTreeSet<_>>();
+    for capability in [
+        agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
+        agl_tools::PERMISSIONS_GRANT_TOOL_ID,
+        agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
+    ] {
+        capabilities.remove(
+            &CapabilityId::new(capability).expect("builtin permission capability IDs remain valid"),
+        );
+    }
+    capabilities
+}
+
+fn subagent_tool_policy(spec: &RuntimeSubagentSpec) -> Result<FunctionToolPolicy> {
+    let mut policy = spec.tool_policy.clone();
+    let memory = spec.memory.as_ref();
+    if memory.is_none_or(|memory| memory.read.is_empty()) {
+        for capability in [
+            agl_tools::MEMORY_SEARCH_TOOL_ID,
+            agl_tools::MEMORY_LIST_TOOL_ID,
+        ] {
+            policy.deny.insert(CapabilityId::new(capability)?);
+        }
+    }
+    if memory.is_none_or(|memory| memory.write.is_empty()) {
+        for capability in [
+            agl_tools::MEMORY_SUGGEST_TOOL_ID,
+            agl_tools::MEMORY_ADD_TOOL_ID,
+            agl_tools::MEMORY_APPROVE_TOOL_ID,
+            agl_tools::MEMORY_REJECT_TOOL_ID,
+        ] {
+            policy.deny.insert(CapabilityId::new(capability)?);
+        }
+    }
+    for capability in [
+        agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
+        agl_tools::PERMISSIONS_GRANT_TOOL_ID,
+        agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
+    ] {
+        policy.deny.insert(CapabilityId::new(capability)?);
+    }
+    Ok(policy)
+}
+
+pub(crate) fn resolve_subagent_effective_capabilities(
+    spec: &RuntimeSubagentSpec,
+    authority_ceiling: &BTreeSet<CapabilityId>,
+    workspace_root: &Path,
+    trust_store_path: &Path,
+) -> Result<EffectiveCapabilitySet> {
+    let selected_skills = selected_skill_ids(&[], &spec.skills, &[])?;
+    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
+        .context("failed to load subagent skill registry")?;
+    let tool_catalog = crate::tools::chat_extension_catalog()?;
+    resolve_effective_capabilities(
+        &skill_registry,
+        &tool_catalog,
+        &selected_skills,
+        subagent_tool_mode(spec.tool_mode),
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(subagent_tool_policy(spec)?),
+        RuntimeCapabilityBoundary {
+            authority_ceiling: Some(authority_ceiling),
+            delegation_enabled: !spec.children.is_empty(),
+        },
+    )
 }
 
 fn selected_skill_hook_batches(
@@ -1246,6 +1585,7 @@ fn selected_skill_visible_tools(
         tool_mode,
         &RuntimePermissionGrantSnapshot::default(),
         None,
+        RuntimeCapabilityBoundary::default(),
     )?;
     Ok(visible_tools_from_effective(&effective))
 }
@@ -1275,9 +1615,16 @@ fn selected_skill_visible_tools_with_dynamic_grants(
         tool_mode,
         &grant_snapshot,
         None,
+        RuntimeCapabilityBoundary::default(),
     )?;
     finalize_permission_grants(store_root, run_id, &effective, &mut grant_snapshot)?;
     Ok((visible_tools_from_effective(&effective), grant_snapshot))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RuntimeCapabilityBoundary<'a> {
+    authority_ceiling: Option<&'a BTreeSet<CapabilityId>>,
+    delegation_enabled: bool,
 }
 
 fn resolve_effective_capabilities(
@@ -1287,12 +1634,21 @@ fn resolve_effective_capabilities(
     tool_mode: ToolAccessMode,
     grant_snapshot: &RuntimePermissionGrantSnapshot,
     function_policy: Option<FunctionToolPolicy>,
+    boundary: RuntimeCapabilityBoundary<'_>,
 ) -> Result<EffectiveCapabilitySet> {
-    let baseline = if selected_skills.is_empty() {
+    let RuntimeCapabilityBoundary {
+        authority_ceiling,
+        delegation_enabled,
+    } = boundary;
+    let mut baseline = if selected_skills.is_empty() {
         core_tool_ids()?
     } else {
         BTreeSet::new()
     };
+    if delegation_enabled {
+        let delegation_id = CapabilityId::new(agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID)?;
+        baseline.insert(delegation_id);
+    }
     let mut skill_policies = Vec::with_capacity(selected_skills.len());
     for skill_id in selected_skills {
         skill_registry.verify_allowed_tools(skill_id, tool_catalog)?;
@@ -1312,13 +1668,23 @@ fn resolve_effective_capabilities(
     )
     .with_selected_skills(skill_policies)
     .with_grants(grant_snapshot.capability_grants());
+    let mut unavailable = BTreeSet::new();
+    if !delegation_enabled {
+        unavailable.insert(CapabilityId::new(
+            agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID,
+        )?);
+    }
     if !agl_host_tools::screen::provider_available() {
-        input = input.with_unavailable_capabilities([CapabilityId::new(
-            agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
-        )?]);
+        unavailable.insert(CapabilityId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?);
+    }
+    if !unavailable.is_empty() {
+        input = input.with_unavailable_capabilities(unavailable);
     }
     if let Some(function_policy) = function_policy {
         input = input.with_function_policy(function_policy);
+    }
+    if let Some(authority_ceiling) = authority_ceiling {
+        input = input.with_authority_ceiling(authority_ceiling.iter().cloned());
     }
     input
         .resolve()

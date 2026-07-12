@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
 
-use agl_capabilities::{ActionInvocation, DispatchDenial, DispatchDenialCode, HookInput};
+use agl_capabilities::{
+    ActionInvocation, CapabilityId, DispatchDenial, DispatchDenialCode, HookInput,
+};
 use agl_events::{
     CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeEventWriter, SafeRuntimeEventEnvelope,
@@ -61,6 +64,10 @@ impl ChatTurnRuntime {
         &self.session
     }
 
+    pub(crate) fn session_mut(&mut self) -> &mut InferenceSession {
+        &mut self.session
+    }
+
     pub fn clear_context(&mut self) -> Result<()> {
         ensure!(
             self.active_effective_capabilities.is_none(),
@@ -81,23 +88,33 @@ impl ChatTurnRuntime {
         self.session.release_context()
     }
 
+    pub(crate) fn suspend_durable_turn(&mut self) {
+        self.active_effective_capabilities = None;
+        self.event_sink = None;
+        self.event_scope = None;
+        self.request_id = None;
+        self.runtime_events.clear();
+        self.attempt_ids.clear();
+    }
+
     pub fn begin_turn(
         &mut self,
-        session_id: &SessionId,
+        session_id: Option<&SessionId>,
         run_id: &RunId,
         turn_id: &TurnId,
         request_id: Option<RequestId>,
     ) -> Result<()> {
-        self.initialize_turn(session_id, run_id, turn_id, request_id, None)
+        self.initialize_turn(session_id, run_id, turn_id, request_id, None, None)
     }
 
     pub(crate) fn resume_turn(
         &mut self,
-        session_id: &SessionId,
+        session_id: Option<&SessionId>,
         run_id: &RunId,
         turn_id: &TurnId,
         request_id: Option<RequestId>,
         durable_event_sequence: u64,
+        delegation_authority_ceiling: BTreeSet<CapabilityId>,
     ) -> Result<()> {
         self.initialize_turn(
             session_id,
@@ -105,18 +122,27 @@ impl ChatTurnRuntime {
             turn_id,
             request_id,
             Some(durable_event_sequence),
+            Some(delegation_authority_ceiling),
         )
     }
 
     fn initialize_turn(
         &mut self,
-        session_id: &SessionId,
+        session_id: Option<&SessionId>,
         run_id: &RunId,
         turn_id: &TurnId,
         request_id: Option<RequestId>,
         durable_event_sequence: Option<u64>,
+        persisted_delegation_authority: Option<BTreeSet<CapabilityId>>,
     ) -> Result<()> {
-        self.refresh_runtime_context(run_id)?;
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot refresh runtime context during an active turn"
+        );
+        self.session.refresh_runtime_context(Some(run_id))?;
+        self.session
+            .freeze_delegation_authority(persisted_delegation_authority);
+        self.rebuild_tool_runtime()?;
         self.active_effective_capabilities = Some(self.session.effective_capabilities().clone());
         self.event_sink = Some(match durable_event_sequence {
             Some(sequence) => RuntimeEventWriter::open_evidence_at_sequence(
@@ -126,12 +152,11 @@ impl ChatTurnRuntime {
             )?,
             None => RuntimeEventWriter::open(self.session.event_stream_path(run_id))?,
         });
-        self.event_scope = Some(
-            EventScope::builder(run_id.clone())
-                .session_id(session_id.clone())
-                .turn_id(turn_id.clone())
-                .build()?,
-        );
+        let mut scope = EventScope::builder(run_id.clone()).turn_id(turn_id.clone());
+        if let Some(session_id) = session_id {
+            scope = scope.session_id(session_id.clone());
+        }
+        self.event_scope = Some(scope.build()?);
         self.request_id = request_id;
         self.generated_requests = 0;
         self.runtime_events.clear();
@@ -577,7 +602,7 @@ fn permission_runtime_status(
             .iter()
             .map(|tool| tool.id.as_str().to_string())
             .collect(),
-        dynamic_grants: true,
+        dynamic_grants: session.dynamic_grants_enabled(),
         granted_visible_tools: session.permission_grants().granted_visible_tools(),
         ignored_grants: session.permission_grants().ignored_grants(),
     }
@@ -599,6 +624,7 @@ fn build_chat_tool_runtime(
             .permission_grants()
             .sensitive_input_run(&screen_id, agl_capabilities::SensitiveInput::ScreenCapture)
             .cloned(),
+        delegation_handler: crate::delegation::DelegationHandler::from_session(session),
     })
 }
 

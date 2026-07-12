@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
-use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, TurnId};
+use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -65,6 +65,7 @@ pub enum DaemonRequestKind {
     SessionTranscript(SessionTranscriptRequest),
     RunSubmit(RunSubmitRequest),
     RunStatus(RunStatusRequest),
+    RunTree(RunTreeRequest),
     RunCancel(RunCancelRequest),
     RunEvents(RunEventsRequest),
     RunSubscribe(RunSubscribeRequest),
@@ -155,7 +156,8 @@ pub enum DaemonEventKind {
     SessionList(SessionListEvent),
     SessionTranscript(SessionTranscriptEvent),
     RunAccepted(RunAcceptedEvent),
-    RunStatus(RunStatusEvent),
+    RunStatus(Box<RunStatusEvent>),
+    RunTree(RunTreeEvent),
     RunEvents(RunEventsEvent),
     RunSubscriptionStarted(RunSubscriptionStartedEvent),
     RunEvent(Box<SafeRuntimeEventEnvelope>),
@@ -193,6 +195,7 @@ pub enum DaemonCapability {
     RuntimeEvents,
     RunSubmit,
     RunStatus,
+    RunTree,
     RunCancel,
     RunReplay,
     RunSubscribe,
@@ -239,6 +242,12 @@ pub struct RunStatusRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunTreeRequest {
+    pub run_id: RunId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunCancelRequest {
     pub run_id: RunId,
 }
@@ -277,6 +286,7 @@ pub struct RunStatusEvent {
     pub session_id: Option<SessionId>,
     pub run_id: RunId,
     pub turn_id: Option<TurnId>,
+    pub run_kind: ProtocolRunKind,
     pub state: ProtocolRunState,
     pub usage: RunUsageEvent,
     pub cancellation_requested: bool,
@@ -288,6 +298,47 @@ pub struct RunStatusEvent {
     pub error_code: Option<String>,
     pub terminal_result: Option<Value>,
     pub error_message: Option<String>,
+    pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
+    pub depth: u32,
+    pub subagent_id: Option<String>,
+    pub spawned_by_step_id: Option<StepId>,
+    pub child_spec_digest: Option<String>,
+    pub model_profile_digest: Option<String>,
+    pub result_delivered: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunTreeEvent {
+    pub requested_run_id: RunId,
+    pub runs: Vec<RunTreeNodeEvent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunTreeNodeEvent {
+    pub run_id: RunId,
+    pub session_id: Option<SessionId>,
+    pub turn_id: Option<TurnId>,
+    pub run_kind: ProtocolRunKind,
+    pub state: ProtocolRunState,
+    pub usage: RunUsageEvent,
+    pub cancellation_requested: bool,
+    pub attempts: u32,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub error_code: Option<String>,
+    pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
+    pub depth: u32,
+    pub subagent_id: Option<String>,
+    pub spawned_by_step_id: Option<StepId>,
+    pub child_spec_digest: Option<String>,
+    pub model_profile_digest: Option<String>,
+    pub result_delivered: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -439,6 +490,14 @@ pub enum TurnTerminalStatus {
     Stopped,
     Failed,
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolRunKind {
+    Turn,
+    Cron,
+    Subagent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -677,6 +736,49 @@ mod tests {
             serde_json::from_value::<DaemonEvent>(finished_value).unwrap(),
             finished
         );
+    }
+
+    #[test]
+    fn run_tree_exposes_safe_relationships_without_private_results() {
+        let child_run_id = RunId::generate();
+        let event = DaemonEvent::new(
+            Some(request_id()),
+            DaemonEventKind::RunTree(RunTreeEvent {
+                requested_run_id: run_id(),
+                runs: vec![RunTreeNodeEvent {
+                    run_id: child_run_id,
+                    session_id: None,
+                    turn_id: None,
+                    run_kind: ProtocolRunKind::Subagent,
+                    state: ProtocolRunState::Failed,
+                    usage: RunUsageEvent::default(),
+                    cancellation_requested: false,
+                    attempts: 1,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                    started_at_ms: Some(1),
+                    finished_at_ms: Some(2),
+                    error_code: Some("chat_turn_failed".to_string()),
+                    parent_run_id: Some(run_id()),
+                    root_run_id: run_id(),
+                    depth: 1,
+                    subagent_id: Some("reviewer".to_string()),
+                    spawned_by_step_id: Some(StepId::generate()),
+                    child_spec_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                    model_profile_digest: Some(format!("sha256:{}", "b".repeat(64))),
+                    result_delivered: true,
+                }],
+            }),
+        );
+
+        let value = serde_json::to_value(&event).unwrap();
+        let encoded = serde_json::to_string(&value).unwrap();
+        assert_eq!(value["kind"], "run_tree");
+        assert_eq!(value["payload"]["runs"][0]["run_kind"], "subagent");
+        assert!(!encoded.contains("terminal_result"));
+        assert!(!encoded.contains("error_message"));
+        assert!(!encoded.contains("task"));
+        assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
     }
 
     #[test]

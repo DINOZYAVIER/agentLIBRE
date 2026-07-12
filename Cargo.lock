@@ -95,6 +95,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2",
  "tracing",
 ]
 
@@ -176,6 +177,7 @@ dependencies = [
  "agl-content",
  "agl-cron",
  "agl-events",
+ "agl-functions",
  "agl-ids",
  "agl-inference",
  "agl-protocol",
