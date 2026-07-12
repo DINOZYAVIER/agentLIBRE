@@ -28,6 +28,42 @@ struct chunks_deleter {
     }
 };
 
+bool non_causal_chunks_fit(
+        const mtmd_context * context,
+        const mtmd_input_chunks * chunks,
+        const llama_context * llama_context,
+        int32_t eval_batch_size,
+        char * err,
+        size_t err_len) {
+    const uint32_t context_batch_size = llama_n_batch(llama_context);
+    const uint32_t context_ubatch_size = llama_n_ubatch(llama_context);
+    for (size_t index = 0; index < mtmd_input_chunks_size(chunks); ++index) {
+        const mtmd_input_chunk * chunk = mtmd_input_chunks_get(chunks, index);
+        if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT ||
+            !mtmd_decode_use_non_causal(context, chunk)) {
+            continue;
+        }
+        const size_t token_count = mtmd_input_chunk_get_n_tokens(chunk);
+        if (token_count <= static_cast<size_t>(eval_batch_size) &&
+            token_count <= context_batch_size && token_count <= context_ubatch_size) {
+            continue;
+        }
+        if (err != nullptr && err_len > 0) {
+            std::snprintf(
+                err,
+                err_len,
+                "non-causal media chunk requires n_batch and n_ubatch >= %zu "
+                "(eval batch %d, context n_batch %u, context n_ubatch %u)",
+                token_count,
+                eval_batch_size,
+                context_batch_size,
+                context_ubatch_size);
+        }
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 extern "C" mtmd_context * agl_mtmd_init(
@@ -135,6 +171,10 @@ extern "C" int32_t agl_mtmd_eval_images(
         static_cast<uint32_t>(position_count) >= llama_n_ctx(llama_context)) {
         set_error(err, err_len, "mtmd prompt exceeds or empties the llama context");
         return 20;
+    }
+    if (!non_causal_chunks_fit(
+            context, chunks.get(), llama_context, batch_size, err, err_len)) {
+        return 21;
     }
     llama_pos new_position = 0;
     const int32_t eval_result = mtmd_helper_eval_chunks(

@@ -275,7 +275,10 @@ fn renders_gemma_function_call_transcript() {
                     .to_string(),
             )),
             name: Some("get_current_temperature".to_string()),
-            tool_calls: Vec::new(),
+            tool_calls: vec![RenderedToolCall {
+                name: "get_current_temperature".to_string(),
+                arguments: json!({"location": "London"}),
+            }],
         }]
     );
 }

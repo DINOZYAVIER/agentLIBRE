@@ -1,13 +1,14 @@
 [backend]
 kind = "llama_cpp"
 model = "/home/dinozyavier/.dyno/models/gemma-4-12b-it-qat/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+multimodal_projector = "/home/dinozyavier/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/mmproj-gemma-4-12B-it-QAT-BF16.gguf"
 
 [runtime]
 gpu_layers = 999
 context_tokens = 32768
 threads = 8
 batch_size = 1024
-ubatch_size = 256
+ubatch_size = 1024
 flash_attention = "on"
 cache_type_k = "q8_0"
 cache_type_v = "q8_0"
