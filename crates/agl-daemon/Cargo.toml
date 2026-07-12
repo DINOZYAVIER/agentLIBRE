@@ -11,6 +11,7 @@ agl-chat.workspace = true
 agl-cron.workspace = true
 agl-content.workspace = true
 agl-events.workspace = true
+agl-functions.workspace = true
 agl-ids.workspace = true
 agl-inference.workspace = true
 agl-protocol.workspace = true

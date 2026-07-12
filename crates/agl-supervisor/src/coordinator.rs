@@ -175,6 +175,10 @@ impl SupervisorHandle {
         self.request_with_reply(|reply| CommandRequest::Outcome { run_id, reply })
     }
 
+    pub fn tree(&self, run_id: RunId) -> Result<Vec<SafeRunStatus>> {
+        self.request_with_reply(|reply| CommandRequest::Tree { run_id, reply })
+    }
+
     pub fn cancel(&self, run_id: RunId) -> Result<SafeRunStatus> {
         self.request_with_reply(|reply| CommandRequest::Cancel { run_id, reply })
     }
@@ -246,6 +250,10 @@ enum CommandRequest {
         run_id: RunId,
         reply: mpsc::SyncSender<Result<Option<RunOutcome>>>,
     },
+    Tree {
+        run_id: RunId,
+        reply: mpsc::SyncSender<Result<Vec<SafeRunStatus>>>,
+    },
     Cancel {
         run_id: RunId,
         reply: mpsc::SyncSender<Result<SafeRunStatus>>,
@@ -313,6 +321,7 @@ impl Coordinator {
         let store = AglStore::open_at(&store_root)?;
         let now_ms = options.clock.now_ms();
         store.recover_expired_work(now_ms)?;
+        store.expire_delegation_trees(now_ms)?;
         Ok(Self {
             store_root,
             store,
@@ -386,6 +395,9 @@ impl Coordinator {
                     })
                 });
                 let _ = reply.send(result.map_err(Into::into));
+            }
+            CommandRequest::Tree { run_id, reply } => {
+                let _ = reply.send(self.store.run_tree(&run_id).map_err(Into::into));
             }
             CommandRequest::Cancel { run_id, reply } => {
                 let now_ms = self.options.clock.now_ms();
@@ -574,6 +586,9 @@ impl Coordinator {
             return;
         }
         self.last_heartbeat_ms = now_ms;
+        if !self.expire_delegation_trees(now_ms) {
+            return;
+        }
         let expires_at_ms = now_ms.saturating_add(self.options.lease_duration_ms());
         let lost = self
             .active
@@ -593,6 +608,9 @@ impl Coordinator {
     }
 
     fn claim_available(&mut self) {
+        if !self.expire_delegation_trees(self.options.clock.now_ms()) {
+            return;
+        }
         while self.active.len() < self.options.worker_limit {
             let now_ms = self.options.clock.now_ms();
             let lease = match self.store.claim_next_run(
@@ -621,6 +639,27 @@ impl Coordinator {
                 cancellation,
             });
         }
+    }
+
+    fn expire_delegation_trees(&mut self, now_ms: i64) -> bool {
+        let statuses = match self.store.expire_delegation_trees(now_ms) {
+            Ok(statuses) => statuses,
+            Err(_) => {
+                for active in self.active.values() {
+                    active.cancellation.cancel();
+                }
+                return false;
+            }
+        };
+        for status in statuses {
+            if let Some(active) = self.active.get(&status.run_id) {
+                active.cancellation.cancel();
+            }
+            if status.state == RunState::Cancelled {
+                self.complete_subscribers(&status.run_id);
+            }
+        }
+        true
     }
 }
 
@@ -820,7 +859,8 @@ fn run_worker_inner(context: &WorkerContext) -> Result<()> {
             Err(error)
                 if error.retryable
                     && effect.delivery_class != EffectDeliveryClass::AtMostOnce
-                    && step.attempts.saturating_add(1) < context.options.retry_limit =>
+                    && (error.retry_limit_exempt
+                        || step.attempts.saturating_add(1) < context.options.retry_limit) =>
             {
                 let mut failed = driver.snapshot()?;
                 refresh_wall_time(&run, &mut failed, context.options.clock.now_ms());
@@ -914,13 +954,17 @@ fn budget_exhausted(run: &DurableRunRecord, snapshot: &DriverSnapshot, now_ms: i
         .map_or(0, |started| now_ms.saturating_sub(started).max(0) as u64);
     let usage = &snapshot.usage;
     let budget = &run.budget;
+    let aggregate_output_tokens = usage
+        .model_output_tokens
+        .saturating_add(run.delegation_used_output_tokens)
+        .saturating_add(run.delegation_reserved_output_tokens);
     let pending_kind = snapshot
         .pending_effect
         .as_ref()
         .map(|effect| effect.kind.as_str());
     elapsed > budget.wall_time_ms
         || usage.model_input_tokens > budget.model_input_tokens
-        || usage.model_output_tokens > budget.model_output_tokens
+        || aggregate_output_tokens > budget.model_output_tokens
         || usage.model_attempts > budget.model_attempts
         || usage.capability_calls > budget.capability_calls
         || (snapshot.terminal.is_none()
@@ -928,7 +972,7 @@ fn budget_exhausted(run: &DurableRunRecord, snapshot: &DriverSnapshot, now_ms: i
                 || (pending_kind == Some("model_generation")
                     && (usage.model_attempts >= budget.model_attempts
                         || usage.model_input_tokens >= budget.model_input_tokens
-                        || usage.model_output_tokens >= budget.model_output_tokens))
+                        || aggregate_output_tokens >= budget.model_output_tokens))
                 || (pending_kind == Some("capability_dispatch")
                     && usage.capability_calls >= budget.capability_calls)))
 }

@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
@@ -11,15 +12,16 @@ use agl_inference::{
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloRequest,
-    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
-    RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest, SessionListRequest,
-    SessionOpenRequest, SessionStatus, SessionStatusRequest,
+    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
+    RunBudgetRequest, RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest,
+    RunTreeRequest, SessionListRequest, SessionOpenRequest, SessionStatus, SessionStatusRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
     AgentLibreWorkspaceConfig,
 };
 use agl_store::RunState;
+use anyhow::Context;
 
 use super::*;
 
@@ -95,6 +97,53 @@ struct InferenceControl {
 #[derive(Clone)]
 struct ControlledInferenceClient {
     control: Arc<InferenceControl>,
+}
+
+struct ScriptedDelegationClient {
+    responses: Mutex<VecDeque<String>>,
+}
+
+impl InferenceClient for ScriptedDelegationClient {
+    fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
+        let content = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .context("daemon delegation response queue is empty")?;
+        Ok(InferenceResponse {
+            attempt_id: job.request.attempt_id,
+            content,
+            finish_reason: InferenceFinishReason::Stop,
+            metadata: InferenceResponseMetadata {
+                model_state: Some("daemon-delegation".to_string()),
+                selected_device: None,
+                duration_ms: 1,
+                input_tokens: 4,
+                output_tokens: 2,
+            },
+        })
+    }
+
+    fn clear_context(
+        &self,
+        _config: &LocalInferenceConfig,
+        _session_id: &SessionId,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn release_context(
+        &self,
+        _config: &LocalInferenceConfig,
+        _session_id: &SessionId,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn status(&self) -> anyhow::Result<ModelManagerStatus> {
+        Ok(ModelManagerStatus::default())
+    }
 }
 
 impl InferenceClient for ControlledInferenceClient {
@@ -225,12 +274,127 @@ fn hello_declares_strict_run_capabilities() {
             assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
             assert!(hello.capabilities.contains(&DaemonCapability::RunSubmit));
             assert!(hello.capabilities.contains(&DaemonCapability::RunStatus));
+            assert!(hello.capabilities.contains(&DaemonCapability::RunTree));
             assert!(hello.capabilities.contains(&DaemonCapability::RunCancel));
             assert!(hello.capabilities.contains(&DaemonCapability::RunReplay));
             assert!(hello.capabilities.contains(&DaemonCapability::RunSubscribe));
         }
         other => panic!("unexpected hello event: {other:?}"),
     }
+}
+
+#[test]
+fn daemon_delegation_uses_the_same_durable_child_path() {
+    let mut test = TestRuntime::new();
+    let workspace = test
+        .runtime
+        .paths
+        .config_dir
+        .parent()
+        .unwrap()
+        .join("delegation-workspace");
+    let function_root = workspace.join(".agl/functions/coordinator");
+    std::fs::create_dir_all(function_root.join("subagents")).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+schema: agentfunction/v1
+id: coordinator
+title: Coordinator
+subagents:
+  use:
+    - reviewer
+delegation:
+  max_depth: 2
+  max_children_per_run: 2
+  max_descendants: 4
+  max_total_output_tokens: 512
+  timeout_seconds: 30
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Delegate the review.\n").unwrap();
+    std::fs::write(
+        function_root.join("subagents/reviewer.md"),
+        r#"---
+schema: agentlibre/subagent/v1
+id: reviewer
+title: Reviewer
+description: Reviews one daemon task.
+model:
+  inherit: true
+tools:
+  mode: read-only
+  allow: []
+  deny: []
+subagents:
+  use: []
+limits:
+  max_model_attempts: 2
+  max_output_tokens: 64
+  max_capability_calls: 2
+  timeout_seconds: 20
+---
+
+Return the daemon child verdict.
+"#,
+    )
+    .unwrap();
+    test.inference.function_ref = Some("coordinator".to_string());
+    test.inference.workspace_root = Some(workspace.clone());
+    let mut state = DaemonState::new(
+        test.runtime.clone(),
+        test.inference.clone(),
+        InferenceClientHandle::new(ScriptedDelegationClient {
+            responses: Mutex::new(VecDeque::from([
+                r#"<tool_call>{"name":"agent.delegate","arguments":{"subagent_id":"reviewer","task":"Review daemon patch"}}</tool_call>"#.to_string(),
+                "Daemon child verdict".to_string(),
+                "Daemon parent answer".to_string(),
+            ])),
+        }),
+    );
+    let opened = state.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: Some(workspace.display().to_string()),
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+    let session_id = match opened.kind {
+        DaemonEventKind::SessionOpened(opened) => opened.session_id,
+        other => panic!("unexpected session event: {other:?}"),
+    };
+    let accepted = submit(&mut state, &session_id, "Coordinate daemon review", None);
+    let outcome = wait_for_terminal(&state, &accepted.run_id);
+    assert_eq!(outcome.status.state, RunState::Succeeded);
+
+    let tree = state.handle_request(request(DaemonRequestKind::RunTree(RunTreeRequest {
+        run_id: accepted.run_id.clone(),
+    })));
+    let child_run_id = match tree.kind {
+        DaemonEventKind::RunTree(tree) => {
+            assert_eq!(tree.runs.len(), 2);
+            assert_eq!(tree.runs[1].run_kind, ProtocolRunKind::Subagent);
+            assert_eq!(tree.runs[1].parent_run_id, Some(accepted.run_id));
+            assert!(tree.runs[1].result_delivered);
+            tree.runs[1].run_id.clone()
+        }
+        other => panic!("unexpected tree event: {other:?}"),
+    };
+    let child_status =
+        state.handle_request(request(DaemonRequestKind::RunStatus(RunStatusRequest {
+            run_id: child_run_id,
+        })));
+    assert!(matches!(
+        child_status.kind,
+        DaemonEventKind::RunStatus(ref status)
+            if status.run_kind == ProtocolRunKind::Subagent
+                && status.terminal_result.is_none()
+                && status.error_message.is_none()
+    ));
 }
 
 #[test]
@@ -253,6 +417,14 @@ fn admission_status_and_cancel_stay_responsive_while_model_blocks() {
     assert!(matches!(
         status.kind,
         DaemonEventKind::RunStatus(ref status) if status.state == ProtocolRunState::Running
+    ));
+    let tree = state.handle_request(request(DaemonRequestKind::RunTree(RunTreeRequest {
+        run_id: accepted.run_id.clone(),
+    })));
+    assert!(matches!(
+        tree.kind,
+        DaemonEventKind::RunTree(ref tree)
+            if tree.requested_run_id == accepted.run_id && tree.runs.len() == 1
     ));
 
     let cancelled = state.handle_request(request(DaemonRequestKind::RunCancel(RunCancelRequest {

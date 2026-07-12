@@ -68,6 +68,7 @@ pub struct DriverEffectError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    pub retry_limit_exempt: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +85,16 @@ impl DriverEffectError {
             code: code.into(),
             message: message.into(),
             retryable,
+            retry_limit_exempt: false,
+        }
+    }
+
+    pub fn durable_wait(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable: true,
+            retry_limit_exempt: true,
         }
     }
 }

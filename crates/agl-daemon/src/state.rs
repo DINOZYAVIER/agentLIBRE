@@ -7,18 +7,19 @@ use agl_chat::{
     InferenceOptions, ToolAccessMode as ChatToolMode,
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
+use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{RequestId, RunId, SessionId, TurnId};
 use agl_inference::ModelManagerStatus;
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent,
-    PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolRunState, ProtocolToolMode,
-    RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunUsageEvent, SessionFinishedEvent,
-    SessionListEvent, SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary,
-    SessionTranscriptEvent,
+    PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState,
+    ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent,
+    RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent,
+    SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_session::ChatSessionStore;
-use agl_store::{RunBudget, RunState};
+use agl_store::{RunBudget, RunKind, RunState, SafeRunStatus};
 use agl_supervisor::{
     IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
     SupervisorHandle, SupervisorOptions,
@@ -45,6 +46,7 @@ pub struct DaemonState {
 struct SessionRuntime {
     status: SessionStatus,
     options: ChatOptions,
+    delegation_plan: Option<RuntimeDelegationPlan>,
 }
 
 impl DaemonState {
@@ -102,6 +104,7 @@ impl DaemonState {
             }
             DaemonRequestKind::RunSubmit(request) => self.submit_run(request_id.clone(), request),
             DaemonRequestKind::RunStatus(request) => self.run_status(request.run_id),
+            DaemonRequestKind::RunTree(request) => self.run_tree(request.run_id),
             DaemonRequestKind::RunCancel(request) => self.cancel_run(request.run_id),
             DaemonRequestKind::RunEvents(request) => {
                 self.run_events(request.run_id, request.after_sequence, request.limit)
@@ -187,6 +190,7 @@ impl DaemonState {
                 )
                 .map_err(runtime_error)?;
                 let session_id = service.session_id().clone();
+                let delegation_plan = service.delegation_plan();
                 let turn_id = TurnId::generate();
                 self.chat_factory.register(service).map_err(runtime_error)?;
                 let persisted_options = ChatOptions {
@@ -197,10 +201,11 @@ impl DaemonState {
                 (
                     Some(session_id.clone()),
                     Some(turn_id),
-                    serde_json::to_value(ChatRunInput {
+                    serde_json::to_value(ChatRunInput::Root {
                         content: agl_content::Content::text(prompt).map_err(runtime_error)?,
                         request_id: None,
                         options: persisted_options,
+                        delegation_plan,
                     })
                     .map_err(runtime_error)?,
                     Some(session_id),
@@ -252,6 +257,7 @@ impl DaemonState {
                 DaemonCapability::RuntimeEvents,
                 DaemonCapability::RunSubmit,
                 DaemonCapability::RunStatus,
+                DaemonCapability::RunTree,
                 DaemonCapability::RunCancel,
                 DaemonCapability::RunReplay,
                 DaemonCapability::RunSubscribe,
@@ -285,6 +291,7 @@ impl DaemonState {
         )
         .map_err(runtime_error)?;
         let summary = service.summary();
+        let delegation_plan = service.delegation_plan();
         let session_id = summary.session_id.clone();
         self.chat_factory.register(service).map_err(runtime_error)?;
         self.sessions.insert(
@@ -296,6 +303,7 @@ impl DaemonState {
                     new_session: false,
                     ..options
                 },
+                delegation_plan,
             },
         );
         Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
@@ -423,10 +431,11 @@ impl DaemonState {
         }
         let run_id = RunId::generate();
         let turn_id = TurnId::generate();
-        let input = serde_json::to_value(ChatRunInput {
+        let input = serde_json::to_value(ChatRunInput::Root {
             content: request.content.clone(),
             request_id: Some(request_id),
             options: session.options.clone(),
+            delegation_plan: session.delegation_plan.clone(),
         })
         .map_err(runtime_error)?;
         let idempotency = request.idempotency_key.map(|key| IdempotentRunSpec {
@@ -476,7 +485,9 @@ impl DaemonState {
             .outcome(run_id.clone())
             .map_err(supervisor_error)?
             .ok_or_else(|| not_found(run_id.as_str()))?;
-        Ok(DaemonEventKind::RunStatus(run_status_event(outcome)))
+        Ok(DaemonEventKind::RunStatus(Box::new(run_status_event(
+            outcome,
+        ))))
     }
 
     fn cancel_run(&self, run_id: RunId) -> Result<DaemonEventKind, ProtocolError> {
@@ -484,6 +495,20 @@ impl DaemonState {
             .cancel(run_id.clone())
             .map_err(supervisor_error)?;
         self.run_status(run_id)
+    }
+
+    fn run_tree(&self, run_id: RunId) -> Result<DaemonEventKind, ProtocolError> {
+        let runs = self
+            .supervisor_handle
+            .tree(run_id.clone())
+            .map_err(supervisor_error)?
+            .into_iter()
+            .map(run_tree_node)
+            .collect();
+        Ok(DaemonEventKind::RunTree(RunTreeEvent {
+            requested_run_id: run_id,
+            runs,
+        }))
     }
 
     fn run_events(
@@ -602,10 +627,12 @@ impl SharedDaemonState {
 
 pub(crate) fn run_status_event(outcome: RunOutcome) -> RunStatusEvent {
     let status = outcome.status;
+    let expose_terminal_content = status.kind != RunKind::Subagent;
     RunStatusEvent {
         session_id: status.session_id,
         run_id: status.run_id,
         turn_id: status.turn_id,
+        run_kind: protocol_run_kind(status.kind),
         state: protocol_run_state(status.state),
         usage: RunUsageEvent {
             wall_time_ms: status.usage.wall_time_ms,
@@ -621,8 +648,60 @@ pub(crate) fn run_status_event(outcome: RunOutcome) -> RunStatusEvent {
         started_at_ms: status.started_at_ms,
         finished_at_ms: status.finished_at_ms,
         error_code: status.error_code,
-        terminal_result: outcome.terminal_result,
-        error_message: outcome.error_message,
+        terminal_result: expose_terminal_content
+            .then_some(outcome.terminal_result)
+            .flatten(),
+        error_message: expose_terminal_content
+            .then_some(outcome.error_message)
+            .flatten(),
+        parent_run_id: status.parent_run_id,
+        root_run_id: status.root_run_id,
+        depth: status.depth,
+        subagent_id: status.subagent_id,
+        spawned_by_step_id: status.spawned_by_step_id,
+        child_spec_digest: status.child_spec_digest,
+        model_profile_digest: status.model_profile_digest,
+        result_delivered: status.result_delivered,
+    }
+}
+
+fn run_tree_node(status: SafeRunStatus) -> RunTreeNodeEvent {
+    RunTreeNodeEvent {
+        session_id: status.session_id,
+        run_id: status.run_id,
+        turn_id: status.turn_id,
+        run_kind: protocol_run_kind(status.kind),
+        state: protocol_run_state(status.state),
+        usage: RunUsageEvent {
+            wall_time_ms: status.usage.wall_time_ms,
+            model_input_tokens: status.usage.model_input_tokens,
+            model_output_tokens: status.usage.model_output_tokens,
+            model_attempts: status.usage.model_attempts,
+            capability_calls: status.usage.capability_calls,
+        },
+        cancellation_requested: status.cancellation_requested,
+        attempts: status.attempts,
+        created_at_ms: status.created_at_ms,
+        updated_at_ms: status.updated_at_ms,
+        started_at_ms: status.started_at_ms,
+        finished_at_ms: status.finished_at_ms,
+        error_code: status.error_code,
+        parent_run_id: status.parent_run_id,
+        root_run_id: status.root_run_id,
+        depth: status.depth,
+        subagent_id: status.subagent_id,
+        spawned_by_step_id: status.spawned_by_step_id,
+        child_spec_digest: status.child_spec_digest,
+        model_profile_digest: status.model_profile_digest,
+        result_delivered: status.result_delivered,
+    }
+}
+
+fn protocol_run_kind(kind: RunKind) -> ProtocolRunKind {
+    match kind {
+        RunKind::Turn => ProtocolRunKind::Turn,
+        RunKind::Cron => ProtocolRunKind::Cron,
+        RunKind::Subagent => ProtocolRunKind::Subagent,
     }
 }
 

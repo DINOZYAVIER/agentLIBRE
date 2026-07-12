@@ -10,9 +10,10 @@ use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent, HelloRequest,
     ProtocolError, ProtocolErrorCode, ProtocolRunState, RunCancelRequest, RunEventsEvent,
     RunEventsRequest, RunStatusEvent, RunStatusRequest, RunSubmitRequest, RunSubscribeRequest,
-    SessionClearRequest, SessionFinishRequest, SessionFinishedEvent, SessionListEvent,
-    SessionListRequest, SessionOpenRequest, SessionOpenedEvent, SessionStatusEvent,
-    SessionStatusRequest, SessionTranscriptEvent, SessionTranscriptRequest, TurnTerminalStatus,
+    RunTreeEvent, RunTreeRequest, SessionClearRequest, SessionFinishRequest, SessionFinishedEvent,
+    SessionListEvent, SessionListRequest, SessionOpenRequest, SessionOpenedEvent,
+    SessionStatusEvent, SessionStatusRequest, SessionTranscriptEvent, SessionTranscriptRequest,
+    TurnTerminalStatus,
 };
 
 #[cfg(unix)]
@@ -311,15 +312,22 @@ where
 
     pub fn run_status(&mut self, run_id: RunId) -> Result<RunStatusEvent, ClientError> {
         match self.single_response(DaemonRequestKind::RunStatus(RunStatusRequest { run_id }))? {
-            DaemonEventKind::RunStatus(status) => Ok(status),
+            DaemonEventKind::RunStatus(status) => Ok(*status),
             other => Err(unexpected("run_status", &other)),
         }
     }
 
     pub fn cancel_run(&mut self, run_id: RunId) -> Result<RunStatusEvent, ClientError> {
         match self.single_response(DaemonRequestKind::RunCancel(RunCancelRequest { run_id }))? {
-            DaemonEventKind::RunStatus(status) => Ok(status),
+            DaemonEventKind::RunStatus(status) => Ok(*status),
             other => Err(unexpected("run_status", &other)),
+        }
+    }
+
+    pub fn run_tree(&mut self, run_id: RunId) -> Result<RunTreeEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::RunTree(RunTreeRequest { run_id }))? {
+            DaemonEventKind::RunTree(tree) => Ok(tree),
+            other => Err(unexpected("run_tree", &other)),
         }
     }
 
@@ -475,6 +483,7 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::SessionTranscript(_) => "session_transcript",
         DaemonEventKind::RunAccepted(_) => "run_accepted",
         DaemonEventKind::RunStatus(_) => "run_status",
+        DaemonEventKind::RunTree(_) => "run_tree",
         DaemonEventKind::RunEvents(_) => "run_events",
         DaemonEventKind::RunSubscriptionStarted(_) => "run_subscription_started",
         DaemonEventKind::RunEvent(_) => "run_event",
@@ -625,10 +634,12 @@ mod tests {
 
     #[test]
     fn status_cancel_and_replay_use_run_requests() {
+        let status_run_id = run_id();
         let status = RunStatusEvent {
             session_id: Some(session_id()),
-            run_id: run_id(),
+            run_id: status_run_id.clone(),
             turn_id: Some(turn_id()),
+            run_kind: agl_protocol::ProtocolRunKind::Turn,
             state: ProtocolRunState::Running,
             usage: RunUsageEvent::default(),
             cancellation_requested: false,
@@ -640,13 +651,37 @@ mod tests {
             error_code: None,
             terminal_result: None,
             error_message: None,
+            parent_run_id: None,
+            root_run_id: status_run_id.clone(),
+            depth: 0,
+            subagent_id: None,
+            spawned_by_step_id: None,
+            child_spec_digest: None,
+            model_profile_digest: None,
+            result_delivered: false,
         };
         let transport = ScriptedTransport::with_events(vec![DaemonEvent::new(
             None,
-            DaemonEventKind::RunStatus(status.clone()),
+            DaemonEventKind::RunStatus(Box::new(status.clone())),
         )]);
         let mut client = AgentLibreClient::new(transport);
-        assert_eq!(client.run_status(run_id()).unwrap(), status);
+        assert_eq!(client.run_status(status_run_id).unwrap(), status);
+    }
+
+    #[test]
+    fn run_tree_uses_the_typed_tree_request() {
+        let requested_run_id = run_id();
+        let tree = RunTreeEvent {
+            requested_run_id: requested_run_id.clone(),
+            runs: Vec::new(),
+        };
+        let transport = ScriptedTransport::with_events(vec![DaemonEvent::new(
+            None,
+            DaemonEventKind::RunTree(tree.clone()),
+        )]);
+        let mut client = AgentLibreClient::new(transport);
+
+        assert_eq!(client.run_tree(requested_run_id).unwrap(), tree);
     }
 
     #[test]

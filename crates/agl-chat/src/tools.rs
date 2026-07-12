@@ -12,6 +12,7 @@ pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub workspace_root: &'a Path,
     pub permission_status: agl_tools::PermissionRuntimeStatus,
     pub screen_admitted_run: Option<RunId>,
+    pub delegation_handler: Option<crate::delegation::DelegationHandler>,
 }
 
 pub(crate) fn chat_extension_catalog() -> Result<ToolCatalog> {
@@ -98,6 +99,12 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         agl_host_tools::ScreenTools::new(config.store_root, config.screen_admitted_run),
         "builtin screen",
     )?;
+    runtime.register_handler(
+        CapabilityId::new(agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID)?,
+        config
+            .delegation_handler
+            .unwrap_or_else(crate::delegation::DelegationHandler::disabled),
+    )?;
 
     Ok(runtime)
 }
@@ -121,6 +128,7 @@ pub(crate) fn chat_tool_provider_declarations() -> Vec<ProviderDeclaration> {
         agl_tools::skills::declaration(),
         agl_tools::store::declaration(),
         agl_host_tools::screen::declaration(),
+        agl_capabilities::delegation_provider(),
     ]
 }
 
@@ -246,6 +254,7 @@ mod tests {
             workspace_root: &root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
             screen_admitted_run: None,
+            delegation_handler: None,
         })
         .unwrap();
 
@@ -360,6 +369,7 @@ mod tests {
             workspace_root: root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
             screen_admitted_run: None,
+            delegation_handler: None,
         })
         .unwrap()
     }
