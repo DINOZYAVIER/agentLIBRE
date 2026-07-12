@@ -25,6 +25,9 @@ pub enum StoreError {
     LeaseLost {
         resource: String,
     },
+    DelegationDenied {
+        code: &'static str,
+    },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Json(serde_json::Error),
@@ -72,6 +75,7 @@ impl fmt::Display for StoreError {
             Self::LeaseLost { resource } => {
                 write!(f, "lease for {resource} is no longer owned by this worker")
             }
+            Self::DelegationDenied { code } => write!(f, "delegation denied: {code}"),
             Self::Io(err) => write!(f, "{err}"),
             Self::Sqlite(err) => write!(f, "{err}"),
             Self::Json(err) => write!(f, "{err}"),

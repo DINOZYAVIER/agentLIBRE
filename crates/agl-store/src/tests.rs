@@ -237,6 +237,378 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
 }
 
 #[test]
+fn child_admission_is_atomic_clamped_and_replay_safe() {
+    let (_root, store) = open_temp_store("child-admission");
+    let (parent, _parent_lease, step, _step_lease) = running_delegation_step(&store, 1);
+    let mut draft = child_run_draft(&parent.run_id, &step.step_id);
+    draft.budget.model_output_tokens = 100;
+    draft.tree_budget.max_total_output_tokens = 40;
+
+    let admitted = store.admit_child_run_at(&draft, 5).unwrap();
+    assert!(!admitted.replayed);
+    assert_eq!(admitted.run.kind, RunKind::Subagent);
+    assert_eq!(admitted.run.session_id, None);
+    assert_eq!(admitted.run.turn_id, None);
+    assert_eq!(admitted.run.parent_run_id.as_ref(), Some(&parent.run_id));
+    assert_eq!(admitted.run.root_run_id, parent.run_id);
+    assert_eq!(admitted.run.depth, 1);
+    assert_eq!(admitted.run.budget.model_output_tokens, 40);
+
+    let root = store.run(&parent.run_id).unwrap().unwrap();
+    assert_eq!(root.delegation_budget, Some(draft.tree_budget.clone()));
+    assert_eq!(root.delegation_reserved_descendants, 1);
+    assert_eq!(root.delegation_reserved_output_tokens, 40);
+
+    let mut replay = draft.clone();
+    replay.run_id = RunId::generate();
+    let replayed = store.admit_child_run_at(&replay, 6).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.run.run_id, admitted.run.run_id);
+
+    replay.subagent_id = "forged".to_string();
+    assert!(matches!(
+        store.admit_child_run_at(&replay, 7),
+        Err(StoreError::DelegationDenied {
+            code: "spawn_replay_mismatch"
+        })
+    ));
+    assert_eq!(store.run_children(&parent.run_id).unwrap().len(), 1);
+    let tree = store.run_tree(&parent.run_id).unwrap();
+    assert_eq!(tree.len(), 2);
+    assert_eq!(tree[1].spawned_by_step_id.as_ref(), Some(&step.step_id));
+    assert_eq!(
+        tree[1].child_spec_digest.as_deref(),
+        Some(digest('b').as_str())
+    );
+}
+
+#[test]
+fn terminal_child_rolls_up_usage_and_is_delivered_once() {
+    let (_root, store) = open_temp_store("child-delivery");
+    let (parent, parent_lease, step, step_lease) = running_delegation_step(&store, 1);
+    let draft = child_run_draft(&parent.run_id, &step.step_id);
+    let child = store.admit_child_run_at(&draft, 5).unwrap().run;
+    store
+        .retry_run_step(
+            &parent_lease,
+            &step_lease,
+            100,
+            "delegation.child_waiting",
+            &json!({"phase": "waiting"}),
+            &RunUsage::default(),
+            &[],
+            6,
+        )
+        .unwrap();
+
+    let child_lease = store
+        .claim_next_run("child-owner", 7, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_lease.run_id, child.run_id);
+    let usage = RunUsage {
+        model_output_tokens: 17,
+        ..RunUsage::default()
+    };
+    store
+        .finish_run(
+            &child_lease,
+            RunState::Succeeded,
+            None,
+            &usage,
+            Some(&json!({"status": "answered", "answer": "done"})),
+            None,
+            None,
+            &[],
+            8,
+        )
+        .unwrap();
+
+    let root = store.run(&parent.run_id).unwrap().unwrap();
+    assert_eq!(root.state, RunState::Waiting);
+    assert_eq!(root.not_before_ms, Some(8));
+    assert_eq!(root.delegation_reserved_output_tokens, 0);
+    assert_eq!(root.delegation_used_output_tokens, 17);
+    let completed_child = store.run(&child.run_id).unwrap().unwrap();
+    assert!(completed_child.tree_usage_recorded_at_ms.is_some());
+    assert!(completed_child.result_delivered_at_ms.is_none());
+
+    let resumed = store
+        .claim_next_run("parent-owner-2", 9, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.run_id, parent.run_id);
+    let resumed_step = store
+        .claim_run_step(&resumed, &step.step_id, 109, 9)
+        .unwrap();
+    store
+        .complete_run_step(
+            &resumed,
+            &resumed_step,
+            RunStepState::Succeeded,
+            Some(&json!({"child_run_id": child.run_id, "status": "succeeded"})),
+            &json!({"phase": "resumed"}),
+            &RunUsage::default(),
+            &[],
+            None,
+            10,
+        )
+        .unwrap();
+    assert!(
+        store
+            .run(&child.run_id)
+            .unwrap()
+            .unwrap()
+            .result_delivered_at_ms
+            .is_some()
+    );
+    assert!(matches!(
+        store.complete_run_step(
+            &resumed,
+            &resumed_step,
+            RunStepState::Succeeded,
+            None,
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            None,
+            11,
+        ),
+        Err(StoreError::LeaseLost { .. })
+    ));
+}
+
+#[test]
+fn duplicate_child_spawn_race_creates_one_run() {
+    let (root, store) = open_temp_store("child-race");
+    let (parent, _parent_lease, step, _step_lease) = running_delegation_step(&store, 1);
+    let draft = child_run_draft(&parent.run_id, &step.step_id);
+    drop(store);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let root = root.path.clone();
+            let barrier = barrier.clone();
+            let mut draft = draft.clone();
+            draft.run_id = RunId::generate();
+            std::thread::spawn(move || {
+                let store = AglStore::open_current_at(root).unwrap();
+                barrier.wait();
+                store.admit_child_run_at(&draft, 5).unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let admissions = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(admissions[0].run.run_id, admissions[1].run.run_id);
+    assert_eq!(admissions.iter().filter(|entry| !entry.replayed).count(), 1);
+    let store = AglStore::open_current_at(&root).unwrap();
+    assert_eq!(store.run_children(&parent.run_id).unwrap().len(), 1);
+}
+
+#[test]
+fn cancellation_cascades_through_the_child_tree() {
+    let (_root, store) = open_temp_store("child-cancel-tree");
+    let (root, root_lease, root_step, root_step_lease) = running_delegation_step(&store, 1);
+    let child_draft = child_run_draft(&root.run_id, &root_step.step_id);
+    let child = store.admit_child_run_at(&child_draft, 5).unwrap().run;
+    store
+        .retry_run_step(
+            &root_lease,
+            &root_step_lease,
+            100,
+            "delegation.child_waiting",
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            6,
+        )
+        .unwrap();
+    let child_lease = store
+        .claim_next_run("child-owner", 7, 100)
+        .unwrap()
+        .unwrap();
+    let nested_step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: None,
+        effect_sequence: 1,
+        effect_kind: "capability_dispatch".to_string(),
+        delivery_class: EffectDeliveryClass::Idempotent,
+        request: json!({"subagent_id": "nested", "task": "work"}),
+    };
+    store
+        .publish_run_step(&child_lease, &json!({}), &nested_step, &[], 8)
+        .unwrap();
+    store
+        .claim_run_step(&child_lease, &nested_step.step_id, 108, 8)
+        .unwrap();
+    let mut grandchild_draft = child_run_draft(&child.run_id, &nested_step.step_id);
+    grandchild_draft.subagent_id = "nested".to_string();
+    grandchild_draft.tree_budget = child_draft.tree_budget.clone();
+    let grandchild = store.admit_child_run_at(&grandchild_draft, 9).unwrap().run;
+
+    let statuses = store
+        .request_run_tree_cancellation(&root.run_id, 10)
+        .unwrap();
+    assert_eq!(statuses.len(), 3);
+    assert_eq!(
+        store.run(&root.run_id).unwrap().unwrap().state,
+        RunState::Cancelled
+    );
+    let running_child = store.run(&child.run_id).unwrap().unwrap();
+    assert_eq!(running_child.state, RunState::Running);
+    assert!(running_child.cancellation_requested_at_ms.is_some());
+    assert_eq!(
+        store.run(&grandchild.run_id).unwrap().unwrap().state,
+        RunState::Cancelled
+    );
+
+    store
+        .finish_run(
+            &child_lease,
+            RunState::Cancelled,
+            None,
+            &RunUsage::default(),
+            None,
+            Some("run_cancelled"),
+            None,
+            &[],
+            11,
+        )
+        .unwrap();
+    let tree = store.run_tree(&root.run_id).unwrap();
+    assert!(tree.iter().all(|run| run.state == RunState::Cancelled));
+    let root = store.run(&root.run_id).unwrap().unwrap();
+    assert_eq!(root.delegation_reserved_output_tokens, 0);
+}
+
+#[test]
+fn tree_budget_denials_do_not_create_or_reserve_children() {
+    for (case, expected_code) in [
+        ("fanout", "fanout_exhausted"),
+        ("descendants", "descendants_exhausted"),
+        ("output", "output_tokens_exhausted"),
+    ] {
+        let (_root, store) = open_temp_store(&format!("child-budget-{case}"));
+        let (parent, parent_lease, first_step, _first_step_lease) =
+            running_delegation_step(&store, 1);
+        let mut first = child_run_draft(&parent.run_id, &first_step.step_id);
+        match case {
+            "fanout" => first.tree_budget.max_children_per_run = 1,
+            "descendants" => first.tree_budget.max_descendants = 1,
+            "output" => first.tree_budget.max_total_output_tokens = 40,
+            _ => unreachable!(),
+        }
+        store.admit_child_run_at(&first, 5).unwrap();
+
+        let second_step = RunStepDraft {
+            step_id: StepId::generate(),
+            turn_id: parent.turn_id.clone(),
+            effect_sequence: 2,
+            effect_kind: "capability_dispatch".to_string(),
+            delivery_class: EffectDeliveryClass::Idempotent,
+            request: json!({"subagent_id": "reviewer", "task": "second"}),
+        };
+        store
+            .publish_run_step(&parent_lease, &json!({}), &second_step, &[], 6)
+            .unwrap();
+        store
+            .claim_run_step(&parent_lease, &second_step.step_id, 107, 7)
+            .unwrap();
+        let mut second = child_run_draft(&parent.run_id, &second_step.step_id);
+        second.input = json!({"run_kind": "subagent", "task": "second"});
+        second.tree_budget = first.tree_budget.clone();
+
+        assert!(matches!(
+            store.admit_child_run_at(&second, 8),
+            Err(StoreError::DelegationDenied { code }) if code == expected_code
+        ));
+        assert_eq!(store.run_children(&parent.run_id).unwrap().len(), 1);
+        let root = store.run(&parent.run_id).unwrap().unwrap();
+        assert_eq!(root.delegation_reserved_descendants, 1);
+        assert_eq!(
+            root.delegation_reserved_output_tokens,
+            first.tree_budget.max_total_output_tokens.min(100)
+        );
+    }
+
+    let (_root, store) = open_temp_store("child-budget-timeout");
+    let (parent, _lease, step, _step_lease) = running_delegation_step(&store, 1);
+    let mut expired = child_run_draft(&parent.run_id, &step.step_id);
+    expired.tree_budget.timeout_ms = 3;
+    assert!(matches!(
+        store.admit_child_run_at(&expired, 5),
+        Err(StoreError::DelegationDenied {
+            code: "tree_timeout_exhausted"
+        })
+    ));
+    let root = store.run(&parent.run_id).unwrap().unwrap();
+    assert!(root.delegation_budget.is_none());
+    assert_eq!(root.delegation_reserved_descendants, 0);
+    assert_eq!(root.delegation_reserved_output_tokens, 0);
+}
+
+#[test]
+fn depth_budget_is_enforced_against_persisted_relationships() {
+    let (_root, store) = open_temp_store("child-budget-depth");
+    let (root, root_lease, root_step, root_step_lease) = running_delegation_step(&store, 1);
+    let mut child_draft = child_run_draft(&root.run_id, &root_step.step_id);
+    child_draft.tree_budget.max_depth = 1;
+    let child = store.admit_child_run_at(&child_draft, 5).unwrap().run;
+    store
+        .retry_run_step(
+            &root_lease,
+            &root_step_lease,
+            100,
+            "delegation.child_waiting",
+            &json!({}),
+            &RunUsage::default(),
+            &[],
+            6,
+        )
+        .unwrap();
+    let child_lease = store
+        .claim_next_run("child-owner", 7, 100)
+        .unwrap()
+        .unwrap();
+    let step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: None,
+        effect_sequence: 1,
+        effect_kind: "capability_dispatch".to_string(),
+        delivery_class: EffectDeliveryClass::Idempotent,
+        request: json!({"subagent_id": "nested", "task": "work"}),
+    };
+    store
+        .publish_run_step(&child_lease, &json!({}), &step, &[], 8)
+        .unwrap();
+    store
+        .claim_run_step(&child_lease, &step.step_id, 108, 8)
+        .unwrap();
+    let mut nested = child_run_draft(&child.run_id, &step.step_id);
+    nested.subagent_id = "nested".to_string();
+    nested.tree_budget = child_draft.tree_budget;
+    assert!(matches!(
+        store.admit_child_run_at(&nested, 9),
+        Err(StoreError::DelegationDenied {
+            code: "depth_exhausted"
+        })
+    ));
+    assert!(store.run_children(&child.run_id).unwrap().is_empty());
+    assert_eq!(
+        store
+            .run(&root.run_id)
+            .unwrap()
+            .unwrap()
+            .delegation_reserved_descendants,
+        1
+    );
+}
+
+#[test]
 fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
     let (_root, store) = open_temp_store("recovery");
     let safe = run_draft(None);
@@ -1166,6 +1538,76 @@ fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
         budget: RunBudget::default(),
         not_before_ms: None,
     }
+}
+
+fn running_delegation_step(
+    store: &AglStore,
+    admitted_at_ms: i64,
+) -> (DurableRunDraft, RunLease, RunStepDraft, StepLease) {
+    let parent = run_draft(Some(SessionId::generate()));
+    store.admit_run_at(&parent, admitted_at_ms).unwrap();
+    let lease = store
+        .claim_next_run("parent-owner", admitted_at_ms + 1, 1_000)
+        .unwrap()
+        .unwrap();
+    let step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: parent.turn_id.clone(),
+        effect_sequence: 1,
+        effect_kind: "capability_dispatch".to_string(),
+        delivery_class: EffectDeliveryClass::Idempotent,
+        request: json!({"subagent_id": "reviewer", "task": "review"}),
+    };
+    store
+        .publish_run_step(
+            &lease,
+            &json!({"phase": "delegate"}),
+            &step,
+            &[],
+            admitted_at_ms + 2,
+        )
+        .unwrap();
+    let step_lease = store
+        .claim_run_step(
+            &lease,
+            &step.step_id,
+            admitted_at_ms + 1_000,
+            admitted_at_ms + 3,
+        )
+        .unwrap();
+    (parent, lease, step, step_lease)
+}
+
+fn child_run_draft(parent_run_id: &RunId, step_id: &StepId) -> ChildRunDraft {
+    ChildRunDraft {
+        run_id: RunId::generate(),
+        parent_run_id: parent_run_id.clone(),
+        spawned_by_step_id: step_id.clone(),
+        subagent_id: "reviewer".to_string(),
+        input: json!({"run_kind": "subagent", "task": "review"}),
+        priority: 0,
+        effective_policy_hash: digest('a'),
+        budget: RunBudget {
+            wall_time_ms: 500,
+            model_input_tokens: 1_000,
+            model_output_tokens: 100,
+            model_attempts: 4,
+            capability_calls: 8,
+        },
+        child_spec_digest: digest('b'),
+        model_profile_digest: digest('c'),
+        tree_budget: DelegationTreeBudget {
+            max_depth: 3,
+            max_children_per_run: 4,
+            max_descendants: 8,
+            max_total_output_tokens: 1_000,
+            timeout_ms: 10_000,
+        },
+    }
+}
+
+fn digest(character: char) -> String {
+    format!("sha256:{}", character.to_string().repeat(64))
 }
 
 fn safe_event(
