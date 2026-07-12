@@ -641,6 +641,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         None,
+        RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
     assert!(inherited.contains(&fs_read));
@@ -652,6 +653,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
         ToolAccessMode::ReadOnly,
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::default()),
+        RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
     assert!(!empty_allow.contains(&fs_read));
@@ -670,12 +672,86 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
             [fs_read.clone()],
             [fs_read.clone()],
         )),
+        RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
     assert!(!denied.contains(&fs_read));
     assert_eq!(
         denied.exclusion(&fs_read).unwrap().reason,
         agl_capabilities::CapabilityExclusionReason::FunctionDenied
+    );
+}
+
+#[test]
+fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
+    let registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let delegate = CapabilityId::new(agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID).unwrap();
+
+    let disabled = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    assert!(!disabled.contains(&delegate));
+
+    let enabled = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary {
+            authority_ceiling: None,
+            delegation_enabled: true,
+        },
+    )
+    .unwrap();
+    assert!(enabled.contains(&delegate));
+
+    let explicitly_empty = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::default()),
+        RuntimeCapabilityBoundary {
+            authority_ceiling: None,
+            delegation_enabled: true,
+        },
+    )
+    .unwrap();
+    assert!(!explicitly_empty.contains(&delegate));
+    assert_eq!(
+        explicitly_empty.exclusion(&delegate).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+    );
+
+    let ceiling = BTreeSet::new();
+    let child_denied = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &[],
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary {
+            authority_ceiling: Some(&ceiling),
+            delegation_enabled: true,
+        },
+    )
+    .unwrap();
+    assert!(!child_denied.contains(&delegate));
+    assert_eq!(
+        child_denied.exclusion(&delegate).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::ParentAuthorityDenied
     );
 }
 
@@ -897,6 +973,7 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
         ToolAccessMode::ReadOnly,
         &snapshot,
         None,
+        RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
 
@@ -1297,6 +1374,9 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
 
 fn full_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
+    catalog
+        .register(agl_capabilities::delegation_provider())
+        .unwrap();
     agl_tools::guards::register(&mut catalog).unwrap();
     agl_tools::cron::register(&mut catalog).unwrap();
     agl_tools::fs::register(&mut catalog).unwrap();

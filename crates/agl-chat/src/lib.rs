@@ -1,3 +1,4 @@
+mod delegation;
 mod inference_client;
 mod options;
 mod prompt;

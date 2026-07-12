@@ -257,6 +257,39 @@ impl AglStore {
         rows.map(|row| safe_status(decode_run(row?)?)).collect()
     }
 
+    pub fn expire_delegation_trees(&self, now_ms: i64) -> Result<Vec<SafeRunStatus>> {
+        let roots = {
+            let sql = format!(
+                "SELECT {RUN_COLUMNS} FROM runs
+                 WHERE parent_run_id IS NULL AND delegation_budget_json IS NOT NULL
+                 ORDER BY created_at_ms, rowid"
+            );
+            let mut statement = self.conn.prepare(&sql)?;
+            let rows = statement.query_map([], read_run_row)?;
+            rows.map(|row| decode_run(row?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut expired = Vec::new();
+        for root in roots {
+            let budget = root
+                .delegation_budget
+                .as_ref()
+                .expect("query selected runs with a delegation budget");
+            let deadline = root
+                .created_at_ms
+                .saturating_add(i64::try_from(budget.timeout_ms).unwrap_or(i64::MAX));
+            if deadline > now_ms {
+                continue;
+            }
+            let subtree = load_run_subtree(&self.conn, &root.run_id)?;
+            if subtree.iter().all(|run| run.state.is_terminal()) {
+                continue;
+            }
+            expired.extend(self.request_run_tree_cancellation(&root.run_id, now_ms)?);
+        }
+        Ok(expired)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn admit_idempotent_run(
         &self,

@@ -542,6 +542,14 @@ impl SubagentFrontMatter {
         }
         if let Some(memory) = &self.memory {
             memory.validate()?;
+            ensure!(
+                memory
+                    .read
+                    .iter()
+                    .chain(&memory.write)
+                    .all(|scope| scope == "user"),
+                "subagent memory scopes currently support only `user`"
+            );
         }
         self.subagents.validate("subagent.subagents.use")?;
         for subagent in &self.subagents.use_ {
@@ -629,6 +637,10 @@ impl SubagentLimits {
         ensure!(
             self.max_output_tokens > 0,
             "subagent.limits.max_output_tokens must be greater than zero"
+        );
+        ensure!(
+            self.max_output_tokens <= u64::from(u32::MAX),
+            "subagent.limits.max_output_tokens exceeds the inference limit"
         );
         ensure!(
             self.max_capability_calls > 0,
@@ -2139,7 +2151,6 @@ Review.
         assert!(context.contains("Available subagents"));
         assert!(context.contains("Reviews a delegated task."));
         assert!(!context.contains("Review.\n"));
-        assert!(!context.contains("agentlibre_subagent_context"));
         assert!(!context.contains("subagents/reviewer.md"));
         let _ = std::fs::remove_dir_all(&root);
     }

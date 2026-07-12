@@ -4,10 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agl_capabilities::CapabilityId;
+use agl_config::LocalInferenceConfig;
 use agl_content::Content;
+use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, RequestId, SessionId};
 use agl_loop::{EffectOutcome, TurnEffect, TurnEffectResult};
-use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
+use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunKind, RunState, RunUsage};
 use agl_supervisor::{
     DriverEffectError, DriverSnapshot, DurableRunDriver, DurableRunDriverFactory,
     EffectExecutionContext, Result as SupervisorResult, RunCancellation, SupervisorEffect,
@@ -16,14 +19,35 @@ use agl_supervisor::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{ChatService, ChatTurnExecution, ChatTurnStatus};
+use crate::{ChatService, ChatTurnExecution, ChatTurnStatus, service::DurableTurnResume};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "run_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ChatRunInput {
+    Root {
+        content: Content,
+        request_id: Option<RequestId>,
+        options: crate::ChatOptions,
+        delegation_plan: Option<RuntimeDelegationPlan>,
+    },
+    Subagent {
+        task: Content,
+        execution_session_id: SessionId,
+        execution_turn_id: agl_ids::TurnId,
+        workspace_root: PathBuf,
+        artifact_root: PathBuf,
+        inference_config: LocalInferenceConfig,
+        delegation_plan: RuntimeDelegationPlan,
+        authority_ceiling: BTreeSet<CapabilityId>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ChatRunInput {
-    pub content: Content,
-    pub request_id: Option<RequestId>,
-    pub options: crate::ChatOptions,
+struct ChatDriverCheckpoint {
+    turn: agl_loop::TurnCheckpoint,
+    effective_policy_hash: String,
+    delegation_authority_ceiling: BTreeSet<CapabilityId>,
 }
 
 #[derive(Clone)]
@@ -104,62 +128,174 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
         run: &DurableRunRecord,
         cancellation: RunCancellation,
     ) -> SupervisorResult<Box<dyn DurableRunDriver>> {
-        let session_id = run
-            .session_id
-            .clone()
-            .ok_or_else(|| SupervisorError::Driver("chat runs require a session ID".to_string()))?;
-        let turn_id = run
-            .turn_id
-            .clone()
-            .ok_or_else(|| SupervisorError::Driver("chat runs require a turn ID".to_string()))?;
         let input: ChatRunInput = serde_json::from_value(run.input.clone())?;
-        let mut service = self
-            .services
-            .lock()
-            .map_err(|error| SupervisorError::Driver(format!("chat service pool poisoned: {error}")))?
-            .remove(&session_id)
-            .map(Ok)
-            .unwrap_or_else(|| {
-                let runtime = self.runtime.as_ref().ok_or_else(|| {
-                    SupervisorError::Driver(format!(
-                        "chat session {session_id} is not registered and no recovery runtime is configured"
-                    ))
+        let (turn_id, request_id, content, mut service, expected_policy_hash) = match input {
+            ChatRunInput::Root {
+                content,
+                request_id,
+                mut options,
+                delegation_plan,
+            } => {
+                if run.kind == RunKind::Subagent {
+                    return Err(SupervisorError::Driver(
+                        "subagent run cannot use root chat input".to_string(),
+                    ));
+                }
+                let session_id = run.session_id.clone().ok_or_else(|| {
+                    SupervisorError::Driver("root chat runs require a session ID".to_string())
                 })?;
-                let inference_client = self.inference_client.clone().ok_or_else(|| {
-                    SupervisorError::Driver("chat recovery inference client is missing".to_string())
+                let turn_id = run.turn_id.clone().ok_or_else(|| {
+                    SupervisorError::Driver("root chat runs require a turn ID".to_string())
                 })?;
-                let mut options = input.options.clone();
-                options.session_id = Some(session_id.clone());
-                options.new_session = false;
-                ChatService::open(options, runtime, inference_client)
-                    .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
-            })?;
+                let mut service = self
+                    .services
+                    .lock()
+                    .map_err(|error| {
+                        SupervisorError::Driver(format!("chat service pool poisoned: {error}"))
+                    })?
+                    .remove(&session_id)
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        let runtime = self.runtime.as_ref().ok_or_else(|| {
+                            SupervisorError::Driver(format!(
+                                "chat session {session_id} is not registered and no recovery runtime is configured"
+                            ))
+                        })?;
+                        let inference_client = self.inference_client.clone().ok_or_else(|| {
+                            SupervisorError::Driver(
+                                "chat recovery inference client is missing".to_string(),
+                            )
+                        })?;
+                        options.session_id = Some(session_id.clone());
+                        options.new_session = false;
+                        ChatService::open(options, runtime, inference_client)
+                            .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
+                    })?;
+                service.install_root_delegation_plan(delegation_plan);
+                (turn_id, request_id, content, service, None)
+            }
+            ChatRunInput::Subagent {
+                task,
+                execution_session_id,
+                execution_turn_id,
+                workspace_root,
+                artifact_root,
+                inference_config,
+                delegation_plan,
+                authority_ceiling,
+            } => {
+                if run.kind != RunKind::Subagent
+                    || run.session_id.is_some()
+                    || run.turn_id.is_some()
+                {
+                    return Err(SupervisorError::Driver(
+                        "subagent chat input requires a sessionless child run".to_string(),
+                    ));
+                }
+                let subagent_id = run.subagent_id.as_deref().ok_or_else(|| {
+                    SupervisorError::Driver("child run has no subagent ID".to_string())
+                })?;
+                let spec = delegation_plan
+                    .subagent_specs
+                    .get(subagent_id)
+                    .ok_or_else(|| {
+                        SupervisorError::Driver(format!(
+                            "persisted delegation plan has no subagent `{subagent_id}`"
+                        ))
+                    })?;
+                if run.child_spec_digest.as_deref() != Some(spec.spec_digest.as_str()) {
+                    return Err(SupervisorError::Driver(
+                        "child specification digest differs from its admitted snapshot".to_string(),
+                    ));
+                }
+                let config_digest =
+                    crate::delegation::inference_config_digest(&inference_config)
+                        .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+                if run.model_profile_digest.as_deref() != Some(config_digest.as_str()) {
+                    return Err(SupervisorError::Driver(
+                        "child model profile digest differs from its admitted snapshot".to_string(),
+                    ));
+                }
+                let spec = spec.clone();
+                let service = self
+                    .services
+                    .lock()
+                    .map_err(|error| {
+                        SupervisorError::Driver(format!("chat service pool poisoned: {error}"))
+                    })?
+                    .remove(&execution_session_id)
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        let runtime = self.runtime.as_ref().ok_or_else(|| {
+                            SupervisorError::Driver(
+                                "subagent recovery runtime is not configured".to_string(),
+                            )
+                        })?;
+                        let inference_client = self.inference_client.clone().ok_or_else(|| {
+                            SupervisorError::Driver(
+                                "subagent recovery inference client is missing".to_string(),
+                            )
+                        })?;
+                        ChatService::open_subagent(
+                            crate::session::SubagentSessionConfig {
+                                inference_config,
+                                spec,
+                                delegation_plan,
+                                authority_ceiling,
+                                artifact_root,
+                                workspace_root,
+                                execution_session_id,
+                            },
+                            runtime,
+                            inference_client,
+                        )
+                        .map_err(|error| SupervisorError::Driver(format!("{error:#}")))
+                    })?;
+                (
+                    execution_turn_id,
+                    None,
+                    task,
+                    service,
+                    run.effective_policy_hash.clone(),
+                )
+            }
+        };
 
-        let execution = if let Some(checkpoint) = &run.checkpoint {
-            let checkpoint = serde_json::from_value(checkpoint.clone())?;
+        let (execution, checkpoint_policy_hash) = if let Some(checkpoint) = &run.checkpoint {
+            let checkpoint: ChatDriverCheckpoint = serde_json::from_value(checkpoint.clone())?;
             let store = AglStore::open_current_at(&self.store_root)?;
             let event_sequence = store.latest_run_event_sequence(&run.run_id)?;
             let attempt_ids = durable_attempt_ids(&store, &run.run_id)?;
-            service
-                .resume_user_turn_from_checkpoint(
-                    run.run_id.clone(),
+            let execution = service
+                .resume_user_turn_from_checkpoint(DurableTurnResume {
+                    run_id: run.run_id.clone(),
                     turn_id,
-                    input.request_id,
-                    checkpoint,
+                    request_id,
+                    checkpoint: checkpoint.turn,
                     event_sequence,
                     attempt_ids,
-                )
-                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?
+                    delegation_authority_ceiling: checkpoint.delegation_authority_ceiling,
+                })
+                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+            (execution, Some(checkpoint.effective_policy_hash))
         } else {
-            service
-                .start_user_turn_with_ids(
-                    run.run_id.clone(),
-                    turn_id,
-                    input.request_id,
-                    input.content,
-                )
-                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?
+            let execution = service
+                .start_user_turn_with_ids(run.run_id.clone(), turn_id, request_id, content)
+                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+            (execution, None)
         };
+        for (expected_policy_hash, label) in [
+            (expected_policy_hash.as_deref(), "admitted subagent"),
+            (checkpoint_policy_hash.as_deref(), "durable checkpoint"),
+        ] {
+            if let Some(expected_policy_hash) = expected_policy_hash
+                && service.effective_policy_hash() != expected_policy_hash
+            {
+                return Err(SupervisorError::Driver(format!(
+                    "effective capability policy differs from the {label} snapshot"
+                )));
+            }
+        }
         let inference_cancellation = execution.cancellation_handle();
         let bridge_finished = Arc::new(AtomicBool::new(false));
         let watcher_finished = bridge_finished.clone();
@@ -257,7 +393,20 @@ impl DurableRunDriver for ChatSupervisorDriver {
                 })
             })
             .transpose()?;
-        let checkpoint = serde_json::to_value(self.execution.checkpoint())?;
+        let checkpoint = serde_json::to_value(ChatDriverCheckpoint {
+            turn: self.execution.checkpoint(),
+            effective_policy_hash: self
+                .service
+                .as_ref()
+                .expect("chat driver retains its service")
+                .effective_policy_hash(),
+            delegation_authority_ceiling: self
+                .service
+                .as_ref()
+                .expect("chat driver retains its service")
+                .delegation_authority_ceiling()
+                .clone(),
+        })?;
         Ok(DriverSnapshot {
             checkpoint,
             pending_effect,
@@ -281,6 +430,12 @@ impl DurableRunDriver for ChatSupervisorDriver {
             .as_mut()
             .expect("chat driver retains its service");
         let pending_kind = self.execution.pending_effect().map(TurnEffect::kind);
+        let pending_is_delegation = matches!(
+            self.execution.pending_effect(),
+            Some(TurnEffect::CapabilityDispatch { request, .. })
+                if request.capability_id.as_str()
+                    == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+        );
         let tokens_before = service.model_token_usage();
         if !self.cancellation.is_cancelled() {
             match pending_kind {
@@ -288,7 +443,9 @@ impl DurableRunDriver for ChatSupervisorDriver {
                     self.usage.model_attempts = self.usage.model_attempts.saturating_add(1);
                 }
                 Some(agl_loop::TurnEffectKind::CapabilityDispatch) => {
-                    self.usage.capability_calls = self.usage.capability_calls.saturating_add(1);
+                    if !pending_is_delegation || context.attempt == 1 {
+                        self.usage.capability_calls = self.usage.capability_calls.saturating_add(1);
+                    }
                 }
                 Some(
                     agl_loop::TurnEffectKind::HookBatch
@@ -311,6 +468,12 @@ impl DurableRunDriver for ChatSupervisorDriver {
             .usage
             .model_output_tokens
             .saturating_add(tokens_after.1.saturating_sub(tokens_before.1));
+        if pending_is_delegation && crate::delegation::result_is_waiting(&result) {
+            return Err(DriverEffectError::durable_wait(
+                "delegation.child_waiting",
+                "delegated child run has not reached a terminal state",
+            ));
+        }
         if let Some(failure) = retryable_failure(&result) {
             return Err(DriverEffectError::new(
                 failure.code.as_str(),
@@ -336,6 +499,14 @@ impl Drop for ChatSupervisorDriver {
         let Some(service) = self.service.take() else {
             return;
         };
+        let mut service = service;
+        let terminal = self.execution.is_terminal();
+        if !terminal {
+            service.suspend_durable_turn();
+        }
+        if terminal && !service.is_session_scoped() {
+            return;
+        }
         let session_id = service.session_id().clone();
         if let Ok(mut pool) = self.pool.lock() {
             pool.insert(session_id, service);
