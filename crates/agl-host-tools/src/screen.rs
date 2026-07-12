@@ -360,18 +360,14 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ashpd::Result<T>> + Send + 'static,
 {
+    let worker = portal_worker_sender()?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("agl-screen-portal".to_string())
-        .spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| ScreenCaptureError::Portal(error.to_string()))
-                .and_then(|runtime| runtime.block_on(task()).map_err(map_portal_error));
+    worker
+        .send(Box::new(move |runtime| {
+            let result = runtime.block_on(task()).map_err(map_portal_error);
             let _ = sender.send(result);
-        })
-        .map_err(|error| ScreenCaptureError::Portal(error.to_string()))?;
+        }))
+        .map_err(|_| ScreenCaptureError::Portal("portal worker stopped".to_string()))?;
     match timeout {
         Some(timeout) => receiver
             .recv_timeout(timeout)
@@ -380,6 +376,35 @@ where
             .recv()
             .map_err(|_| ScreenCaptureError::Portal("portal worker stopped".to_string()))?,
     }
+}
+
+#[cfg(target_os = "linux")]
+type PortalJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
+
+#[cfg(target_os = "linux")]
+fn portal_worker_sender() -> Result<std::sync::mpsc::SyncSender<PortalJob>, ScreenCaptureError> {
+    static WORKER: OnceLock<Result<std::sync::mpsc::SyncSender<PortalJob>, String>> =
+        OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            let (sender, receiver) = std::sync::mpsc::sync_channel::<PortalJob>(8);
+            std::thread::Builder::new()
+                .name("agl-screen-portal".to_string())
+                .spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        job(&runtime);
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(sender)
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| ScreenCaptureError::Portal(error.clone()))
 }
 
 #[cfg(target_os = "linux")]
@@ -623,5 +648,20 @@ mod tests {
             normalize_image(&vec![0; MAX_SOURCE_BYTES + 1]).unwrap_err(),
             ScreenCaptureError::SourceTooLarge
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portal_tasks_reuse_one_worker_runtime() {
+        let first = run_portal_task(Some(Duration::from_secs(1)), || async {
+            Ok::<_, ashpd::Error>(std::thread::current().id())
+        })
+        .unwrap();
+        let second = run_portal_task(Some(Duration::from_secs(1)), || async {
+            Ok::<_, ashpd::Error>(std::thread::current().id())
+        })
+        .unwrap();
+
+        assert_eq!(first, second);
     }
 }
