@@ -5,16 +5,21 @@ use agl_ids::{RunId, SessionId, StepId, TurnId};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::{
-    AglStore, DurableRunAdmission, DurableRunDraft, DurableRunRecord, EffectDeliveryClass,
-    IdempotencyStatus, RecoveryReport, Result, RunLease, RunState, RunStepDraft, RunStepRecord,
-    RunStepState, RunUsage, SafeRunStatus, StepLease, StoreError,
+    AglStore, ChildRunAdmission, ChildRunDraft, DurableRunAdmission, DurableRunDraft,
+    DurableRunRecord, EffectDeliveryClass, IdempotencyStatus, RecoveryReport, Result, RunLease,
+    RunState, RunStepDraft, RunStepRecord, RunStepState, RunUsage, SafeRunStatus, StepLease,
+    StoreError,
 };
 
 const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, input_json,
     checkpoint_json, effective_policy_hash, budget_json, usage_json, lease_owner,
     lease_generation, lease_expires_at_ms, cancellation_requested_at_ms, attempts,
     not_before_ms, created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
-    terminal_result_json, error_code, error_message";
+    terminal_result_json, error_code, error_message, parent_run_id, root_run_id, depth,
+    subagent_id, spawned_by_step_id, child_spec_digest, model_profile_digest,
+    result_delivered_at_ms, tree_usage_recorded_at_ms, delegation_budget_json,
+    delegation_reserved_descendants, delegation_reserved_output_tokens,
+    delegation_used_output_tokens";
 
 const STEP_COLUMNS: &str = "id, run_id, turn_id, effect_sequence, effect_kind,
     delivery_class, request_json, result_json, state, attempts, lease_owner,
@@ -32,6 +37,224 @@ impl AglStore {
             insert_run(tx, draft, now_ms)?;
             load_run(tx, &draft.run_id)
         })
+    }
+
+    pub fn admit_child_run(&self, draft: &ChildRunDraft) -> Result<ChildRunAdmission> {
+        self.admit_child_run_at(draft, unix_millis())
+    }
+
+    pub fn admit_child_run_at(
+        &self,
+        draft: &ChildRunDraft,
+        now_ms: i64,
+    ) -> Result<ChildRunAdmission> {
+        validate_child_run_draft(draft)?;
+        self.transaction(|tx| {
+            if let Some(existing) = load_child_by_spawn_step(tx, &draft.spawned_by_step_id)? {
+                validate_child_replay(tx, draft, &existing)?;
+                return Ok(ChildRunAdmission {
+                    run: existing,
+                    replayed: true,
+                });
+            }
+
+            let parent = load_run(tx, &draft.parent_run_id)?;
+            if parent.state != RunState::Running || parent.cancellation_requested_at_ms.is_some() {
+                return delegation_denied("parent_not_running");
+            }
+            let step = load_step(tx, &draft.spawned_by_step_id)?;
+            if step.run_id != parent.run_id
+                || step.state != RunStepState::Running
+                || step.effect_kind != "capability_dispatch"
+            {
+                return delegation_denied("invalid_spawn_step");
+            }
+
+            let root = load_run(tx, &parent.root_run_id)?;
+            if root.parent_run_id.is_some()
+                || root.root_run_id != root.run_id
+                || root.cancellation_requested_at_ms.is_some()
+            {
+                return delegation_denied("invalid_root_run");
+            }
+            match &root.delegation_budget {
+                Some(existing) if existing != &draft.tree_budget => {
+                    return delegation_denied("tree_budget_mismatch");
+                }
+                Some(_) => {}
+                None => {
+                    tx.execute(
+                        "UPDATE runs SET delegation_budget_json = ?1, updated_at_ms = ?2
+                         WHERE id = ?3 AND delegation_budget_json IS NULL",
+                        params![
+                            serde_json::to_string(&draft.tree_budget)?,
+                            now_ms,
+                            root.run_id.as_str()
+                        ],
+                    )?;
+                }
+            }
+
+            let depth = parent
+                .depth
+                .checked_add(1)
+                .ok_or(StoreError::DelegationDenied {
+                    code: "depth_exhausted",
+                })?;
+            if depth > draft.tree_budget.max_depth {
+                return delegation_denied("depth_exhausted");
+            }
+            let child_count: u32 = tx.query_row(
+                "SELECT COUNT(*) FROM runs WHERE parent_run_id = ?1",
+                [parent.run_id.as_str()],
+                |row| row.get(0),
+            )?;
+            if child_count >= draft.tree_budget.max_children_per_run {
+                return delegation_denied("fanout_exhausted");
+            }
+            if root.delegation_reserved_descendants >= draft.tree_budget.max_descendants {
+                return delegation_denied("descendants_exhausted");
+            }
+
+            let tree_deadline_ms = root
+                .created_at_ms
+                .saturating_add(i64::try_from(draft.tree_budget.timeout_ms).unwrap_or(i64::MAX));
+            let tree_wall_remaining = tree_deadline_ms.saturating_sub(now_ms);
+            if tree_wall_remaining <= 0 {
+                return delegation_denied("tree_timeout_exhausted");
+            }
+
+            let parent_output_remaining = parent
+                .budget
+                .model_output_tokens
+                .saturating_sub(parent.usage.model_output_tokens)
+                .saturating_sub(parent.delegation_used_output_tokens)
+                .saturating_sub(parent.delegation_reserved_output_tokens);
+            let tree_output_remaining = draft
+                .tree_budget
+                .max_total_output_tokens
+                .saturating_sub(root.delegation_used_output_tokens)
+                .saturating_sub(root.delegation_reserved_output_tokens);
+            let parent_wall_remaining = parent
+                .budget
+                .wall_time_ms
+                .saturating_sub(parent.usage.wall_time_ms);
+            let parent_input_remaining = parent
+                .budget
+                .model_input_tokens
+                .saturating_sub(parent.usage.model_input_tokens);
+            let parent_attempts_remaining = parent
+                .budget
+                .model_attempts
+                .saturating_sub(parent.usage.model_attempts);
+            let parent_calls_remaining = parent
+                .budget
+                .capability_calls
+                .saturating_sub(parent.usage.capability_calls);
+
+            let mut budget = draft.budget.clone();
+            budget.wall_time_ms = budget
+                .wall_time_ms
+                .min(u64::try_from(tree_wall_remaining).unwrap_or_default())
+                .min(parent_wall_remaining);
+            budget.model_input_tokens = budget.model_input_tokens.min(parent_input_remaining);
+            budget.model_output_tokens = budget
+                .model_output_tokens
+                .min(parent_output_remaining)
+                .min(tree_output_remaining);
+            budget.model_attempts = budget.model_attempts.min(parent_attempts_remaining);
+            budget.capability_calls = budget.capability_calls.min(parent_calls_remaining);
+            if budget.wall_time_ms == 0 {
+                return delegation_denied("wall_time_exhausted");
+            }
+            if budget.model_input_tokens == 0 {
+                return delegation_denied("model_input_exhausted");
+            }
+            if budget.model_output_tokens == 0 {
+                return delegation_denied("output_tokens_exhausted");
+            }
+            if budget.model_attempts == 0 {
+                return delegation_denied("model_attempts_exhausted");
+            }
+            if budget.capability_calls == 0 {
+                return delegation_denied("capability_calls_exhausted");
+            }
+
+            tx.execute(
+                "INSERT INTO runs
+                 (id, session_id, turn_id, kind, state, priority, input_json, checkpoint_json,
+                  effective_policy_hash, budget_json, usage_json, lease_owner, lease_generation,
+                  lease_expires_at_ms, cancellation_requested_at_ms, attempts, not_before_ms,
+                  created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
+                  terminal_result_json, error_code, error_message, parent_run_id, root_run_id,
+                  depth, subagent_id, spawned_by_step_id, child_spec_digest,
+                  model_profile_digest)
+                 VALUES (?1, NULL, NULL, 'subagent', 'queued', ?2, ?3, NULL, ?4, ?5, ?6,
+                         NULL, 0, NULL, NULL, 0, NULL, ?7, ?7, NULL, NULL, NULL, NULL, NULL,
+                         ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    draft.run_id.as_str(),
+                    draft.priority,
+                    serde_json::to_string(&draft.input)?,
+                    draft.effective_policy_hash,
+                    serde_json::to_string(&budget)?,
+                    serde_json::to_string(&RunUsage::default())?,
+                    now_ms,
+                    parent.run_id.as_str(),
+                    root.run_id.as_str(),
+                    depth,
+                    draft.subagent_id,
+                    draft.spawned_by_step_id.as_str(),
+                    draft.child_spec_digest,
+                    draft.model_profile_digest,
+                ],
+            )?;
+            tx.execute(
+                "UPDATE runs
+                 SET delegation_reserved_descendants = delegation_reserved_descendants + 1,
+                     updated_at_ms = ?1
+                 WHERE id = ?2",
+                params![now_ms, root.run_id.as_str()],
+            )?;
+            reserve_output_on_ancestors(tx, &draft.run_id, budget.model_output_tokens, now_ms)?;
+
+            Ok(ChildRunAdmission {
+                run: load_run(tx, &draft.run_id)?,
+                replayed: false,
+            })
+        })
+    }
+
+    pub fn child_run_by_spawn_step(&self, step_id: &StepId) -> Result<Option<DurableRunRecord>> {
+        load_child_by_spawn_step(&self.conn, step_id)
+    }
+
+    pub fn run_children(&self, parent_run_id: &RunId) -> Result<Vec<DurableRunRecord>> {
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE parent_run_id = ?1 ORDER BY created_at_ms, rowid"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map([parent_run_id.as_str()], read_run_row)?;
+        rows.map(|row| decode_run(row?)).collect()
+    }
+
+    pub fn run_tree(&self, run_id: &RunId) -> Result<Vec<SafeRunStatus>> {
+        load_run(&self.conn, run_id)?;
+        let sql = format!(
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT id FROM runs WHERE id = ?1
+                 UNION ALL
+                 SELECT child.id FROM runs child
+                 JOIN subtree parent ON child.parent_run_id = parent.id
+             )
+             SELECT {RUN_COLUMNS} FROM runs
+             WHERE id IN (SELECT id FROM subtree)
+             ORDER BY depth, created_at_ms, rowid"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map([run_id.as_str()], read_run_row)?;
+        rows.map(|row| safe_status(decode_run(row?)?)).collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -270,38 +493,88 @@ impl AglStore {
     }
 
     pub fn request_run_cancellation(&self, run_id: &RunId, now_ms: i64) -> Result<SafeRunStatus> {
+        self.request_run_tree_cancellation(run_id, now_ms)?
+            .into_iter()
+            .find(|status| &status.run_id == run_id)
+            .ok_or_else(|| StoreError::NotFound {
+                resource: format!("run {run_id}"),
+            })
+    }
+
+    pub fn request_run_tree_cancellation(
+        &self,
+        run_id: &RunId,
+        now_ms: i64,
+    ) -> Result<Vec<SafeRunStatus>> {
         self.transaction(|tx| {
-            let run = load_run(tx, run_id)?;
-            if run.state.is_terminal() {
-                return safe_status(run);
-            }
-            let (state, finished_at_ms) = match run.state {
-                RunState::Queued | RunState::Waiting => (RunState::Cancelled, Some(now_ms)),
-                RunState::Running => (RunState::Running, None),
-                terminal => return safe_status_with_state(run, terminal),
-            };
+            load_run(tx, run_id)?;
             tx.execute(
-                "UPDATE runs
-                 SET state = ?1, cancellation_requested_at_ms = COALESCE(cancellation_requested_at_ms, ?2),
-                     finished_at_ms = COALESCE(finished_at_ms, ?3),
-                     lease_owner = CASE WHEN ?1 = 'cancelled' THEN NULL ELSE lease_owner END,
-                     lease_expires_at_ms = CASE WHEN ?1 = 'cancelled' THEN NULL ELSE lease_expires_at_ms END,
+                "WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM runs WHERE id = ?1
+                     UNION ALL
+                     SELECT child.id FROM runs child
+                     JOIN subtree parent ON child.parent_run_id = parent.id
+                 )
+                 UPDATE runs
+                 SET state = CASE
+                         WHEN state IN ('queued', 'waiting') THEN 'cancelled'
+                         ELSE state
+                     END,
+                     cancellation_requested_at_ms = COALESCE(cancellation_requested_at_ms, ?2),
+                     finished_at_ms = CASE
+                         WHEN state IN ('queued', 'waiting') THEN COALESCE(finished_at_ms, ?2)
+                         ELSE finished_at_ms
+                     END,
+                     lease_owner = CASE
+                         WHEN state IN ('queued', 'waiting') THEN NULL
+                         ELSE lease_owner
+                     END,
+                     lease_expires_at_ms = CASE
+                         WHEN state IN ('queued', 'waiting') THEN NULL
+                         ELSE lease_expires_at_ms
+                     END,
                      updated_at_ms = ?2
-                 WHERE id = ?4",
-                params![state.as_str(), now_ms, finished_at_ms, run_id.as_str()],
+                 WHERE id IN (SELECT id FROM subtree)
+                   AND state NOT IN ('succeeded', 'failed', 'cancelled')",
+                params![run_id.as_str(), now_ms],
             )?;
-            if state == RunState::Cancelled {
-                tx.execute(
-                    "UPDATE run_steps
-                     SET state = 'cancelled', lease_owner = NULL, lease_expires_at_ms = NULL,
-                         error_code = COALESCE(error_code, 'run_cancelled'),
-                         updated_at_ms = ?2, finished_at_ms = ?2
-                     WHERE run_id = ?1 AND state IN ('pending', 'running')",
-                    params![run_id.as_str(), now_ms],
-                )?;
-                finish_linked_idempotency(tx, run_id, state, Some("run_cancelled"), now_ms)?;
+            tx.execute(
+                "UPDATE run_steps
+                 SET state = 'cancelled', lease_owner = NULL, lease_expires_at_ms = NULL,
+                     error_code = COALESCE(error_code, 'run_cancelled'),
+                     updated_at_ms = ?2, finished_at_ms = ?2
+                 WHERE run_id IN (
+                     WITH RECURSIVE subtree(id) AS (
+                         SELECT id FROM runs WHERE id = ?1
+                         UNION ALL
+                         SELECT child.id FROM runs child
+                         JOIN subtree parent ON child.parent_run_id = parent.id
+                     )
+                     SELECT id FROM subtree
+                 )
+                   AND state IN ('pending', 'running')
+                   AND EXISTS (
+                       SELECT 1 FROM runs cancelled
+                       WHERE cancelled.id = run_steps.run_id
+                         AND cancelled.state = 'cancelled'
+                   )",
+                params![run_id.as_str(), now_ms],
+            )?;
+
+            let cancelled = load_run_subtree(tx, run_id)?;
+            for run in &cancelled {
+                if run.state == RunState::Cancelled {
+                    finish_linked_idempotency(
+                        tx,
+                        &run.run_id,
+                        RunState::Cancelled,
+                        Some("run_cancelled"),
+                        now_ms,
+                    )?;
+                    record_terminal_child_usage(tx, &run.run_id, now_ms)?;
+                }
             }
-            safe_status(load_run(tx, run_id)?)
+            cancelled.into_iter().map(safe_status).collect()
         })
     }
 
@@ -446,6 +719,24 @@ impl AglStore {
                 ],
             )?;
             require_fenced_change(changed, format!("run {}", run_lease.run_id))?;
+            if state == RunStepState::Succeeded
+                && let Some(child) = load_child_by_spawn_step(tx, &step_lease.step_id)?
+            {
+                if child.parent_run_id.as_ref() != Some(&run_lease.run_id)
+                    || !child.state.is_terminal()
+                    || child.tree_usage_recorded_at_ms.is_none()
+                {
+                    return delegation_denied("child_result_not_ready");
+                }
+                let changed = tx.execute(
+                    "UPDATE runs SET result_delivered_at_ms = ?1, updated_at_ms = ?1
+                     WHERE id = ?2 AND result_delivered_at_ms IS NULL",
+                    params![now_ms, child.run_id.as_str()],
+                )?;
+                if changed != 1 {
+                    return delegation_denied("child_result_already_delivered");
+                }
+            }
             append_events(tx, &run_lease.run_id, events)?;
             load_step(tx, &step_lease.step_id)
         })
@@ -556,6 +847,7 @@ impl AglStore {
                     params![lease.run_id.as_str(), now_ms],
                 )?;
             }
+            record_terminal_child_usage(tx, &lease.run_id, now_ms)?;
             append_events(tx, &lease.run_id, events)?;
             finish_linked_idempotency(tx, &lease.run_id, state, error_code, now_ms)?;
             load_run(tx, &lease.run_id)
@@ -662,6 +954,21 @@ impl AglStore {
                  WHERE status = 'in_progress' AND lease_expires_at_ms <= ?1",
                 params![now_ms, legacy_timestamp(now_ms)],
             )? as u64;
+            let terminal_children = {
+                let mut statement = tx.prepare(
+                    "SELECT id FROM runs
+                     WHERE kind = 'subagent'
+                       AND state IN ('succeeded', 'failed', 'cancelled')
+                       AND tree_usage_recorded_at_ms IS NULL
+                     ORDER BY depth DESC, created_at_ms",
+                )?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                rows.map(|row| parse_run_id(&row?, "runs.id"))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            for child_run_id in terminal_children {
+                record_terminal_child_usage(tx, &child_run_id, now_ms)?;
+            }
             Ok(RecoveryReport {
                 requeued_runs,
                 requeued_steps,
@@ -680,9 +987,10 @@ fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Res
           effective_policy_hash, budget_json, usage_json, lease_owner, lease_generation,
           lease_expires_at_ms, cancellation_requested_at_ms, attempts, not_before_ms,
           created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
-          terminal_result_json, error_code, error_message)
+          terminal_result_json, error_code, error_message, root_run_id, depth)
          VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10,
-                 NULL, 0, NULL, NULL, 0, ?11, ?12, ?12, NULL, NULL, NULL, NULL, NULL)",
+                 NULL, 0, NULL, NULL, 0, ?11, ?12, ?12, NULL, NULL, NULL, NULL, NULL,
+                 ?1, 0)",
         params![
             draft.run_id.as_str(),
             draft.session_id.as_ref().map(SessionId::as_str),
@@ -720,7 +1028,253 @@ fn validate_run_draft(draft: &DurableRunDraft) -> Result<()> {
             "turn runs require session and turn IDs",
         );
     }
+    if draft.kind == crate::RunKind::Subagent {
+        return invalid(
+            "runs.kind",
+            draft.kind.as_str(),
+            "subagent runs require atomic child admission",
+        );
+    }
     Ok(())
+}
+
+fn validate_child_run_draft(draft: &ChildRunDraft) -> Result<()> {
+    if draft.run_id == draft.parent_run_id {
+        return delegation_denied("self_parent");
+    }
+    validate_non_blank(&draft.subagent_id, "runs.subagent_id")?;
+    if draft.subagent_id.trim() != draft.subagent_id
+        || !draft.subagent_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        return delegation_denied("invalid_subagent_id");
+    }
+    for (field, digest) in [
+        ("runs.effective_policy_hash", &draft.effective_policy_hash),
+        ("runs.child_spec_digest", &draft.child_spec_digest),
+        ("runs.model_profile_digest", &draft.model_profile_digest),
+    ] {
+        validate_sha256_digest(field, digest)?;
+    }
+    if draft.budget.wall_time_ms == 0
+        || draft.budget.model_input_tokens == 0
+        || draft.budget.model_output_tokens == 0
+        || draft.budget.model_attempts == 0
+        || draft.budget.capability_calls == 0
+    {
+        return delegation_denied("invalid_child_budget");
+    }
+    let tree = &draft.tree_budget;
+    if tree.max_depth == 0
+        || tree.max_depth > 16
+        || tree.max_children_per_run == 0
+        || tree.max_children_per_run > 64
+        || tree.max_descendants == 0
+        || tree.max_descendants > 1_024
+        || tree.max_total_output_tokens == 0
+        || tree.max_total_output_tokens > i64::MAX as u64
+        || tree.timeout_ms == 0
+        || tree.timeout_ms > i64::MAX as u64
+    {
+        return delegation_denied("invalid_tree_budget");
+    }
+    Ok(())
+}
+
+fn validate_sha256_digest(field: &'static str, digest: &str) -> Result<()> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return invalid(field, digest, "expected sha256 digest");
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return invalid(field, digest, "expected lowercase sha256 digest");
+    }
+    Ok(())
+}
+
+fn validate_child_replay(
+    tx: &Transaction<'_>,
+    draft: &ChildRunDraft,
+    existing: &DurableRunRecord,
+) -> Result<()> {
+    let matches = existing.kind == crate::RunKind::Subagent
+        && existing.parent_run_id.as_ref() == Some(&draft.parent_run_id)
+        && existing.spawned_by_step_id.as_ref() == Some(&draft.spawned_by_step_id)
+        && existing.subagent_id.as_deref() == Some(draft.subagent_id.as_str())
+        && existing.input == draft.input
+        && existing.effective_policy_hash.as_deref() == Some(draft.effective_policy_hash.as_str())
+        && existing.child_spec_digest.as_deref() == Some(draft.child_spec_digest.as_str())
+        && existing.model_profile_digest.as_deref() == Some(draft.model_profile_digest.as_str());
+    if !matches {
+        return delegation_denied("spawn_replay_mismatch");
+    }
+    let root = load_run(tx, &existing.root_run_id)?;
+    if root.delegation_budget.as_ref() != Some(&draft.tree_budget) {
+        return delegation_denied("tree_budget_mismatch");
+    }
+    Ok(())
+}
+
+fn load_child_by_spawn_step(
+    conn: &rusqlite::Connection,
+    step_id: &StepId,
+) -> Result<Option<DurableRunRecord>> {
+    let sql = format!("SELECT {RUN_COLUMNS} FROM runs WHERE spawned_by_step_id = ?1");
+    conn.query_row(&sql, [step_id.as_str()], read_run_row)
+        .optional()?
+        .map(decode_run)
+        .transpose()
+}
+
+fn reserve_output_on_ancestors(
+    tx: &Transaction<'_>,
+    child_run_id: &RunId,
+    output_tokens: u64,
+    now_ms: i64,
+) -> Result<()> {
+    let changed = tx.execute(
+        "WITH RECURSIVE ancestors(id) AS (
+             SELECT parent_run_id FROM runs WHERE id = ?1
+             UNION ALL
+             SELECT parent.parent_run_id FROM runs parent
+             JOIN ancestors child ON parent.id = child.id
+             WHERE parent.parent_run_id IS NOT NULL
+         )
+         UPDATE runs
+         SET delegation_reserved_output_tokens = delegation_reserved_output_tokens + ?2,
+             updated_at_ms = ?3
+         WHERE id IN (SELECT id FROM ancestors)",
+        params![child_run_id.as_str(), output_tokens, now_ms],
+    )?;
+    if changed == 0 {
+        return delegation_denied("missing_parent_chain");
+    }
+    Ok(())
+}
+
+fn record_terminal_child_usage(
+    tx: &Transaction<'_>,
+    child_run_id: &RunId,
+    now_ms: i64,
+) -> Result<()> {
+    let child = load_run(tx, child_run_id)?;
+    if child.kind != crate::RunKind::Subagent
+        || !child.state.is_terminal()
+        || child.tree_usage_recorded_at_ms.is_some()
+    {
+        return Ok(());
+    }
+    let parent_run_id = child
+        .parent_run_id
+        .as_ref()
+        .ok_or(StoreError::DelegationDenied {
+            code: "missing_parent_run",
+        })?;
+    if child.usage.model_output_tokens > child.budget.model_output_tokens {
+        return delegation_denied("child_output_budget_exceeded");
+    }
+    let root = load_run(tx, &child.root_run_id)?;
+    let tree_budget = root
+        .delegation_budget
+        .as_ref()
+        .ok_or(StoreError::DelegationDenied {
+            code: "missing_tree_budget",
+        })?;
+    if root
+        .delegation_used_output_tokens
+        .saturating_add(child.usage.model_output_tokens)
+        > tree_budget.max_total_output_tokens
+    {
+        return delegation_denied("tree_output_budget_exceeded");
+    }
+
+    let (ancestor_count, under_reserved): (u32, u32) = tx.query_row(
+        "WITH RECURSIVE ancestors(id) AS (
+             SELECT parent_run_id FROM runs WHERE id = ?1
+             UNION ALL
+             SELECT parent.parent_run_id FROM runs parent
+             JOIN ancestors child ON parent.id = child.id
+             WHERE parent.parent_run_id IS NOT NULL
+         )
+         SELECT COUNT(*), COALESCE(SUM(
+             CASE WHEN runs.delegation_reserved_output_tokens < ?2 THEN 1 ELSE 0 END
+         ), 0)
+         FROM runs WHERE id IN (SELECT id FROM ancestors)",
+        params![child_run_id.as_str(), child.budget.model_output_tokens],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if ancestor_count == 0 || under_reserved != 0 {
+        return delegation_denied("tree_reservation_corrupt");
+    }
+    let changed = tx.execute(
+        "WITH RECURSIVE ancestors(id) AS (
+             SELECT parent_run_id FROM runs WHERE id = ?1
+             UNION ALL
+             SELECT parent.parent_run_id FROM runs parent
+             JOIN ancestors child ON parent.id = child.id
+             WHERE parent.parent_run_id IS NOT NULL
+         )
+         UPDATE runs
+         SET delegation_reserved_output_tokens =
+                 delegation_reserved_output_tokens - ?2,
+             delegation_used_output_tokens =
+                 delegation_used_output_tokens + ?3,
+             updated_at_ms = ?4
+         WHERE id IN (SELECT id FROM ancestors)",
+        params![
+            child_run_id.as_str(),
+            child.budget.model_output_tokens,
+            child.usage.model_output_tokens,
+            now_ms
+        ],
+    )?;
+    if changed != ancestor_count as usize {
+        return delegation_denied("parent_chain_changed");
+    }
+    let changed = tx.execute(
+        "UPDATE runs SET tree_usage_recorded_at_ms = ?1, updated_at_ms = ?1
+         WHERE id = ?2 AND tree_usage_recorded_at_ms IS NULL",
+        params![now_ms, child_run_id.as_str()],
+    )?;
+    if changed != 1 {
+        return delegation_denied("tree_usage_already_recorded");
+    }
+    tx.execute(
+        "UPDATE runs
+         SET not_before_ms = CASE
+                 WHEN not_before_ms IS NULL OR not_before_ms > ?1 THEN ?1
+                 ELSE not_before_ms
+             END,
+             updated_at_ms = ?1
+         WHERE id = ?2 AND state = 'waiting'
+           AND cancellation_requested_at_ms IS NULL",
+        params![now_ms, parent_run_id.as_str()],
+    )?;
+    let spawn_step_id = child
+        .spawned_by_step_id
+        .as_ref()
+        .ok_or(StoreError::DelegationDenied {
+            code: "missing_spawn_step",
+        })?;
+    tx.execute(
+        "UPDATE run_steps
+         SET not_before_ms = CASE
+                 WHEN not_before_ms IS NULL OR not_before_ms > ?1 THEN ?1
+                 ELSE not_before_ms
+             END,
+             updated_at_ms = ?1
+         WHERE id = ?2 AND run_id = ?3 AND state = 'pending'",
+        params![now_ms, spawn_step_id.as_str(), parent_run_id.as_str()],
+    )?;
+    Ok(())
+}
+
+fn delegation_denied<T>(code: &'static str) -> Result<T> {
+    Err(StoreError::DelegationDenied { code })
 }
 
 fn validate_step_draft(lease: &RunLease, step: &RunStepDraft) -> Result<()> {
@@ -847,6 +1401,23 @@ fn load_run_optional(
         .transpose()
 }
 
+fn load_run_subtree(conn: &rusqlite::Connection, run_id: &RunId) -> Result<Vec<DurableRunRecord>> {
+    let sql = format!(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT id FROM runs WHERE id = ?1
+             UNION ALL
+             SELECT child.id FROM runs child
+             JOIN subtree parent ON child.parent_run_id = parent.id
+         )
+         SELECT {RUN_COLUMNS} FROM runs
+         WHERE id IN (SELECT id FROM subtree)
+         ORDER BY depth, created_at_ms, rowid"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([run_id.as_str()], read_run_row)?;
+    rows.map(|row| decode_run(row?)).collect()
+}
+
 #[derive(Debug)]
 struct RawRunRow {
     id: String,
@@ -873,6 +1444,19 @@ struct RawRunRow {
     terminal_result_json: Option<String>,
     error_code: Option<String>,
     error_message: Option<String>,
+    parent_run_id: Option<String>,
+    root_run_id: String,
+    depth: u32,
+    subagent_id: Option<String>,
+    spawned_by_step_id: Option<String>,
+    child_spec_digest: Option<String>,
+    model_profile_digest: Option<String>,
+    result_delivered_at_ms: Option<i64>,
+    tree_usage_recorded_at_ms: Option<i64>,
+    delegation_budget_json: Option<String>,
+    delegation_reserved_descendants: u32,
+    delegation_reserved_output_tokens: u64,
+    delegation_used_output_tokens: u64,
 }
 
 fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
@@ -901,6 +1485,19 @@ fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
         terminal_result_json: row.get(21)?,
         error_code: row.get(22)?,
         error_message: row.get(23)?,
+        parent_run_id: row.get(24)?,
+        root_run_id: row.get(25)?,
+        depth: row.get(26)?,
+        subagent_id: row.get(27)?,
+        spawned_by_step_id: row.get(28)?,
+        child_spec_digest: row.get(29)?,
+        model_profile_digest: row.get(30)?,
+        result_delivered_at_ms: row.get(31)?,
+        tree_usage_recorded_at_ms: row.get(32)?,
+        delegation_budget_json: row.get(33)?,
+        delegation_reserved_descendants: row.get(34)?,
+        delegation_reserved_output_tokens: row.get(35)?,
+        delegation_used_output_tokens: row.get(36)?,
     })
 }
 
@@ -946,6 +1543,31 @@ fn decode_run(raw: RawRunRow) -> Result<DurableRunRecord> {
             .transpose()?,
         error_code: raw.error_code,
         error_message: raw.error_message,
+        parent_run_id: raw
+            .parent_run_id
+            .as_deref()
+            .map(|value| parse_run_id(value, "runs.parent_run_id"))
+            .transpose()?,
+        root_run_id: parse_run_id(&raw.root_run_id, "runs.root_run_id")?,
+        depth: raw.depth,
+        subagent_id: raw.subagent_id,
+        spawned_by_step_id: raw
+            .spawned_by_step_id
+            .as_deref()
+            .map(|value| parse_step_id(value, "runs.spawned_by_step_id"))
+            .transpose()?,
+        child_spec_digest: raw.child_spec_digest,
+        model_profile_digest: raw.model_profile_digest,
+        result_delivered_at_ms: raw.result_delivered_at_ms,
+        tree_usage_recorded_at_ms: raw.tree_usage_recorded_at_ms,
+        delegation_budget: raw
+            .delegation_budget_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        delegation_reserved_descendants: raw.delegation_reserved_descendants,
+        delegation_reserved_output_tokens: raw.delegation_reserved_output_tokens,
+        delegation_used_output_tokens: raw.delegation_used_output_tokens,
     })
 }
 
@@ -969,6 +1591,14 @@ fn safe_status_with_state(run: DurableRunRecord, state: RunState) -> Result<Safe
         started_at_ms: run.started_at_ms,
         finished_at_ms: run.finished_at_ms,
         error_code: run.error_code,
+        parent_run_id: run.parent_run_id,
+        root_run_id: run.root_run_id,
+        depth: run.depth,
+        subagent_id: run.subagent_id,
+        spawned_by_step_id: run.spawned_by_step_id,
+        child_spec_digest: run.child_spec_digest,
+        model_profile_digest: run.model_profile_digest,
+        result_delivered: run.result_delivered_at_ms.is_some(),
     })
 }
 
