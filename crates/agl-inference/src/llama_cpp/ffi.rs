@@ -102,9 +102,19 @@ pub(crate) struct llama_batch {
 }
 
 #[repr(C)]
-pub(crate) struct llama_chat_message {
+pub(crate) struct agl_llama_chat_tool_call {
+    pub name: *const c_char,
+    pub arguments: *const c_char,
+    pub id: *const c_char,
+}
+
+#[repr(C)]
+pub(crate) struct agl_llama_chat_message {
     pub role: *const c_char,
     pub content: *const c_char,
+    pub name: *const c_char,
+    pub tool_calls: *const agl_llama_chat_tool_call,
+    pub n_tool_calls: usize,
 }
 
 #[repr(C)]
@@ -168,7 +178,7 @@ unsafe extern "C" {
 
     pub(crate) fn agl_llama_common_chat_apply_template(
         model: *const c_void,
-        chat: *const llama_chat_message,
+        chat: *const agl_llama_chat_message,
         n_msg: usize,
         add_ass: bool,
         buf: *mut c_char,

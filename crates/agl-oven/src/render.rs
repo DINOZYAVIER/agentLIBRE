@@ -143,11 +143,15 @@ fn render_assistant_tool_call(
             Content::text(render_hermes_tool_call(name, arguments)?)?,
             Some(name.to_string()),
         )),
-        ToolCallFormat::GemmaFunctionCall => Ok(rendered_text_message(
-            RenderedMessageRole::Assistant,
-            Content::text(render_gemma_function_call(name, arguments)?)?,
-            Some(name.to_string()),
-        )),
+        ToolCallFormat::GemmaFunctionCall => Ok(RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: Some(Content::text(render_gemma_function_call(name, arguments)?)?),
+            name: Some(name.to_string()),
+            tool_calls: vec![RenderedToolCall {
+                name: name.to_string(),
+                arguments: arguments.clone(),
+            }],
+        }),
     }
 }
 
