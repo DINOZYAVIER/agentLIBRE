@@ -341,10 +341,10 @@ fn print_function_status_report(report: &FunctionStatusReport) {
     }
     for subagent in &report.subagents {
         println!(
-            "function.subagent id={} title={} path={}",
+            "function.subagent id={} title={} description={}",
             subagent.id,
             subagent.title,
-            subagent.path.display()
+            subagent.description
         );
     }
     for warning in &report.warnings {
