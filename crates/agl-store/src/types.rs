@@ -372,6 +372,7 @@ pub struct PermissionGrantRecord {
 pub enum RunKind {
     Turn,
     Cron,
+    Subagent,
 }
 
 impl RunKind {
@@ -379,6 +380,7 @@ impl RunKind {
         match self {
             Self::Turn => "turn",
             Self::Cron => "cron",
+            Self::Subagent => "subagent",
         }
     }
 
@@ -386,6 +388,7 @@ impl RunKind {
         match value {
             "turn" => Ok(Self::Turn),
             "cron" => Ok(Self::Cron),
+            "subagent" => Ok(Self::Subagent),
             _ => invalid_run_value("runs.kind", value, "invalid run kind"),
         }
     }
@@ -530,6 +533,37 @@ pub struct RunUsage {
     pub capability_calls: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationTreeBudget {
+    pub max_depth: u32,
+    pub max_children_per_run: u32,
+    pub max_descendants: u32,
+    pub max_total_output_tokens: u64,
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChildRunDraft {
+    pub run_id: RunId,
+    pub parent_run_id: RunId,
+    pub spawned_by_step_id: StepId,
+    pub subagent_id: String,
+    pub input: serde_json::Value,
+    pub priority: i32,
+    pub effective_policy_hash: String,
+    pub budget: RunBudget,
+    pub child_spec_digest: String,
+    pub model_profile_digest: String,
+    pub tree_budget: DelegationTreeBudget,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChildRunAdmission {
+    pub run: DurableRunRecord,
+    pub replayed: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DurableRunDraft {
     pub run_id: RunId,
@@ -570,6 +604,19 @@ pub struct DurableRunRecord {
     pub terminal_result: Option<serde_json::Value>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
+    pub depth: u32,
+    pub subagent_id: Option<String>,
+    pub spawned_by_step_id: Option<StepId>,
+    pub child_spec_digest: Option<String>,
+    pub model_profile_digest: Option<String>,
+    pub result_delivered_at_ms: Option<i64>,
+    pub tree_usage_recorded_at_ms: Option<i64>,
+    pub delegation_budget: Option<DelegationTreeBudget>,
+    pub delegation_reserved_descendants: u32,
+    pub delegation_reserved_output_tokens: u64,
+    pub delegation_used_output_tokens: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -595,6 +642,14 @@ pub struct SafeRunStatus {
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
     pub error_code: Option<String>,
+    pub parent_run_id: Option<RunId>,
+    pub root_run_id: RunId,
+    pub depth: u32,
+    pub subagent_id: Option<String>,
+    pub spawned_by_step_id: Option<StepId>,
+    pub child_spec_digest: Option<String>,
+    pub model_profile_digest: Option<String>,
+    pub result_delivered: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

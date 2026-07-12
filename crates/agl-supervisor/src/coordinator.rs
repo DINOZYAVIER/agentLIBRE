@@ -372,6 +372,14 @@ impl Coordinator {
                             started_at_ms: run.started_at_ms,
                             finished_at_ms: run.finished_at_ms,
                             error_code: run.error_code,
+                            parent_run_id: run.parent_run_id,
+                            root_run_id: run.root_run_id,
+                            depth: run.depth,
+                            subagent_id: run.subagent_id,
+                            spawned_by_step_id: run.spawned_by_step_id,
+                            child_spec_digest: run.child_spec_digest,
+                            model_profile_digest: run.model_profile_digest,
+                            result_delivered: run.result_delivered_at_ms.is_some(),
                         },
                         terminal_result: run.terminal_result,
                         error_message: run.error_message,
@@ -383,17 +391,28 @@ impl Coordinator {
                 let now_ms = self.options.clock.now_ms();
                 let result = self
                     .store
-                    .request_run_cancellation(&run_id, now_ms)
-                    .map_err(Into::into);
-                if let Some(active) = self.active.get(&run_id) {
-                    active.cancellation.cancel();
-                }
-                if result
-                    .as_ref()
-                    .is_ok_and(|status| status.state == RunState::Cancelled)
-                {
-                    self.complete_subscribers(&run_id);
-                }
+                    .request_run_tree_cancellation(&run_id, now_ms)
+                    .map_err(SupervisorError::from)
+                    .and_then(|statuses| {
+                        let requested = statuses
+                            .iter()
+                            .find(|status| status.run_id == run_id)
+                            .cloned()
+                            .ok_or_else(|| {
+                                SupervisorError::Driver(format!(
+                                    "cancelled run tree omitted requested run {run_id}"
+                                ))
+                            })?;
+                        for status in statuses {
+                            if let Some(active) = self.active.get(&status.run_id) {
+                                active.cancellation.cancel();
+                            }
+                            if status.state == RunState::Cancelled {
+                                self.complete_subscribers(&status.run_id);
+                            }
+                        }
+                        Ok(requested)
+                    });
                 let _ = reply.send(result);
             }
             CommandRequest::EventsAfter {

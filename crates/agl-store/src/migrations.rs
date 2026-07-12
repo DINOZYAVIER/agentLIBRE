@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 12;
+pub const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -371,6 +371,58 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 ADD COLUMN sensitive_inputs_json TEXT NOT NULL DEFAULT '[]';
             ALTER TABLE permission_grants
                 ADD COLUMN sensitive_inputs_json TEXT NOT NULL DEFAULT '[]';
+        "#,
+    },
+    StoreMigration {
+        version: 13,
+        name: "013_supervised_subagent_runs",
+        sql: r#"
+            ALTER TABLE runs RENAME COLUMN kind TO obsolete_kind;
+            ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'cron'
+                CHECK (kind IN ('turn', 'cron', 'subagent'));
+            UPDATE runs SET kind = obsolete_kind;
+            ALTER TABLE runs DROP COLUMN obsolete_kind;
+
+            ALTER TABLE runs ADD COLUMN parent_run_id TEXT REFERENCES runs(id);
+            ALTER TABLE runs ADD COLUMN root_run_id TEXT REFERENCES runs(id);
+            ALTER TABLE runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0 CHECK (depth >= 0);
+            ALTER TABLE runs ADD COLUMN subagent_id TEXT;
+            ALTER TABLE runs ADD COLUMN spawned_by_step_id TEXT REFERENCES run_steps(id);
+            ALTER TABLE runs ADD COLUMN child_spec_digest TEXT;
+            ALTER TABLE runs ADD COLUMN model_profile_digest TEXT;
+            ALTER TABLE runs ADD COLUMN result_delivered_at_ms INTEGER;
+            ALTER TABLE runs ADD COLUMN tree_usage_recorded_at_ms INTEGER;
+            ALTER TABLE runs ADD COLUMN delegation_budget_json TEXT;
+            ALTER TABLE runs ADD COLUMN delegation_reserved_descendants INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE runs ADD COLUMN delegation_reserved_output_tokens INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE runs ADD COLUMN delegation_used_output_tokens INTEGER NOT NULL DEFAULT 0;
+            UPDATE runs SET root_run_id = id;
+
+            CREATE UNIQUE INDEX runs_spawn_step_unique_idx
+                ON runs(spawned_by_step_id) WHERE spawned_by_step_id IS NOT NULL;
+            CREATE INDEX runs_parent_idx ON runs(parent_run_id, created_at_ms);
+            CREATE INDEX runs_root_depth_idx ON runs(root_run_id, depth, created_at_ms);
+
+            CREATE TRIGGER runs_subagent_insert_guard
+            BEFORE INSERT ON runs
+            WHEN (
+                NEW.kind = 'subagent' AND (
+                    NEW.session_id IS NOT NULL OR NEW.turn_id IS NOT NULL OR
+                    NEW.parent_run_id IS NULL OR NEW.root_run_id IS NULL OR
+                    NEW.depth <= 0 OR NEW.subagent_id IS NULL OR
+                    NEW.spawned_by_step_id IS NULL OR NEW.child_spec_digest IS NULL OR
+                    NEW.model_profile_digest IS NULL
+                )
+            ) OR (
+                NEW.kind != 'subagent' AND (
+                    NEW.parent_run_id IS NOT NULL OR NEW.depth != 0 OR
+                    NEW.subagent_id IS NOT NULL OR NEW.spawned_by_step_id IS NOT NULL OR
+                    NEW.child_spec_digest IS NOT NULL OR NEW.model_profile_digest IS NOT NULL
+                )
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid supervised subagent run shape');
+            END;
         "#,
     },
 ];
