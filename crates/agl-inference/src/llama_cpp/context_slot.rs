@@ -4,7 +4,9 @@ use std::ptr;
 use std::rc::Rc;
 
 use agl_actions::{ModelAction, ToolCall, ToolJsonRepair, parse_model_action};
-use agl_config::{InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig, RuntimeSwitch};
+use agl_config::{
+    InferenceRuntimeConfig, KvCacheType, LocalInferenceConfig, RuntimeSwitch, ToolCallFormat,
+};
 use agl_content::Content;
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
 use anyhow::{Context, Result, bail, ensure};
@@ -185,9 +187,13 @@ impl LlamaCppContextSlot {
                 .iter()
                 .cloned(),
         );
-        let mut formatted =
-            apply_chat_template_messages(model.main_ptr().cast_const(), &messages, true)
-                .context("failed to render llama.cpp chat template")?;
+        let mut formatted = apply_chat_template_messages(
+            model.main_ptr().cast_const(),
+            &messages,
+            rendered.tool_call_format,
+            true,
+        )
+        .context("failed to render llama.cpp chat template")?;
         let injected_assistant_prefix = disable_qwen_thinking(&mut formatted);
         let assistant_context_prefix = if formatted.ends_with(DISABLED_THINKING_PREFILL) {
             DISABLED_THINKING_PREFILL.to_string()
@@ -1243,9 +1249,10 @@ impl Drop for Sampler {
 fn apply_chat_template_messages(
     model: *const c_void,
     messages: &[RenderedMessage],
+    tool_call_format: ToolCallFormat,
     add_assistant: bool,
 ) -> Result<String> {
-    let prepared = PreparedChatMessages::new(messages)?;
+    let prepared = PreparedChatMessages::new(messages, tool_call_format)?;
     apply_common_chat_template(model, &prepared, add_assistant)
 }
 
@@ -1312,13 +1319,22 @@ fn c_error_message(buf: &[c_char]) -> String {
 struct PreparedChatMessages {
     _roles: Vec<CString>,
     _contents: Vec<CString>,
-    messages: Vec<ffi::llama_chat_message>,
+    _names: Vec<CString>,
+    _tool_call_names: Vec<CString>,
+    _tool_call_arguments: Vec<CString>,
+    _tool_calls: Vec<Vec<ffi::agl_llama_chat_tool_call>>,
+    messages: Vec<ffi::agl_llama_chat_message>,
 }
 
 impl PreparedChatMessages {
-    fn new(messages: &[RenderedMessage]) -> Result<Self> {
+    fn new(messages: &[RenderedMessage], tool_call_format: ToolCallFormat) -> Result<Self> {
+        let render_structured_tool_fields = tool_call_format == ToolCallFormat::GemmaFunctionCall;
         let mut roles = Vec::with_capacity(messages.len());
         let mut contents = Vec::with_capacity(messages.len());
+        let mut names = Vec::new();
+        let mut tool_call_names = Vec::new();
+        let mut tool_call_arguments = Vec::new();
+        let mut tool_calls = Vec::with_capacity(messages.len());
         let mut ffi_messages = Vec::with_capacity(messages.len());
 
         for message in messages {
@@ -1328,10 +1344,56 @@ impl PreparedChatMessages {
                 RenderedMessageRole::Assistant => "assistant",
                 RenderedMessageRole::Tool => "tool",
             })?;
-            let content = CString::new(rendered_message_content(message)?)?;
-            ffi_messages.push(ffi::llama_chat_message {
+            let structured_tool_calls = render_structured_tool_fields
+                && message.role == RenderedMessageRole::Assistant
+                && !message.tool_calls.is_empty();
+            let content = if structured_tool_calls {
+                CString::new(String::new())?
+            } else {
+                CString::new(rendered_message_content(message)?)?
+            };
+            let name = if render_structured_tool_fields && message.role == RenderedMessageRole::Tool
+            {
+                match &message.name {
+                    Some(name) => {
+                        names.push(CString::new(name.as_str())?);
+                        names.last().map_or(ptr::null(), |name| name.as_ptr())
+                    }
+                    None => ptr::null(),
+                }
+            } else {
+                ptr::null()
+            };
+            let mut ffi_tool_calls = Vec::new();
+            if structured_tool_calls {
+                ffi_tool_calls.reserve(message.tool_calls.len());
+                for tool_call in &message.tool_calls {
+                    tool_call_names.push(CString::new(tool_call.name.as_str())?);
+                    tool_call_arguments
+                        .push(CString::new(serde_json::to_string(&tool_call.arguments)?)?);
+                    ffi_tool_calls.push(ffi::agl_llama_chat_tool_call {
+                        name: tool_call_names
+                            .last()
+                            .map_or(ptr::null(), |name| name.as_ptr()),
+                        arguments: tool_call_arguments
+                            .last()
+                            .map_or(ptr::null(), |arguments| arguments.as_ptr()),
+                        id: ptr::null(),
+                    });
+                }
+            }
+            let n_tool_calls = ffi_tool_calls.len();
+            tool_calls.push(ffi_tool_calls);
+            let tool_calls_ptr = tool_calls
+                .last()
+                .filter(|tool_calls| !tool_calls.is_empty())
+                .map_or(ptr::null(), |tool_calls| tool_calls.as_ptr());
+            ffi_messages.push(ffi::agl_llama_chat_message {
                 role: role.as_ptr(),
                 content: content.as_ptr(),
+                name,
+                tool_calls: tool_calls_ptr,
+                n_tool_calls,
             });
             roles.push(role);
             contents.push(content);
@@ -1340,6 +1402,10 @@ impl PreparedChatMessages {
         Ok(Self {
             _roles: roles,
             _contents: contents,
+            _names: names,
+            _tool_call_names: tool_call_names,
+            _tool_call_arguments: tool_call_arguments,
+            _tool_calls: tool_calls,
             messages: ffi_messages,
         })
     }
@@ -1352,17 +1418,19 @@ pub(crate) fn rendered_message_content(message: &RenderedMessage) -> Result<Stri
         )?,
         None => String::new(),
     };
-    for tool_call in &message.tool_calls {
-        if !content.is_empty() {
-            content.push('\n');
+    if content.is_empty() {
+        for tool_call in &message.tool_calls {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            let payload = serde_json::json!({
+                "name": tool_call.name,
+                "arguments": tool_call.arguments,
+            });
+            content.push_str(&serde_json::to_string(&payload).context(
+                "failed to serialize rendered structured tool call for llama.cpp chat message",
+            )?);
         }
-        let payload = serde_json::json!({
-            "name": tool_call.name,
-            "arguments": tool_call.arguments,
-        });
-        content.push_str(&serde_json::to_string(&payload).context(
-            "failed to serialize rendered structured tool call for llama.cpp chat message",
-        )?);
     }
     Ok(content)
 }
@@ -1663,10 +1731,10 @@ mod tests {
     }
 
     #[test]
-    fn rendered_message_content_includes_tool_calls() {
+    fn rendered_message_content_serializes_tool_calls_without_text() {
         let message = RenderedMessage {
             role: RenderedMessageRole::Assistant,
-            content: text("result"),
+            content: None,
             name: None,
             tool_calls: vec![RenderedToolCall {
                 name: "read_file".to_string(),
@@ -1676,9 +1744,25 @@ mod tests {
 
         let content = rendered_message_content(&message).unwrap();
 
-        assert!(content.contains("result\n"));
         assert!(content.contains("\"name\":\"read_file\""));
         assert!(content.contains("\"path\":\"README.md\""));
+    }
+
+    #[test]
+    fn rendered_message_content_keeps_canonical_text_when_tool_calls_are_structured() {
+        let message = RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: text("<|tool_call>call:screen.capture{}<tool_call|>"),
+            name: Some("screen.capture".to_string()),
+            tool_calls: vec![RenderedToolCall {
+                name: "screen.capture".to_string(),
+                arguments: json!({}),
+            }],
+        };
+
+        let content = rendered_message_content(&message).unwrap();
+
+        assert_eq!(content, "<|tool_call>call:screen.capture{}<tool_call|>");
     }
 
     #[test]
@@ -1873,7 +1957,8 @@ mod tests {
             }],
         };
 
-        let prepared = PreparedChatMessages::new(&rendered.messages).unwrap();
+        let prepared =
+            PreparedChatMessages::new(&rendered.messages, rendered.tool_call_format).unwrap();
 
         assert_eq!(prepared.messages.len(), 2);
         assert_eq!(
@@ -1899,6 +1984,64 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "hello"
+        );
+    }
+
+    #[test]
+    fn prepared_gemma_messages_preserve_tool_call_and_observation_fields() {
+        let messages = vec![
+            RenderedMessage {
+                role: RenderedMessageRole::Assistant,
+                content: text("<|tool_call>call:screen.capture{}<tool_call|>"),
+                name: Some("screen.capture".to_string()),
+                tool_calls: vec![RenderedToolCall {
+                    name: "screen.capture".to_string(),
+                    arguments: json!({}),
+                }],
+            },
+            RenderedMessage {
+                role: RenderedMessageRole::Tool,
+                content: text(r#"{"status":"ok"}<__media__>"#),
+                name: Some("screen.capture".to_string()),
+                tool_calls: Vec::new(),
+            },
+        ];
+
+        let prepared =
+            PreparedChatMessages::new(&messages, ToolCallFormat::GemmaFunctionCall).unwrap();
+
+        assert_eq!(prepared.messages.len(), 2);
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared.messages[0].content) }
+                .to_str()
+                .unwrap(),
+            ""
+        );
+        assert_eq!(prepared.messages[0].n_tool_calls, 1);
+        let prepared_tool_call = unsafe { &*prepared.messages[0].tool_calls };
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared_tool_call.name) }
+                .to_str()
+                .unwrap(),
+            "screen.capture"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared_tool_call.arguments) }
+                .to_str()
+                .unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared.messages[1].name) }
+                .to_str()
+                .unwrap(),
+            "screen.capture"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(prepared.messages[1].content) }
+                .to_str()
+                .unwrap(),
+            r#"{"status":"ok"}<__media__>"#
         );
     }
 
