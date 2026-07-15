@@ -35,7 +35,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0-alpha.11"
+version = "1.0.0-alpha.12"
 edition = "2024"
 license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
