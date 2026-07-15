@@ -51,8 +51,8 @@ expect_failure_contains() {
   [[ "$output" == *"$expected"* ]] || ci_fail "command output did not contain '$expected': $output"
 }
 
-expect_failure_contains "planned but not implemented" "$agl_bin" setup
-expect_failure_contains "planned but not implemented" "$agl_bin" doctor
-expect_failure_contains "planned but not implemented" "$agl_bin" model pull
+expect_failure_contains 'unknown command `setup`' "$agl_bin" setup
+expect_failure_contains 'unknown command `doctor`' "$agl_bin" doctor
+expect_failure_contains 'unknown command `model`' "$agl_bin" model pull
 
 ci_section "Release CLI smoke passed"
