@@ -7,6 +7,46 @@ fn temp_root(label: &str) -> PathBuf {
     root
 }
 
+fn init_workspace_with_artifacts(root: &Path) {
+    init_repo_workspace(root, &RepoInitOptions::default()).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[functions]
+default = "gemma4-12b"
+
+[artifacts.tasks]
+kind = "local"
+path = ".agl/tasks"
+required = true
+access = "read_write"
+validation = "agl.task_spec.v1"
+create = ["."]
+
+[artifacts.reviews]
+kind = "local"
+path = ".agl/reviews"
+required = false
+access = "read_write"
+create = ["."]
+
+[artifacts.state]
+kind = "ignored"
+path = ".agl/state"
+required = false
+access = "read_write"
+create = ["."]
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+    fs::create_dir_all(root.join(".agl/reviews")).unwrap();
+    fs::create_dir_all(root.join(".agl/state")).unwrap();
+}
+
 fn init_git_repo(root: &Path) {
     let status = Command::new("git")
         .arg("init")
@@ -95,23 +135,22 @@ Only a partial task spec.
 }
 
 #[test]
-fn init_creates_manifest_and_local_component_dirs() {
+fn init_creates_minimal_manifest_without_implicit_artifacts() {
     let root = temp_root("init");
     let report = init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
 
     assert_eq!(report.workspace_root, root);
     assert!(report.manifest_path.exists());
     assert!(report.manifest_path.ends_with(WORKSPACE_MANIFEST_PATH));
-    assert!(root.join(".agl/tasks").is_dir());
-    assert!(root.join(".agl/reviews").is_dir());
-    assert!(root.join(".agl/state").is_dir());
+    assert!(!root.join(".agl/tasks").exists());
+    assert!(!root.join(".agl/reviews").exists());
+    assert!(!root.join(".agl/state").exists());
     assert!(!root.join(".agl/skills").exists());
 
     let manifest = fs::read_to_string(root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
     assert!(manifest.contains("[functions]"));
     assert!(manifest.contains(&format!("default = \"{DEFAULT_FUNCTION}\"")));
-    assert!(manifest.contains("kind = \"submodule\""));
-    assert!(manifest.contains(DEFAULT_SKILLS_URL));
+    assert!(!manifest.contains("[artifacts."));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -126,9 +165,12 @@ fn init_repairs_missing_workspace_default_function() {
 version = 1
 profile = "repo-workflow"
 
-[components.state]
+[artifacts.state]
 path = ".agl/state"
 kind = "ignored"
+required = false
+access = "read_write"
+create = ["."]
 "#,
     )
     .unwrap();
@@ -181,8 +223,8 @@ fn status_missing_manifest_reports_init_next_step() {
 }
 
 #[test]
-fn status_after_init_warns_about_missing_skills_submodule() {
-    let root = temp_root("status-warning");
+fn status_after_minimal_init_is_ok() {
+    let root = temp_root("status-ok");
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
     let report = status_repo_workspace(
         &root,
@@ -193,23 +235,18 @@ fn status_after_init_warns_about_missing_skills_submodule() {
     )
     .unwrap();
 
-    assert_eq!(report.state, RepoStatusState::Warning);
+    assert_eq!(report.state, RepoStatusState::Ok);
     assert!(!report.should_fail(false));
-    assert!(report.should_fail(true));
-    assert!(
-        report
-            .warnings
-            .contains(&"component.skills.missing".to_string())
-    );
-    assert!(report.next_steps.contains(&"agl skill init".to_string()));
+    assert!(!report.should_fail(true));
+    assert!(report.warnings.is_empty());
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn artifact_status_reports_default_contracts() {
+fn artifact_status_reports_declared_artifacts() {
     let root = temp_root("artifact-status");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
 
     let report = status_artifacts(
         &root,
@@ -226,37 +263,17 @@ fn artifact_status_reports_default_contracts() {
         artifact.id == "tasks"
             && artifact.path.as_path() == std::path::Path::new(".agl/tasks")
             && artifact.kind == ArtifactKind::Source
-            && artifact.schema.as_deref() == Some("agl.task_spec.v1")
+            && artifact.validation.as_deref() == Some("agl.task_spec.v1")
     }));
     assert!(report.artifacts.iter().any(|artifact| {
-        artifact.id == "decision-docs"
-            && artifact.path.as_path() == std::path::Path::new(".agl/decision-docs")
+        artifact.id == "tasks" && artifact.storage == WorkspaceArtifactKind::Local
     }));
-    assert!(report.artifacts.iter().any(|artifact| {
-        artifact.id == "smoke" && artifact.path.as_path() == std::path::Path::new(".agl/smoke")
-    }));
-    assert!(report.artifacts.iter().any(|artifact| {
-        artifact.id == "handoffs"
-            && artifact.path.as_path() == std::path::Path::new(".agl/handoffs")
-    }));
-    assert!(report.sources.iter().any(|source| {
-        source.id == "skills"
-            && source.role == ArtifactSourceRole::Core
-            && source.kind == ArtifactSourceKind::Submodule
-    }));
-    assert!(report.sources.iter().any(|source| {
-        source.id == "tasks"
-            && source.role == ArtifactSourceRole::Planning
-            && source.kind == ArtifactSourceKind::Local
-    }));
-    assert!(report.artifacts.iter().any(|artifact| {
-        artifact.id == "state"
-            && artifact.source_role == ArtifactSourceRole::State
-            && artifact.provides.contains(&"notes".to_string())
-            && artifact.provides.contains(&"memory".to_string())
-            && artifact.provides.contains(&"matrix".to_string())
-            && artifact.provides.contains(&"cron".to_string())
-    }));
+    assert!(
+        report
+            .artifacts
+            .iter()
+            .any(|artifact| { artifact.id == "state" && artifact.kind == ArtifactKind::State })
+    );
     assert!(
         report
             .warnings
@@ -269,7 +286,7 @@ fn artifact_status_reports_default_contracts() {
 #[test]
 fn artifact_sync_creates_missing_declared_roots() {
     let root = temp_root("artifact-sync");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     fs::remove_dir_all(root.join(".agl/tasks")).unwrap();
 
     let report = sync_artifacts(
@@ -282,22 +299,17 @@ fn artifact_sync_creates_missing_declared_roots() {
     .unwrap();
 
     assert!(root.join(".agl/tasks").is_dir());
-    assert!(!root.join(".agl/skills").exists());
     assert!(report.actions.iter().any(|action| {
         action.artifact_id == "tasks" && action.action == ArtifactSyncActionKind::CreatedDir
-    }));
-    assert!(report.actions.iter().any(|action| {
-        action.artifact_id == "skills"
-            && action.action == ArtifactSyncActionKind::SkippedNoCreateRule
     }));
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn artifact_lock_writes_contract_hashes() {
+fn artifact_lock_writes_definition_hashes() {
     let root = temp_root("artifact-lock");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
 
     let report = lock_artifacts(
         &root,
@@ -316,21 +328,20 @@ fn artifact_lock_writes_contract_hashes() {
     );
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
     let locked = report.lock.artifacts.get("tasks").unwrap();
-    assert_eq!(locked.source_id, "tasks");
-    assert_eq!(locked.source_role, ArtifactSourceRole::Planning);
-    assert_eq!(locked.source_kind, ArtifactSourceKind::Local);
-    assert_eq!(locked.source_path, PathBuf::from(".agl/tasks"));
-    assert_eq!(locked.contract_hash.len(), 64);
+    assert_eq!(locked.id, "tasks");
+    assert_eq!(locked.storage, WorkspaceArtifactKind::Local);
+    assert_eq!(locked.path, PathBuf::from(".agl/tasks"));
+    assert_eq!(locked.definition_hash.len(), 64);
     assert_ne!(report.lock.locked_at_unix_ms, 0);
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn artifact_lock_records_git_source_identity_and_detects_drift() {
+fn artifact_lock_records_git_identity_and_detects_drift() {
     let root = temp_root("artifact-lock-source-identity");
     init_git_repo(&root);
-    let source = root.join(".agl/sources/core");
+    let source = root.join(".agl/tasks");
     fs::create_dir_all(&source).unwrap();
     init_git_repo(&source);
     fs::write(source.join("README.md"), "core source\n").unwrap();
@@ -338,7 +349,6 @@ fn artifact_lock_records_git_source_identity_and_detects_drift() {
     git_with_identity(&source, &["commit", "-m", "Add source"]);
     let commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
     let tree = git_output(&source, ["rev-parse", "HEAD^{tree}"]).unwrap();
-    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
@@ -348,27 +358,11 @@ profile = "repo-workflow"
 [functions]
 default = "gemma4-12b"
 
-[components.tasks]
-path = ".agl/tasks"
-kind = "local"
-
-[artifact_sources.core]
-role = "core"
+[artifacts.tasks]
 kind = "git"
-path = ".agl/sources/core"
-required = true
-provides = ["tasks"]
-
-[[artifact_sources.core.artifacts]]
-id = "tasks"
-kind = "source"
 path = ".agl/tasks"
-access = "read_write"
-provides = ["tasks"]
-schema = "agl.task_spec.v1"
 required = true
-shared = true
-conflict_policy = "identical"
+access = "read_write"
 "#,
     )
     .unwrap();
@@ -383,9 +377,9 @@ conflict_policy = "identical"
     .unwrap();
 
     let locked = report.lock.artifacts.get("tasks").unwrap();
-    assert_eq!(locked.source_id, "core");
-    assert_eq!(locked.source_commit.as_deref(), Some(commit.trim()));
-    assert_eq!(locked.source_tree.as_deref(), Some(tree.trim()));
+    assert_eq!(locked.id, "tasks");
+    assert_eq!(locked.commit.as_deref(), Some(commit.trim()));
+    assert_eq!(locked.tree.as_deref(), Some(tree.trim()));
 
     fs::write(source.join("README.md"), "core source changed\n").unwrap();
     git(&source, &["add", "."]);
@@ -404,7 +398,7 @@ conflict_policy = "identical"
         drift
             .errors
             .iter()
-            .any(|error| error == "artifact.tasks.source_commit_changed"),
+            .any(|error| error == "artifact.tasks.commit_changed"),
         "{:?}",
         drift.errors
     );
@@ -426,7 +420,7 @@ conflict_policy = "identical"
             .artifacts
             .get("tasks")
             .unwrap()
-            .source_commit
+            .commit
             .as_deref(),
         Some(refreshed_commit.trim())
     );
@@ -435,9 +429,9 @@ conflict_policy = "identical"
 }
 
 #[test]
-fn artifact_lock_rejects_entries_missing_source_identity() {
-    let root = temp_root("artifact-lock-missing-source-identity");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+fn artifact_lock_rejects_entries_missing_definition_identity() {
+    let root = temp_root("artifact-lock-missing-definition-identity");
+    init_workspace_with_artifacts(&root);
     let report = lock_artifacts(
         &root,
         &ArtifactLockOptions {
@@ -452,9 +446,8 @@ fn artifact_lock_rejects_entries_missing_source_identity() {
         .unwrap()
         .lines()
         .filter(|line| {
-            !line.trim_start().starts_with("source_role")
-                && !line.trim_start().starts_with("source_kind")
-                && !line.trim_start().starts_with("source_path")
+            !line.trim_start().starts_with("storage")
+                && !line.trim_start().starts_with("definition_hash")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -484,7 +477,7 @@ fn artifact_lock_rejects_entries_missing_source_identity() {
 #[test]
 fn artifact_status_reports_undeclared_agl_roots() {
     let root = temp_root("artifact-undeclared");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     fs::create_dir_all(root.join(".agl/mystery")).unwrap();
 
     let report = status_artifacts(
@@ -513,7 +506,6 @@ fn artifact_status_reports_undeclared_agl_roots() {
 #[test]
 fn artifact_status_does_not_report_declared_source_parent_as_undeclared() {
     let root = temp_root("artifact-declared-source-root");
-    fs::create_dir_all(root.join(".agl/tasks")).unwrap();
     fs::create_dir_all(root.join(".agl/sources/core")).unwrap();
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
@@ -524,24 +516,11 @@ profile = "repo-workflow"
 [functions]
 default = "gemma4-12b"
 
-[components.tasks]
-path = ".agl/tasks"
-kind = "local"
-
-[artifact_sources.core]
-role = "core"
+[artifacts.core]
 kind = "local"
 path = ".agl/sources/core"
 required = true
-provides = ["tasks"]
-
-[[artifact_sources.core.artifacts]]
-id = "tasks"
-kind = "source"
-path = ".agl/tasks"
 access = "read_write"
-provides = ["tasks"]
-required = true
 "#,
     )
     .unwrap();
@@ -570,7 +549,7 @@ required = true
 #[test]
 fn artifact_status_reports_task_schema_failures() {
     let root = temp_root("artifact-schema-invalid");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), false);
 
     let report = status_artifacts(
@@ -598,7 +577,7 @@ fn artifact_status_reports_task_schema_failures() {
 #[test]
 fn artifact_status_does_not_report_unrelated_stale_locks_when_scoped() {
     let root = temp_root("artifact-scoped-stale-lock");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     let report = lock_artifacts(
         &root,
         &ArtifactLockOptions {
@@ -657,7 +636,7 @@ fn artifact_status_does_not_report_unrelated_stale_locks_when_scoped() {
 #[test]
 fn artifact_path_handle_resolves_declared_writable_path() {
     let root = temp_root("artifact-handle");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
 
     let handle = resolve_artifact_path_handle(
         &root,
@@ -683,7 +662,7 @@ fn artifact_path_handle_resolves_declared_writable_path() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("does not permit"));
+    assert!(err.to_string().contains("is not declared"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -701,22 +680,11 @@ profile = "repo-workflow"
 [functions]
 default = "gemma4-12b"
 
-[components.tasks]
+[artifacts.tasks]
+kind = "local"
 path = ".agl/tasks"
-kind = "local"
-
-[artifact_sources.local]
-role = "local"
-kind = "local"
-path = ".agl"
 required = true
-
-[[artifact_sources.local.artifacts]]
-id = "tasks"
-kind = "source"
-path = ".agl/tasks"
 access = "write"
-required = true
 "#,
     )
     .unwrap();
@@ -745,9 +713,9 @@ required = true
 }
 
 #[test]
-fn artifact_status_detects_contract_hash_drift() {
-    let root = temp_root("artifact-contract-drift");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+fn artifact_status_detects_definition_drift() {
+    let root = temp_root("artifact-definition-drift");
+    init_workspace_with_artifacts(&root);
     lock_artifacts(
         &root,
         &ArtifactLockOptions {
@@ -777,7 +745,7 @@ fn artifact_status_detects_contract_hash_drift() {
     assert!(
         report
             .errors
-            .contains(&"artifact.tasks.contract_changed".to_string()),
+            .contains(&"artifact.tasks.definition_changed".to_string()),
         "{:?}",
         report.errors
     );
@@ -786,9 +754,9 @@ fn artifact_status_detects_contract_hash_drift() {
 }
 
 #[test]
-fn artifact_status_detects_source_path_drift() {
-    let root = temp_root("artifact-source-path-drift");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+fn artifact_status_detects_locked_path_drift() {
+    let root = temp_root("artifact-path-drift");
+    init_workspace_with_artifacts(&root);
     let report = lock_artifacts(
         &root,
         &ArtifactLockOptions {
@@ -798,7 +766,7 @@ fn artifact_status_detects_source_path_drift() {
     )
     .unwrap();
     let mut lock = report.lock;
-    lock.artifacts.get_mut("tasks").unwrap().source_path = PathBuf::from(".agl/other");
+    lock.artifacts.get_mut("tasks").unwrap().path = PathBuf::from(".agl/other");
     fs::write(
         root.join(ARTIFACT_LOCK_PATH),
         toml::to_string_pretty(&lock).unwrap(),
@@ -817,7 +785,7 @@ fn artifact_status_detects_source_path_drift() {
     assert!(
         report
             .errors
-            .contains(&"artifact.tasks.source_path_changed".to_string()),
+            .contains(&"artifact.tasks.path_changed".to_string()),
         "{:?}",
         report.errors
     );
@@ -838,20 +806,11 @@ profile = "repo-workflow"
 [functions]
 default = "gemma4-12b"
 
-[components.tasks]
-path = ".agl/tasks"
+[artifacts.bad]
 kind = "local"
-
-[artifact_sources.bad]
-role = "local"
-kind = "local"
-path = ".agl/sources/bad"
-
-[[artifact_sources.bad.artifacts]]
-id = "bad"
-kind = "source"
 path = "outside"
 access = "read"
+required = true
 "#,
     )
     .unwrap();
@@ -886,43 +845,37 @@ fn init_can_apply_local_workspace_profile_file() {
 version = 1
 name = "portable-repo-workflow"
 
-[components.skills]
+[artifacts.skills]
+kind = "git"
 path = ".agl/skills"
-kind = "submodule"
-url = "git@example.com:agentlibre/agl-skills.git"
+url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
 rev = "v0.2.0"
-lock = ".agl/skills.lock"
+required = true
+access = "read"
 
-[components.tasks]
-path = ".agl/tasks"
+[artifacts.tasks]
 kind = "git"
-url = "git@example.com:agentlibre/tasks.git"
+path = ".agl/tasks"
+url = "ssh://git@example.invalid/agentlibre/tasks.git"
 rev = "main"
+required = true
+access = "read_write"
+validation = "agl.task_spec.v1"
 
-[components.reviews]
+[artifacts.reviews]
+kind = "git"
 path = ".agl/reviews"
-kind = "submodule"
-url = "git@example.com:agentlibre/reviews.git"
+url = "ssh://git@example.invalid/agentlibre/reviews.git"
 rev = "main"
+required = true
+access = "read_write"
 
-[components.state]
-path = ".agl/state"
+[artifacts.state]
 kind = "ignored"
-
-[artifact_sources.skills]
-role = "core"
-kind = "submodule"
-path = ".agl/skills"
-
-[artifact_sources.tasks]
-role = "planning"
-kind = "git"
-path = ".agl/tasks"
-
-[artifact_sources.reviews]
-role = "generated"
-kind = "submodule"
-path = ".agl/reviews"
+path = ".agl/state"
+required = false
+access = "read_write"
+create = ["."]
 "#,
     )
     .unwrap();
@@ -940,10 +893,10 @@ path = ".agl/reviews"
 
     assert_eq!(manifest.profile, "portable-repo-workflow");
     assert_eq!(manifest.functions.default, DEFAULT_FUNCTION);
-    assert_eq!(manifest.components["tasks"].kind, ComponentKind::Git);
+    assert_eq!(manifest.artifacts["tasks"].kind, WorkspaceArtifactKind::Git);
     assert_eq!(
-        manifest.components["reviews"].kind,
-        ComponentKind::Submodule
+        manifest.artifacts["reviews"].kind,
+        WorkspaceArtifactKind::Git
     );
     assert!(root.join(".agl/state").is_dir());
     assert!(!root.join(".agl/tasks").exists());
@@ -953,15 +906,15 @@ path = ".agl/reviews"
     }));
     assert!(report.changes.iter().any(|change| {
         change.path == Path::new(".agl/reviews")
-            && change.action == RepoInitAction::DeclaredSubmodule
+            && change.action == RepoInitAction::DeclaredGitComponent
     }));
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn profile_file_requires_artifact_sources() {
-    let root = temp_root("profile-requires-artifact-sources");
+fn profile_file_allows_no_artifacts() {
+    let root = temp_root("profile-without-artifacts");
     let profile_path = root.join("profile.toml");
     fs::write(
         &profile_path,
@@ -969,21 +922,11 @@ fn profile_file_requires_artifact_sources() {
 version = 1
 name = "repo-workflow"
 
-[components.skills]
-path = ".agl/skills"
-kind = "submodule"
-url = "git@example.com:agentlibre/skills.git"
-rev = "v1"
-lock = ".agl/skills.lock"
-
-[components.tasks]
-path = ".agl/tasks"
-kind = "local"
 "#,
     )
     .unwrap();
 
-    let err = init_repo_workspace(
+    let report = init_repo_workspace(
         &root,
         &RepoInitOptions {
             profile: DEFAULT_PROFILE.to_string(),
@@ -991,9 +934,9 @@ kind = "local"
             ..RepoInitOptions::default()
         },
     )
-    .unwrap_err();
-
-    assert!(err.to_string().contains("must define artifact_sources"));
+    .unwrap();
+    let manifest = read_manifest(&report.manifest_path).unwrap();
+    assert!(manifest.artifacts.is_empty());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1004,9 +947,9 @@ fn init_can_override_skills_and_externalize_tasks() {
     let report = init_repo_workspace(
         &root,
         &RepoInitOptions {
-            skills_url: Some("git@example.com:agentlibre/skills.git".to_string()),
+            skills_url: Some("ssh://git@example.invalid/agentlibre/skills.git".to_string()),
             skills_rev: Some("v1".to_string()),
-            tasks_url: Some("git@example.com:private/specs.git".to_string()),
+            tasks_url: Some("ssh://git@example.invalid/agentlibre/specs.git".to_string()),
             tasks_rev: Some("main".to_string()),
             ..RepoInitOptions::default()
         },
@@ -1014,52 +957,46 @@ fn init_can_override_skills_and_externalize_tasks() {
     .unwrap();
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
-    let skills = &manifest.components["skills"];
-    assert_eq!(skills.kind, ComponentKind::Submodule);
+    let skills = &manifest.artifacts["skills"];
+    assert_eq!(skills.kind, WorkspaceArtifactKind::Git);
     assert_eq!(
         skills.url.as_deref(),
-        Some("git@example.com:agentlibre/skills.git")
+        Some("ssh://git@example.invalid/agentlibre/skills.git")
     );
     assert_eq!(skills.rev.as_deref(), Some("v1"));
 
-    let tasks = &manifest.components["tasks"];
-    assert_eq!(tasks.kind, ComponentKind::Submodule);
+    let tasks = &manifest.artifacts["tasks"];
+    assert_eq!(tasks.kind, WorkspaceArtifactKind::Git);
     assert_eq!(
         tasks.url.as_deref(),
-        Some("git@example.com:private/specs.git")
+        Some("ssh://git@example.invalid/agentlibre/specs.git")
     );
     assert_eq!(tasks.rev.as_deref(), Some("main"));
-    assert_eq!(tasks.lock.as_deref(), Some(Path::new(".agl/tasks.lock")));
-    let tasks_source = &manifest.artifact_sources["tasks"];
-    assert_eq!(tasks_source.kind, ArtifactSourceKind::Submodule);
-    assert_eq!(
-        tasks_source.url.as_deref(),
-        Some("git@example.com:private/specs.git")
-    );
-    assert_eq!(tasks_source.rev.as_deref(), Some("main"));
+    assert_eq!(tasks.validation.as_deref(), Some("agl.task_spec.v1"));
     assert!(!root.join(".agl/tasks").exists());
     assert!(report.changes.iter().any(|change| {
-        change.path == Path::new(".agl/tasks") && change.action == RepoInitAction::DeclaredSubmodule
+        change.path == Path::new(".agl/tasks")
+            && change.action == RepoInitAction::DeclaredGitComponent
     }));
 
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn init_accepts_generic_artifact_sources() {
-    let root = temp_root("init-generic-artifact-sources");
+fn init_accepts_generic_artifacts() {
+    let root = temp_root("init-generic-artifacts");
     let report = init_repo_workspace(
         &root,
         &RepoInitOptions {
-            artifact_sources: vec![
-                RepoArtifactSourceOverride {
+            artifacts: vec![
+                RepoArtifactOverride {
                     name: "tasks".to_string(),
-                    url: "rpi:/home/dinozyavier/git/agl-specs.git".to_string(),
+                    url: "ssh://git@example.invalid/agentlibre/agl-specs.git".to_string(),
                     rev: Some("main".to_string()),
                 },
-                RepoArtifactSourceOverride {
+                RepoArtifactOverride {
                     name: "reviews".to_string(),
-                    url: "git@example.com:agentlibre/reviews.git".to_string(),
+                    url: "ssh://git@example.invalid/agentlibre/reviews.git".to_string(),
                     rev: None,
                 },
             ],
@@ -1069,35 +1006,22 @@ fn init_accepts_generic_artifact_sources() {
     .unwrap();
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
-    let tasks = &manifest.components["tasks"];
-    assert_eq!(tasks.kind, ComponentKind::Submodule);
+    let tasks = &manifest.artifacts["tasks"];
+    assert_eq!(tasks.kind, WorkspaceArtifactKind::Git);
     assert_eq!(
         tasks.url.as_deref(),
-        Some("rpi:/home/dinozyavier/git/agl-specs.git")
+        Some("ssh://git@example.invalid/agentlibre/agl-specs.git")
     );
     assert_eq!(tasks.rev.as_deref(), Some("main"));
-    assert_eq!(
-        manifest.artifact_sources["tasks"].role,
-        ArtifactSourceRole::Planning
-    );
-    assert_eq!(
-        manifest.artifact_sources["tasks"].url.as_deref(),
-        Some("rpi:/home/dinozyavier/git/agl-specs.git")
-    );
-
-    let reviews = &manifest.components["reviews"];
-    assert_eq!(reviews.kind, ComponentKind::Submodule);
+    let reviews = &manifest.artifacts["reviews"];
+    assert_eq!(reviews.kind, WorkspaceArtifactKind::Git);
     assert_eq!(
         reviews.url.as_deref(),
-        Some("git@example.com:agentlibre/reviews.git")
-    );
-    assert_eq!(
-        manifest.artifact_sources["reviews"].role,
-        ArtifactSourceRole::Generated
+        Some("ssh://git@example.invalid/agentlibre/reviews.git")
     );
     assert!(report.changes.iter().any(|change| {
         change.path == Path::new(".agl/reviews")
-            && change.action == RepoInitAction::DeclaredSubmodule
+            && change.action == RepoInitAction::DeclaredGitComponent
     }));
 
     fs::remove_dir_all(root).unwrap();
@@ -1121,13 +1045,13 @@ fn init_rejects_tasks_rev_without_tasks_url() {
 }
 
 #[test]
-fn init_component_dry_run_plans_submodule_add() {
+fn init_component_dry_run_plans_git_clone() {
     let root = temp_root("component-init-dry-run");
     init_git_repo(&root);
     init_repo_workspace(
         &root,
         &RepoInitOptions {
-            tasks_url: Some("git@example.com:private/specs.git".to_string()),
+            tasks_url: Some("ssh://git@example.invalid/agentlibre/specs.git".to_string()),
             tasks_rev: Some("main".to_string()),
             ..RepoInitOptions::default()
         },
@@ -1147,7 +1071,7 @@ fn init_component_dry_run_plans_submodule_add() {
     assert_eq!(
         report.actions,
         vec![
-            RepoComponentInitAction::WouldAddSubmodule,
+            RepoComponentInitAction::WouldClone,
             RepoComponentInitAction::WouldCheckoutRev
         ]
     );
@@ -1157,7 +1081,7 @@ fn init_component_dry_run_plans_submodule_add() {
 }
 
 #[test]
-fn init_component_adds_external_tasks_submodule() {
+fn init_component_clones_external_tasks_repository() {
     let source = temp_root("component-init-tasks-source");
     init_git_repo(&source);
     fs::write(source.join("README.md"), "private specs\n").unwrap();
@@ -1190,13 +1114,12 @@ fn init_component_adds_external_tasks_submodule() {
     assert_eq!(
         report.actions,
         vec![
-            RepoComponentInitAction::AddedSubmodule,
+            RepoComponentInitAction::Cloned,
             RepoComponentInitAction::CheckedOutRev
         ]
     );
     assert!(root.join(".agl/tasks/README.md").is_file());
-    let modules = fs::read_to_string(root.join(".gitmodules")).unwrap();
-    assert!(modules.contains("path = .agl/tasks"));
+    assert!(!root.join(".gitmodules").exists());
 
     fs::remove_dir_all(root).unwrap();
     fs::remove_dir_all(source).unwrap();
@@ -1206,7 +1129,7 @@ fn init_component_adds_external_tasks_submodule() {
 fn init_component_rejects_local_tasks_component() {
     let root = temp_root("component-init-local-tasks");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
 
     let report = init_repo_component(
         &root,
@@ -1222,8 +1145,36 @@ fn init_component_rejects_local_tasks_component() {
         report
             .errors
             .iter()
-            .any(|error| error.contains("component_not_submodule"))
+            .any(|error| error.contains("component_not_git_backed"))
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_is_neutral_when_tasks_are_not_configured() {
+    let root = temp_root("verify-tasks-not-configured");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: true }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::NotConfigured);
+    assert!(report.errors.is_empty());
+    assert!(report.warnings.is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn verify_task_specs_fails_when_required_tasks_root_is_missing() {
+    let root = temp_root("verify-tasks-required-missing");
+    init_workspace_with_artifacts(&root);
+    fs::remove_dir_all(root.join(".agl/tasks")).unwrap();
+
+    let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
+
+    assert_eq!(report.state, TaskSpecVerifyState::Invalid);
+    assert!(!report.errors.is_empty());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1232,7 +1183,7 @@ fn init_component_rejects_local_tasks_component() {
 fn verify_task_specs_accepts_valid_markdown() {
     let root = temp_root("verify-valid-task-spec");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), true);
 
     let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: true }).unwrap();
@@ -1249,7 +1200,7 @@ fn verify_task_specs_accepts_valid_markdown() {
 fn verify_task_specs_reports_missing_sections_per_file() {
     let root = temp_root("verify-invalid-task-spec");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), false);
 
     let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
@@ -1277,7 +1228,7 @@ fn verify_task_specs_reports_missing_sections_per_file() {
 fn verify_task_specs_checks_only_planned_task_overviews() {
     let root = temp_root("verify-planned-task-overviews");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     fs::write(root.join(".agl/tasks/README.md"), "# Task index\n").unwrap();
     fs::write(root.join(".agl/tasks/AGENTS.md"), "# Instructions\n").unwrap();
     write_task_spec(root.join(".agl/tasks/AGL-001/00_overview.md"), true);
@@ -1306,7 +1257,7 @@ fn verify_task_specs_checks_only_planned_task_overviews() {
 fn verify_task_specs_rejects_unsupported_task_status() {
     let root = temp_root("verify-unsupported-task-status");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     let path = root.join(".agl/tasks/AGL-001/00_overview.md");
     write_task_spec(path.clone(), true);
     let content = fs::read_to_string(&path).unwrap();
@@ -1334,7 +1285,7 @@ fn verify_task_specs_rejects_unsupported_task_status() {
 fn verify_task_specs_rejects_empty_tasks_component() {
     let root = temp_root("verify-empty-task-specs");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
 
     let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
 
@@ -1351,7 +1302,7 @@ fn verify_task_specs_rejects_empty_tasks_component() {
 #[test]
 fn export_profile_writes_policy_and_excludes_local_state() {
     let root = temp_root("export-profile");
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
     fs::write(
         root.join(".agl/skill-trust.toml"),
         "SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT",
@@ -1377,19 +1328,14 @@ fn export_profile_writes_policy_and_excludes_local_state() {
 
     assert!(report.wrote);
     assert_eq!(profile.name, DEFAULT_PROFILE);
-    assert!(profile.components.contains_key("skills"));
+    assert!(profile.artifacts.contains_key("tasks"));
+    assert!(profile.artifacts.contains_key("state"));
     assert!(profile.policy.hooks.managed);
     assert_eq!(
         profile.policy.hooks.install,
         vec!["pre-commit".to_string(), "pre-push".to_string()]
     );
     assert!(!profile.policy.trust.import_local_trust);
-    assert!(
-        profile
-            .skill_pack
-            .as_ref()
-            .is_some_and(|identity| identity.same_ids_when_pinned)
-    );
     assert!(!content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"));
     assert!(!content.contains("SECRET_STATE_SHOULD_NOT_EXPORT"));
 
@@ -1405,30 +1351,30 @@ fn export_profile_writes_policy_and_excludes_local_state() {
 }
 
 #[test]
-fn export_profile_round_trips_actual_skills_component_identity() {
-    let root = temp_root("export-profile-actual-skills");
-    let source = temp_root("export-profile-actual-skills-source");
-    fs::remove_dir_all(source.join(".git")).unwrap();
-    init_git_repo(&source);
-    fs::write(source.join("README.md"), "skills\n").unwrap();
-    git(&source, &["add", "."]);
-    git_with_identity(&source, &["commit", "-m", "Add skills"]);
-    let commit = git_output(&source, ["rev-parse", "HEAD"]).unwrap();
-    let tree = git_output(&source, ["rev-parse", "HEAD^{tree}"]).unwrap();
+fn export_profile_round_trips_artifact_identity() {
+    let root = temp_root("export-profile-artifact-identity");
+    fs::create_dir_all(root.join(".agl")).unwrap();
+    fs::write(
+        root.join(WORKSPACE_MANIFEST_PATH),
+        r#"
+version = 1
+profile = "repo-workflow"
 
-    init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
-    git(
-        &root,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            source.to_str().unwrap(),
-            ".agl/skills",
-        ],
-    );
+[functions]
+default = "gemma4-12b"
+
+[artifacts.skills]
+kind = "git"
+path = ".agl/skills"
+url = "ssh://git@example.invalid/agentlibre/skills.git"
+rev = "v1"
+commit = "0123456789abcdef"
+tree = "fedcba9876543210"
+required = true
+access = "read"
+"#,
+    )
+    .unwrap();
 
     let out = root.join("repo-workflow.toml");
     export_repo_profile(
@@ -1440,15 +1386,13 @@ fn export_profile_round_trips_actual_skills_component_identity() {
     )
     .unwrap();
     let profile = read_workspace_profile(&out).unwrap();
-    let component = profile.components.get("skills").unwrap();
-    let skill_pack = profile.skill_pack.as_ref().unwrap();
-
-    assert_eq!(component.url.as_deref(), Some(source.to_str().unwrap()));
-    assert_eq!(component.commit.as_deref(), Some(commit.trim()));
-    assert_eq!(component.tree.as_deref(), Some(tree.trim()));
-    assert_eq!(skill_pack.url, component.url);
-    assert_eq!(skill_pack.commit, component.commit);
-    assert_eq!(skill_pack.tree, component.tree);
+    let artifact = profile.artifacts.get("skills").unwrap();
+    assert_eq!(
+        artifact.url.as_deref(),
+        Some("ssh://git@example.invalid/agentlibre/skills.git")
+    );
+    assert_eq!(artifact.commit.as_deref(), Some("0123456789abcdef"));
+    assert_eq!(artifact.tree.as_deref(), Some("fedcba9876543210"));
 
     let imported = temp_root("export-profile-imported");
     init_git_repo(&imported);
@@ -1462,18 +1406,17 @@ fn export_profile_round_trips_actual_skills_component_identity() {
     )
     .unwrap();
     let imported_manifest = fs::read_to_string(imported.join(WORKSPACE_MANIFEST_PATH)).unwrap();
-    assert!(imported_manifest.contains(source.to_str().unwrap()));
-    assert!(imported_manifest.contains(commit.trim()));
-    assert!(imported_manifest.contains(tree.trim()));
+    assert!(imported_manifest.contains("ssh://git@example.invalid/agentlibre/skills.git"));
+    assert!(imported_manifest.contains("0123456789abcdef"));
+    assert!(imported_manifest.contains("fedcba9876543210"));
 
     fs::remove_dir_all(root).unwrap();
-    fs::remove_dir_all(source).unwrap();
     fs::remove_dir_all(imported).unwrap();
 }
 
 #[test]
-fn profile_validation_rejects_mismatched_skill_pack_identity() {
-    let root = temp_root("profile-skill-pack-mismatch");
+fn profile_validation_rejects_removed_skill_pack_schema() {
+    let root = temp_root("profile-old-skill-pack-schema");
     let profile_path = root.join("profile.toml");
     fs::write(
         &profile_path,
@@ -1481,31 +1424,58 @@ fn profile_validation_rejects_mismatched_skill_pack_identity() {
 version = 1
 name = "repo-workflow"
 
-[components.skills]
-path = ".agl/skills"
-kind = "submodule"
-url = "git@example.com:agentlibre/agl-skills.git"
-rev = "v0.1.0"
-lock = ".agl/skills.lock"
-
-[artifact_sources.skills]
-role = "core"
-kind = "submodule"
-path = ".agl/skills"
-
 [skill_pack]
 component = "skills"
 path = ".agl/skills"
-url = "git@example.com:agentlibre/other-skills.git"
+url = "ssh://git@example.invalid/agentlibre/skills.git"
 rev = "v0.1.0"
-lock = ".agl/skills.lock"
 same_ids_when_pinned = true
 "#,
     )
     .unwrap();
 
     let err = read_workspace_profile(&profile_path).unwrap_err();
-    assert!(err.to_string().contains("skill_pack.skills.url_mismatch"));
+    assert!(format!("{err:#}").contains("unknown field"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn workspace_manifest_rejects_removed_component_and_nested_artifact_shape() {
+    let root = temp_root("manifest-old-artifact-shape");
+    let manifest_path = root.join(WORKSPACE_MANIFEST_PATH);
+    fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        r#"
+version = 1
+profile = "repo-workflow"
+
+[functions]
+default = "gemma4-12b"
+
+[components.tasks]
+path = ".agl/tasks"
+kind = "git"
+
+[artifact_sources.tasks]
+role = "planning"
+kind = "git"
+path = ".agl/tasks"
+required = true
+
+[[artifact_sources.tasks.artifacts]]
+id = "tasks"
+kind = "source"
+path = "."
+access = "read_write"
+required = true
+"#,
+    )
+    .unwrap();
+
+    let error = read_manifest(&manifest_path).unwrap_err();
+    assert!(format!("{error:#}").contains("unknown field"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1520,14 +1490,12 @@ fn profile_file_name_must_match_requested_non_default_profile() {
 version = 1
 name = "actual-profile"
 
-[components.state]
-path = ".agl/state"
-kind = "ignored"
-
-[artifact_sources.state]
-role = "state"
+[artifacts.state]
 kind = "ignored"
 path = ".agl/state"
+required = false
+access = "read_write"
+create = ["."]
 "#,
     )
     .unwrap();
@@ -1551,7 +1519,21 @@ path = ".agl/state"
 fn existing_plain_skills_directory_is_not_component_git_worktree() {
     let root = temp_root("plain-skills");
     init_git_repo(&root);
-    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    init_workspace_with_artifacts(&root);
+    let manifest_path = root.join(WORKSPACE_MANIFEST_PATH);
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str(
+        r#"
+
+[artifacts.skills]
+kind = "git"
+path = ".agl/skills"
+url = "ssh://git@example.invalid/agentlibre/skills.git"
+required = true
+access = "read"
+"#,
+    );
+    fs::write(&manifest_path, manifest).unwrap();
     fs::create_dir_all(root.join(".agl/skills")).unwrap();
 
     let report = status_repo_workspace(
@@ -1566,8 +1548,8 @@ fn existing_plain_skills_directory_is_not_component_git_worktree() {
     assert_eq!(report.state, RepoStatusState::Invalid);
     let skills = report.components.first().expect("skills status");
     assert!(skills.exists);
-    assert_eq!(skills.submodule_registered, Some(false));
-    assert_eq!(skills.gitlink_present, Some(false));
+    assert_eq!(skills.submodule_registered, None);
+    assert_eq!(skills.gitlink_present, None);
     assert!(
         skills
             .errors

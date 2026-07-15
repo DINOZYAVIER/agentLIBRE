@@ -1,6 +1,6 @@
 use agl_functions::{FunctionSource, list_functions, workspace_functions_root};
 use agl_repo::{
-    DEFAULT_FUNCTION, RepoArtifactSourceOverride as AglRepoArtifactSourceOverride,
+    DEFAULT_FUNCTION, RepoArtifactOverride as AglRepoArtifactOverride,
     RepoInitOptions as AglRepoInitOptions, init_repo_workspace,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
@@ -43,10 +43,10 @@ fn repo_init_options(options: RepoInitOptions) -> AglRepoInitOptions {
     AglRepoInitOptions {
         profile: options.profile,
         profile_file: options.profile_file,
-        artifact_sources: options
-            .artifact_sources
+        artifacts: options
+            .artifacts
             .into_iter()
-            .map(|source| AglRepoArtifactSourceOverride {
+            .map(|source| AglRepoArtifactOverride {
                 name: source.name,
                 url: source.url,
                 rev: source.rev,

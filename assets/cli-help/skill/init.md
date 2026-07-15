@@ -1,4 +1,4 @@
-Initialize the workspace skills submodule.
+Materialize the workspace skills artifact.
 
-The skills component must be declared in .agl/workspace.toml. Use --dry-run to
+The skills artifact must be declared in .agl/workspace.toml. Use --dry-run to
 preview git operations.

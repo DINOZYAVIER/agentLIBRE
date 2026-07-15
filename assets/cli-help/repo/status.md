@@ -1,4 +1,4 @@
-Report repo-local AgentLIBRE workspace status.
+Report repo-local agentLIBRE workspace status.
 
-This checks .agl/workspace.toml, declared components, submodule state, and
-managed folders.
+This checks .agl/workspace.toml, declared artifact roots, Git state, and managed
+folders.

@@ -233,6 +233,22 @@ fn add_functions(
                 panic!("builtin function {} is missing {}", id, required.display());
             }
         }
+        let inference_text = fs::read_to_string(&inference_config).unwrap_or_else(|error| {
+            panic!(
+                "failed to read builtin function inference preset {}: {error}",
+                inference_config.display()
+            )
+        });
+        agl_config::load_inference_preset_from_str(
+            &inference_config.display().to_string(),
+            &inference_text,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "builtin function inference preset {} must use portable model ids: {error:#}",
+                inference_config.display()
+            )
+        });
 
         let function_asset_index = assets.len();
         assets.push(asset(

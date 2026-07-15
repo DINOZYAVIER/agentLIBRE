@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
-use agl_config::LocalInferenceConfig;
+use agl_config::ResolvedInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
 use agl_ids::{RequestId, RunId, SessionId};
 use agl_inference::{
@@ -127,7 +127,7 @@ impl InferenceClient for ScriptedDelegationClient {
 
     fn clear_context(
         &self,
-        _config: &LocalInferenceConfig,
+        _config: &ResolvedInferenceConfig,
         _session_id: &SessionId,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -135,7 +135,7 @@ impl InferenceClient for ScriptedDelegationClient {
 
     fn release_context(
         &self,
-        _config: &LocalInferenceConfig,
+        _config: &ResolvedInferenceConfig,
         _session_id: &SessionId,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -171,7 +171,7 @@ impl InferenceClient for ControlledInferenceClient {
 
     fn clear_context(
         &self,
-        _config: &LocalInferenceConfig,
+        _config: &ResolvedInferenceConfig,
         _session_id: &SessionId,
     ) -> anyhow::Result<()> {
         Ok(())
@@ -179,7 +179,7 @@ impl InferenceClient for ControlledInferenceClient {
 
     fn release_context(
         &self,
-        _config: &LocalInferenceConfig,
+        _config: &ResolvedInferenceConfig,
         _session_id: &SessionId,
     ) -> anyhow::Result<()> {
         Ok(())

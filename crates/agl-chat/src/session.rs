@@ -9,14 +9,13 @@ use agl_capabilities::{
     SkillId, StateEffect, render_canonical_json,
 };
 use agl_config::{
-    LocalInferenceConfig, ModelConfig, ToolCallFormat, load_local_inference_config,
-    load_local_inference_config_from_str,
+    ModelConfig, ResolvedInferenceConfig, ToolCallFormat, load_inference_preset_from_str,
+    load_local_inference_config, model_bindings_path, resolve_inference_preset,
 };
 use agl_content::Content;
 use agl_functions::{
-    FunctionToolMode, IdentityContractMode, RuntimeDelegationPlan, RuntimeFunction,
-    RuntimeIdentityContract, RuntimeSubagentSpec, resolve_runtime_function,
-    resolve_runtime_function_allow_missing_profile,
+    FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
+    RuntimeSubagentSpec, resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
@@ -47,7 +46,7 @@ const MEMORY_CONTEXT_ENTRY_LIMIT: usize = 8;
 
 pub struct InferenceSession {
     inference_client: InferenceClientHandle,
-    inference_config: LocalInferenceConfig,
+    inference_config: ResolvedInferenceConfig,
     session_id: SessionId,
     max_output_tokens: u32,
     model_config: ModelConfig,
@@ -61,7 +60,7 @@ pub struct InferenceSession {
     function_context: Option<String>,
     function_skills: Vec<String>,
     runtime_identity: Option<RuntimeIdentityEvidence>,
-    identity_contract: Option<RuntimeIdentityContract>,
+    runtime_identity_validation: Option<RuntimeIdentityValidation>,
     skill_context: Option<String>,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
@@ -87,7 +86,7 @@ pub struct InferenceSession {
 }
 
 pub(crate) struct SubagentSessionConfig {
-    pub inference_config: LocalInferenceConfig,
+    pub inference_config: ResolvedInferenceConfig,
     pub spec: RuntimeSubagentSpec,
     pub delegation_plan: RuntimeDelegationPlan,
     pub authority_ceiling: BTreeSet<CapabilityId>,
@@ -171,7 +170,7 @@ impl InferenceSession {
         }
 
         let config = if use_function_embedded_config {
-            load_local_inference_config_from_str(
+            let preset = load_inference_preset_from_str(
                 &config_path.display().to_string(),
                 function_embedded_config.expect("checked above"),
             )
@@ -180,7 +179,15 @@ impl InferenceSession {
                     "failed to load function inference config {}",
                     config_path.display()
                 )
-            })?
+            })?;
+            resolve_inference_preset(preset, model_bindings_path(&config_dir)).with_context(
+                || {
+                    format!(
+                        "failed to resolve function inference models for {}",
+                        config_path.display()
+                    )
+                },
+            )?
         } else {
             load_local_inference_config(&config_path).with_context(|| {
                 format!(
@@ -232,11 +239,12 @@ impl InferenceSession {
                 tool_mode,
             )
         });
-        let identity_contract = effective_identity_contract(runtime_function.as_ref());
+        let runtime_identity_validation =
+            effective_runtime_identity_validation(runtime_function.as_ref());
         let delegation_authority_ceiling =
             delegable_capability_ids(&skill_context.effective_capabilities);
         let mut hook_batches = skill_context.hook_batches;
-        add_identity_hook_batch(&mut hook_batches, identity_contract.as_ref())?;
+        add_identity_hook_batch(&mut hook_batches, runtime_identity_validation.as_ref())?;
         let runtime_features =
             build_runtime_feature_context(&workspace_root, tool_mode, &skill_context.visible_tools);
         let config_skills = config.prompt.skills.clone();
@@ -268,7 +276,7 @@ impl InferenceSession {
             function_context,
             function_skills,
             runtime_identity,
-            identity_contract,
+            runtime_identity_validation,
             skill_context: skill_context.context,
             skill_hook_batches: hook_batches,
             visible_tools: skill_context.visible_tools,
@@ -377,7 +385,7 @@ impl InferenceSession {
             function_context: None,
             function_skills,
             runtime_identity: None,
-            identity_contract: None,
+            runtime_identity_validation: None,
             skill_context: skill_context.context,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
@@ -447,7 +455,7 @@ impl InferenceSession {
         &self.delegation_authority_ceiling
     }
 
-    pub(crate) fn inference_config(&self) -> &LocalInferenceConfig {
+    pub(crate) fn inference_config(&self) -> &ResolvedInferenceConfig {
         &self.inference_config
     }
 
@@ -491,20 +499,19 @@ impl InferenceSession {
                 serde_json::to_value(identity).expect("runtime identity serializes"),
             );
         }
-        if let Some(contract) = &self.identity_contract {
+        if let Some(validation) = &self.runtime_identity_validation {
             payload.insert(
-                "identity_contract".to_string(),
-                serde_json::to_value(contract).expect("identity contract serializes"),
+                "runtime_identity_validation".to_string(),
+                serde_json::to_value(validation).expect("identity validation serializes"),
             );
         }
         serde_json::Value::Object(payload)
     }
 
     pub fn max_hook_repair_attempts(&self) -> usize {
-        self.identity_contract
+        self.runtime_identity_validation
             .as_ref()
-            .filter(|contract| contract.repair)
-            .map(|contract| contract.max_repair_attempts as usize)
+            .map(|validation| validation.repair_attempts as usize)
             .unwrap_or(0)
     }
 
@@ -684,20 +691,21 @@ impl InferenceSession {
                 self.tool_mode,
             )
         });
-        self.identity_contract = effective_identity_contract(self.runtime_function.as_ref());
+        self.runtime_identity_validation =
+            effective_runtime_identity_validation(self.runtime_function.as_ref());
         if let Some(run_id) = run_id
-            && (self.runtime_identity.is_some() || self.identity_contract.is_some())
+            && (self.runtime_identity.is_some() || self.runtime_identity_validation.is_some())
         {
             write_identity_evidence(
                 &self.artifact_root,
                 run_id,
                 self.runtime_identity.as_ref(),
-                self.identity_contract.as_ref(),
+                self.runtime_identity_validation.as_ref(),
             )?;
         }
         self.skill_context = skill_context.context;
         let mut hook_batches = skill_context.hook_batches;
-        add_identity_hook_batch(&mut hook_batches, self.identity_contract.as_ref())?;
+        add_identity_hook_batch(&mut hook_batches, self.runtime_identity_validation.as_ref())?;
         self.skill_hook_batches = hook_batches;
         self.visible_tools = skill_context.visible_tools;
         self.effective_capabilities = skill_context.effective_capabilities;
@@ -887,30 +895,23 @@ fn build_runtime_identity(
     }
 }
 
-fn effective_identity_contract(
+fn effective_runtime_identity_validation(
     function: Option<&RuntimeFunction>,
-) -> Option<RuntimeIdentityContract> {
-    let function = function?;
-    let contract = function
-        .identity_contract
-        .clone()
-        .unwrap_or_else(RuntimeIdentityContract::function_default);
-    contract.is_enabled().then_some(contract)
+) -> Option<RuntimeIdentityValidation> {
+    function?.runtime_identity_validation.clone()
 }
 
 fn add_identity_hook_batch(
     hook_batches: &mut Vec<TurnHookBatch>,
-    contract: Option<&RuntimeIdentityContract>,
+    validation: Option<&RuntimeIdentityValidation>,
 ) -> Result<()> {
-    let Some(contract) = contract.filter(|contract| contract.is_enabled()) else {
+    let Some(validation) = validation else {
         return Ok(());
     };
-    let hook_id = match contract.mode {
-        IdentityContractMode::Off => return Ok(()),
-        IdentityContractMode::ValidateClaims => {
-            agl_tools::guards::RUNTIME_IDENTITY_VALIDATE_HOOK_ID
-        }
-        IdentityContractMode::Require => agl_tools::guards::RUNTIME_IDENTITY_REQUIRE_HOOK_ID,
+    let hook_id = if validation.required {
+        agl_tools::guards::RUNTIME_IDENTITY_REQUIRE_HOOK_ID
+    } else {
+        agl_tools::guards::RUNTIME_IDENTITY_VALIDATE_HOOK_ID
     };
     let hook_id = HookId::new(hook_id)?;
     if let Some(batch) = hook_batches
@@ -930,7 +931,7 @@ fn write_identity_evidence(
     artifact_root: &std::path::Path,
     run_id: &RunId,
     identity: Option<&RuntimeIdentityEvidence>,
-    contract: Option<&RuntimeIdentityContract>,
+    validation: Option<&RuntimeIdentityValidation>,
 ) -> Result<()> {
     let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
     std::fs::create_dir_all(&run_dir).with_context(|| {
@@ -946,12 +947,13 @@ fn write_identity_evidence(
         std::fs::write(&path, bytes)
             .with_context(|| format!("failed to write runtime identity {}", path.display()))?;
     }
-    if let Some(contract) = contract {
-        let path = run_dir.join("identity-contract.json");
-        let bytes = serde_json::to_vec_pretty(contract)
-            .with_context(|| format!("failed to serialize identity contract {}", path.display()))?;
+    if let Some(validation) = validation {
+        let path = run_dir.join("identity-validation.json");
+        let bytes = serde_json::to_vec_pretty(validation).with_context(|| {
+            format!("failed to serialize identity validation {}", path.display())
+        })?;
         std::fs::write(&path, bytes)
-            .with_context(|| format!("failed to write identity contract {}", path.display()))?;
+            .with_context(|| format!("failed to write identity validation {}", path.display()))?;
     }
     Ok(())
 }

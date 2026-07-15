@@ -20,6 +20,23 @@ omitted. On those commands, `--config PATH` overrides the selected function's
 model config for one invocation; it does not disable function context, skills,
 tools, subagents, memory policy, identity hooks, or function evidence.
 
+Packaged functions contain portable model ids. Bind those ids to files on this
+machine in `$AGL_HOME/config/models.toml`:
+
+```toml
+version = 1
+
+[models.gemma4-12b]
+path = "/home/user/models/gemma4-12b.gguf"
+
+[models.gemma4-12b-mmproj]
+path = "/home/user/models/mmproj-gemma4-12b.gguf"
+```
+
+Bindings are explicit: agentLIBRE does not search home directories or infer a
+model from its filename. `agl function status <id>` reports required ids,
+resolved paths, and the binding file to repair when an id is missing.
+
 The active local inference profile is resolved for low-level inference
 commands, config health checks, and function profile resolution in this order:
 

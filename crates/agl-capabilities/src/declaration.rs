@@ -266,7 +266,7 @@ impl ActionDeclaration {
         }
         let compiled =
             ActionSchema::compile(&self.input_schema).map_err(DeclarationError::InvalidSchema)?;
-        validate_input_schema_contract(&self.input_schema, &compiled)?;
+        validate_input_schema_shape(&self.input_schema, &compiled)?;
         Ok(())
     }
 
@@ -282,7 +282,7 @@ impl ActionDeclaration {
 
 const DRAFT_2020_12_SCHEMA: &str = "https://json-schema.org/draft/2020-12/schema";
 
-fn validate_input_schema_contract(
+fn validate_input_schema_shape(
     schema: &Value,
     compiled: &ActionSchema,
 ) -> Result<(), DeclarationError> {

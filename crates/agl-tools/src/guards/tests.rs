@@ -209,7 +209,7 @@ fn runtime_identity_require_repairs_missing_claims_and_passes_exact_lists() {
 }
 
 #[test]
-fn task_spec_guard_requires_contract_sections() {
+fn task_spec_guard_requires_spec_sections() {
     let guards = CoreGuards::new();
     let valid = r#"
 # Problem
@@ -423,11 +423,10 @@ fn runtime_identity_payload(content: &str) -> serde_json::Value {
             "subagents": ["reviewer"],
             "workspace_root": "/repo"
         },
-        "identity_contract": {
-            "mode": "validate_claims",
+        "runtime_identity_validation": {
+            "required": false,
             "fields": ["function", "skills", "subagents"],
-            "repair": true,
-            "max_repair_attempts": 1
+            "repair_attempts": 1
         }
     })
 }

@@ -2,7 +2,7 @@ Start an interactive chat session.
 
 Use chat when you want multiple turns in one session. It loads the workspace
 default agentFUNCTION from .agl/workspace.toml unless --function selects
-another function. The session transcript is saved under the AgentLIBRE data
+another function. The session transcript is saved under the agentLIBRE data
 directory unless --no-history is used.
 
 Common use:

@@ -739,3 +739,93 @@ tool_call_format = "hermes_json"
         "tool_call_format HermesJson is not supported for dialect Gemma4",
     );
 }
+
+#[test]
+fn portable_preset_resolves_main_projector_and_draft_bindings() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-config-model-bindings-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let model = root.join("model.gguf");
+    let projector = root.join("mmproj.gguf");
+    let draft = root.join("draft.gguf");
+    for path in [&model, &projector, &draft] {
+        std::fs::write(path, []).unwrap();
+    }
+    let bindings_path = root.join("models.toml");
+    std::fs::write(
+        &bindings_path,
+        format!(
+            "version = 1\n\n[models.main]\npath = {:?}\n\n[models.projector]\npath = {:?}\n\n[models.draft]\npath = {:?}\n",
+            model, projector, draft
+        ),
+    )
+    .unwrap();
+    let vision_preset = load_inference_preset_from_str(
+        "vision fixture",
+        &preset_text("multimodal_projector_id = \"projector\"", ""),
+    )
+    .unwrap();
+    let vision = resolve_inference_preset(vision_preset, &bindings_path).unwrap();
+    assert_eq!(vision.backend.model, model);
+    assert_eq!(
+        vision.backend.multimodal_projector.as_deref(),
+        Some(projector.as_path())
+    );
+
+    let mtp_preset = load_inference_preset_from_str(
+        "MTP fixture",
+        &preset_text(
+            "",
+            "[runtime.mtp]\nenabled = true\ndraft_model_id = \"draft\"\ndraft_tokens = 4",
+        ),
+    )
+    .unwrap();
+    let mtp = resolve_inference_preset(mtp_preset, &bindings_path).unwrap();
+    assert_eq!(
+        mtp.runtime.mtp.draft_model.as_deref(),
+        Some(draft.as_path())
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn portable_preset_names_a_missing_model_binding() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-config-missing-binding-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let bindings_path = root.join("models.toml");
+    std::fs::write(&bindings_path, "version = 1\nmodels = {}\n").unwrap();
+    let preset = load_inference_preset_from_str("fixture", &preset_text("", "")).unwrap();
+
+    let error = resolve_inference_preset(preset, &bindings_path).unwrap_err();
+
+    assert!(error.to_string().contains("model `main` is not configured"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn preset_text(backend_extra: &str, runtime_extra: &str) -> String {
+    format!(
+        r#"
+[backend]
+kind = "llama_cpp"
+model_id = "main"
+{backend_extra}
+
+[runtime]
+gpu_layers = 0
+context_tokens = 4096
+threads = 2
+{runtime_extra}
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#
+    )
+}

@@ -4,11 +4,3 @@
 [submodule "assets/core-skills"]
 	path = assets/core-skills
 	url = https://github.com/DINOZYAVIER/agl-core-skills.git
-[submodule ".agl/skills"]
-	path = .agl/skills
-	url = rpi:/home/dinozyavier/git/agl-private-skills.git
-	branch = main
-[submodule ".agl/tasks"]
-	path = .agl/tasks
-	url = rpi:/home/dinozyavier/git/agl-specs.git
-	branch = main

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use agl_config::{
-    BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, LocalInferenceConfig, ModelConfig,
-    ModelDialect, MtpRuntimeConfig, PromptConfig, ToolCallFormat, load_local_inference_config,
+    BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, ModelConfig, ModelDialect,
+    MtpRuntimeConfig, PromptConfig, ResolvedInferenceConfig, ToolCallFormat,
+    load_local_inference_config,
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
@@ -74,8 +75,8 @@ fn inference_request() -> InferenceRequest {
     }
 }
 
-fn local_config() -> LocalInferenceConfig {
-    LocalInferenceConfig {
+fn local_config() -> ResolvedInferenceConfig {
+    ResolvedInferenceConfig {
         backend: InferenceBackendConfig {
             kind: BackendKind::LlamaCpp,
             model: PathBuf::from("/models/qwen.gguf"),

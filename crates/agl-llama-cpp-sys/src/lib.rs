@@ -1,31 +1,38 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+pub mod build_support;
+
 use std::ffi::{c_char, c_float, c_int, c_void};
 
-pub(crate) type llama_token = i32;
-pub(crate) type llama_pos = i32;
-pub(crate) type llama_seq_id = i32;
-pub(crate) type llama_memory_t = *mut c_void;
-pub(crate) type ggml_backend_dev_t = *mut c_void;
+/// Directory containing the shared llama.cpp libraries selected at build time.
+pub const fn library_dir() -> &'static str {
+    env!("AGL_LLAMA_CPP_LIBRARY_DIR")
+}
 
-pub(crate) const LLAMA_SPLIT_MODE_LAYER: c_int = 1;
-pub(crate) const LLAMA_CONTEXT_TYPE_MTP: c_int = 1;
-pub(crate) const LLAMA_FLASH_ATTN_TYPE_AUTO: c_int = -1;
-pub(crate) const LLAMA_FLASH_ATTN_TYPE_DISABLED: c_int = 0;
-pub(crate) const LLAMA_FLASH_ATTN_TYPE_ENABLED: c_int = 1;
-pub(crate) const GGML_TYPE_F32: c_int = 0;
-pub(crate) const GGML_TYPE_F16: c_int = 1;
-pub(crate) const GGML_TYPE_Q4_0: c_int = 2;
-pub(crate) const GGML_TYPE_Q4_1: c_int = 3;
-pub(crate) const GGML_TYPE_Q5_0: c_int = 6;
-pub(crate) const GGML_TYPE_Q5_1: c_int = 7;
-pub(crate) const GGML_TYPE_Q8_0: c_int = 8;
-pub(crate) const GGML_TYPE_IQ4_NL: c_int = 20;
-pub(crate) const GGML_TYPE_BF16: c_int = 30;
+pub type llama_token = i32;
+pub type llama_pos = i32;
+pub type llama_seq_id = i32;
+pub type llama_memory_t = *mut c_void;
+pub type ggml_backend_dev_t = *mut c_void;
+
+pub const LLAMA_SPLIT_MODE_LAYER: c_int = 1;
+pub const LLAMA_CONTEXT_TYPE_MTP: c_int = 1;
+pub const LLAMA_FLASH_ATTN_TYPE_AUTO: c_int = -1;
+pub const LLAMA_FLASH_ATTN_TYPE_DISABLED: c_int = 0;
+pub const LLAMA_FLASH_ATTN_TYPE_ENABLED: c_int = 1;
+pub const GGML_TYPE_F32: c_int = 0;
+pub const GGML_TYPE_F16: c_int = 1;
+pub const GGML_TYPE_Q4_0: c_int = 2;
+pub const GGML_TYPE_Q4_1: c_int = 3;
+pub const GGML_TYPE_Q5_0: c_int = 6;
+pub const GGML_TYPE_Q5_1: c_int = 7;
+pub const GGML_TYPE_Q8_0: c_int = 8;
+pub const GGML_TYPE_IQ4_NL: c_int = 20;
+pub const GGML_TYPE_BF16: c_int = 30;
 
 #[repr(C)]
-pub(crate) struct llama_model_params {
+pub struct llama_model_params {
     pub devices: *mut ggml_backend_dev_t,
     pub tensor_buft_overrides: *const c_void,
     pub n_gpu_layers: c_int,
@@ -46,7 +53,7 @@ pub(crate) struct llama_model_params {
 }
 
 #[repr(C)]
-pub(crate) struct llama_context_params {
+pub struct llama_context_params {
     pub n_ctx: u32,
     pub n_batch: u32,
     pub n_ubatch: u32,
@@ -86,12 +93,12 @@ pub(crate) struct llama_context_params {
 }
 
 #[repr(C)]
-pub(crate) struct llama_sampler_chain_params {
+pub struct llama_sampler_chain_params {
     pub no_perf: bool,
 }
 
 #[repr(C)]
-pub(crate) struct llama_batch {
+pub struct llama_batch {
     pub n_tokens: i32,
     pub token: *mut llama_token,
     pub embd: *mut c_float,
@@ -102,14 +109,14 @@ pub(crate) struct llama_batch {
 }
 
 #[repr(C)]
-pub(crate) struct agl_llama_chat_tool_call {
+pub struct agl_llama_chat_tool_call {
     pub name: *const c_char,
     pub arguments: *const c_char,
     pub id: *const c_char,
 }
 
 #[repr(C)]
-pub(crate) struct agl_llama_chat_message {
+pub struct agl_llama_chat_message {
     pub role: *const c_char,
     pub content: *const c_char,
     pub name: *const c_char,
@@ -119,64 +126,57 @@ pub(crate) struct agl_llama_chat_message {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(crate) struct agl_llama_mtp_stats {
-    pub(crate) draft_calls: u64,
-    pub(crate) empty_drafts: u64,
-    pub(crate) drafted_tokens: u64,
-    pub(crate) accepted_tokens: u64,
+pub struct agl_llama_mtp_stats {
+    pub draft_calls: u64,
+    pub empty_drafts: u64,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
 }
 
 unsafe extern "C" {
-    pub(crate) fn ggml_backend_load_all_from_path(dir_path: *const c_char);
-    pub(crate) fn ggml_backend_dev_count() -> usize;
-    pub(crate) fn ggml_backend_dev_get(index: usize) -> ggml_backend_dev_t;
-    pub(crate) fn ggml_backend_dev_by_name(name: *const c_char) -> ggml_backend_dev_t;
-    pub(crate) fn ggml_backend_dev_name(device: ggml_backend_dev_t) -> *const c_char;
-    pub(crate) fn ggml_backend_dev_description(device: ggml_backend_dev_t) -> *const c_char;
-    pub(crate) fn ggml_backend_dev_memory(
-        device: ggml_backend_dev_t,
-        free: *mut usize,
-        total: *mut usize,
-    );
+    pub fn ggml_backend_load_all_from_path(dir_path: *const c_char);
+    pub fn ggml_backend_dev_count() -> usize;
+    pub fn ggml_backend_dev_get(index: usize) -> ggml_backend_dev_t;
+    pub fn ggml_backend_dev_by_name(name: *const c_char) -> ggml_backend_dev_t;
+    pub fn ggml_backend_dev_name(device: ggml_backend_dev_t) -> *const c_char;
+    pub fn ggml_backend_dev_description(device: ggml_backend_dev_t) -> *const c_char;
+    pub fn ggml_backend_dev_memory(device: ggml_backend_dev_t, free: *mut usize, total: *mut usize);
 
-    pub(crate) fn llama_backend_init();
-    pub(crate) fn llama_log_set(
+    pub fn llama_backend_init();
+    pub fn llama_log_set(
         log_callback: Option<unsafe extern "C" fn(c_int, *const c_char, *mut c_void)>,
         user_data: *mut c_void,
     );
-    pub(crate) fn llama_model_default_params() -> llama_model_params;
-    pub(crate) fn llama_context_default_params() -> llama_context_params;
-    pub(crate) fn llama_sampler_chain_default_params() -> llama_sampler_chain_params;
-    pub(crate) fn llama_model_load_from_file(
+    pub fn llama_model_default_params() -> llama_model_params;
+    pub fn llama_context_default_params() -> llama_context_params;
+    pub fn llama_sampler_chain_default_params() -> llama_sampler_chain_params;
+    pub fn llama_model_load_from_file(
         path_model: *const c_char,
         params: llama_model_params,
     ) -> *mut c_void;
-    pub(crate) fn llama_model_free(model: *mut c_void);
-    pub(crate) fn llama_init_from_model(
-        model: *mut c_void,
-        params: llama_context_params,
-    ) -> *mut c_void;
-    pub(crate) fn llama_set_abort_callback(
+    pub fn llama_model_free(model: *mut c_void);
+    pub fn llama_init_from_model(model: *mut c_void, params: llama_context_params) -> *mut c_void;
+    pub fn llama_set_abort_callback(
         ctx: *mut c_void,
         abort_callback: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
         abort_callback_data: *mut c_void,
     );
-    pub(crate) fn llama_free(ctx: *mut c_void);
-    pub(crate) fn llama_model_get_vocab(model: *const c_void) -> *const c_void;
-    pub(crate) fn llama_model_desc(model: *const c_void, buf: *mut c_char, buf_size: usize) -> i32;
-    pub(crate) fn llama_n_ctx(ctx: *const c_void) -> u32;
-    pub(crate) fn llama_get_memory(ctx: *const c_void) -> llama_memory_t;
-    pub(crate) fn llama_memory_seq_pos_max(mem: llama_memory_t, seq_id: llama_seq_id) -> llama_pos;
-    pub(crate) fn llama_memory_seq_rm(
+    pub fn llama_free(ctx: *mut c_void);
+    pub fn llama_model_get_vocab(model: *const c_void) -> *const c_void;
+    pub fn llama_model_desc(model: *const c_void, buf: *mut c_char, buf_size: usize) -> i32;
+    pub fn llama_n_ctx(ctx: *const c_void) -> u32;
+    pub fn llama_get_memory(ctx: *const c_void) -> llama_memory_t;
+    pub fn llama_memory_seq_pos_max(mem: llama_memory_t, seq_id: llama_seq_id) -> llama_pos;
+    pub fn llama_memory_seq_rm(
         mem: llama_memory_t,
         seq_id: llama_seq_id,
         p0: llama_pos,
         p1: llama_pos,
     ) -> bool;
-    pub(crate) fn llama_print_system_info() -> *const c_char;
-    pub(crate) fn llama_supports_gpu_offload() -> bool;
+    pub fn llama_print_system_info() -> *const c_char;
+    pub fn llama_supports_gpu_offload() -> bool;
 
-    pub(crate) fn agl_llama_common_chat_apply_template(
+    pub fn agl_llama_common_chat_apply_template(
         model: *const c_void,
         chat: *const agl_llama_chat_message,
         n_msg: usize,
@@ -186,7 +186,7 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
-    pub(crate) fn agl_llama_mtp_init(
+    pub fn agl_llama_mtp_init(
         ctx_tgt: *mut c_void,
         ctx_dft: *mut c_void,
         n_max: i32,
@@ -195,14 +195,14 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> *mut c_void;
-    pub(crate) fn agl_llama_mtp_free(spec: *mut c_void);
-    pub(crate) fn agl_llama_mtp_begin(
+    pub fn agl_llama_mtp_free(spec: *mut c_void);
+    pub fn agl_llama_mtp_begin(
         spec: *mut c_void,
         prompt_tokens: *const llama_token,
         prompt_tokens_count: usize,
     ) -> c_int;
-    pub(crate) fn agl_llama_mtp_process(spec: *mut c_void, batch: *const llama_batch) -> c_int;
-    pub(crate) fn agl_llama_mtp_draft(
+    pub fn agl_llama_mtp_process(spec: *mut c_void, batch: *const llama_batch) -> c_int;
+    pub fn agl_llama_mtp_draft(
         spec: *mut c_void,
         n_past: llama_pos,
         id_last: llama_token,
@@ -212,9 +212,9 @@ unsafe extern "C" {
         out_tokens_capacity: usize,
         out_tokens_count: *mut usize,
     ) -> c_int;
-    pub(crate) fn agl_llama_mtp_accept(spec: *mut c_void, n_accepted: u16) -> c_int;
-    pub(crate) fn agl_llama_mtp_get_stats(spec: *const c_void) -> agl_llama_mtp_stats;
-    pub(crate) fn agl_mtmd_init(
+    pub fn agl_llama_mtp_accept(spec: *mut c_void, n_accepted: u16) -> c_int;
+    pub fn agl_llama_mtp_get_stats(spec: *const c_void) -> agl_llama_mtp_stats;
+    pub fn agl_mtmd_init(
         projector_path: *const c_char,
         model: *const c_void,
         use_gpu: bool,
@@ -223,9 +223,9 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> *mut c_void;
-    pub(crate) fn agl_mtmd_marker(context: *const c_void) -> *const c_char;
-    pub(crate) fn agl_mtmd_free(context: *mut c_void);
-    pub(crate) fn agl_mtmd_eval_images(
+    pub fn agl_mtmd_marker(context: *const c_void) -> *const c_char;
+    pub fn agl_mtmd_free(context: *mut c_void);
+    pub fn agl_mtmd_eval_images(
         context: *mut c_void,
         llama_context: *mut c_void,
         prompt: *const c_char,
@@ -238,7 +238,7 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> c_int;
-    pub(crate) fn llama_tokenize(
+    pub fn llama_tokenize(
         vocab: *const c_void,
         text: *const c_char,
         text_len: i32,
@@ -247,7 +247,7 @@ unsafe extern "C" {
         add_special: bool,
         parse_special: bool,
     ) -> i32;
-    pub(crate) fn llama_token_to_piece(
+    pub fn llama_token_to_piece(
         vocab: *const c_void,
         token: llama_token,
         buf: *mut c_char,
@@ -255,16 +255,12 @@ unsafe extern "C" {
         lstrip: i32,
         special: bool,
     ) -> i32;
-    pub(crate) fn llama_batch_get_one(tokens: *mut llama_token, n_tokens: i32) -> llama_batch;
-    pub(crate) fn llama_decode(ctx: *mut c_void, batch: llama_batch) -> i32;
-    pub(crate) fn llama_vocab_is_eog(vocab: *const c_void, token: llama_token) -> bool;
-    pub(crate) fn llama_sampler_chain_init(params: llama_sampler_chain_params) -> *mut c_void;
-    pub(crate) fn llama_sampler_chain_add(chain: *mut c_void, sampler: *mut c_void);
-    pub(crate) fn llama_sampler_init_greedy() -> *mut c_void;
-    pub(crate) fn llama_sampler_sample(
-        sampler: *mut c_void,
-        ctx: *mut c_void,
-        idx: i32,
-    ) -> llama_token;
-    pub(crate) fn llama_sampler_free(sampler: *mut c_void);
+    pub fn llama_batch_get_one(tokens: *mut llama_token, n_tokens: i32) -> llama_batch;
+    pub fn llama_decode(ctx: *mut c_void, batch: llama_batch) -> i32;
+    pub fn llama_vocab_is_eog(vocab: *const c_void, token: llama_token) -> bool;
+    pub fn llama_sampler_chain_init(params: llama_sampler_chain_params) -> *mut c_void;
+    pub fn llama_sampler_chain_add(chain: *mut c_void, sampler: *mut c_void);
+    pub fn llama_sampler_init_greedy() -> *mut c_void;
+    pub fn llama_sampler_sample(sampler: *mut c_void, ctx: *mut c_void, idx: i32) -> llama_token;
+    pub fn llama_sampler_free(sampler: *mut c_void);
 }

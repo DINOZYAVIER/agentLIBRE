@@ -1,4 +1,4 @@
-Inspect and verify AgentLIBRE skills.
+Inspect and verify agentLIBRE skills.
 
 Skill use:
 - core skills ship with the binary and are trusted by the binary.

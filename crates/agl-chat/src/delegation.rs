@@ -5,7 +5,7 @@ use agl_capabilities::{
     ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, CapabilityId,
     DelegateActionArgs,
 };
-use agl_config::{LocalInferenceConfig, load_local_inference_config};
+use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
 use agl_functions::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
@@ -29,7 +29,7 @@ struct DelegationContext {
     workspace_root: PathBuf,
     artifact_root: PathBuf,
     trust_store_path: PathBuf,
-    parent_inference_config: LocalInferenceConfig,
+    parent_inference_config: ResolvedInferenceConfig,
     plan: RuntimeDelegationPlan,
     children: BTreeSet<String>,
     authority_ceiling: BTreeSet<CapabilityId>,
@@ -193,7 +193,7 @@ impl ActionHandler for DelegationHandler {
 fn resolve_child_inference_config(
     context: &DelegationContext,
     spec: &RuntimeSubagentSpec,
-) -> Result<LocalInferenceConfig> {
+) -> Result<ResolvedInferenceConfig> {
     if spec.model.inherit {
         return Ok(context.parent_inference_config.clone());
     }
@@ -305,7 +305,7 @@ pub(crate) fn result_is_waiting(result: &agl_loop::TurnEffectResult) -> bool {
     )
 }
 
-pub(crate) fn inference_config_digest(config: &LocalInferenceConfig) -> Result<String> {
+pub(crate) fn inference_config_digest(config: &ResolvedInferenceConfig) -> Result<String> {
     Ok(sha256_bytes(&serde_json::to_vec(config)?))
 }
 

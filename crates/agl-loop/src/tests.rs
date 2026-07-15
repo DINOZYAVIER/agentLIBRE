@@ -400,7 +400,10 @@ fn hook_repair_reissues_model_and_hook_failure_is_typed() {
 fn model_capability_and_transcript_failures_are_typed() {
     let model = run_script(
         input(),
-        Script::default().model_failure(EffectFailureCode::Inference, "private model failure"),
+        Script::default().model_failure(
+            EffectFailureCode::Inference,
+            "raw inference backend diagnostic",
+        ),
         false,
     );
     assert!(matches!(
@@ -415,7 +418,7 @@ fn model_capability_and_transcript_failures_are_typed() {
     assert!(
         !serde_json::to_string(&model.events)
             .unwrap()
-            .contains("private model failure")
+            .contains("raw inference backend diagnostic")
     );
 
     let mut capability_script =

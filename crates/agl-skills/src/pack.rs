@@ -133,7 +133,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repo_workflow_pack_contract_is_valid() {
+    fn repo_workflow_pack_manifest_is_valid() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/repo-workflow-pack");
 

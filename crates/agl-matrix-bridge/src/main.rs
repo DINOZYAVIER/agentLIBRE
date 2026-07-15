@@ -52,13 +52,13 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
     },
-    /// Deliver queued AgentLIBRE Matrix notification outbox rows.
+    /// Deliver queued agentLIBRE Matrix notification outbox rows.
     DeliverOutbox {
         /// Matrix bridge config TOML path.
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
 
-        /// AgentLIBRE store root containing agentlibre.sqlite3.
+        /// agentLIBRE store root containing agentlibre.sqlite3.
         #[arg(long, value_name = "PATH")]
         store_root: PathBuf,
 

@@ -2,7 +2,7 @@
 //!
 //! This crate intentionally owns only Matrix-facing bridge concerns. The daemon
 //! boundary goes through `agl-client`; [`AgentClient`] is the bridge-level
-//! contract used by Matrix event handling code.
+//! interface used by Matrix event handling code.
 
 pub mod access;
 pub mod app;

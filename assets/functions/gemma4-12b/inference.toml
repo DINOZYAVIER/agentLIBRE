@@ -1,7 +1,7 @@
 [backend]
 kind = "llama_cpp"
-model = "/home/dinozyavier/.dyno/models/gemma-4-12b-it-qat/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
-multimodal_projector = "/home/dinozyavier/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/mmproj-gemma-4-12B-it-QAT-BF16.gguf"
+model_id = "gemma4-12b"
+multimodal_projector_id = "gemma4-12b-mmproj"
 
 [runtime]
 gpu_layers = 999

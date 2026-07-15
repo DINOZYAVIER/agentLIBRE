@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use agl_config::{BackendKind, LocalInferenceConfig, load_local_inference_config};
+use agl_config::{BackendKind, ResolvedInferenceConfig, load_local_inference_config};
 use agl_runtime::{AgentLibrePaths, AgentLibreRuntimeConfig, write_default_runtime_config};
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -60,7 +60,7 @@ fn run_config_status(
 struct ConfigStatusReport {
     paths: ConfigStatusPaths,
     runtime_config: RuntimeConfigStatus,
-    local_inference_config: LocalInferenceConfigStatus,
+    local_inference_config: ResolvedInferenceConfigStatus,
     logs: LogStatus,
     skill_trust_store: FileStatus,
     workspace_root: Option<PathBuf>,
@@ -92,7 +92,7 @@ struct RuntimeConfigStatus {
 }
 
 #[derive(Debug, Serialize)]
-struct LocalInferenceConfigStatus {
+struct ResolvedInferenceConfigStatus {
     path: PathBuf,
     source: &'static str,
     exists: bool,
@@ -201,12 +201,12 @@ fn runtime_config_status(paths: &AgentLibrePaths) -> RuntimeConfigStatus {
 fn local_inference_config_status(
     config_override: Option<&Path>,
     paths: &AgentLibrePaths,
-) -> LocalInferenceConfigStatus {
+) -> ResolvedInferenceConfigStatus {
     let (path, source) = resolve_local_inference_config_path(config_override, paths);
     let exists = path.exists();
     match load_local_inference_config(&path) {
         Ok(config) => local_inference_config_loaded(path, source, exists, config),
-        Err(err) => LocalInferenceConfigStatus {
+        Err(err) => ResolvedInferenceConfigStatus {
             path,
             source,
             exists,
@@ -243,10 +243,10 @@ fn local_inference_config_loaded(
     path: PathBuf,
     source: &'static str,
     exists: bool,
-    config: LocalInferenceConfig,
-) -> LocalInferenceConfigStatus {
+    config: ResolvedInferenceConfig,
+) -> ResolvedInferenceConfigStatus {
     let model_path = config.backend.model.clone();
-    LocalInferenceConfigStatus {
+    ResolvedInferenceConfigStatus {
         path,
         source,
         exists,
@@ -313,7 +313,7 @@ fn print_config_status_report(report: &ConfigStatusReport) {
     }
 }
 
-fn print_local_inference_config_status(status: &LocalInferenceConfigStatus) {
+fn print_local_inference_config_status(status: &ResolvedInferenceConfigStatus) {
     println!(
         "local_inference_config path={} source={} exists={} status={}",
         status.path.display(),

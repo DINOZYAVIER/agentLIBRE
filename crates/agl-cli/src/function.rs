@@ -330,6 +330,27 @@ fn print_function_status_report(report: &FunctionStatusReport) {
     if let Some(model_path) = &report.inference_model_path {
         println!("function.model.path={}", model_path.display());
     }
+    if let Some(model_id) = &report.inference_model_id {
+        println!("function.model.id={model_id}");
+    }
+    if let Some(projector_id) = &report.inference_multimodal_projector_id {
+        println!("function.model.multimodal_projector_id={projector_id}");
+    }
+    if let Some(projector_path) = &report.inference_multimodal_projector_path {
+        println!(
+            "function.model.multimodal_projector_path={}",
+            projector_path.display()
+        );
+    }
+    if let Some(draft_model_id) = &report.inference_draft_model_id {
+        println!("function.model.draft_model_id={draft_model_id}");
+    }
+    if let Some(draft_model_path) = &report.inference_draft_model_path {
+        println!(
+            "function.model.draft_model_path={}",
+            draft_model_path.display()
+        );
+    }
     if let Some(model_exists) = report.inference_model_exists {
         println!("function.model.exists={model_exists}");
     }

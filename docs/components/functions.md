@@ -104,7 +104,7 @@ Use one YAML-front-matter manifest and one Markdown system prompt file:
         tester.md
 ```
 
-Global functions live under the AgentLIBRE config directory:
+Global functions live under the agentLIBRE config directory:
 
 ```text
 $AGL_HOME/config/functions/<id>/FUNCTION.md
@@ -230,15 +230,14 @@ artifacts:
   keep_runs: true
 doctor:
   smoke_prompt: "Inspect the repository and report whether tests are visible."
-contracts:
-  identity:
-    mode: validate_claims
+validation:
+  runtime_identity:
+    required: false
     fields:
       - function
       - skills
       - subagents
-    repair: true
-    max_repair_attempts: 1
+    repair_attempts: 1
 ---
 ```
 
@@ -276,7 +275,7 @@ Recommended front matter fields:
 - `subagents.use`: subagent ids under `subagents/<id>.md`.
 - `memory.read` and `memory.write`: memory scopes the function may use.
 - `doctor.smoke_prompt`: optional smoke prompt for `agl function doctor`.
-- `contracts.identity`: optional runtime identity validation policy; see
+- `validation.runtime_identity`: optional runtime identity validation; see
   [Hooks](hooks.md).
 
 Unknown front matter fields should fail validation unless the key starts with
@@ -286,9 +285,12 @@ is not a function manifest field; use the sibling `SYSTEM.md` file.
 `SYSTEM.md` is regular Markdown. The renderer injects it as the function's
 system prompt context. It must sit next to `FUNCTION.md` and must not be empty.
 
-`inference.toml` is a normal local inference config for model and runtime
-settings. Config-level `[prompt]` settings are not the function system prompt;
-they must not point to `SYSTEM.md`. Packaged function configs set
+Tracked builtin `inference.toml` files are portable inference presets: they use
+`model_id`, optional `multimodal_projector_id`, and optional `draft_model_id`.
+Those ids resolve through `$AGL_HOME/config/models.toml` before model admission.
+An explicit low-level `--config PATH` remains a local resolved config and may
+contain direct filesystem paths. Config-level `[prompt]` settings are not the
+function system prompt; they must not point to `SYSTEM.md`. Packaged presets set
 `[prompt].system = "none"` so `SYSTEM.md` is the only function-owned system
 prompt.
 
@@ -385,7 +387,7 @@ Current builtin model functions:
 6. Resolve selected skills.
 7. Resolve selected subagent artifacts.
 8. Render deterministic function context for the model.
-9. Add runtime identity validation hooks when `contracts.identity` enables
+9. Add runtime identity validation hooks when `validation.runtime_identity` enables
    them.
 10. Write resolution evidence into the run artifact directory.
 
@@ -477,7 +479,7 @@ Every function-backed runtime command should emit these artifacts:
 - `subagent-registry.json`: selected subagent ids, paths, titles, and status.
 - `runtime-identity.json`: exact function, profile, skill, subagent, workspace,
   and tool-mode identity used by identity hooks.
-- `identity-contract.json`: effective identity validation and repair policy
+- `identity-validation.json`: effective identity validation and repair policy
   after function defaults and CLI overrides.
 
 `agl function status` should print repair hints for:

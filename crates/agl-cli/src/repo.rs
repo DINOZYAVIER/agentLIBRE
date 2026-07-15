@@ -2,12 +2,11 @@ use agl_repo::{
     ArtifactLockOptions as AglArtifactLockOptions, ArtifactLockReport, ArtifactReportState,
     ArtifactState, ArtifactStatusOptions as AglArtifactStatusOptions, ArtifactStatusReport,
     ArtifactSyncActionKind, ArtifactSyncOptions as AglArtifactSyncOptions, ArtifactSyncReport,
-    HookInstallReport, RepoArtifactSourceOverride as AglRepoArtifactSourceOverride,
-    RepoComponentInitAction, RepoComponentInitOptions as AglRepoComponentInitOptions,
-    RepoComponentInitReport, RepoExportProfileOptions as AglRepoExportProfileOptions,
-    RepoExportProfileReport, RepoHooksOptions as AglRepoHooksOptions, RepoInitAction,
-    RepoInitOptions as AglRepoInitOptions, RepoInitReport,
-    RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
+    HookInstallReport, RepoArtifactOverride as AglRepoArtifactOverride, RepoComponentInitAction,
+    RepoComponentInitOptions as AglRepoComponentInitOptions, RepoComponentInitReport,
+    RepoExportProfileOptions as AglRepoExportProfileOptions, RepoExportProfileReport,
+    RepoHooksOptions as AglRepoHooksOptions, RepoInitAction, RepoInitOptions as AglRepoInitOptions,
+    RepoInitReport, RepoStatusOptions as AglRepoStatusOptions, RepoStatusReport,
     TaskSpecVerifyOptions as AglTaskSpecVerifyOptions, TaskSpecVerifyReport, TaskSpecVerifyState,
     export_repo_profile, init_repo_component, init_repo_workspace, install_repo_hooks,
     lock_artifacts, status_artifacts, status_repo_workspace, sync_artifacts, verify_task_specs,
@@ -40,10 +39,10 @@ fn run_repo_init(options: RepoInitOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: options.profile,
             profile_file: options.profile_file,
-            artifact_sources: options
-                .artifact_sources
+            artifacts: options
+                .artifacts
                 .into_iter()
-                .map(|source| AglRepoArtifactSourceOverride {
+                .map(|source| AglRepoArtifactOverride {
                     name: source.name,
                     url: source.url,
                     rev: source.rev,
@@ -86,7 +85,7 @@ fn run_repo_import_profile(options: RepoImportProfileOptions) -> Result<()> {
         &AglRepoInitOptions {
             profile: agl_repo::DEFAULT_PROFILE.to_string(),
             profile_file: Some(options.profile_file),
-            artifact_sources: Vec::new(),
+            artifacts: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,
@@ -317,53 +316,28 @@ fn print_artifact_status_report(report: &ArtifactStatusReport) {
     println!("workspace_root={}", report.workspace_root.display());
     println!("manifest_path={}", report.manifest_path.display());
     println!("lock_path={}", report.lock_path.display());
-    for source in &report.sources {
-        println!(
-            "artifact_source id={} role={:?} kind={:?} state={:?} path={}",
-            source.id,
-            source.role,
-            source.kind,
-            source.state,
-            source.path.display()
-        );
-        if let Some(url) = &source.expected_url {
-            println!("artifact_source.expected_url id={} value={url}", source.id);
-        }
-        if let Some(url) = &source.actual_url {
-            println!("artifact_source.actual_url id={} value={url}", source.id);
-        }
-        if let Some(commit) = &source.actual_commit {
-            println!(
-                "artifact_source.actual_commit id={} value={commit}",
-                source.id
-            );
-        }
-        if let Some(tree) = &source.actual_tree {
-            println!("artifact_source.actual_tree id={} value={tree}", source.id);
-        }
-        for warning in &source.warnings {
-            println!("artifact_source.warning id={} {warning}", source.id);
-        }
-        for error in &source.errors {
-            println!("artifact_source.error id={} {error}", source.id);
-        }
-    }
     for artifact in &report.artifacts {
         println!(
-            "artifact id={} source={} kind={:?} access={:?} state={} path={} contract_hash={}",
+            "artifact id={} storage={:?} kind={:?} access={:?} state={} path={} definition_hash={}",
             artifact.id,
-            artifact.source_id,
+            artifact.storage,
             artifact.kind,
             artifact.access,
             artifact_state(artifact.state),
             artifact.path.display(),
-            artifact.contract_hash
+            artifact.definition_hash
         );
-        for provide in &artifact.provides {
-            println!("artifact.provides id={} value={provide}", artifact.id);
+        if let Some(validation) = &artifact.validation {
+            println!("artifact.validation id={} value={validation}", artifact.id);
         }
-        if let Some(schema) = &artifact.schema {
-            println!("artifact.schema id={} value={schema}", artifact.id);
+        if let Some(url) = &artifact.actual_url {
+            println!("artifact.actual_url id={} value={url}", artifact.id);
+        }
+        if let Some(commit) = &artifact.actual_commit {
+            println!("artifact.actual_commit id={} value={commit}", artifact.id);
+        }
+        if let Some(tree) = &artifact.actual_tree {
+            println!("artifact.actual_tree id={} value={tree}", artifact.id);
         }
         for warning in &artifact.warnings {
             println!("artifact.warning id={} {warning}", artifact.id);
@@ -422,23 +396,19 @@ fn print_artifact_lock_report(report: &ArtifactLockReport) {
     println!("lock.locked_at_unix_ms={}", report.lock.locked_at_unix_ms);
     for artifact in report.lock.artifacts.values() {
         println!(
-            "lock.artifact id={} source={} source_kind={:?} path={} kind={:?} access={:?} contract_hash={}",
+            "lock.artifact id={} storage={:?} path={} kind={:?} access={:?} definition_hash={}",
             artifact.id,
-            artifact.source_id,
-            artifact.source_kind,
+            artifact.storage,
             artifact.path.display(),
             artifact.kind,
             artifact.access,
-            artifact.contract_hash
+            artifact.definition_hash
         );
-        if let Some(commit) = &artifact.source_commit {
-            println!(
-                "lock.artifact.source_commit id={} value={commit}",
-                artifact.id
-            );
+        if let Some(commit) = &artifact.commit {
+            println!("lock.artifact.commit id={} value={commit}", artifact.id);
         }
-        if let Some(tree) = &artifact.source_tree {
-            println!("lock.artifact.source_tree id={} value={tree}", artifact.id);
+        if let Some(tree) = &artifact.tree {
+            println!("lock.artifact.tree id={} value={tree}", artifact.id);
         }
     }
     for warning in &report.warnings {
@@ -451,6 +421,7 @@ fn print_artifact_lock_report(report: &ArtifactLockReport) {
 
 fn task_spec_verify_state(state: TaskSpecVerifyState) -> &'static str {
     match state {
+        TaskSpecVerifyState::NotConfigured => "not_configured",
         TaskSpecVerifyState::Ok => "ok",
         TaskSpecVerifyState::Warning => "warning",
         TaskSpecVerifyState::Invalid => "invalid",
@@ -496,25 +467,9 @@ fn print_repo_export_profile_report(report: &RepoExportProfileReport) {
         "profile.policy.trust.import_local_trust={}",
         report.profile.policy.trust.import_local_trust
     );
-    if let Some(skill_pack) = &report.profile.skill_pack {
-        println!("profile.skill_pack.component={}", skill_pack.component);
-        println!("profile.skill_pack.path={}", skill_pack.path.display());
-        if let Some(url) = &skill_pack.url {
-            println!("profile.skill_pack.url={url}");
-        }
-        if let Some(rev) = &skill_pack.rev {
-            println!("profile.skill_pack.rev={rev}");
-        }
-        if let Some(commit) = &skill_pack.commit {
-            println!("profile.skill_pack.commit={commit}");
-        }
-        if let Some(tree) = &skill_pack.tree {
-            println!("profile.skill_pack.tree={tree}");
-        }
-        println!(
-            "profile.skill_pack.same_ids_when_pinned={}",
-            skill_pack.same_ids_when_pinned
-        );
+    for (name, artifact) in &report.profile.artifacts {
+        println!("profile.artifact.name={name}");
+        println!("profile.artifact.path={}", artifact.path.display());
     }
 }
 
@@ -544,6 +499,10 @@ fn print_hook_install_report(report: &HookInstallReport) {
 
 fn repo_component_init_action(action: RepoComponentInitAction) -> &'static str {
     match action {
+        RepoComponentInitAction::WouldClone => "would_clone",
+        RepoComponentInitAction::Cloned => "cloned",
+        RepoComponentInitAction::WouldFetch => "would_fetch",
+        RepoComponentInitAction::Fetched => "fetched",
         RepoComponentInitAction::WouldAddSubmodule => "would_add_submodule",
         RepoComponentInitAction::AddedSubmodule => "added_submodule",
         RepoComponentInitAction::WouldUpdateSubmodule => "would_update_submodule",

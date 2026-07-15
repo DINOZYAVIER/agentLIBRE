@@ -1,4 +1,5 @@
 Advanced daemon commands.
 
-These commands inspect the local runtime daemon used by clients such as the
-Matrix bridge. Most local CLI use does not require the daemon.
+The daemon serves long-running clients such as the Matrix bridge.
+Commands such as `agl run` and `agl chat` execute in the invoking process.
+`agl serve` starts the daemon, and `agl daemon status` inspects it.
