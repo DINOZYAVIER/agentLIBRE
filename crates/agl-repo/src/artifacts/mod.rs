@@ -122,7 +122,7 @@ pub fn status_artifacts(
     }
     if !errors.is_empty() {
         next_steps.push("inspect agl repo artifact status --json".to_string());
-    } else if !lock_path.exists() {
+    } else if !all_artifacts.is_empty() && !lock_path.exists() {
         warnings.push("artifact_lock_missing".to_string());
         next_steps.push("agl repo artifact lock".to_string());
     }

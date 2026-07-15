@@ -38,11 +38,6 @@ events_file() {
   printf '%s/runs/%s/events.jsonl' "$root" "$run_id"
 }
 
-model_state() {
-  local path="$1"
-  grep -F -m 1 "model_state = " "$path" | sed 's/^model_state = //'
-}
-
 need_tool cargo
 need_tool grep
 need_tool python3
@@ -82,8 +77,9 @@ infer_runtime_log="$(attempt_file "$infer_root" "$infer_run_id" "$infer_attempt_
 infer_function_evidence="$infer_root/runs/$infer_run_id/function-resolution.json"
 infer_content="$(json_content "$infer_response")"
 [[ "$infer_content" == "agentLIBRE ok" ]] || fail "infer returned: $infer_content"
+require_json_metadata_value "$infer_response" model_state loaded
+require_json_metadata_value "$infer_response" selected_device "$device"
 require_contains "$infer_events" '"backend":"llama_cpp"'
-require_contains "$infer_runtime_log" "selected_device = $device"
 require_contains "$infer_runtime_log" "load_tensors: offloaded"
 [[ ! -e "$infer_function_evidence" ]] || fail "raw inference run wrote function evidence"
 
@@ -119,16 +115,16 @@ reject_generated_continuation "$chat_response_1"
 reject_generated_continuation "$chat_response_2"
 require_contains "$chat_events_1" '"backend":"llama_cpp"'
 require_contains "$chat_events_2" '"backend":"llama_cpp"'
-require_contains "$chat_runtime_log_1" "model_state = loaded"
-require_contains "$chat_runtime_log_1" "selected_device = $device"
+require_json_metadata_value "$chat_response_1" model_state loaded
+require_json_metadata_value "$chat_response_1" selected_device "$device"
 require_contains "$chat_runtime_log_1" "load_tensors: offloaded"
-require_contains "$chat_runtime_log_2" "model_state = reused"
-require_contains "$chat_runtime_log_2" "selected_device = $device"
-require_contains "$chat_runtime_log_2" "load_tensors: offloaded"
+require_json_metadata_value "$chat_response_2" model_state reused
+require_json_metadata_value "$chat_response_2" selected_device "$device"
+require_contains "$chat_runtime_log_2" "context_state = reused"
+require_not_contains "$chat_runtime_log_2" "load_tensors: offloaded"
 require_contains "$normalized_transcript" '"kind":"user_message"'
 require_contains "$normalized_transcript" '"kind":"assistant_message"'
 require_contains "$app_log" "chat session started"
-require_contains "$inference_log" "llama.cpp inference attempt succeeded"
 [[ ! -e "$chat_root/runs/$chat_run_id_1/function-resolution.json" ]] ||
   fail "raw inference chat wrote function evidence for $chat_run_id_1"
 [[ ! -e "$chat_root/runs/$chat_run_id_2/function-resolution.json" ]] ||
@@ -149,6 +145,6 @@ echo "chat attempt 2 runtime log: $chat_runtime_log_2"
 echo "linked llama.cpp libraries:"
 echo "$linked_libraries"
 echo "selected device: $device"
-echo "chat attempt 1 model state: $(model_state "$chat_runtime_log_1")"
-echo "chat attempt 2 model state: $(model_state "$chat_runtime_log_2")"
+echo "chat attempt 1 model state: $(json_metadata_value "$chat_response_1" model_state)"
+echo "chat attempt 2 model state: $(json_metadata_value "$chat_response_2" model_state)"
 echo "AGL-016 llama.cpp smoke passed"

@@ -79,6 +79,34 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 PY
 }
 
+json_metadata_value() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    metadata = json.load(handle).get("metadata")
+if not isinstance(metadata, dict) or key not in metadata:
+    raise SystemExit(f"{path}: response metadata has no {key!r}")
+value = metadata[key]
+if isinstance(value, (dict, list)):
+    raise SystemExit(f"{path}: response metadata {key!r} is not scalar")
+print(value, end="")
+PY
+}
+
+require_json_metadata_value() {
+  local path="$1"
+  local key="$2"
+  local expected="$3"
+  local actual
+  require_file "$path"
+  actual="$(json_metadata_value "$path" "$key")"
+  [[ "$actual" == "$expected" ]] ||
+    fail "$path metadata $key is $actual, expected $expected"
+}
+
 runtime_attempt_id() {
   local events_path="$1"
   local ordinal="$2"

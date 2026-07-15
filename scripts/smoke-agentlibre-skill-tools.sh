@@ -25,15 +25,15 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     request = json.load(handle)
 
-messages = request.get("messages")
-if messages is None:
-    messages = request.get("rendered", {}).get("messages", [])
+messages = request.get("rendered", {}).get("messages", [])
 
 for message in messages:
-    content = message.get("content", "")
-    if "<agentlibre_tool_context>" in content:
-        print(content, end="")
-        break
+    parts = message.get("content", {}).get("parts", [])
+    for part in parts:
+        text = part.get("text", "")
+        if "<agentlibre_tool_context>" in text:
+            print(text, end="")
+            raise SystemExit(0)
 else:
     raise SystemExit("missing agentlibre_tool_context")
 PY
@@ -104,12 +104,12 @@ require_contains "$request_1" "fs.list"
 require_contains "$request_1" "fs.search"
 require_not_contains "$tool_context" "fs.edit"
 require_contains "$response_1" "fs.read"
-require_contains "$runtime_1" "model_state = loaded"
-require_contains "$runtime_2" "model_state = reused"
+require_json_metadata_value "$response_1" model_state loaded
+require_json_metadata_value "$latest_response" model_state reused
 require_not_contains "$runtime_2" "llama_cpp_session_reset_reason"
 require_contains "$events" '"kind":"tool.call_started"'
 require_contains "$events" '"kind":"tool.call_finished"'
-require_contains "$events" '"name":"fs.read"'
+require_contains "$events" '"capability_id":"fs.read"'
 require_contains "$events" '"kind":"turn.finished"'
 require_contains "$events" '"status":"answered"'
 require_contains "$stdout_path" "skill tools smoke ok"

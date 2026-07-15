@@ -809,6 +809,80 @@ fn portable_preset_names_a_missing_model_binding() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn portable_preset_ignores_an_unrequired_missing_model_file() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-config-unused-missing-binding-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let model = root.join("model.gguf");
+    std::fs::write(&model, []).unwrap();
+    let missing = root.join("unused.gguf");
+    let bindings_path = root.join("models.toml");
+    std::fs::write(
+        &bindings_path,
+        format!(
+            "version = 1\n\n[models.main]\npath = {:?}\n\n[models.unused]\npath = {:?}\n",
+            model, missing
+        ),
+    )
+    .unwrap();
+    let preset = load_inference_preset_from_str("fixture", &preset_text("", "")).unwrap();
+
+    let resolved = resolve_inference_preset(preset, &bindings_path).unwrap();
+
+    assert_eq!(resolved.backend.model, model);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn portable_preset_names_a_required_missing_model_file() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-config-required-missing-model-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let missing = root.join("main.gguf");
+    let bindings_path = root.join("models.toml");
+    std::fs::write(
+        &bindings_path,
+        format!("version = 1\n\n[models.main]\npath = {:?}\n", missing),
+    )
+    .unwrap();
+    let preset = load_inference_preset_from_str("fixture", &preset_text("", "")).unwrap();
+
+    let error = resolve_inference_preset(preset, &bindings_path).unwrap_err();
+    let diagnostic = format!("{error:#}");
+
+    assert!(diagnostic.contains("model `main` file does not exist"));
+    assert!(diagnostic.contains(&bindings_path.display().to_string()));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_bindings_reject_a_blank_path() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-config-blank-model-binding-{}-{}",
+        std::process::id(),
+        FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let bindings_path = root.join("models.toml");
+    std::fs::write(
+        &bindings_path,
+        "version = 1\n\n[models.main]\npath = \"   \"\n",
+    )
+    .unwrap();
+
+    let error = load_model_bindings(&bindings_path).unwrap_err();
+
+    assert!(format!("{error:#}").contains("model `main` path cannot be blank"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn preset_text(backend_extra: &str, runtime_extra: &str) -> String {
     format!(
         r#"
