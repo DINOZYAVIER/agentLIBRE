@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use agl_capabilities::{
@@ -311,7 +312,12 @@ pub(crate) fn inference_config_digest(config: &ResolvedInferenceConfig) -> Resul
 
 fn sha256_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    format!("sha256:{digest:x}")
+    let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
+    value.push_str("sha256:");
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    value
 }
 
 #[cfg(test)]

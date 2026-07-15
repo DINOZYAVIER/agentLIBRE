@@ -1,4 +1,4 @@
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Formatter, Write as _};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,7 +55,12 @@ pub struct BlobDigest(String);
 impl BlobDigest {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let digest = Sha256::digest(bytes);
-        Self(format!("sha256:{digest:x}"))
+        let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
+        value.push_str("sha256:");
+        for byte in digest {
+            write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Self(value)
     }
 
     pub fn parse(value: impl Into<String>) -> Result<Self, ContentError> {

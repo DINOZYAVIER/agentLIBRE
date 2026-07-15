@@ -84,8 +84,8 @@ fn message_relation_replies_to_room_event() {
     };
 
     match message_relation(&context).unwrap() {
-        Relation::Reply { in_reply_to } => {
-            assert_eq!(in_reply_to.event_id.as_str(), "$event:example");
+        Relation::Reply(reply) => {
+            assert_eq!(reply.in_reply_to.event_id.as_str(), "$event:example");
         }
         relation => panic!("expected reply relation, got {relation:?}"),
     }
