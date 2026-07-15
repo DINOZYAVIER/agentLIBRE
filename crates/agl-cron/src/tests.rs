@@ -50,6 +50,35 @@ fn adds_lists_and_toggles_jobs() {
 }
 
 #[test]
+fn deleted_jobs_cannot_be_reenabled() {
+    let root = temp_root("deleted-enable");
+    let store = AglStore::open_at(&root).unwrap();
+    let repo = CronRepository::new(&store);
+    let job = repo
+        .add_job(CronJobDraft::new(
+            "Old job",
+            CronTargetKind::Builtin,
+            "store-status",
+            "hourly",
+        ))
+        .unwrap();
+    repo.delete_job(&job.id).unwrap();
+
+    let err = repo.set_enabled(&job.id, true).unwrap_err();
+
+    assert!(matches!(
+        err,
+        CronError::InvalidValue {
+            field: "id",
+            reason: "cannot update deleted job",
+            ..
+        }
+    ));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn manual_run_records_history_and_idempotency() {
     let root = temp_root("run");
     let store = AglStore::open_at(&root).unwrap();

@@ -306,10 +306,15 @@ fn validate_non_empty_path(name: &str, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("agl-runtime-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
     #[test]
     fn runtime_config_file_overrides_logging_and_history() {
-        let root = std::env::temp_dir().join(format!("agl-runtime-config-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("config-file");
         let paths = AgentLibrePaths::from_agl_home(&root);
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(
@@ -357,10 +362,8 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn workspace_root_resolves_git_top_before_cwd() {
-        let root =
-            std::env::temp_dir().join(format!("agl-runtime-workspace-git-{}", std::process::id()));
+        let root = temp_root("workspace-git");
         let nested = root.join("crates/agl-cli");
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(&nested).unwrap();
 
@@ -372,9 +375,7 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn workspace_root_falls_back_to_current_directory_without_git() {
-        let root =
-            std::env::temp_dir().join(format!("agl-runtime-workspace-cwd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("workspace-cwd");
         std::fs::create_dir_all(&root).unwrap();
         if root.ancestors().any(|path| path.join(".git").exists()) {
             std::fs::remove_dir_all(root).unwrap();
@@ -389,13 +390,9 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn workspace_root_explicit_override_wins() {
-        let root = std::env::temp_dir().join(format!(
-            "agl-runtime-workspace-explicit-{}",
-            std::process::id()
-        ));
+        let root = temp_root("workspace-explicit");
         let start = root.join("repo/subdir");
         let explicit = root.join("workspace");
-        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("repo/.git")).unwrap();
         std::fs::create_dir_all(&start).unwrap();
         std::fs::create_dir_all(&explicit).unwrap();
@@ -408,9 +405,7 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn writes_default_runtime_config_file() {
-        let root =
-            std::env::temp_dir().join(format!("agl-runtime-config-write-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("config-write");
         let path = root.join("config").join("agentlibre.toml");
 
         write_default_runtime_config(&path, false).unwrap();
@@ -425,9 +420,7 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn default_runtime_config_refuses_overwrite() {
-        let root =
-            std::env::temp_dir().join(format!("agl-runtime-config-refuse-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("config-refuse");
         let path = root.join("config").join("agentlibre.toml");
         write_default_runtime_config(&path, false).unwrap();
 
@@ -440,9 +433,7 @@ root = "/tmp/workspace-root"
 
     #[test]
     fn default_runtime_config_force_overwrites() {
-        let root =
-            std::env::temp_dir().join(format!("agl-runtime-config-force-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = temp_root("config-force");
         let path = root.join("config").join("agentlibre.toml");
         write_default_runtime_config(&path, false).unwrap();
         std::fs::write(&path, "old").unwrap();

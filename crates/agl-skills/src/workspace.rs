@@ -1043,34 +1043,51 @@ fn build_trust_record(
 
 fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
     let harness = skill.harness.as_ref().context("skill harness is missing")?;
-    let mut catalog = agl_tools::ToolCatalog::new();
-    agl_tools::guards::register(&mut catalog)
-        .context("failed to register builtin guard provider")?;
-    agl_tools::cron::register(&mut catalog)
-        .context("failed to register builtin cron tool provider")?;
-    agl_tools::fs::register(&mut catalog).context("failed to register builtin tool provider")?;
-    agl_tools::matrix::register(&mut catalog)
-        .context("failed to register builtin Matrix tool provider")?;
-    agl_tools::memory::register(&mut catalog)
-        .context("failed to register builtin memory tool provider")?;
-    agl_tools::notes::register(&mut catalog)
-        .context("failed to register builtin notes tool provider")?;
-    agl_tools::permissions::register(&mut catalog)
-        .context("failed to register builtin permission tool provider")?;
-    agl_tools::repo::register(&mut catalog)
-        .context("failed to register builtin repo tool provider")?;
-    agl_tools::skills::register(&mut catalog)
-        .context("failed to register builtin skill tool provider")?;
-    agl_tools::store::register(&mut catalog)
-        .context("failed to register builtin store tool provider")?;
+    let catalog =
+        agl_tools::builtin_tool_catalog().context("failed to register builtin tool catalog")?;
     for hook in &harness.required_hooks {
         if catalog.hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);
         }
     }
-    for tool in &harness.allowed_tools {
+    validate_trust_tool_refs(
+        &harness.name,
+        "allowed_tools",
+        &harness.allowed_tools,
+        &catalog,
+    )?;
+    validate_trust_tool_refs(
+        &harness.name,
+        "requestable_tools",
+        &harness.requestable_tools,
+        &catalog,
+    )?;
+    validate_trust_tool_refs(
+        &harness.name,
+        "denied_tools",
+        &harness.denied_tools,
+        &catalog,
+    )?;
+    for template in &harness.permission_request_templates {
+        validate_trust_tool_refs(
+            &harness.name,
+            "permission_request_templates.tools",
+            &template.tools,
+            &catalog,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_trust_tool_refs(
+    skill_name: &str,
+    field: &str,
+    tools: &[agl_tools::ToolId],
+    catalog: &agl_tools::ToolCatalog,
+) -> Result<()> {
+    for tool in tools {
         if catalog.tool(tool).is_none() {
-            bail!("skill `{}` allows missing tool `{tool}`", harness.name);
+            bail!("skill `{skill_name}` references missing tool `{tool}` in {field}");
         }
     }
     Ok(())

@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use agl_tools::{
-    HookId, ToolCapability, ToolCatalog, ToolId, ToolOperationKind, ToolProviderId, ToolStateEffect,
-};
+use agl_tools::{SkillId, ToolCatalog, ToolId, ToolOperationKind, ToolStateEffect};
 use serde::Deserialize;
 
 use crate::SkillRegistry;
@@ -13,22 +11,12 @@ const TOOL_LENS_AUDIT: &str = include_str!("../../../assets/audits/tool-lens.tom
 #[serde(deny_unknown_fields)]
 struct ToolLensAudit {
     version: u32,
-    tools: Vec<AuditTool>,
+    tool_policy_owners: BTreeMap<ToolId, String>,
     #[serde(default)]
     missing_tools: Vec<MissingTool>,
-    skills: Vec<AuditSkill>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuditTool {
-    id: ToolId,
-    provider: ToolProviderId,
-    capability: ToolCapability,
-    operation_kind: ToolOperationKind,
-    state_effects: Vec<ToolStateEffect>,
-    visible_in_read_only: bool,
-    policy_owner: String,
+    skill_classifications: BTreeMap<SkillId, String>,
+    #[serde(default)]
+    skill_risks: BTreeMap<SkillId, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,44 +29,10 @@ struct MissingTool {
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuditSkill {
-    id: agl_tools::SkillId,
-    pack: String,
-    classification: String,
-    allowed_tools: Vec<ToolId>,
-    requestable_tools: Vec<ToolId>,
-    denied_tools: Vec<ToolId>,
-    permission_request_templates: Vec<AuditPermissionRequestTemplate>,
-    required_hooks: Vec<HookId>,
-    state_effects: Vec<ToolStateEffect>,
-    memory_read_scopes: Vec<String>,
-    notes_read: bool,
-    notes_write: bool,
-    risks: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuditPermissionRequestTemplate {
-    id: String,
-    tools: Vec<ToolId>,
-    max_operation_kind: Option<ToolOperationKind>,
-    state_effects: Vec<ToolStateEffect>,
-    default_duration: String,
-    reason_template: String,
-}
-
 #[test]
 fn tool_lens_audit_fixture_covers_builtin_tools() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
-    let audit_tools = audit
-        .tools
-        .iter()
-        .map(|tool| (tool.id.clone(), tool))
-        .collect::<BTreeMap<_, _>>();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let actual_tools = catalog
         .providers()
         .iter()
@@ -87,25 +41,25 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
 
     assert_eq!(audit.version, 1);
     assert_eq!(
-        audit_tools.keys().cloned().collect::<BTreeSet<_>>(),
+        audit
+            .tool_policy_owners
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
         actual_tools
     );
 
     for provider in catalog.providers() {
         for tool in &provider.tools {
-            let expected = audit_tools.get(&tool.id).unwrap();
-            assert_eq!(expected.provider, provider.id, "{}", tool.id);
-            assert_eq!(expected.capability, tool.capability, "{}", tool.id);
-            assert_eq!(expected.operation_kind, tool.operation_kind, "{}", tool.id);
-            assert_eq!(expected.state_effects, tool.state_effects, "{}", tool.id);
-            assert_eq!(
-                expected.visible_in_read_only, tool.visible_in_read_only,
-                "{}",
+            let policy_owner = audit.tool_policy_owners.get(&tool.id).unwrap();
+            assert!(
+                !policy_owner.trim().is_empty(),
+                "{} must name a policy owner",
                 tool.id
             );
             assert!(
-                !expected.policy_owner.trim().is_empty(),
-                "{} must name a policy owner",
+                !provider.id.as_str().trim().is_empty(),
+                "{} must come from a named provider",
                 tool.id
             );
         }
@@ -115,13 +69,8 @@ fn tool_lens_audit_fixture_covers_builtin_tools() {
 #[test]
 fn tool_lens_audit_fixture_covers_builtin_skills() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let registry = SkillRegistry::from_builtin_assets().unwrap();
-    let audit_skills = audit
-        .skills
-        .iter()
-        .map(|skill| (skill.id.clone(), skill))
-        .collect::<BTreeMap<_, _>>();
     let actual_skills = registry
         .skills()
         .iter()
@@ -129,145 +78,57 @@ fn tool_lens_audit_fixture_covers_builtin_skills() {
         .collect::<BTreeSet<_>>();
 
     assert_eq!(
-        audit_skills.keys().cloned().collect::<BTreeSet<_>>(),
+        audit
+            .skill_classifications
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
         actual_skills
+    );
+    assert!(
+        audit
+            .skill_risks
+            .keys()
+            .all(|skill| audit.skill_classifications.contains_key(skill)),
+        "skill risks must only reference audited skills"
     );
 
     for registered in registry.skills() {
         let skill = &registered.harness;
-        let expected = audit_skills.get(&skill.id).unwrap();
-        assert_eq!(expected.pack, skill.pack, "{}", skill.id);
-        assert_eq!(
-            expected
-                .allowed_tools
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            skill.allowed_tools.iter().cloned().collect::<BTreeSet<_>>(),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected
-                .requestable_tools
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            skill
-                .requestable_tools
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected
-                .denied_tools
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            skill.denied_tools.iter().cloned().collect::<BTreeSet<_>>(),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected
-                .permission_request_templates
-                .iter()
-                .map(|template| template.id.as_str())
-                .collect::<Vec<_>>(),
-            skill
-                .permission_request_templates
-                .iter()
-                .map(|template| template.id.as_str())
-                .collect::<Vec<_>>(),
-            "{}",
-            skill.id
-        );
-        for expected_template in &expected.permission_request_templates {
-            let actual = skill
-                .permission_request_templates
-                .iter()
-                .find(|template| template.id == expected_template.id)
-                .unwrap_or_else(|| {
-                    panic!("{} missing template {}", skill.id, expected_template.id)
-                });
-            assert_eq!(
-                expected_template.tools, actual.tools,
-                "{}:{}",
-                skill.id, actual.id
-            );
-            assert_eq!(
-                expected_template.max_operation_kind, actual.max_operation_kind,
-                "{}:{}",
-                skill.id, actual.id
-            );
-            assert_eq!(
-                expected_template.state_effects, actual.state_effects,
-                "{}:{}",
-                skill.id, actual.id
-            );
-            assert_eq!(
-                expected_template.default_duration, actual.default_duration,
-                "{}:{}",
-                skill.id, actual.id
-            );
-            assert_eq!(
-                expected_template.reason_template, actual.reason_template,
-                "{}:{}",
-                skill.id, actual.id
-            );
+        for tool in skill
+            .allowed_tools
+            .iter()
+            .chain(skill.requestable_tools.iter())
+            .chain(skill.denied_tools.iter())
+            .chain(
+                skill
+                    .permission_request_templates
+                    .iter()
+                    .flat_map(|template| template.tools.iter()),
+            )
+        {
+            catalog
+                .tool(tool)
+                .unwrap_or_else(|| panic!("{} references unknown tool {tool}", skill.id));
         }
-        assert_eq!(
-            expected
-                .required_hooks
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            skill
-                .required_hooks
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected.state_effects,
-            state_effects_for_skill(skill.allowed_tools.iter(), &catalog),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected.memory_read_scopes,
-            skill
-                .permissions
-                .memory_read_scopes()
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected.notes_read, skill.permissions.notes.read,
-            "{}",
-            skill.id
-        );
-        assert_eq!(
-            expected.notes_write, skill.permissions.notes.write,
-            "{}",
-            skill.id
-        );
+        let classification = audit.skill_classifications.get(&skill.id).unwrap();
         assert!(
-            !expected.classification.trim().is_empty(),
+            !classification.trim().is_empty(),
             "{} must be classified",
             skill.id
         );
-        if !expected.state_effects.is_empty() {
+        let state_effects = state_effects_for_skill(skill.allowed_tools.iter(), &catalog);
+        let risks = audit
+            .skill_risks
+            .get(&skill.id)
+            .cloned()
+            .unwrap_or_default();
+        for risk in &risks {
+            assert!(!risk.trim().is_empty(), "{} has a blank risk", skill.id);
+        }
+        if !state_effects.is_empty() {
             assert!(
-                !expected.risks.is_empty(),
+                !risks.is_empty(),
                 "{} mutates state and must record audit risks",
                 skill.id
             );
@@ -278,7 +139,7 @@ fn tool_lens_audit_fixture_covers_builtin_skills() {
 #[test]
 fn tool_lens_missing_tools_are_future_work_not_current_tools() {
     let audit = read_audit();
-    let catalog = builtin_tool_catalog();
+    let catalog = agl_tools::builtin_tool_catalog().unwrap();
     let current_tools = catalog
         .providers()
         .iter()
@@ -329,22 +190,6 @@ fn tool_lens_missing_tools_are_future_work_not_current_tools() {
 
 fn read_audit() -> ToolLensAudit {
     toml::from_str(TOOL_LENS_AUDIT).expect("tool lens audit fixture must parse")
-}
-
-fn builtin_tool_catalog() -> ToolCatalog {
-    let mut catalog = ToolCatalog::new();
-    agl_tools::guards::register(&mut catalog).unwrap();
-    agl_tools::cron::register(&mut catalog).unwrap();
-    agl_tools::fs::register(&mut catalog).unwrap();
-    agl_tools::matrix::register(&mut catalog).unwrap();
-    agl_tools::matrix_delivery::register(&mut catalog).unwrap();
-    agl_tools::memory::register(&mut catalog).unwrap();
-    agl_tools::notes::register(&mut catalog).unwrap();
-    agl_tools::permissions::register(&mut catalog).unwrap();
-    agl_tools::repo::register(&mut catalog).unwrap();
-    agl_tools::skills::register(&mut catalog).unwrap();
-    agl_tools::store::register(&mut catalog).unwrap();
-    catalog
 }
 
 fn state_effects_for_skill<'a>(

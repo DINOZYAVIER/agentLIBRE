@@ -4,6 +4,7 @@ mod prompt;
 mod service;
 mod session;
 mod terminal;
+mod tools;
 
 pub use loop_host::ChatLoopHost;
 pub use options::{ChatOptions, InferenceOptions, ToolAccessMode};

@@ -100,6 +100,7 @@ impl LlamaCppRuntime {
                 auto_selected_device: auto_selected_device.map(str::to_string),
                 loaded: false,
                 rendered_message_history_len: 0,
+                messages: Vec::new(),
             }),
         }
     }
@@ -133,6 +134,7 @@ impl LlamaCppRuntime {
             LlamaCppRuntimeInner::Test(runtime) => {
                 runtime.loaded = false;
                 runtime.rendered_message_history_len = 0;
+                runtime.messages.clear();
             }
         }
     }
@@ -264,6 +266,7 @@ struct TestLlamaCppRuntime {
     auto_selected_device: Option<String>,
     loaded: bool,
     rendered_message_history_len: usize,
+    messages: Vec<RenderedMessage>,
 }
 
 #[cfg(test)]
@@ -274,12 +277,13 @@ impl TestLlamaCppRuntime {
             "llama.cpp max_output_tokens cannot be zero"
         );
 
-        let can_append = rendered.messages.len() >= self.rendered_message_history_len;
+        let can_append = self.can_append_rendered(rendered);
         let model_state = if self.loaded && can_append {
             LlamaCppModelState::Reused
         } else {
             self.loaded = true;
             self.rendered_message_history_len = 0;
+            self.messages.clear();
             LlamaCppModelState::Loaded
         };
         let mut content = self
@@ -296,7 +300,14 @@ impl TestLlamaCppRuntime {
             appended_messages,
             self.auto_selected_device.as_deref(),
         );
-        self.rendered_message_history_len = rendered.messages.len() + 1;
+        self.messages = rendered.messages.clone();
+        self.messages.push(RenderedMessage {
+            role: RenderedMessageRole::Assistant,
+            content: content.clone(),
+            name: None,
+            tool_calls: Vec::new(),
+        });
+        self.rendered_message_history_len = self.messages.len();
         if model_state == LlamaCppModelState::Reused {
             log.push_str("llama_cpp_session_load_log:\n");
             log.push_str("load_tensors: offloaded 66/66 layers to GPU\n");
@@ -314,6 +325,13 @@ impl TestLlamaCppRuntime {
                 .or_else(|| self.auto_selected_device.clone()),
             log,
         })
+    }
+
+    fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
+        rendered.messages.len() >= self.rendered_message_history_len
+            && self.messages.len() >= self.rendered_message_history_len
+            && self.messages[..self.rendered_message_history_len]
+                == rendered.messages[..self.rendered_message_history_len]
     }
 }
 

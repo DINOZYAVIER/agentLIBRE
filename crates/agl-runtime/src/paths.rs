@@ -66,6 +66,10 @@ impl AgentLibrePaths {
         self.data_dir.join("sessions")
     }
 
+    pub fn store_root(&self) -> PathBuf {
+        self.data_dir.join("store")
+    }
+
     pub fn session_dir(&self, session_id: impl AsRef<str>) -> PathBuf {
         self.sessions_root().join(session_id.as_ref())
     }
@@ -133,6 +137,10 @@ mod tests {
         assert_eq!(
             paths.session_run_artifact_root(session_id, "run-001"),
             PathBuf::from("/tmp/agl-home/data/sessions/session-001/runs/run-001")
+        );
+        assert_eq!(
+            paths.store_root(),
+            PathBuf::from("/tmp/agl-home/data/store")
         );
         assert_eq!(
             paths.app_log_path(),

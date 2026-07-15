@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonState,
-    run_cron_tick,
+    render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 
 #[cfg(unix)]
@@ -38,7 +38,7 @@ impl DaemonServer {
         listener
             .set_nonblocking(true)
             .context("failed to set daemon socket nonblocking")?;
-        let store = AglStore::open_default(&self.runtime.paths)
+        let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
         tracing::info!(
             target: "agentlibre::daemon",
@@ -126,7 +126,7 @@ struct StoreCronNotifier<'a> {
 impl CronNotifier for StoreCronNotifier<'_> {
     fn notify(&mut self, notification: CronNotification) -> Result<()> {
         if notification.notify_ref.starts_with("matrix-room:") {
-            let body = cron_notification_body(&notification);
+            let body = render_cron_notification_body(&notification);
             let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
             let item =
                 self.store
@@ -166,7 +166,7 @@ fn run_daemon_skill_cron(
     runtime: &AgentLibreRuntimeConfig,
     inference_defaults: &InferenceOptions,
 ) -> Result<String> {
-    let prompt = cron_skill_prompt(job)?;
+    let prompt = render_cron_skill_prompt(job)?;
     let mut inference = inference_defaults.clone();
     inference.skills.push(job.target_ref.clone());
     inference.tool_mode = ToolAccessMode::Write;
@@ -195,35 +195,6 @@ fn run_daemon_skill_cron(
         )),
         ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
     }
-}
-
-fn cron_skill_prompt(job: &CronJob) -> Result<String> {
-    let prompt = job
-        .prompt
-        .as_deref()
-        .context("skill cron job missing prompt")?;
-    if let Some(input) = job.input.as_deref() {
-        Ok(format!("{prompt}\n\nCron input:\n{input}"))
-    } else {
-        Ok(prompt.to_string())
-    }
-}
-
-fn cron_notification_body(notification: &CronNotification) -> String {
-    let mut body = format!(
-        "Cron job `{}` ({}) {} for {}.",
-        notification.job_name,
-        notification.job_id,
-        notification.status.as_str(),
-        notification.scheduled_for
-    );
-    if let Some(result_ref) = &notification.result_ref {
-        body.push_str(&format!("\nresult_ref: {result_ref}"));
-    }
-    if let Some(error) = &notification.error {
-        body.push_str(&format!("\nerror: {error}"));
-    }
-    body
 }
 
 fn unix_now() -> u64 {

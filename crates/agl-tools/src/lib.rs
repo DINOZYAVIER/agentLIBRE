@@ -13,6 +13,8 @@ mod registry;
 pub mod repo;
 pub mod skills;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 mod tool;
 
 pub use cron::{
@@ -54,6 +56,24 @@ pub use skills::{
 };
 pub use store::{STORE_EXPORT_TOOL_ID, STORE_MIGRATE_TOOL_ID, STORE_STATUS_TOOL_ID, StoreTools};
 pub use tool::{ToolHandler, ToolInput, ToolOutput};
+
+pub(crate) use tool::parse_tool_args;
+
+pub fn builtin_tool_catalog() -> Result<ToolCatalog, ToolCatalogError> {
+    let mut catalog = ToolCatalog::new();
+    guards::register(&mut catalog)?;
+    cron::register(&mut catalog)?;
+    fs::register(&mut catalog)?;
+    matrix::register(&mut catalog)?;
+    matrix_delivery::register(&mut catalog)?;
+    memory::register(&mut catalog)?;
+    notes::register(&mut catalog)?;
+    permissions::register(&mut catalog)?;
+    repo::register(&mut catalog)?;
+    skills::register(&mut catalog)?;
+    store::register(&mut catalog)?;
+    Ok(catalog)
+}
 
 #[cfg(test)]
 mod tests;

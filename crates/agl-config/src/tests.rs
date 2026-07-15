@@ -1,18 +1,32 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::*;
 
 static FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn write_temp_config(name: &str, content: &str) -> PathBuf {
+fn write_temp_config(name: &str, content: &str) -> TempConfig {
     let id = FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "agl-config-{name}-{}-{id}.toml",
         std::process::id()
     ));
     std::fs::write(&path, content).unwrap();
-    path
+    TempConfig(path)
+}
+
+struct TempConfig(PathBuf);
+
+impl AsRef<Path> for TempConfig {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn assert_error_contains(error: &anyhow::Error, needle: &str) {
@@ -69,8 +83,6 @@ tool_call_format = "hermes_json"
     assert_eq!(config.model.tool_call_format, ToolCallFormat::HermesJson);
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
     assert!(config.prompt.skills.is_empty());
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -102,8 +114,6 @@ tool_call_format = "hermes_json"
     assert_eq!(config.runtime.cache_type_k, None);
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
     assert!(config.prompt.skills.is_empty());
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -132,8 +142,6 @@ system = "none"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.prompt.system, SystemPrompt::None);
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -162,8 +170,6 @@ system = "builtin:default"
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.prompt.system, SystemPrompt::BuiltinDefault);
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -192,8 +198,6 @@ skills = ["task-spec"]
     let config = load_local_inference_config(&path).unwrap();
 
     assert_eq!(config.prompt.skills, vec!["task-spec"]);
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -222,8 +226,6 @@ skills = ["Bad Skill"]
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "prompt skill id is invalid");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -252,8 +254,6 @@ system = "builtin:future"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "failed to parse config file");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -279,12 +279,7 @@ tool_call_format = "hermes_json"
 
     let err = load_local_inference_config(&path).unwrap_err();
 
-    assert!(
-        err.to_string().contains("failed to parse config file"),
-        "unexpected error: {err}"
-    );
-
-    std::fs::remove_file(path).unwrap();
+    assert_error_contains(&err, "failed to parse config file");
 }
 
 #[test]
@@ -310,12 +305,7 @@ tool_call_format = "hermes_json"
 
     let err = load_local_inference_config(&path).unwrap_err();
 
-    assert!(
-        err.to_string().contains("failed to parse config file"),
-        "unexpected error: {err}"
-    );
-
-    std::fs::remove_file(path).unwrap();
+    assert_error_contains(&err, "failed to parse config file");
 }
 
 #[test]
@@ -344,8 +334,6 @@ tool_call_format = "hermes_json"
         config.backend.model,
         PathBuf::from("/definitely/not/downloaded/qwen.gguf")
     );
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -371,8 +359,6 @@ tool_call_format = "hermes_json"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "context_tokens 0 must be between 1 and 1048576");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -400,8 +386,6 @@ tool_call_format = "hermes_json"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "ubatch_size 512 cannot exceed batch_size 256");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -428,8 +412,6 @@ tool_call_format = "hermes_json"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "ubatch_size 512 cannot exceed context_tokens 256");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -455,8 +437,6 @@ tool_call_format = "hermes_json"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "backend model path cannot be empty");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -482,8 +462,6 @@ tool_call_format = "hermes_json"
     let err = load_local_inference_config(&path).unwrap_err();
 
     assert_error_contains(&err, "backend model path cannot be empty");
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -513,8 +491,6 @@ tool_call_format = "hermes_json"
         &err,
         "runtime device cannot contain leading or trailing whitespace",
     );
-
-    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -543,6 +519,4 @@ tool_call_format = "hermes_json"
         &err,
         "tool_call_format HermesJson is not supported for dialect Gemma4",
     );
-
-    std::fs::remove_file(path).unwrap();
 }

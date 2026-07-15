@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{
     AglStore, StoreDomain, StoreExportOptions as AglStoreExportOptions, StoreSchemaStatus,
-    StoreStatus, default_store_root,
+    StoreStatus,
 };
 use anyhow::{Context, Result};
 
@@ -14,7 +14,7 @@ use crate::args::{
 
 pub(crate) fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "store", "starting command");
-    let store_root = default_store_root(&runtime.paths);
+    let store_root = runtime.paths.store_root();
 
     match command {
         StoreCommand::Status(options) => run_store_status(options, &store_root),
@@ -26,28 +26,16 @@ pub(crate) fn run_store(command: StoreCommand, runtime: &AgentLibreRuntimeConfig
 fn run_store_status(options: StoreStatusOptions, store_root: &std::path::Path) -> Result<()> {
     let schema = AglStore::schema_status_at(store_root).context("failed to read store schema")?;
     if schema.migration_required {
-        if options.json {
-            println!("{}", serde_json::to_string_pretty(&schema)?);
-        } else {
-            print_store_schema_status(&schema);
-        }
-        return Ok(());
+        return crate::print_json_or(options.json, &schema, || print_store_schema_status(&schema));
     }
     let store = AglStore::open_current_read_only_at(store_root).context("failed to open store")?;
     let status = store.status().context("failed to read store status")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-    } else {
-        print_store_status(&status);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &status, || print_store_status(&status))
 }
 
 fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path) -> Result<()> {
     let report = AglStore::migrate_at(store_root).context("failed to migrate store")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
+    crate::print_json_or(options.json, &report, || {
         println!("store.migrated=true");
         println!("store.path={}", report.database_path.display());
         println!(
@@ -59,14 +47,13 @@ fn run_store_migrate(options: StoreMigrateOptions, store_root: &std::path::Path)
             "store.migrations.applied={}",
             report.applied_migrations.len()
         );
-        for migration in report.applied_migrations {
+        for migration in &report.applied_migrations {
             println!(
                 "store.migration version={} name={}",
                 migration.version, migration.name
             );
         }
-    }
-    Ok(())
+    })
 }
 
 fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path) -> Result<()> {
@@ -113,16 +100,13 @@ fn run_store_export(options: StoreExportCliOptions, store_root: &std::path::Path
     let record_types = record_type_counts(&options.out)?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "domain": domain.as_str(),
-                "path": options.out,
-                "records": records,
-                "record_types": record_types,
-                "include_deleted": options.include_deleted,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "domain": domain.as_str(),
+            "path": options.out,
+            "records": records,
+            "record_types": record_types,
+            "include_deleted": options.include_deleted,
+        }))?;
     } else {
         println!("store.exported=true");
         println!("store.export.domain={}", domain.as_str());

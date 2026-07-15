@@ -415,7 +415,9 @@ impl<'a> MemoryRepository<'a> {
         };
         match self.search_fts(query, text) {
             Ok(entries) => Ok(entries),
-            Err(MemoryError::Sqlite(_)) => self.search_like(query, text),
+            Err(MemoryError::Sqlite(err)) if should_fallback_to_like(&err) => {
+                self.search_like(query, text)
+            }
             Err(err) => Err(err),
         }
     }
@@ -841,6 +843,16 @@ fn escape_like(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn should_fallback_to_like(err: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(_, Some(message)) = err else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("fts5:")
+        || message.contains("malformed match expression")
+        || (message.contains("match") && message.contains("syntax error"))
 }
 
 fn timestamp() -> String {

@@ -46,6 +46,7 @@ fn hello_reports_alpha_capabilities_without_loading_model() {
         DaemonEventKind::Hello(event) => {
             assert_eq!(event.protocol_version, PROTOCOL_VERSION);
             assert!(event.capabilities.contains(&DaemonCapability::SessionOpen));
+            assert!(event.capabilities.contains(&DaemonCapability::SessionList));
         }
         other => panic!("unexpected event: {other:?}"),
     }

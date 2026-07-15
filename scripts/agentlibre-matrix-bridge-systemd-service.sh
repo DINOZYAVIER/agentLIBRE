@@ -30,6 +30,8 @@ EOF
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
+# shellcheck source=systemd-lib.sh
+source "$script_dir/systemd-lib.sh"
 config_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
 
 unit="agl-matrix-bridge.service"
@@ -87,49 +89,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$unit" == */* || "$unit" == *$'\n'* || -z "$unit" ]]; then
-  echo "--unit must be a unit name, not a path: $unit" >&2
-  exit 2
-fi
+agl_systemd_validate_unit_name "$unit"
 
 for value_name in cwd binary config; do
   value="${!value_name}"
-  if [[ "$value" != /* ]]; then
-    echo "--${value_name//_/-} must be absolute: $value" >&2
-    exit 2
-  fi
-  if [[ "$value" == *$'\n'* ]]; then
-    echo "--${value_name//_/-} must not contain newlines" >&2
-    exit 2
-  fi
+  agl_systemd_validate_absolute_path "--${value_name//_/-}" "$value"
 done
 
-if [[ "$log_filter" == *$'\n'* || -z "$log_filter" ]]; then
-  echo "--log-filter must be non-empty and must not contain newlines" >&2
-  exit 2
-fi
-
-if [[ "$dry_run" -eq 0 && ! -d "$cwd" ]]; then
-  echo "working directory does not exist: $cwd" >&2
-  exit 1
-fi
-
-if [[ "$dry_run" -eq 0 && ! -x "$binary" ]]; then
-  echo "binary does not exist or is not executable: $binary" >&2
-  exit 1
-fi
-
-if [[ "$dry_run" -eq 0 && ! -f "$config" ]]; then
-  echo "config file does not exist: $config" >&2
-  exit 1
-fi
-
-systemd_quote() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "$value"
-}
+agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
+agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
+agl_systemd_require_executable "$dry_run" "$binary"
+agl_systemd_require_file "$dry_run" "$config" "config file"
 
 unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
@@ -143,7 +113,7 @@ Type=simple
 WorkingDirectory=$cwd
 UMask=0077
 Environment=AGL_MATRIX_LOG=$log_filter
-ExecStart=$(systemd_quote "$binary") sync --config $(systemd_quote "$config")
+ExecStart=$(agl_systemd_quote "$binary") sync --config $(agl_systemd_quote "$config")
 Restart=always
 RestartSec=5
 
@@ -163,21 +133,4 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$unit_dir"
-tmp_file="$(mktemp "$unit_dir/.${unit}.XXXXXX")"
-printf '%s' "$unit_content" > "$tmp_file"
-chmod 0644 "$tmp_file"
-mv "$tmp_file" "$unit_file"
-
-systemctl --user daemon-reload
-systemctl --user reset-failed "$unit" || true
-
-if [[ "$enable" -eq 1 ]]; then
-  systemctl --user enable "$unit"
-fi
-
-if [[ "$restart" -eq 1 ]]; then
-  systemctl --user restart "$unit"
-fi
-
-systemctl --user --no-pager show "$unit" -p UnitFileState -p ActiveState -p ExecStart
+agl_systemd_install_user_unit "$unit_dir" "$unit" "$unit_content" "$enable" "$restart"

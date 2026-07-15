@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use agl_tools::SkillId;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +16,7 @@ impl PromptConfig {
     pub fn validate(&self) -> Result<()> {
         let mut seen = BTreeSet::new();
         for skill in &self.skills {
-            if let Err(err) = SkillId::new(skill.clone()) {
-                bail!("prompt skill id is invalid: {err}");
-            }
+            validate_prompt_skill_id(skill)?;
             if !seen.insert(skill) {
                 bail!("prompt skill id is duplicated: {skill}");
             }
@@ -35,4 +32,22 @@ pub enum SystemPrompt {
     BuiltinDefault,
     #[serde(rename = "none")]
     None,
+}
+
+fn validate_prompt_skill_id(value: &str) -> Result<()> {
+    let valid = !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        })
+        && value.matches(':').count() <= 1
+        && !value.starts_with(':')
+        && !value.ends_with(':');
+    if !valid {
+        bail!(
+            "prompt skill id is invalid: skill id must use lowercase ASCII letters, digits, hyphens, underscores, dots, or one namespace colon: {value}"
+        );
+    }
+    Ok(())
 }

@@ -9,6 +9,8 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    memory::{parse_kind as parse_memory_kind, parse_scope_kind as parse_memory_scope_kind},
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "notes-tools";
@@ -274,38 +276,15 @@ fn tool(
     }
 }
 
-fn parse_memory_scope_kind(scope: &str) -> Result<agl_memory::MemoryScopeKind> {
-    match scope {
-        "user" => Ok(agl_memory::MemoryScopeKind::User),
-        "repo" => Ok(agl_memory::MemoryScopeKind::Repo),
-        "matrix_room" => Ok(agl_memory::MemoryScopeKind::MatrixRoom),
-        "matrix_user" => Ok(agl_memory::MemoryScopeKind::MatrixUser),
-        _ => anyhow::bail!("unknown memory scope `{scope}`"),
-    }
-}
-
-fn parse_memory_kind(kind: &str) -> Result<agl_memory::MemoryKind> {
-    match kind {
-        "fact" => Ok(agl_memory::MemoryKind::Fact),
-        "preference" => Ok(agl_memory::MemoryKind::Preference),
-        "summary" => Ok(agl_memory::MemoryKind::Summary),
-        "decision" => Ok(agl_memory::MemoryKind::Decision),
-        "working_note" => Ok(agl_memory::MemoryKind::WorkingNote),
-        _ => anyhow::bail!("unknown memory kind `{kind}`"),
-    }
-}
-
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddArgs {
     title: String,
     body: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     limit: Option<usize>,
@@ -313,11 +292,13 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IdArgs {
     id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateArgs {
     id: String,
     title: Option<String>,
@@ -325,6 +306,7 @@ struct UpdateArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LinkArgs {
     id: String,
     target_ref: String,
@@ -332,6 +314,7 @@ struct LinkArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RememberArgs {
     id: String,
     scope: String,
@@ -341,10 +324,9 @@ struct RememberArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::{temp_root, value_for};
 
     use super::*;
 
@@ -359,11 +341,7 @@ mod tests {
                 json!({"title":"Workflow","body":"Use pinned skills."}),
             )
             .unwrap();
-        let note_id = add
-            .lines()
-            .find_map(|line| line.strip_prefix("note_id="))
-            .unwrap()
-            .to_string();
+        let note_id = value_for(&add, "note_id=").unwrap();
         let search = tools
             .dispatch(NOTES_SEARCH_TOOL_ID, json!({"query":"pinned"}))
             .unwrap();
@@ -373,8 +351,6 @@ mod tests {
 
         assert!(search.contains("matches=1"));
         assert!(show.contains("Use pinned skills."));
-
-        cleanup(root);
     }
 
     #[test]
@@ -413,8 +389,6 @@ mod tests {
 
         assert!(delete.contains("status=deleted"));
         assert!(show.contains("deleted=true"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -432,27 +406,5 @@ mod tests {
                 .tool(&ToolId::new(NOTES_ADD_TOOL_ID).unwrap())
                 .is_some()
         );
-    }
-
-    fn value_for(output: &str, prefix: &str) -> Option<String> {
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .map(str::to_string)
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-notes-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

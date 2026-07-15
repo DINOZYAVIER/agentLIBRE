@@ -1,12 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use agl_runtime::AgentLibrePaths;
-
 use crate::{DEFAULT_DATABASE_FILE, Result, StoreError};
-
-pub fn default_store_root(paths: &AgentLibrePaths) -> PathBuf {
-    paths.data_dir.join("store")
-}
 
 pub fn default_database_path(root: impl AsRef<Path>) -> Result<PathBuf> {
     database_path(root.as_ref(), DEFAULT_DATABASE_FILE)
