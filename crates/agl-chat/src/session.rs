@@ -15,7 +15,7 @@ use agl_runtime::{
 use agl_skills::{
     SkillContextEvidence, SkillSource, build_verified_context_bundle, trusted_workspace_registry,
 };
-use agl_store::{AglStore, PermissionGrantRecord, default_store_root};
+use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::{HookEvent, HookId, SkillId, ToolCatalog, ToolId};
 use agl_turn::{ModelRequest, TurnHookBatch, TurnMessage, VisibleTool};
 use anyhow::{Context, Result, bail, ensure};
@@ -61,7 +61,7 @@ impl InferenceSession {
                 .clone()
                 .or_else(|| env::var_os(ARTIFACT_ROOT_ENV).map(PathBuf::from)))
             .unwrap_or_else(|| Self::default_artifact_root(runtime));
-        let store_root = default_store_root(&runtime.paths);
+        let store_root = runtime.paths.store_root();
 
         tracing::info!(
             target: "agentlibre::app",
@@ -476,8 +476,8 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.workspace_root,
         request.trust_store_path,
     )?;
-    let store =
-        AglStore::open_default(&request.runtime.paths).context("failed to open memory store")?;
+    let store = AglStore::open_at(request.runtime.paths.store_root())
+        .context("failed to open memory store")?;
     let memory = MemoryRepository::new(&store);
     let mut query = MemorySearchQuery::scoped(MemoryScope::user());
     query.limit = MEMORY_CONTEXT_ENTRY_LIMIT;
@@ -547,27 +547,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
     let skill_registry =
         trusted_workspace_registry(request.workspace_root, request.trust_store_path)
             .context("failed to load skill registry")?;
-    let mut tool_catalog = ToolCatalog::new();
-    agl_tools::guards::register(&mut tool_catalog)
-        .context("failed to register builtin core guard provider")?;
-    agl_tools::cron::register(&mut tool_catalog)
-        .context("failed to register builtin cron tool provider")?;
-    agl_tools::fs::register(&mut tool_catalog)
-        .context("failed to register builtin core tool provider")?;
-    agl_tools::matrix::register(&mut tool_catalog)
-        .context("failed to register builtin Matrix tool provider")?;
-    agl_tools::memory::register(&mut tool_catalog)
-        .context("failed to register builtin memory tool provider")?;
-    agl_tools::notes::register(&mut tool_catalog)
-        .context("failed to register builtin notes tool provider")?;
-    agl_tools::permissions::register(&mut tool_catalog)
-        .context("failed to register builtin permission tool provider")?;
-    agl_tools::repo::register(&mut tool_catalog)
-        .context("failed to register builtin repo tool provider")?;
-    agl_tools::skills::register(&mut tool_catalog)
-        .context("failed to register builtin skill tool provider")?;
-    agl_tools::store::register(&mut tool_catalog)
-        .context("failed to register builtin store tool provider")?;
+    let tool_catalog = crate::tools::chat_extension_catalog()?;
     let (context, hook_batches) = if selected_skills.is_empty() {
         (None, Vec::new())
     } else {

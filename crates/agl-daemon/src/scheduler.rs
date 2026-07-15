@@ -54,6 +54,35 @@ pub trait CronNotifier {
     fn notify(&mut self, notification: CronNotification) -> Result<()>;
 }
 
+pub fn render_cron_skill_prompt(job: &CronJob) -> Result<String> {
+    let prompt = job
+        .prompt
+        .as_deref()
+        .context("skill cron job missing prompt")?;
+    if let Some(input) = job.input.as_deref() {
+        Ok(format!("{prompt}\n\nCron input:\n{input}"))
+    } else {
+        Ok(prompt.to_string())
+    }
+}
+
+pub fn render_cron_notification_body(notification: &CronNotification) -> String {
+    let mut body = format!(
+        "Cron job `{}` ({}) {} for {}.",
+        notification.job_name,
+        notification.job_id,
+        notification.status.as_str(),
+        notification.scheduled_for
+    );
+    if let Some(result_ref) = &notification.result_ref {
+        body.push_str(&format!("\nresult_ref: {result_ref}"));
+    }
+    if let Some(error) = &notification.error {
+        body.push_str(&format!("\nerror: {error}"));
+    }
+    body
+}
+
 #[derive(Default)]
 pub struct NoopCronNotifier;
 
@@ -120,4 +149,59 @@ pub fn run_cron_tick(
         report.recorded_runs.push(run);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use agl_cron::CronTargetKind;
+
+    use super::*;
+
+    #[test]
+    fn cron_skill_prompt_renders_optional_input() {
+        let mut job = cron_job();
+        job.prompt = Some("Review changes.".to_string());
+        job.input = Some("Only docs.".to_string());
+
+        assert_eq!(
+            render_cron_skill_prompt(&job).unwrap(),
+            "Review changes.\n\nCron input:\nOnly docs."
+        );
+    }
+
+    #[test]
+    fn cron_notification_body_includes_result_and_error_refs() {
+        let body = render_cron_notification_body(&CronNotification {
+            notify_ref: "matrix-room:!room".to_string(),
+            run_id: "run-001".to_string(),
+            job_id: "job-001".to_string(),
+            job_name: "Nightly".to_string(),
+            scheduled_for: "2026-07-03T00:00:00Z".to_string(),
+            status: CronRunStatus::Failed,
+            result_ref: Some("result:ref".to_string()),
+            error: Some("boom".to_string()),
+        });
+
+        assert!(body.contains("Cron job `Nightly` (job-001) failed"));
+        assert!(body.contains("result_ref: result:ref"));
+        assert!(body.contains("error: boom"));
+    }
+
+    fn cron_job() -> CronJob {
+        CronJob {
+            id: "job-001".to_string(),
+            name: "Nightly".to_string(),
+            enabled: true,
+            target_kind: CronTargetKind::Skill,
+            target_ref: "repo-review".to_string(),
+            schedule_expr: "daily".to_string(),
+            timezone: "UTC".to_string(),
+            notify_ref: None,
+            prompt: None,
+            input: None,
+            created_at: "2026-07-03T00:00:00Z".to_string(),
+            updated_at: "2026-07-03T00:00:00Z".to_string(),
+            deleted_at: None,
+        }
+    }
 }

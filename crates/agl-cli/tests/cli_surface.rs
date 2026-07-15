@@ -12,8 +12,7 @@ static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn agl_help_uses_public_alias_and_hides_infer() {
     let output = run_agl(&["--help"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl");
     assert_contains(&stdout, "run");
@@ -48,8 +47,7 @@ fn agl_help_uses_public_alias_and_hides_infer() {
 fn agl_no_arg_help_uses_public_alias() {
     let output = run_agl(&[]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "Usage: agl");
 }
 
@@ -116,8 +114,7 @@ fn command_help_exits_successfully_for_public_commands() {
     ] {
         let output = run_agl(args);
 
-        assert_success(&output);
-        assert_empty_stderr(&output);
+        assert_success_no_stderr(&output);
         assert_contains(&stdout(&output), "Usage: agl");
     }
 }
@@ -145,15 +142,13 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_contains(&add_stdout, "memory id=");
     assert_contains(&add_stdout, "scope=user");
     assert_contains(&add_stdout, "kind=preference");
-    let id = memory_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "memory");
 
     let list = run_agl(&["--home", &home_arg, "memory", "list"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &id);
+    assert_success_stdout_contains(&list, &id);
 
     let search = run_agl(&["--home", &home_arg, "memory", "search", "imperative"]);
-    assert_success(&search);
-    assert_contains(&stdout(&search), &id);
+    assert_success_stdout_contains(&search, &id);
 
     let show = run_agl(&["--home", &home_arg, "memory", "show", &id]);
     assert_success(&show);
@@ -161,8 +156,7 @@ fn memory_commands_manage_explicit_user_memory() {
     assert_contains(&stdout(&show), "Use imperative subjects.");
 
     let delete = run_agl(&["--home", &home_arg, "memory", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "memory.deleted=true");
+    assert_success_stdout_contains(&delete, "memory.deleted=true");
 
     let hidden = run_agl(&["--home", &home_arg, "memory", "list"]);
     assert_success(&hidden);
@@ -191,7 +185,7 @@ fn memory_commands_manage_explicit_user_memory() {
         "Only profile-a should see this.",
     ]);
     assert_success(&keyed);
-    let keyed_id = memory_id_from_output(&stdout(&keyed));
+    let keyed_id = id_from_output(&stdout(&keyed), "memory");
     let default_user = run_agl(&["--home", &home_arg, "memory", "list", "--scope", "user"]);
     assert_success(&default_user);
     assert!(
@@ -208,8 +202,7 @@ fn memory_commands_manage_explicit_user_memory() {
         "--scope-key",
         "profile-a",
     ]);
-    assert_success(&profile_user);
-    assert_contains(&stdout(&profile_user), &keyed_id);
+    assert_success_stdout_contains(&profile_user, &keyed_id);
 }
 
 #[test]
@@ -236,7 +229,7 @@ fn memory_suggestion_commands_require_approval() {
     let suggest_stdout = stdout(&suggest);
     assert_contains(&suggest_stdout, "memory_suggestion id=");
     assert_contains(&suggest_stdout, "status=pending");
-    let suggestion_id = memory_suggestion_id_from_output(&suggest_stdout);
+    let suggestion_id = id_from_output(&suggest_stdout, "memory suggestion");
 
     let empty_memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
     assert_success(&empty_memory);
@@ -246,8 +239,7 @@ fn memory_suggestion_commands_require_approval() {
     );
 
     let list = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &suggestion_id);
+    assert_success_stdout_contains(&list, &suggestion_id);
 
     let approve = run_agl(&["--home", &home_arg, "memory", "approve", &suggestion_id]);
     assert_success(&approve);
@@ -255,8 +247,7 @@ fn memory_suggestion_commands_require_approval() {
     assert_contains(&stdout(&approve), "memory id=");
 
     let memory = run_agl(&["--home", &home_arg, "memory", "search", "pending"]);
-    assert_success(&memory);
-    assert_contains(&stdout(&memory), "kind=decision");
+    assert_success_stdout_contains(&memory, "kind=decision");
 
     let pending = run_agl(&["--home", &home_arg, "memory", "list-suggestions"]);
     assert_success(&pending);
@@ -285,11 +276,10 @@ fn notes_commands_manage_notes_and_promote_memory() {
     assert_success(&add);
     let add_stdout = stdout(&add);
     assert_contains(&add_stdout, "note id=");
-    let id = note_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "note");
 
     let search = run_agl(&["--home", &home_arg, "notes", "search", "pinned"]);
-    assert_success(&search);
-    assert_contains(&stdout(&search), &id);
+    assert_success_stdout_contains(&search, &id);
 
     let update = run_agl(&[
         "--home",
@@ -303,8 +293,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     assert_success(&update);
 
     let show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
-    assert_success(&show);
-    assert_contains(&stdout(&show), "Use pinned trusted workspace skills.");
+    assert_success_stdout_contains(&show, "Use pinned trusted workspace skills.");
 
     let remember = run_agl(&["--home", &home_arg, "notes", "remember", &id]);
     assert_success(&remember);
@@ -337,8 +326,7 @@ fn notes_commands_manage_notes_and_promote_memory() {
     );
 
     let delete = run_agl(&["--home", &home_arg, "notes", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "note.deleted=true");
+    assert_success_stdout_contains(&delete, "note.deleted=true");
 
     let audit_show = run_agl(&["--home", &home_arg, "notes", "show", &id]);
     assert_success(&audit_show);
@@ -378,23 +366,19 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_contains(&add_stdout, "cron id=");
     assert_contains(&add_stdout, "target=builtin:store-status");
     assert_contains(&add_stdout, "enabled=true");
-    let id = cron_id_from_output(&add_stdout);
+    let id = id_from_output(&add_stdout, "cron");
 
     let list = run_agl(&["--home", &home_arg, "cron", "list"]);
-    assert_success(&list);
-    assert_contains(&stdout(&list), &id);
+    assert_success_stdout_contains(&list, &id);
 
     let show = run_agl(&["--home", &home_arg, "cron", "show", &id]);
-    assert_success(&show);
-    assert_contains(&stdout(&show), "notify_ref=matrix-room:!status");
+    assert_success_stdout_contains(&show, "notify_ref=matrix-room:!status");
 
     let disable = run_agl(&["--home", &home_arg, "cron", "disable", &id]);
-    assert_success(&disable);
-    assert_contains(&stdout(&disable), "enabled=false");
+    assert_success_stdout_contains(&disable, "enabled=false");
 
     let enable = run_agl(&["--home", &home_arg, "cron", "enable", &id]);
-    assert_success(&enable);
-    assert_contains(&stdout(&enable), "enabled=true");
+    assert_success_stdout_contains(&enable, "enabled=true");
 
     let run = run_agl(&["--home", &home_arg, "cron", "run", &id, "--now"]);
     assert_success(&run);
@@ -427,8 +411,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     assert_contains(&stdout(&preflight), "\"records_run\": false");
 
     let history = run_agl(&["--home", &home_arg, "cron", "history", &id]);
-    assert_success(&history);
-    assert_contains(&stdout(&history), "status=succeeded");
+    assert_success_stdout_contains(&history, "status=succeeded");
 
     let tick = run_agl(&[
         "--home", &home_arg, "cron", "tick", "--at", "32400", "--json",
@@ -467,8 +450,7 @@ fn cron_commands_manage_builtin_jobs_and_run_history() {
     );
 
     let delete = run_agl(&["--home", &home_arg, "cron", "delete", &id]);
-    assert_success(&delete);
-    assert_contains(&stdout(&delete), "cron.deleted=true");
+    assert_success_stdout_contains(&delete, "cron.deleted=true");
 
     let hidden = run_agl(&["--home", &home_arg, "cron", "list"]);
     assert_success(&hidden);
@@ -496,8 +478,7 @@ fn cron_add_rejects_invalid_schedule() {
         "store-status",
     ]);
 
-    assert_failure(&output);
-    assert_contains(&stderr(&output), "invalid cron schedule_expr value");
+    assert_failure_stderr_contains(&output, "invalid cron schedule_expr value");
 }
 
 #[test]
@@ -566,8 +547,7 @@ fn store_commands_report_status_and_export_jsonl() {
     let overwrite = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
-    assert_failure(&overwrite);
-    assert_contains(&stderr(&overwrite), "pass --force to overwrite");
+    assert_failure_stderr_contains(&overwrite, "pass --force to overwrite");
 
     let forced = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg, "--force",
@@ -586,8 +566,7 @@ fn store_commands_report_status_and_export_jsonl() {
         "--out",
         &matrix_out_arg,
     ]);
-    assert_failure(&matrix_export);
-    assert_contains(&stderr(&matrix_export), "invalid value 'matrix'");
+    assert_failure_stderr_contains(&matrix_export, "invalid value 'matrix'");
     assert!(
         !matrix_out.exists(),
         "unknown domain must not create export file"
@@ -618,8 +597,7 @@ fn store_status_does_not_create_database_before_explicit_migrate() {
     let export = run_agl(&[
         "--home", &home_arg, "store", "export", "--domain", "memory", "--out", &out_arg,
     ]);
-    assert_failure(&export);
-    assert_contains(&stderr(&export), "run store.migrate first");
+    assert_failure_stderr_contains(&export, "run store.migrate first");
 
     let migrate = run_agl(&["--home", &home_arg, "store", "migrate"]);
     assert_success(&migrate);
@@ -640,8 +618,7 @@ fn run_help_describes_trusted_workspace_skills() {
 fn hidden_repo_help_remains_available_for_advanced_usage() {
     let output = run_agl(&["repo", "--help"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl repo");
     assert_contains(&stdout, "init");
@@ -703,10 +680,8 @@ fn init_and_repo_init_dry_run_are_equivalent() {
     let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
     let repo_init = run_agl_in(repo.path(), &["repo", "init", "--dry-run"]);
 
-    assert_success(&init);
-    assert_success(&repo_init);
-    assert_empty_stderr(&init);
-    assert_empty_stderr(&repo_init);
+    assert_success_no_stderr(&init);
+    assert_success_no_stderr(&repo_init);
     assert_eq!(stdout(&init), stdout(&repo_init));
 }
 
@@ -786,8 +761,7 @@ fn repo_export_profile_writes_portable_policy_manifest() {
     );
 
     let overwrite = run_agl_in(repo.path(), &["repo", "export-profile", "--out", &out_arg]);
-    assert_failure(&overwrite);
-    assert_contains(&stderr(&overwrite), "failed to create profile export");
+    assert_failure_stderr_contains(&overwrite, "failed to create profile export");
 }
 
 #[test]
@@ -826,8 +800,7 @@ fn init_then_status_reports_missing_skills_submodule_warning() {
 
     let output = run_agl_in(repo.path(), &["status"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=warning");
     assert_contains(&stdout, "component.skills.warning=missing");
@@ -942,8 +915,7 @@ fn skill_lock_refuses_plain_workspace_skills_directory() {
 fn skill_inspect_runtime_succeeds_for_builtin_skill() {
     let output = run_agl(&["skill", "inspect", "change", "--runtime"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "skill name=change");
     assert_contains(&stdout(&output), "usable=true");
 }
@@ -952,8 +924,7 @@ fn skill_inspect_runtime_succeeds_for_builtin_skill() {
 fn skill_inspect_runtime_succeeds_for_expanded_repo_builtin_skill() {
     let output = run_agl(&["skill", "inspect", "repo-review", "--runtime"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     assert_contains(&stdout(&output), "skill name=repo-review");
     assert_contains(&stdout(&output), "usable=true");
 }
@@ -996,8 +967,7 @@ fn daemon_status_without_daemon_reports_not_running_without_model_config() {
     let home_arg = home.path_string();
     let output = run_agl(&["--home", &home_arg, "daemon", "status"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=not_running");
     assert_contains(
@@ -1012,7 +982,7 @@ fn retired_infer_command_fails_with_run_guidance() {
     let output = run_agl(&["infer", "--config", "local.toml", "--prompt", "hello"]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "agl infer");
     assert_contains(&stderr, "Use `agl run --config PATH PROMPT`");
@@ -1022,8 +992,7 @@ fn retired_infer_command_fails_with_run_guidance() {
 fn completion_bash_emits_agl_completion_function() {
     let output = run_agl(&["completion", "bash"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "_agl()");
     assert_contains(&stdout, "complete -F _agl");
@@ -1048,8 +1017,7 @@ fn home_override_roots_config_paths_in_requested_home() {
     let home_arg = home.path_string();
     let output = run_agl(&["--home", &home_arg, "config", "paths"]);
 
-    assert_success(&output);
-    assert_empty_stderr(&output);
+    assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, &format!("config_dir={home_arg}/config"));
     assert_contains(&stdout, &format!("data_dir={home_arg}/data"));
@@ -1066,10 +1034,7 @@ fn chat_rejects_prompt_option_with_clap_error() {
     let output = run_agl(&["chat", "--prompt", "hello"]);
 
     assert_failure(&output);
-    assert!(
-        stdout(&output).is_empty(),
-        "stdout should be empty on parse error"
-    );
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "unexpected argument '--prompt'");
     assert!(
@@ -1090,10 +1055,7 @@ fn chat_new_session_conflict_fails_before_inference_path() {
     ]);
 
     assert_failure(&output);
-    assert!(
-        stdout(&output).is_empty(),
-        "stdout should be empty on parse validation error"
-    );
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "--new-session cannot be used with --session-id");
     assert!(
@@ -1112,7 +1074,7 @@ fn reserved_future_commands_fail_before_bare_prompt_execution() {
         let output = run_agl(args);
 
         assert_failure(&output);
-        assert!(stdout(&output).is_empty(), "stdout should be empty");
+        assert_empty_stdout(&output);
         let stderr = stderr(&output);
         assert_contains(&stderr, "planned but not implemented");
         assert!(
@@ -1127,7 +1089,7 @@ fn blank_bare_prompt_fails_before_inference_path() {
     let output = run_agl(&["   "]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "prompt cannot be empty");
     assert!(
@@ -1170,7 +1132,7 @@ fn invalid_workspace_root_fails_before_inference_config() {
     ]);
 
     assert_failure(&output);
-    assert!(stdout(&output).is_empty(), "stdout should be empty");
+    assert_empty_stdout(&output);
     let stderr = stderr(&output);
     assert_contains(&stderr, "failed to canonicalize workspace root");
     assert!(
@@ -1318,6 +1280,26 @@ fn assert_empty_stderr(output: &Output) {
     );
 }
 
+fn assert_empty_stdout(output: &Output) {
+    let stdout = stdout(output);
+    assert!(stdout.is_empty(), "stdout should be empty:\n{stdout}");
+}
+
+fn assert_success_no_stderr(output: &Output) {
+    assert_success(output);
+    assert_empty_stderr(output);
+}
+
+fn assert_success_stdout_contains(output: &Output, needle: &str) {
+    assert_success(output);
+    assert_contains(&stdout(output), needle);
+}
+
+fn assert_failure_stderr_contains(output: &Output, needle: &str) {
+    assert_failure(output);
+    assert_contains(&stderr(output), needle);
+}
+
 fn assert_contains(haystack: &str, needle: &str) {
     assert!(
         haystack.contains(needle),
@@ -1337,35 +1319,11 @@ fn version_from_stdout<'a>(binary: &str, stdout: &'a str) -> &'a str {
         .unwrap_or_else(|| panic!("missing version in output: {stdout}"))
 }
 
-fn memory_id_from_output(stdout: &str) -> String {
+fn id_from_output(stdout: &str, label: &str) -> String {
     stdout
         .split_whitespace()
         .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("memory id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn memory_suggestion_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("memory suggestion id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn note_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("note id missing from output:\n{stdout}"))
-        .to_string()
-}
-
-fn cron_id_from_output(stdout: &str) -> String {
-    stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("id="))
-        .unwrap_or_else(|| panic!("cron id missing from output:\n{stdout}"))
+        .unwrap_or_else(|| panic!("{label} id missing from output:\n{stdout}"))
         .to_string()
 }
 

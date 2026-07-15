@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{ToolHandler, ToolInput, ToolOutput};
+use crate::{ToolHandler, ToolInput, ToolOutput, parse_tool_args as parse_args};
 
 mod declarations;
 
@@ -256,10 +256,6 @@ impl ToolHandler for CronTools {
     }
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 fn parse_target_kind(value: &str) -> Result<CronTargetKind> {
     match value {
         "builtin" => Ok(CronTargetKind::Builtin),
@@ -402,22 +398,26 @@ fn current_unix_seconds() -> u64 {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListArgs {
     include_deleted: Option<bool>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IdArgs {
     id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HistoryArgs {
     job_id: String,
     limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JobDraftArgs {
     name: String,
     target_kind: String,
@@ -452,6 +452,7 @@ impl JobDraftArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateArgs {
     id: String,
     name: Option<String>,
@@ -497,6 +498,7 @@ fn optional_update(value: Option<String>, clear: Option<bool>) -> Option<Option<
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunArgs {
     job_id: String,
     scheduled_for: Option<String>,
@@ -506,6 +508,7 @@ struct RunArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TickArgs {
     unix_seconds: Option<u64>,
     mock_skill_execution: Option<bool>,

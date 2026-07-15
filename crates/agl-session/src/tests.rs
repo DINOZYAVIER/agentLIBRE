@@ -5,12 +5,33 @@ use crate::fsm::{ChatSessionMachine, ChatSessionPhase, ChatSessionTransition};
 use crate::*;
 
 static DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const TEST_SESSION_ID: &str = "session-001";
+const TEST_RUN_ID: &str = "run-001";
+const NEXT_RUN_ID: &str = "run-002";
+const TEST_CONFIG_PATH: &str = "/tmp/local.toml";
+const TEST_BACKEND: &str = "llama_cpp";
 
 fn temp_root(name: &str) -> PathBuf {
     let id = DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("agl-session-{name}-{}-{id}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
     path
+}
+
+fn test_session_id() -> AgentLibreSessionId {
+    AgentLibreSessionId::new(TEST_SESSION_ID).unwrap()
+}
+
+fn start_test_session(root: impl AsRef<std::path::Path>) -> ChatSessionStore {
+    start_session(root, test_session_id(), TEST_RUN_ID)
+}
+
+fn start_session(
+    root: impl AsRef<std::path::Path>,
+    session_id: AgentLibreSessionId,
+    run_id: &str,
+) -> ChatSessionStore {
+    ChatSessionStore::start(root, session_id, run_id, TEST_CONFIG_PATH, TEST_BACKEND).unwrap()
 }
 
 #[test]
@@ -25,13 +46,13 @@ fn generated_session_ids_are_unique_path_segments() {
 
 #[test]
 fn chat_session_machine_accepts_answer_turn_path() {
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let session_id = test_session_id();
     let mut machine = ChatSessionMachine::new(session_id);
 
     assert_eq!(
         machine
             .apply(ChatSessionTransition::StartNewSession {
-                run_id: "run-001".to_string(),
+                run_id: TEST_RUN_ID.to_string(),
             })
             .unwrap()
             .to,
@@ -66,7 +87,7 @@ fn chat_session_machine_accepts_answer_turn_path() {
     assert_eq!(
         machine
             .apply(ChatSessionTransition::LinkModelAttempt {
-                run_id: "run-001".to_string(),
+                run_id: TEST_RUN_ID.to_string(),
                 attempt_id: "attempt-0001".to_string(),
             })
             .unwrap()
@@ -94,7 +115,7 @@ fn chat_session_machine_accepts_answer_turn_path() {
 
 #[test]
 fn chat_session_machine_rejects_illegal_transition_and_finished_is_terminal() {
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let session_id = test_session_id();
     let mut machine = ChatSessionMachine::new(session_id);
 
     let err = machine
@@ -108,7 +129,7 @@ fn chat_session_machine_rejects_illegal_transition_and_finished_is_terminal() {
 
     machine
         .apply(ChatSessionTransition::StartNewSession {
-            run_id: "run-001".to_string(),
+            run_id: TEST_RUN_ID.to_string(),
         })
         .unwrap();
     machine
@@ -128,14 +149,7 @@ fn chat_session_machine_rejects_illegal_transition_and_finished_is_terminal() {
 #[test]
 fn writes_chat_session_metadata_and_transcript_from_transitions() {
     let root = temp_root("session");
-    let mut store = ChatSessionStore::start(
-        &root,
-        AgentLibreSessionId::new("session-001").unwrap(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let mut store = start_test_session(&root);
 
     store
         .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
@@ -166,14 +180,7 @@ fn writes_chat_session_metadata_and_transcript_from_transitions() {
 #[test]
 fn stopped_turn_marker_is_recorded_as_assistant_message() {
     let root = temp_root("stopped-marker");
-    let mut store = ChatSessionStore::start(
-        &root,
-        AgentLibreSessionId::new("session-001").unwrap(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let mut store = start_test_session(&root);
 
     store
         .append_user_message(AgentLibreMessageId::indexed(1), "tool bait".to_string())
@@ -204,14 +211,7 @@ fn stopped_turn_marker_is_recorded_as_assistant_message() {
 #[test]
 fn tool_messages_are_recorded_and_replayed() {
     let root = temp_root("tool-message");
-    let mut store = ChatSessionStore::start(
-        &root,
-        AgentLibreSessionId::new("session-001").unwrap(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let mut store = start_test_session(&root);
 
     store
         .append_user_message(AgentLibreMessageId::indexed(1), "read".to_string())
@@ -253,14 +253,7 @@ fn tool_messages_are_recorded_and_replayed() {
 #[test]
 fn session_failures_are_recorded() {
     let root = temp_root("session-failure");
-    let mut store = ChatSessionStore::start(
-        &root,
-        AgentLibreSessionId::new("session-001").unwrap(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let mut store = start_test_session(&root);
 
     store
         .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
@@ -278,14 +271,7 @@ fn session_failures_are_recorded() {
 #[test]
 fn exit_command_finishes_session_with_reason() {
     let root = temp_root("exit-command");
-    let mut store = ChatSessionStore::start(
-        &root,
-        AgentLibreSessionId::new("session-001").unwrap(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let mut store = start_test_session(&root);
 
     store.request_exit().unwrap();
 
@@ -299,7 +285,7 @@ fn exit_command_finishes_session_with_reason() {
 
 #[test]
 fn session_finished_without_reason_is_rejected() {
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
+    let session_id = test_session_id();
     let line = serde_json::json!({
         "kind": "session_finished",
         "session_id": session_id,
@@ -328,18 +314,17 @@ fn session_metadata_model_config_path_is_rejected() {
 #[test]
 fn start_refuses_existing_chat_session() {
     let root = temp_root("session-collision");
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
-    let _store = ChatSessionStore::start(
-        &root,
-        session_id.clone(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let session_id = test_session_id();
+    let _store = start_session(&root, session_id.clone(), TEST_RUN_ID);
 
-    let err = ChatSessionStore::start(&root, session_id, "run-002", "/tmp/local.toml", "llama_cpp")
-        .unwrap_err();
+    let err = ChatSessionStore::start(
+        &root,
+        session_id,
+        NEXT_RUN_ID,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+    )
+    .unwrap_err();
 
     assert!(format!("{err:#}").contains("chat session already exists"));
 
@@ -349,15 +334,8 @@ fn start_refuses_existing_chat_session() {
 #[test]
 fn opens_existing_session_and_reads_replay_without_appending_start() {
     let root = temp_root("session-replay");
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
-    let mut store = ChatSessionStore::start(
-        &root,
-        session_id.clone(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let session_id = test_session_id();
+    let mut store = start_session(&root, session_id.clone(), TEST_RUN_ID);
     store
         .append_user_message(AgentLibreMessageId::indexed(1), "hello".to_string())
         .unwrap();
@@ -367,7 +345,7 @@ fn opens_existing_session_and_reads_replay_without_appending_start() {
         .unwrap();
     let before = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
 
-    let opened = ChatSessionStore::open(&root, session_id, "run-002").unwrap();
+    let opened = ChatSessionStore::open(&root, session_id, NEXT_RUN_ID).unwrap();
     let replay = opened.read_replay().unwrap();
     let after = std::fs::read_to_string(opened.transcript_jsonl()).unwrap();
 
@@ -382,19 +360,12 @@ fn opens_existing_session_and_reads_replay_without_appending_start() {
 #[test]
 fn malformed_transcript_reports_line_number() {
     let root = temp_root("session-malformed");
-    let session_id = AgentLibreSessionId::new("session-001").unwrap();
-    let store = ChatSessionStore::start(
-        &root,
-        session_id.clone(),
-        "run-001",
-        "/tmp/local.toml",
-        "llama_cpp",
-    )
-    .unwrap();
+    let session_id = test_session_id();
+    let store = start_session(&root, session_id.clone(), TEST_RUN_ID);
     let mut transcript = std::fs::read_to_string(store.transcript_jsonl()).unwrap();
     transcript.push_str("not-json\n");
     std::fs::write(store.transcript_jsonl(), transcript).unwrap();
-    let opened = ChatSessionStore::open(&root, session_id, "run-002").unwrap();
+    let opened = ChatSessionStore::open(&root, session_id, NEXT_RUN_ID).unwrap();
 
     let err = opened.read_replay().unwrap_err();
 

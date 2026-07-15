@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
+# shellcheck source=smoke-lib.sh
+source "$script_dir/smoke-lib.sh"
 
 config="${AGL_SMOKE_CONFIG:-}"
 artifact_root="${AGL_SMOKE_ARTIFACT_ROOT:-/tmp/agl-016-llama-cpp-smoke}"
@@ -10,36 +12,6 @@ agl_bin="${AGL_SMOKE_AGL_BIN:-$repo_root/target/debug/agl}"
 device="${AGL_SMOKE_DEVICE:-Vulkan0}"
 run_suffix="agl-016-$(date +%s)-$$"
 export AGL_HOME="${AGL_SMOKE_HOME:-${AGL_HOME:-$artifact_root/home-$run_suffix}}"
-
-fail() {
-  echo "smoke failed: $*" >&2
-  exit 1
-}
-
-need_tool() {
-  command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"
-}
-
-require_file() {
-  [[ -f "$1" ]] || fail "missing file: $1"
-}
-
-require_contains() {
-  local path="$1"
-  local needle="$2"
-  require_file "$path"
-  grep -F -- "$needle" "$path" >/dev/null || fail "$path does not contain: $needle"
-}
-
-json_content() {
-  python3 - "$1" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    print(json.load(handle)["content"], end="")
-PY
-}
 
 reject_generated_continuation() {
   local path="$1"

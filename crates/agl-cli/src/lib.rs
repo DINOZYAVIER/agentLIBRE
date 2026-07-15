@@ -5,17 +5,15 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
-    ChatLoopHost, ChatOptions, ChatService, ChatTurnStatus, InferenceOptions, InferenceSession,
-    ToolAccessMode as ChatToolAccessMode, assistant_text_for_terminal, build_turn_input,
-    chat_workspace_root, default_run_id,
+    ChatOptions, ChatService, ChatTurnStatus, InferenceOptions,
+    ToolAccessMode as ChatToolAccessMode, chat_workspace_root, default_run_id,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRun, CronRunStatus, CronTargetKind};
 use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
-    default_socket_path, run_cron_tick,
+    default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
-use agl_loop::{TurnOutput, run_turn};
 use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::ComponentStatus;
 use agl_runtime::{
@@ -53,6 +51,24 @@ use memory::run_memory;
 use notes::run_notes;
 use repo::run_repo;
 use store::run_store;
+
+pub(crate) fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+pub(crate) fn print_json_or(
+    json: bool,
+    value: &impl serde::Serialize,
+    print_text: impl FnOnce(),
+) -> Result<()> {
+    if json {
+        print_json(value)
+    } else {
+        print_text();
+        Ok(())
+    }
+}
 
 pub fn run_cli() {
     let invocation = match parse_cli(env::args()) {
@@ -129,43 +145,50 @@ fn runtime_for_command_paths(
     command: &CliCommand,
     paths: AgentLibrePaths,
 ) -> Result<AgentLibreRuntimeConfig> {
-    if matches!(
-        command,
-        CliCommand::Config(_)
-            | CliCommand::Cron(_)
-            | CliCommand::Store(_)
-            | CliCommand::Repo(_)
-            | CliCommand::Skill(_)
-            | CliCommand::Memory(_)
-            | CliCommand::Notes(_)
-            | CliCommand::DaemonStatus(_)
-    ) {
-        return Ok(AgentLibreRuntimeConfig {
+    match cli_runtime_profile(command) {
+        CliRuntimeProfile::LightBatch => Ok(AgentLibreRuntimeConfig {
             paths,
             logging: AgentLibreLoggingConfig::from_env(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
-        });
+        }),
+        CliRuntimeProfile::FullBatch | CliRuntimeProfile::Interactive => {
+            AgentLibreRuntimeConfig::from_paths(paths)
+        }
     }
-
-    AgentLibreRuntimeConfig::from_paths(paths)
 }
 
 fn process_mode_for_command(command: &CliCommand) -> AgentLibreProcessMode {
+    match cli_runtime_profile(command) {
+        CliRuntimeProfile::Interactive => AgentLibreProcessMode::Interactive,
+        CliRuntimeProfile::FullBatch | CliRuntimeProfile::LightBatch => {
+            AgentLibreProcessMode::Batch
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliRuntimeProfile {
+    Interactive,
+    FullBatch,
+    LightBatch,
+}
+
+fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Infer(_) | CliCommand::Chat(_) => AgentLibreProcessMode::Interactive,
-        CliCommand::Serve(_)
-        | CliCommand::Repo(_)
-        | CliCommand::Skill(_)
+        CliCommand::Infer(_) | CliCommand::Chat(_) => CliRuntimeProfile::Interactive,
+        CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Store(_)
+        | CliCommand::Repo(_)
+        | CliCommand::Skill(_)
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
-        | CliCommand::DaemonStatus(_)
+        | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
+        CliCommand::Serve(_)
         | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
-        | CliCommand::Completion { .. }
-        | CliCommand::Config(_) => AgentLibreProcessMode::Batch,
+        | CliCommand::Completion { .. } => CliRuntimeProfile::FullBatch,
     }
 }
 
@@ -193,7 +216,8 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
 
 fn run_cron(command: CronCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "cron", "starting command");
-    let store = AglStore::open_default(&runtime.paths).context("failed to open cron store")?;
+    let store =
+        AglStore::open_at(runtime.paths.store_root()).context("failed to open cron store")?;
     let cron = CronRepository::new(&store);
 
     match command {
@@ -230,24 +254,14 @@ fn run_cron_add(
     draft.input = options.input;
     let job = cron.add_job(draft).context("failed to add cron job")?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_list(options: CronListOptions, cron: &CronRepository<'_>) -> Result<()> {
     let jobs = cron
         .list_jobs(options.include_deleted)
         .context("failed to list cron jobs")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&jobs)?);
-    } else {
-        print_cron_jobs(&jobs);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &jobs, || print_cron_jobs(&jobs))
 }
 
 fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<()> {
@@ -255,36 +269,21 @@ fn run_cron_show(options: CronShowOptions, cron: &CronRepository<'_>) -> Result<
         .job(&options.id)
         .context("failed to read cron job")?
         .ok_or_else(|| anyhow::anyhow!("cron job not found: {}", options.id))?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-    } else {
-        print_cron_job_detail(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_detail(&job))
 }
 
 fn run_cron_enable(options: CronEnableOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, true)
         .context("failed to enable cron job")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_disable(options: CronDisableOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .set_enabled(&options.id, false)
         .context("failed to disable cron job")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-    } else {
-        print_cron_job_summary(&job);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &job, || print_cron_job_summary(&job))
 }
 
 fn run_cron_run(
@@ -313,14 +312,11 @@ fn run_cron_run(
     let idempotency = idempotency_report(store, &outcome)?;
 
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "job": job,
-                "run": run,
-                "idempotency": idempotency,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "job": job,
+            "run": run,
+            "idempotency": idempotency,
+        }))?;
     } else {
         print_cron_run(&run);
         println!(
@@ -340,7 +336,7 @@ fn run_cron_run(
 fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bool) -> Result<()> {
     validate_stored_cron_target(job, runtime)?;
     let prompt = if job.target_kind == CronTargetKind::Skill {
-        Some(cron_skill_prompt(job)?)
+        Some(render_cron_skill_prompt(job)?)
     } else {
         None
     };
@@ -355,13 +351,10 @@ fn run_cron_preflight(job: &CronJob, runtime: &AgentLibreRuntimeConfig, json: bo
         "records_run": false,
     });
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "job": job,
-                "preflight": report,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "job": job,
+            "preflight": report,
+        }))?;
     } else {
         println!("cron.preflight.ok=true");
         println!(
@@ -390,15 +383,12 @@ fn run_cron_tick_command(
     let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
         .context("failed to run cron scheduler tick")?;
     if options.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "at": unix_seconds,
-                "due_jobs": report.due_jobs,
-                "recorded_runs": report.recorded_runs,
-                "notifications": report.notifications,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "at": unix_seconds,
+            "due_jobs": report.due_jobs,
+            "recorded_runs": report.recorded_runs,
+            "notifications": report.notifications,
+        }))?;
     } else {
         println!("cron.tick.at={unix_seconds}");
         println!("cron.tick.due_jobs={}", report.due_jobs);
@@ -413,25 +403,17 @@ fn run_cron_history(options: CronHistoryOptions, cron: &CronRepository<'_>) -> R
     let runs = cron
         .history(&options.id)
         .context("failed to read cron run history")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&runs)?);
-    } else {
-        print_cron_runs(&runs);
-    }
-    Ok(())
+    crate::print_json_or(options.json, &runs, || print_cron_runs(&runs))
 }
 
 fn run_cron_delete(options: CronDeleteOptions, cron: &CronRepository<'_>) -> Result<()> {
     let job = cron
         .delete_job(&options.id)
         .context("failed to delete cron job")?;
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-    } else {
+    crate::print_json_or(options.json, &job, || {
         println!("cron.deleted=true");
         print_cron_job_summary(&job);
-    }
-    Ok(())
+    })
 }
 
 fn validate_cron_target(target: &CronTargetArg, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
@@ -506,7 +488,7 @@ fn run_builtin_cron_target(job: &CronJob, store: &AglStore) -> Result<String> {
 }
 
 fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
-    let prompt = cron_skill_prompt(job)?;
+    let prompt = render_cron_skill_prompt(job)?;
     let inference = InferenceOptions {
         skills: vec![job.target_ref.clone()],
         tool_mode: ChatToolAccessMode::Write,
@@ -540,20 +522,8 @@ fn run_skill_cron_target(job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Re
 }
 
 fn run_mock_skill_cron_target(job: &CronJob) -> Result<String> {
-    let _prompt = cron_skill_prompt(job)?;
+    let _prompt = render_cron_skill_prompt(job)?;
     Ok(format!("skill:{}:mock", job.target_ref))
-}
-
-fn cron_skill_prompt(job: &CronJob) -> Result<String> {
-    let prompt = job
-        .prompt
-        .as_deref()
-        .context("skill cron job missing prompt")?;
-    if let Some(input) = job.input.as_deref() {
-        Ok(format!("{prompt}\n\nCron input:\n{input}"))
-    } else {
-        Ok(prompt.to_string())
-    }
 }
 
 fn prompt_preview(prompt: &str) -> String {
@@ -610,7 +580,7 @@ impl CronNotifier for CliStoreCronNotifier<'_> {
         if !notification.notify_ref.starts_with("matrix-room:") {
             return Ok(());
         }
-        let body = cron_notification_body(&notification);
+        let body = render_cron_notification_body(&notification);
         let dedupe_key = format!("cron:{}:{}", notification.run_id, notification.notify_ref);
         self.store
             .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
@@ -623,23 +593,6 @@ impl CronNotifier for CliStoreCronNotifier<'_> {
             .context("failed to enqueue Matrix notification")?;
         Ok(())
     }
-}
-
-fn cron_notification_body(notification: &CronNotification) -> String {
-    let mut body = format!(
-        "Cron job `{}` ({}) {} for {}.",
-        notification.job_name,
-        notification.job_id,
-        notification.status.as_str(),
-        notification.scheduled_for
-    );
-    if let Some(result_ref) = &notification.result_ref {
-        body.push_str(&format!("\nresult_ref: {result_ref}"));
-    }
-    if let Some(error) = &notification.error {
-        body.push_str(&format!("\nerror: {error}"));
-    }
-    body
 }
 
 fn unix_now() -> u64 {
@@ -738,25 +691,22 @@ fn run_skill_list(options: SkillListOptions, runtime: &AgentLibreRuntimeConfig) 
                 workspace_skills.push(skill);
             }
         }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "source": skill_list_source_as_str(options.source),
-                "trusted_only": options.trusted_only,
-                "limit": limit,
-                "builtins": builtins,
-                "workspace": {
-                    "state": workspace.state,
-                    "workspace_root": workspace.workspace_root,
-                    "component": workspace.component,
-                    "lock_path": workspace.lock_path,
-                    "skills": workspace_skills,
-                    "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
-                    "errors": if include_workspace { workspace.errors } else { Vec::new() },
-                    "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
-                },
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "source": skill_list_source_as_str(options.source),
+            "trusted_only": options.trusted_only,
+            "limit": limit,
+            "builtins": builtins,
+            "workspace": {
+                "state": workspace.state,
+                "workspace_root": workspace.workspace_root,
+                "component": workspace.component,
+                "lock_path": workspace.lock_path,
+                "skills": workspace_skills,
+                "warnings": if include_workspace { workspace.warnings } else { Vec::new() },
+                "errors": if include_workspace { workspace.errors } else { Vec::new() },
+                "next_steps": if include_workspace { workspace.next_steps } else { Vec::new() },
+            },
+        }))?;
     } else {
         if include_builtin {
             for skill in registry.skills() {
@@ -842,13 +792,13 @@ fn run_skill_inspect(
         .iter()
         .any(|skill| skill.permits_context_injection())
         || workspace_skills.iter().any(|skill| skill.usable);
+    let workspace_overrides = workspace_skills
+        .iter()
+        .filter(|skill| skill.overrides_builtin)
+        .filter_map(|skill| skill.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
 
     if options.json {
-        let workspace_overrides = workspace_skills
-            .iter()
-            .filter(|skill| skill.overrides_builtin)
-            .filter_map(|skill| skill.name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
         let builtins = builtins
             .into_iter()
             .map(|skill| {
@@ -865,20 +815,12 @@ fn run_skill_inspect(
                 })
             })
             .collect::<Vec<_>>();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "name": options.name,
-                "builtins": builtins,
-                "workspace": workspace_skills,
-            }))?
-        );
+        crate::print_json(&serde_json::json!({
+            "name": options.name,
+            "builtins": builtins,
+            "workspace": workspace_skills,
+        }))?;
     } else {
-        let workspace_overrides = workspace_skills
-            .iter()
-            .filter(|skill| skill.overrides_builtin)
-            .filter_map(|skill| skill.name.clone())
-            .collect::<std::collections::BTreeSet<_>>();
         for skill in builtins {
             println!(
                 "skill name={} source={} pack={} version={} trust={:?} usable={} overridden_by_workspace={}",
@@ -915,11 +857,9 @@ fn run_skill_status(options: SkillStatusOptions, runtime: &AgentLibreRuntimeConf
         skill_trust_store_path(runtime),
     )?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_workspace_skill_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_workspace_skill_report(&report)
+    })?;
 
     if report.should_fail(options.strict) {
         bail!("workspace skill status is not healthy");
@@ -933,11 +873,9 @@ fn run_skill_verify(options: SkillVerifyOptions) -> Result<()> {
         std::env::current_dir().context("failed to resolve current directory")?,
     )?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_workspace_skill_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_workspace_skill_report(&report)
+    })?;
 
     if report.should_fail(true) {
         bail!("workspace skill verification failed");
@@ -954,11 +892,7 @@ fn run_skill_lock(options: SkillLockOptions) -> Result<()> {
         },
     )?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_skill_lock_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || print_skill_lock_report(&report))?;
 
     if report.has_errors() {
         bail!("workspace skill lock failed");
@@ -978,11 +912,9 @@ fn run_skill_trust(options: SkillTrustOptions, runtime: &AgentLibreRuntimeConfig
         },
     )?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_skill_trust_update_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_skill_trust_update_report(&report)
+    })?;
 
     if report.has_errors() {
         bail!("workspace skill trust failed");
@@ -998,11 +930,9 @@ fn run_skill_revoke(options: SkillRevokeOptions, runtime: &AgentLibreRuntimeConf
         &options.name,
     )?;
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_skill_trust_update_report(&report);
-    }
+    crate::print_json_or(options.json, &report, || {
+        print_skill_trust_update_report(&report)
+    })?;
 
     if report.has_errors() {
         bail!("workspace skill revoke failed");
@@ -1062,6 +992,14 @@ fn chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
     }
 }
 
+fn one_shot_chat_options_from_run_options(options: &RunOptions) -> ChatOptions {
+    let mut chat_options = chat_options_from_run_options(options);
+    chat_options.session_id = None;
+    chat_options.no_history = true;
+    chat_options.new_session = true;
+    chat_options
+}
+
 fn chat_tool_mode(mode: args::ToolAccessMode) -> ChatToolAccessMode {
     match mode {
         args::ToolAccessMode::ReadOnly => ChatToolAccessMode::ReadOnly,
@@ -1078,32 +1016,24 @@ fn run_infer(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<(
         .prompt
         .clone()
         .context("run requires PROMPT or --prompt TEXT")?;
-    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
     let tool_mode = options.tool_mode;
-    let inference_options = inference_options_from_run_options(&options);
-    let session = InferenceSession::new(inference_options, runtime, None)?;
-    let mut loop_host = ChatLoopHost::new(session, &workspace_root)?;
+    let mut chat_service =
+        ChatService::open(one_shot_chat_options_from_run_options(&options), runtime)?;
+    let summary = chat_service.summary();
     tracing::info!(
         target: "agentlibre::app",
-        run_id = %loop_host.session().run_id(),
-        event_stream = %loop_host.event_sink_path().display(),
-        workspace_root = %loop_host.workspace_root().display(),
+        run_id = %summary.run_id,
+        event_stream = %summary.event_stream.display(),
+        workspace_root = %summary.workspace_root.display(),
         tool_mode = tool_mode.as_str(),
         "runtime loop host initialized"
     );
-    let hook_batches = loop_host.session().turn_hook_batches().to_vec();
-    let visible_tools = loop_host.session().turn_visible_tools().to_vec();
-    let input = build_turn_input(
-        loop_host.session().run_id().as_str(),
-        1,
-        &[],
-        &hook_batches,
-        &visible_tools,
-        &prompt,
-    );
-    loop_host.reset_turn_counters();
-    let output = run_turn(&mut loop_host, input)?;
-    print_turn_output(&output);
+    match chat_service.run_user_turn(&prompt)?.status {
+        ChatTurnStatus::Answered { answer } => println!("{answer}"),
+        ChatTurnStatus::Stopped { reason } => {
+            println!("stopped=true reason={}", reason.as_str());
+        }
+    }
     Ok(())
 }
 
@@ -1579,13 +1509,6 @@ fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Resul
     Ok(())
 }
 
-fn print_turn_output(output: &TurnOutput) {
-    match output {
-        TurnOutput::Answered { answer } => println!("{}", assistant_text_for_terminal(answer)),
-        TurnOutput::Stopped { reason, .. } => println!("stopped=true reason={}", reason.as_str()),
-    }
-}
-
 fn print_chat_session_summary(chat_service: &ChatService) {
     println!("session_id={}", chat_service.session_id());
     println!("run_id={}", chat_service.run_id());
@@ -1598,6 +1521,70 @@ mod tests {
     use crate::args::ConfigCommand;
 
     use super::*;
+
+    fn serve_options() -> ServeOptions {
+        ServeOptions {
+            socket_path: None,
+            config: None,
+            artifact_root: None,
+            run_id: None,
+            workspace_root: None,
+            max_output_tokens: 256,
+            tool_mode: crate::args::ToolAccessMode::ReadOnly,
+            skills: Vec::new(),
+            memory: false,
+        }
+    }
+
+    #[test]
+    fn cli_runtime_profile_drives_config_loading_and_process_mode() {
+        let config = CliCommand::Config(ConfigCommand::Paths);
+        assert_eq!(cli_runtime_profile(&config), CliRuntimeProfile::LightBatch);
+        assert_eq!(
+            process_mode_for_command(&config),
+            AgentLibreProcessMode::Batch
+        );
+
+        let serve = CliCommand::Serve(serve_options());
+        assert_eq!(cli_runtime_profile(&serve), CliRuntimeProfile::FullBatch);
+        assert_eq!(
+            process_mode_for_command(&serve),
+            AgentLibreProcessMode::Batch
+        );
+
+        let infer = CliCommand::Infer(RunOptions::default());
+        assert_eq!(cli_runtime_profile(&infer), CliRuntimeProfile::Interactive);
+        assert_eq!(
+            process_mode_for_command(&infer),
+            AgentLibreProcessMode::Interactive
+        );
+    }
+
+    #[test]
+    fn one_shot_run_uses_chat_service_without_history() {
+        let options = RunOptions {
+            workspace_root: Some(PathBuf::from("/tmp/workspace")),
+            session_id: Some("ignored-session".to_string()),
+            no_history: false,
+            new_session: false,
+            prompt: Some("hello".to_string()),
+            ..RunOptions::default()
+        };
+
+        let chat_options = one_shot_chat_options_from_run_options(&options);
+
+        assert!(chat_options.no_history);
+        assert!(chat_options.new_session);
+        assert_eq!(chat_options.session_id, None);
+        assert_eq!(
+            chat_options.workspace_root,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+        assert_eq!(
+            chat_options.inference.workspace_root,
+            Some(PathBuf::from("/tmp/workspace"))
+        );
+    }
 
     #[test]
     fn config_command_runtime_does_not_parse_existing_config() {

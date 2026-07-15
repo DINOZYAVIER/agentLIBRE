@@ -144,6 +144,9 @@ impl LlamaCppSession {
 
     pub(super) fn can_append_rendered(&self, rendered: &RenderedModelRequest) -> bool {
         rendered.messages.len() >= self.rendered_message_history_len
+            && self.messages.len() >= self.rendered_message_history_len
+            && self.messages[..self.rendered_message_history_len]
+                == rendered.messages[..self.rendered_message_history_len]
     }
 
     pub(super) fn set_load_native_log(&mut self, log: String) {
@@ -232,6 +235,9 @@ impl LlamaCppSession {
                 rendered.messages.len(),
                 self.rendered_message_history_len
             );
+        }
+        if !self.can_append_rendered(rendered) {
+            bail!("llama.cpp session rendered history prefix changed");
         }
 
         let mut messages = self.messages.clone();
@@ -409,22 +415,6 @@ impl Sampler {
             bail!("llama.cpp returned null greedy sampler");
         }
         unsafe { ffi::llama_sampler_chain_add(chain, greedy) };
-        Ok(Self(chain))
-    }
-
-    #[allow(dead_code)]
-    fn default_sampling() -> Result<Self> {
-        let params = unsafe { ffi::llama_sampler_chain_default_params() };
-        let chain = unsafe { ffi::llama_sampler_chain_init(params) };
-        ensure!(!chain.is_null(), "llama.cpp returned null sampler chain");
-        unsafe {
-            ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_min_p(0.05, 1));
-            ffi::llama_sampler_chain_add(chain, ffi::llama_sampler_init_temp(0.8));
-            ffi::llama_sampler_chain_add(
-                chain,
-                ffi::llama_sampler_init_dist(ffi::LLAMA_DEFAULT_SEED),
-            );
-        }
         Ok(Self(chain))
     }
 

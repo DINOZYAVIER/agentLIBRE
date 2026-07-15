@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn current_schema_version_matches_last_migration() {
@@ -15,11 +16,11 @@ fn current_schema_version_matches_last_migration() {
 }
 
 #[test]
-fn opens_default_store_and_reports_health() {
+fn opens_store_at_explicit_root_and_reports_health() {
     let root = temp_root("health");
-    let paths = AgentLibrePaths::from_agl_home(&root);
+    let store_root = root.join("data/store");
 
-    let store = AglStore::open_default(&paths).unwrap();
+    let store = AglStore::open_at(&store_root).unwrap();
     let health = store.health().unwrap();
     let status = store.status().unwrap();
 
@@ -31,8 +32,6 @@ fn opens_default_store_and_reports_health() {
     assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(status.domains.len(), StoreDomain::all().len());
     assert!(status.domains.iter().all(|domain| domain.total_rows == 0));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -50,14 +49,11 @@ fn explicit_migration_reports_applied_steps_and_schema_status() {
     assert_eq!(report.applied_migrations.len(), STORE_MIGRATIONS.len());
     assert!(after.database_exists);
     assert!(!after.migration_required);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn transaction_commits_and_rolls_back() {
-    let root = temp_root("transaction");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("transaction");
     store
         .transaction(|tx| {
             tx.execute("CREATE TABLE tx_probe(value TEXT NOT NULL)", [])?;
@@ -93,17 +89,13 @@ fn transaction_commits_and_rolls_back() {
         .query_row("SELECT COUNT(*) FROM tx_probe", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 1);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn migration_history_gaps_fail_clearly() {
     let root = temp_root("migration-gap");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = Connection::open(&db_path).unwrap();
-    conn.execute_batch(
+    write_raw_database(
+        &root,
         r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -113,50 +105,36 @@ fn migration_history_gaps_fail_clearly() {
             VALUES (1, 'unix:1'), (3, 'unix:3');
             PRAGMA user_version = 3;
             "#,
-    )
-    .unwrap();
-    drop(conn);
+    );
 
     let err = AglStore::open_at(&root).unwrap_err();
     assert!(matches!(err, StoreError::MigrationGap { missing: 2 }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn store_status_counts_domain_rows() {
-    let root = temp_root("domain-status");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_entries
+    let (_root, store) = open_temp_store("domain-status");
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_entries
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
                  VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
                         ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO notes
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO notes
                  (id, title, body, created_at, updated_at, deleted_at)
                  VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL),
                         ('note_deleted', 'Deleted', 'Body', 'unix:1', 'unix:2', 'unix:3')",
-            [],
-        )
-        .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_jobs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
                  VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL),
                         ('cron_deleted', 'Deleted', 0, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
+    );
 
     let status = store.status().unwrap();
 
@@ -170,23 +148,17 @@ fn store_status_counts_domain_rows() {
             assert_eq!(domain.active_rows, 1, "domain={}", domain.domain.as_str());
         }
     }
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn status_reports_in_progress_idempotency_without_recovering_it() {
-    let root = temp_root("stale-idempotency");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO idempotency_keys
+    let (_root, store) = open_temp_store("stale-idempotency");
+    execute_fixture(
+        &store,
+        "INSERT INTO idempotency_keys
                  (namespace, key, fingerprint, status, result_ref, created_at, updated_at)
                  VALUES ('cron.run', 'job-1:unix:60', 'sha256:abc', 'in_progress', NULL, 'unix:1', 'unix:2')",
-                [],
-            )
-            .unwrap();
+    );
 
     let status = store.status().unwrap();
     let record = store
@@ -199,183 +171,87 @@ fn status_reports_in_progress_idempotency_without_recovering_it() {
     assert_eq!(status.idempotency.stale_in_progress[0].key, "job-1:unix:60");
     assert_eq!(record.status, IdempotencyStatus::InProgress);
     assert!(record.result_ref.is_none());
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn export_memory_jsonl_respects_tombstones() {
-    let root = temp_root("export-memory");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_entries
+    let (_root, store) = open_temp_store("export-memory");
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_entries
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, created_at, updated_at, deleted_at)
                  VALUES ('mem_active', 'user', 'default', 'fact', 'Active', 'Body', NULL, 100, 'unix:1', 'unix:1', NULL),
                         ('mem_deleted', 'user', 'default', 'fact', 'Deleted', 'Body', NULL, 100, 'unix:1', 'unix:2', 'unix:3')",
-                [],
-            )
-            .unwrap();
-    let mut active = Vec::new();
-    let mut all = Vec::new();
-
-    let active_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: false,
-            },
-            &mut active,
-        )
-        .unwrap();
-    let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: true,
-            },
-            &mut all,
-        )
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    );
+    let (active_count, active) = export_domain(&store, StoreDomain::Memory, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Memory, true);
     assert_eq!(active_count, 1);
     assert!(active.contains("\"id\":\"mem_active\""));
     assert!(!active.contains("mem_deleted"));
     assert_eq!(all_count, 2);
     assert!(all.contains("\"id\":\"mem_deleted\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn export_memory_jsonl_includes_pending_suggestions() {
-    let root = temp_root("export-memory-suggestions");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO memory_suggestions
+    let (_root, store) = open_temp_store("export-memory-suggestions");
+    execute_fixture(
+        &store,
+        "INSERT INTO memory_suggestions
                  (id, scope_kind, scope_key, kind, title, body, source_ref, confidence, status, created_at, updated_at, resolved_at, resolution_ref, resolution_note)
                  VALUES ('suggest_pending', 'user', 'default', 'decision', 'Pending', 'Body', 'chat:1', 95, 'pending', 'unix:1', 'unix:1', NULL, NULL, NULL),
                         ('suggest_rejected', 'user', 'default', 'fact', 'Rejected', 'Body', 'chat:2', 90, 'rejected', 'unix:1', 'unix:2', 'unix:2', NULL, 'not durable')",
-                [],
-            )
-            .unwrap();
-    let mut active = Vec::new();
-    let mut all = Vec::new();
-
-    let active_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: false,
-            },
-            &mut active,
-        )
-        .unwrap();
-    let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Memory,
-                include_deleted: true,
-            },
-            &mut all,
-        )
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    );
+    let (active_count, active) = export_domain(&store, StoreDomain::Memory, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Memory, true);
     assert_eq!(active_count, 1);
     assert!(active.contains("\"record_type\":\"memory_suggestion\""));
     assert!(active.contains("\"id\":\"suggest_pending\""));
     assert!(!active.contains("suggest_rejected"));
     assert_eq!(all_count, 2);
     assert!(all.contains("\"id\":\"suggest_rejected\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn export_notes_and_cron_include_related_rows() {
-    let root = temp_root("export-related");
-    let store = AglStore::open_at(&root).unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO notes
+    let (_root, store) = open_temp_store("export-related");
+    execute_fixture(
+        &store,
+        "INSERT INTO notes
                  (id, title, body, created_at, updated_at, deleted_at)
                  VALUES ('note_active', 'Active', 'Body', 'unix:1', 'unix:1', NULL)",
-            [],
-        )
-        .unwrap();
-    store
-        .connection()
-        .execute(
-            "INSERT INTO note_links
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO note_links
                  (id, note_id, target_ref, label, created_at)
                  VALUES ('link_1', 'note_active', 'memory:mem_1', 'remembered', 'unix:2')",
-            [],
-        )
-        .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_jobs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_jobs
                  (id, name, enabled, target_kind, target_ref, schedule_expr, timezone, notify_ref, created_at, updated_at, deleted_at)
                  VALUES ('cron_active', 'Active', 1, 'builtin', 'store-status', 'hourly', 'UTC', NULL, 'unix:1', 'unix:1', NULL)",
-                [],
-            )
-            .unwrap();
-    store
-            .connection()
-            .execute(
-                "INSERT INTO cron_runs
+    );
+    execute_fixture(
+        &store,
+        "INSERT INTO cron_runs
                  (id, job_id, scheduled_for, started_at, finished_at, status, result_ref, error)
                  VALUES ('run_1', 'cron_active', 'unix:2', 'unix:2', 'unix:2', 'succeeded', 'builtin:store-status', NULL)",
-                [],
-            )
-            .unwrap();
-    let mut notes = Vec::new();
-    let mut cron = Vec::new();
-
-    let notes_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Notes,
-                include_deleted: false,
-            },
-            &mut notes,
-        )
-        .unwrap();
-    let cron_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Cron,
-                include_deleted: false,
-            },
-            &mut cron,
-        )
-        .unwrap();
-
-    let notes = String::from_utf8(notes).unwrap();
-    let cron = String::from_utf8(cron).unwrap();
+    );
+    let (notes_count, notes) = export_domain(&store, StoreDomain::Notes, false);
+    let (cron_count, cron) = export_domain(&store, StoreDomain::Cron, false);
     assert_eq!(notes_count, 2);
     assert!(notes.contains("\"record_type\":\"note\""));
     assert!(notes.contains("\"record_type\":\"note_link\""));
     assert_eq!(cron_count, 2);
     assert!(cron.contains("\"record_type\":\"cron_job\""));
     assert!(cron.contains("\"record_type\":\"cron_run\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
-    let root = temp_root("matrix-outbox");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("matrix-outbox");
 
     let first = store
         .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
@@ -401,33 +277,56 @@ fn matrix_notification_outbox_enqueues_once_and_exports_with_cron() {
     assert_eq!(queued, vec![first.clone()]);
     assert_eq!(first.status, MatrixNotificationOutboxStatus::Queued);
 
+    let (page, truncated) = store.queued_matrix_notifications_page(1).unwrap();
+    assert_eq!(page, vec![first.clone()]);
+    assert!(!truncated);
+
     let sent = store.mark_matrix_notification_sent(&first.id).unwrap();
     assert_eq!(sent.status, MatrixNotificationOutboxStatus::Sent);
     assert!(sent.delivered_at.is_some());
     assert!(store.queued_matrix_notifications(10).unwrap().is_empty());
 
-    let mut cron = Vec::new();
-    let count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Cron,
-                include_deleted: false,
-            },
-            &mut cron,
-        )
-        .unwrap();
-    let cron = String::from_utf8(cron).unwrap();
+    let (count, cron) = export_domain(&store, StoreDomain::Cron, false);
     assert_eq!(count, 1);
     assert!(cron.contains("\"record_type\":\"matrix_notification_outbox\""));
     assert!(cron.contains("\"status\":\"sent\""));
+}
 
-    std::fs::remove_dir_all(root).unwrap();
+#[test]
+fn matrix_notification_outbox_page_reports_truncation_only_for_extra_rows() {
+    let (_root, store) = open_temp_store("matrix-outbox-page");
+
+    let first = store
+        .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+            "matrix-room:!room",
+            "cron",
+            "run_1",
+            "cron:run_1:matrix-room:!room",
+            "First.",
+        ))
+        .unwrap();
+    let second = store
+        .enqueue_matrix_notification(MatrixNotificationOutboxDraft::new(
+            "matrix-room:!room",
+            "cron",
+            "run_2",
+            "cron:run_2:matrix-room:!room",
+            "Second.",
+        ))
+        .unwrap();
+
+    let (exact_page, exact_truncated) = store.queued_matrix_notifications_page(2).unwrap();
+    let (limited_page, limited_truncated) = store.queued_matrix_notifications_page(1).unwrap();
+
+    assert_eq!(exact_page, vec![first.clone(), second]);
+    assert!(!exact_truncated);
+    assert_eq!(limited_page, vec![first]);
+    assert!(limited_truncated);
 }
 
 #[test]
 fn permission_requests_grants_and_revokes_are_persisted() {
-    let root = temp_root("permission-requests");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("permission-requests");
 
     let request = store
         .create_permission_request(PermissionRequestDraft {
@@ -483,14 +382,11 @@ fn permission_requests_grants_and_revokes_are_persisted() {
         .unwrap();
     assert_eq!(permissions.total_rows, 3);
     assert_eq!(permissions.active_rows, 1);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn permission_export_reports_pending_and_historical_records() {
-    let root = temp_root("permission-export");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("permission-export");
     let request = store
         .create_permission_request(PermissionRequestDraft {
             requested_tools: vec!["notes.add".to_string()],
@@ -509,37 +405,14 @@ fn permission_export_reports_pending_and_historical_records() {
         .revoke_permission_grant(&grants[0].id, Some("chat:turn-3"))
         .unwrap();
 
-    let mut active = Vec::new();
-    let active_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Permissions,
-                include_deleted: false,
-            },
-            &mut active,
-        )
-        .unwrap();
-    let mut all = Vec::new();
-    let all_count = store
-        .export_domain_jsonl(
-            &StoreExportOptions {
-                domain: StoreDomain::Permissions,
-                include_deleted: true,
-            },
-            &mut all,
-        )
-        .unwrap();
-
-    let active = String::from_utf8(active).unwrap();
-    let all = String::from_utf8(all).unwrap();
+    let (active_count, active) = export_domain(&store, StoreDomain::Permissions, false);
+    let (all_count, all) = export_domain(&store, StoreDomain::Permissions, true);
     assert_eq!(active_count, 0);
     assert_eq!(all_count, 2);
     assert!(active.is_empty());
     assert!(all.contains("\"record_type\":\"permission_request\""));
     assert!(all.contains("\"record_type\":\"permission_grant\""));
     assert!(all.contains("\"status\":\"revoked\""));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -557,18 +430,14 @@ fn migrations_are_repeatable() {
         second.health().unwrap().migration_version,
         CURRENT_SCHEMA_VERSION
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn schema_v1_database_migrates_to_current() {
     let root = temp_root("migrate-v1");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(
-            r#"
+    write_raw_database(
+        &root,
+        r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
@@ -590,9 +459,7 @@ fn schema_v1_database_migrates_to_current() {
             VALUES ('cron.run', 'job-001:unix:1', 'sha256:abc', 'completed', 'run-001', 'unix:1', 'unix:1');
             PRAGMA user_version = 1;
             "#,
-        )
-        .unwrap();
-    drop(conn);
+    );
 
     let store = AglStore::open_at(&root).unwrap();
     assert_eq!(
@@ -614,17 +481,13 @@ fn schema_v1_database_migrates_to_current() {
         .skip_idempotency("cron.run", "job-002:unix:1", Some("no-op"))
         .unwrap();
     assert_eq!(skipped.status, IdempotencyStatus::Skipped);
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn future_schema_version_is_rejected() {
     let root = temp_root("future-version");
-    std::fs::create_dir_all(&root).unwrap();
-    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute_batch(
+    write_raw_database(
+        &root,
         r#"
             CREATE TABLE schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -634,9 +497,7 @@ fn future_schema_version_is_rejected() {
             VALUES (999, 'unix:1');
             PRAGMA user_version = 999;
             "#,
-    )
-    .unwrap();
-    drop(conn);
+    );
 
     let err = AglStore::open_at(&root).unwrap_err();
 
@@ -647,14 +508,11 @@ fn future_schema_version_is_rejected() {
             supported: CURRENT_SCHEMA_VERSION
         }
     ));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn idempotency_replays_same_fingerprint() {
-    let root = temp_root("idempotency-replay");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-replay");
 
     let first = store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
@@ -665,14 +523,11 @@ fn idempotency_replays_same_fingerprint() {
 
     assert!(matches!(first, IdempotencyOutcome::Inserted(_)));
     assert!(matches!(second, IdempotencyOutcome::Replayed(_)));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn idempotency_rejects_different_fingerprint() {
-    let root = temp_root("idempotency-conflict");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-conflict");
     store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
         .unwrap();
@@ -682,14 +537,11 @@ fn idempotency_rejects_different_fingerprint() {
         .unwrap_err();
 
     assert!(matches!(err, StoreError::IdempotencyConflict { .. }));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn complete_idempotency_records_result_ref() {
-    let root = temp_root("idempotency-complete");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-complete");
     store
         .begin_idempotency("matrix", "event-001", "sha256:abc")
         .unwrap();
@@ -700,14 +552,11 @@ fn complete_idempotency_records_result_ref() {
 
     assert_eq!(record.status, IdempotencyStatus::Completed);
     assert_eq!(record.result_ref.as_deref(), Some("session/turn-001"));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn fail_idempotency_records_failed_status() {
-    let root = temp_root("idempotency-failed");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-failed");
     store
         .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
         .unwrap();
@@ -722,14 +571,11 @@ fn fail_idempotency_records_failed_status() {
     assert_eq!(record.status, IdempotencyStatus::Failed);
     assert_eq!(record.result_ref.as_deref(), Some("error-001"));
     assert!(matches!(replay, IdempotencyOutcome::Replayed(_)));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn skip_idempotency_records_skipped_status() {
-    let root = temp_root("idempotency-skipped");
-    let store = AglStore::open_at(&root).unwrap();
+    let (_root, store) = open_temp_store("idempotency-skipped");
     store
         .begin_idempotency("cron.run", "job-001:unix:1", "sha256:abc")
         .unwrap();
@@ -740,8 +586,6 @@ fn skip_idempotency_records_skipped_status() {
 
     assert_eq!(record.status, IdempotencyStatus::Skipped);
     assert_eq!(record.result_ref.as_deref(), Some("not-due"));
-
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -751,12 +595,65 @@ fn database_file_rejects_path_traversal() {
     let err = database_path(&root, "../agentlibre.sqlite3").unwrap_err();
 
     assert!(matches!(err, StoreError::InvalidPath { .. }));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
-fn temp_root(label: &str) -> PathBuf {
+fn export_domain(store: &AglStore, domain: StoreDomain, include_deleted: bool) -> (usize, String) {
+    let mut output = Vec::new();
+    let count = store
+        .export_domain_jsonl(
+            &StoreExportOptions {
+                domain,
+                include_deleted,
+            },
+            &mut output,
+        )
+        .unwrap();
+    (count, String::from_utf8(output).unwrap())
+}
+
+fn execute_fixture(store: &AglStore, sql: &str) {
+    store.connection().execute(sql, []).unwrap();
+}
+
+fn write_raw_database(root: &std::path::Path, sql: &str) {
+    std::fs::create_dir_all(root).unwrap();
+    let db_path = database_path(root, DEFAULT_DATABASE_FILE).unwrap();
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute_batch(sql).unwrap();
+}
+
+fn open_temp_store(label: &str) -> (TempRoot, AglStore) {
+    let root = temp_root(label);
+    let store = AglStore::open_at(&root).unwrap();
+    (root, store)
+}
+
+fn temp_root(label: &str) -> TempRoot {
     let root = std::env::temp_dir().join(format!("agl-store-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    root
+    TempRoot { path: root }
+}
+
+struct TempRoot {
+    path: PathBuf,
+}
+
+impl AsRef<std::path::Path> for TempRoot {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for TempRoot {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }

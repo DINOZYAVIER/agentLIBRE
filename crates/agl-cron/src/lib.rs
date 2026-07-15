@@ -361,6 +361,16 @@ impl<'a> CronRepository<'a> {
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<CronJob> {
         validate_non_blank("id", id)?;
+        let current = self
+            .job(id)?
+            .ok_or_else(|| CronError::NotFound { id: id.to_string() })?;
+        if current.deleted_at.is_some() {
+            return Err(CronError::InvalidValue {
+                field: "id",
+                value: id.to_string(),
+                reason: "cannot update deleted job",
+            });
+        }
         let now = timestamp();
         self.store.connection().execute(
             "UPDATE cron_jobs

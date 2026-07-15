@@ -4,13 +4,14 @@ use agl_repo::{
     RepoHooksOptions, RepoInitOptions, RepoStatusOptions, init_repo_workspace, install_repo_hooks,
     render_repo_profile_toml, status_repo_workspace,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "repo-tools";
@@ -231,10 +232,6 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 fn render_hooks_report(tool_id: &str, report: &agl_repo::HookInstallReport) -> String {
     let mut output = format!(
         "tool={tool_id}\nworkspace_root={}\ndry_run={}\nhooks={}\nerrors={}\n---",
@@ -264,20 +261,24 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StatusArgs {
     component: Option<String>,
     strict: Option<bool>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExportProfileArgs {
     max_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HooksStatusArgs {}
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InitArgs {
     profile: Option<String>,
     profile_file: Option<String>,
@@ -286,6 +287,7 @@ struct InitArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportProfileArgs {
     profile_file: String,
     dry_run: Option<bool>,
@@ -293,6 +295,7 @@ struct ImportProfileArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InstallHooksArgs {
     dry_run: Option<bool>,
     force: Option<bool>,
@@ -300,10 +303,9 @@ struct InstallHooksArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::temp_root;
 
     use super::*;
 
@@ -330,8 +332,6 @@ mod tests {
         assert!(profile.contains("name = \"repo-workflow\""));
         assert!(hooks.contains("tool=repo.hooks.status"));
         assert!(hooks.contains("dry_run=true"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -367,22 +367,5 @@ kind = "local"
         assert!(imported.contains("tool=repo.import_profile"));
         assert!(imported.contains("status=ok"));
         assert!(root.join(".agl/workspace.toml").is_file());
-
-        cleanup(root);
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-repo-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

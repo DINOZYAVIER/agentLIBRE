@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::{
     ToolCapability, ToolCatalog, ToolCatalogError, ToolDeclaration, ToolHandler, ToolId, ToolInput,
     ToolOperationKind, ToolOutput, ToolProviderDeclaration, ToolProviderId, ToolStateEffect,
+    parse_tool_args as parse_args,
 };
 
 pub const PROVIDER_ID: &str = "memory-tools";
@@ -222,18 +223,8 @@ pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
     catalog.register(declaration())
 }
 
-fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).with_context(|| format!("{tool} arguments are invalid"))
-}
-
 fn parse_scope(scope: &str, scope_key: Option<String>) -> Result<MemoryScope> {
-    let kind = match scope {
-        "user" => MemoryScopeKind::User,
-        "repo" => MemoryScopeKind::Repo,
-        "matrix_room" => MemoryScopeKind::MatrixRoom,
-        "matrix_user" => MemoryScopeKind::MatrixUser,
-        _ => bail!("unknown memory scope `{scope}`"),
-    };
+    let kind = parse_scope_kind(scope)?;
     match (kind, scope_key) {
         (MemoryScopeKind::User, None) => Ok(MemoryScope::user()),
         (kind, Some(key)) => MemoryScope::new(kind, key).map_err(anyhow::Error::from),
@@ -248,7 +239,17 @@ fn parse_optional_scope(
     scope.map(|scope| parse_scope(scope, scope_key)).transpose()
 }
 
-fn parse_kind(kind: &str) -> Result<MemoryKind> {
+pub(crate) fn parse_scope_kind(scope: &str) -> Result<MemoryScopeKind> {
+    match scope {
+        "user" => Ok(MemoryScopeKind::User),
+        "repo" => Ok(MemoryScopeKind::Repo),
+        "matrix_room" => Ok(MemoryScopeKind::MatrixRoom),
+        "matrix_user" => Ok(MemoryScopeKind::MatrixUser),
+        _ => bail!("unknown memory scope `{scope}`"),
+    }
+}
+
+pub(crate) fn parse_kind(kind: &str) -> Result<MemoryKind> {
     match kind {
         "fact" => Ok(MemoryKind::Fact),
         "preference" => Ok(MemoryKind::Preference),
@@ -281,6 +282,7 @@ fn render_entries(tool_id: &str, entries: Vec<agl_memory::MemoryEntry>) -> Strin
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
     scope: Option<String>,
@@ -290,6 +292,7 @@ struct SearchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListArgs {
     scope: Option<String>,
     scope_key: Option<String>,
@@ -298,6 +301,7 @@ struct ListArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SuggestArgs {
     scope: String,
     scope_key: Option<String>,
@@ -309,6 +313,7 @@ struct SuggestArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddArgs {
     scope: String,
     scope_key: Option<String>,
@@ -320,11 +325,13 @@ struct AddArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SuggestionIdArgs {
     suggestion_id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RejectArgs {
     suggestion_id: String,
     resolution_note: Option<String>,
@@ -332,10 +339,9 @@ struct RejectArgs {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
     use serde_json::json;
+
+    use crate::test_support::{temp_root, value_for};
 
     use super::*;
 
@@ -359,8 +365,6 @@ mod tests {
 
         assert!(output.contains("tool=memory.suggest"));
         assert!(output.contains("status=pending"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -436,8 +440,6 @@ mod tests {
             )
             .unwrap();
         assert!(rejected.contains("status=rejected"));
-
-        cleanup(root);
     }
 
     #[test]
@@ -450,27 +452,5 @@ mod tests {
                 .tool(&ToolId::new(MEMORY_SUGGEST_TOOL_ID).unwrap())
                 .is_some()
         );
-    }
-
-    fn value_for(output: &str, prefix: &str) -> Option<String> {
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix(prefix))
-            .map(str::to_string)
-    }
-
-    fn temp_root(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "agl-memory-tools-{label}-{}-{nanos}",
-            std::process::id()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        let _ = std::fs::remove_dir_all(root);
     }
 }

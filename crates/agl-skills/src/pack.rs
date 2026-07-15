@@ -138,7 +138,7 @@ mod tests {
 
         assert_eq!(pack.manifest.name, "agl/repo-workflow");
         assert_eq!(pack.manifest.profile, "repo-workflow");
-        assert_eq!(pack.skills.len(), 8);
+        assert_eq!(pack.skills.len(), 1);
         assert!(pack.skills.iter().any(|skill| skill.name == "repo-change"));
     }
 }

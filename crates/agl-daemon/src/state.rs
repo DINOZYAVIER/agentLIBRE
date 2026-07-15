@@ -67,6 +67,7 @@ impl DaemonState {
                                 DaemonCapability::SessionClear,
                                 DaemonCapability::SessionFinish,
                                 DaemonCapability::SessionStatus,
+                                DaemonCapability::SessionList,
                                 DaemonCapability::SessionTranscript,
                                 DaemonCapability::FinalAssistantMessage,
                             ],
@@ -114,11 +115,6 @@ impl DaemonState {
                     None => Err(not_found_error(&request.session_id)),
                 }
             }
-            DaemonRequestKind::SessionCancel(_request) => Err(ProtocolError::new(
-                ProtocolErrorCode::Unsupported,
-                "turn cancellation is not implemented in this alpha",
-                false,
-            )),
             DaemonRequestKind::SessionStatus(request) => {
                 let status = self
                     .sessions

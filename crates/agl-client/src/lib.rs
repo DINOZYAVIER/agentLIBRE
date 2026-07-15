@@ -6,9 +6,9 @@ use std::path::Path;
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent, HelloRequest,
     ProtocolError, ProtocolErrorCode, SessionClearRequest, SessionFinishRequest,
-    SessionFinishedEvent, SessionOpenRequest, SessionOpenedEvent, SessionStatusEvent,
-    SessionStatusRequest, SessionTranscriptEvent, SessionTranscriptRequest, SessionTurnRequest,
-    TurnTerminalStatus,
+    SessionFinishedEvent, SessionListEvent, SessionListRequest, SessionOpenRequest,
+    SessionOpenedEvent, SessionStatusEvent, SessionStatusRequest, SessionTranscriptEvent,
+    SessionTranscriptRequest, SessionTurnRequest, TurnTerminalStatus,
 };
 
 #[cfg(unix)]
@@ -228,6 +228,16 @@ where
         }
     }
 
+    pub fn list_sessions(
+        &mut self,
+        request: SessionListRequest,
+    ) -> Result<SessionListEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::SessionList(request))? {
+            DaemonEventKind::SessionList(event) => Ok(event),
+            other => Err(unexpected("session_list", &other)),
+        }
+    }
+
     pub fn read_transcript(
         &mut self,
         request: SessionTranscriptRequest,
@@ -431,6 +441,24 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn list_sessions_uses_protocol_session_list_request() {
+        let event = DaemonEvent::new(
+            Some("req-000001".to_string()),
+            DaemonEventKind::SessionList(SessionListEvent {
+                sessions: Vec::new(),
+            }),
+        );
+        let mut client = AgentLibreClient::new(ScriptedTransport::with_events(vec![event]));
+
+        let response = client.list_sessions(SessionListRequest::default()).unwrap();
+
+        assert!(response.sessions.is_empty());
+        let request: DaemonRequest =
+            serde_json::from_str(&client.transport.writes[0]).expect("request JSON");
+        assert!(matches!(request.kind, DaemonRequestKind::SessionList(_)));
     }
 
     #[test]

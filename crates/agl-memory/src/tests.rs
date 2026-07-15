@@ -59,6 +59,59 @@ fn search_is_scoped() {
 }
 
 #[test]
+fn malformed_fts_query_falls_back_to_like_search() {
+    let root = temp_root("fts-fallback");
+    let store = AglStore::open_at(&root).unwrap();
+    let repo = MemoryRepository::new(&store);
+    repo.add(MemoryDraft::new(
+        MemoryScope::user(),
+        MemoryKind::Fact,
+        "Matrix OR",
+        "Fallback should find this exact text.",
+    ))
+    .unwrap();
+
+    let results = repo
+        .search(&MemorySearchQuery::text(None, "Matrix OR"))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].title, "Matrix OR");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn memory_search_does_not_hide_schema_errors() {
+    let root = temp_root("fts-schema-error");
+    let store = AglStore::open_at(&root).unwrap();
+    let repo = MemoryRepository::new(&store);
+    repo.add(MemoryDraft::new(
+        MemoryScope::user(),
+        MemoryKind::Fact,
+        "Matrix",
+        "Matrix uses room scoped trust.",
+    ))
+    .unwrap();
+    store
+        .connection()
+        .execute("DROP TABLE memory_entries_fts", [])
+        .unwrap();
+
+    let err = repo
+        .search(&MemorySearchQuery::text(None, "Matrix"))
+        .unwrap_err();
+
+    assert!(
+        matches!(err, MemoryError::Sqlite(_)),
+        "unexpected error: {err}"
+    );
+    assert!(err.to_string().contains("memory_entries_fts"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn deleted_memory_is_hidden_by_default() {
     let root = temp_root("delete");
     let store = AglStore::open_at(&root).unwrap();

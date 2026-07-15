@@ -10,7 +10,7 @@ fn plain_skills_dir_is_discovered_but_not_usable() {
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
     let skill_dir = root.join(".agl/skills/agl/repo-change");
-    write_workspace_skill(&skill_dir, "repo-change", &[]);
+    write_workspace_skill(&skill_dir, "repo-change", &[], &[]);
 
     let report = workspace_skill_report(&root).unwrap();
 
@@ -69,6 +69,7 @@ fn lock_refuses_unusable_component() {
     write_workspace_skill(
         &root.join(".agl/skills/agl/repo-change"),
         "repo-change",
+        &[],
         &[],
     );
 
@@ -292,6 +293,36 @@ fn same_name_workspace_skill_reports_routing_broadening() {
     fs::remove_dir_all(source).unwrap();
 }
 
+#[test]
+fn trust_rejects_missing_requestable_tools() {
+    let (root, source) = clean_skills_submodule_fixture_with_routing(
+        "missing-requestable-tool",
+        "repo-change",
+        &[],
+        &["missing.tool"],
+    );
+    lock_workspace_skills(&root, &SkillLockOptions { dry_run: false }).unwrap();
+    let trust_store = root.join("state/skill-trust.toml");
+
+    let err = trust_workspace_skill(
+        &root,
+        &trust_store,
+        "repo-change",
+        &SkillTrustOptions {
+            approve: true,
+            agentlibre_version: "test-version".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("missing.tool"), "{message}");
+    assert!(message.contains("requestable_tools"), "{message}");
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(source).unwrap();
+}
+
 fn clean_skills_submodule_fixture(label: &str) -> (PathBuf, PathBuf) {
     clean_skills_submodule_fixture_with_skill(label, "repo-change")
 }
@@ -305,12 +336,22 @@ fn clean_skills_submodule_fixture_with_allowed_tools(
     skill_name: &str,
     allowed_tools: &[&str],
 ) -> (PathBuf, PathBuf) {
+    clean_skills_submodule_fixture_with_routing(label, skill_name, allowed_tools, &[])
+}
+
+fn clean_skills_submodule_fixture_with_routing(
+    label: &str,
+    skill_name: &str,
+    allowed_tools: &[&str],
+    requestable_tools: &[&str],
+) -> (PathBuf, PathBuf) {
     let source = temp_root(&format!("{label}-skills-source"));
     init_git_repo(&source);
     write_workspace_skill(
         &source.join("agl").join(skill_name),
         skill_name,
         allowed_tools,
+        requestable_tools,
     );
     git_run(&source, ["add", "."]);
     git_run(
@@ -386,9 +427,15 @@ fn git_run<const N: usize>(root: &Path, args: [&str; N]) {
     );
 }
 
-fn write_workspace_skill(skill_dir: &Path, name: &str, allowed_tools: &[&str]) {
+fn write_workspace_skill(
+    skill_dir: &Path,
+    name: &str,
+    allowed_tools: &[&str],
+    requestable_tools: &[&str],
+) {
     fs::create_dir_all(skill_dir).unwrap();
     let allowed_tools = render_yaml_string_list(allowed_tools);
+    let requestable_tools = render_yaml_string_list(requestable_tools);
     fs::write(
         skill_dir.join("SKILL.md"),
         format!(
@@ -402,6 +449,8 @@ required_hooks:
   - repo_path.validate
 allowed_tools:
 {allowed_tools}
+requestable_tools:
+{requestable_tools}
 context_budget_tokens: 256
 references:
   include: []

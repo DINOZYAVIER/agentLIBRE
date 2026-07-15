@@ -1,7 +1,6 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use serde_json::json;
+
+use crate::test_support::{temp_root, value_for};
 
 use super::*;
 
@@ -92,28 +91,4 @@ fn cron_tools_manage_jobs_runs_and_scheduler_ticks() {
     assert!(disabled.contains("enabled=false"));
     assert!(enabled.contains("enabled=true"));
     assert!(deleted.contains("status=deleted"));
-
-    cleanup(root);
-}
-
-fn value_for(output: &str, prefix: &str) -> Option<String> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(prefix))
-        .map(str::to_string)
-}
-
-fn temp_root(label: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "agl-cron-tools-{label}-{}-{nanos}",
-        std::process::id()
-    ))
-}
-
-fn cleanup(root: PathBuf) {
-    let _ = std::fs::remove_dir_all(root);
 }

@@ -165,6 +165,10 @@ impl ToolRuntime {
         Ok(())
     }
 
+    pub fn handler_ids(&self) -> impl Iterator<Item = &ToolId> {
+        self.handlers.keys()
+    }
+
     pub fn set_allowed_tools(&mut self, allowed_tools: impl IntoIterator<Item = ToolId>) {
         self.allowed_tools = Some(allowed_tools.into_iter().collect());
     }
