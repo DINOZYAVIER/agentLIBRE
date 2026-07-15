@@ -151,6 +151,7 @@ fn init_creates_minimal_manifest_without_implicit_artifacts() {
     assert!(manifest.contains("[functions]"));
     assert!(manifest.contains(&format!("default = \"{DEFAULT_FUNCTION}\"")));
     assert!(!manifest.contains("[artifacts."));
+    assert_eq!(report.next_steps, vec!["agl status".to_string()]);
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -279,6 +280,32 @@ fn artifact_status_reports_declared_artifacts() {
             .warnings
             .contains(&"artifact_lock_missing".to_string())
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_status_accepts_workspace_without_artifacts_or_lock() {
+    let root = temp_root("artifact-status-empty");
+    init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    fs::create_dir_all(root.join(".agl/functions")).unwrap();
+    fs::create_dir_all(root.join(".agl/inference/profiles")).unwrap();
+
+    let report = status_artifacts(
+        &root,
+        &ArtifactStatusOptions {
+            artifact: None,
+            strict: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactReportState::Ok);
+    assert!(report.artifacts.is_empty());
+    assert!(report.undeclared.is_empty());
+    assert!(report.warnings.is_empty());
+    assert!(report.errors.is_empty());
+    assert!(report.next_steps.is_empty());
 
     fs::remove_dir_all(root).unwrap();
 }

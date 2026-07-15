@@ -330,10 +330,12 @@ require_reused_attempts() {
   local ordinal
   for ordinal in "$@"; do
     local attempt_id
+    local response
     local runtime_log
     attempt_id="$(runtime_attempt_id "$run_dir/events.jsonl" "$ordinal")"
+    printf -v response '%s/attempts/%s/response.json' "$run_dir" "$attempt_id"
     printf -v runtime_log '%s/attempts/%s/runtime.log' "$run_dir" "$attempt_id"
-    require_contains "$runtime_log" "model_state = reused"
+    require_json_metadata_value "$response" model_state reused
     require_not_contains "$runtime_log" "llama_cpp_session_reset_reason"
   done
   require_tree_not_contains "$run_dir" "rendered_history_not_appendable"
@@ -512,9 +514,11 @@ for path in sys.argv[1:]:
     if report.get("state") != "invalid":
         raise SystemExit(f"{path}: expected invalid workspace state")
     codes = {item.get("code") for item in report.get("diagnostics", [])}
-    required = {"workspace_manifest_missing", "skills_lock_missing"}
+    required = {"workspace_manifest_missing"}
     if not required <= codes:
         raise SystemExit(f"{path}: missing diagnostics {sorted(required - codes)}")
+    if "skills_lock_missing" in codes:
+        raise SystemExit(f"{path}: undeclared workspace skills unexpectedly require a lock")
 PY
   record_case "builtin-skill-and-workspace-boundaries" "static"
 }
@@ -533,12 +537,8 @@ duplicates = [path for path in paths if path.startswith(("docs/specs/", "packs/"
 if duplicates:
     raise SystemExit(f"tracked duplicate task/pack roots: {duplicates}")
 agl_paths = {path for path in paths if path == ".agl" or path.startswith(".agl/")}
-allowed = {".agl/skills", ".agl/tasks"}
-unexpected = sorted(agl_paths - allowed)
-if unexpected:
-    raise SystemExit(f"unexpected tracked local .agl paths: {unexpected}")
-if ".agl/tasks" not in agl_paths:
-    raise SystemExit("planned task component is not tracked at .agl/tasks")
+if agl_paths:
+    raise SystemExit(f"tracked workspace-local .agl paths: {sorted(agl_paths)}")
 PY
   record_case "repo-schema" "static"
 }
@@ -854,6 +854,7 @@ run_tool_multiturn_case() {
   attempt_id_2="$(runtime_attempt_id "$events_raw_1" 2)"
   attempt_id_3="$(runtime_attempt_id "$events_raw_2" 1)"
   local request_3="$run_dir_2/attempts/$attempt_id_3/request.json"
+  local response_3="$run_dir_2/attempts/$attempt_id_3/response.json"
   local runtime_3="$run_dir_2/attempts/$attempt_id_3/runtime.log"
   require_event_sequence "$events_1" \
     '{"kind":"tool.call_started","name":"fs.read"}' \
@@ -879,7 +880,7 @@ run_tool_multiturn_case() {
   require_contains "$normalized_transcript" '"kind":"assistant_tool_call"'
   require_contains "$normalized_transcript" '"kind":"tool_message"'
   require_contains "$normalized_transcript" '"name":"fs.read"'
-  require_contains "$runtime_3" "model_state = reused"
+  require_json_metadata_value "$response_3" model_state reused
   require_contains "$CASE_STDOUT" "assistant> AGL067_PRIOR_TOOL_OBSERVATION. Verification: prior fs.read observation retained."
   python3 - "$normalized_transcript" \
     "$run_id_1" "$turn_id_1" "$attempt_id_1" "$attempt_id_2" \

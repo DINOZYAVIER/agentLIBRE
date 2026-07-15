@@ -64,11 +64,7 @@ pub fn init_repo_workspace(
         manifest_path,
         dry_run: options.dry_run,
         changes,
-        next_steps: vec![
-            "agl status".to_string(),
-            "agl skill lock".to_string(),
-            "agl skill verify".to_string(),
-        ],
+        next_steps: vec!["agl status".to_string()],
     })
 }
 
