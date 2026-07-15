@@ -47,11 +47,17 @@ require_model_state() {
   local run_dir="$1"
   local attempt_id="$2"
   local state="$3"
+  local response
   local runtime_log
+  response="$(attempt_file "$run_dir" "$attempt_id" response.json)"
   runtime_log="$(attempt_file "$run_dir" "$attempt_id" runtime.log)"
-  require_contains "$runtime_log" "model_state = $state"
-  require_contains "$runtime_log" "selected_device = $device"
-  require_contains "$runtime_log" "load_tensors: offloaded"
+  require_json_metadata_value "$response" model_state "$state"
+  require_json_metadata_value "$response" selected_device "$device"
+  if [[ "$state" == "loaded" ]]; then
+    require_contains "$runtime_log" "load_tensors: offloaded"
+  else
+    require_not_contains "$runtime_log" "load_tensors: offloaded"
+  fi
 }
 
 require_jsonl_kind_count_at_least() {
@@ -99,6 +105,37 @@ need_tool python3
 [[ -n "$config" ]] || fail "AGL_SMOKE_CONFIG must point to a local inference TOML file"
 [[ -f "$config" ]] || fail "missing smoke config: $config"
 config="$(smoke_abs_path "$config")"
+
+models_path="$AGL_HOME/config/models.toml"
+if [[ ! -f "$models_path" ]]; then
+  mkdir -p "$(dirname -- "$models_path")"
+  python3 - "$config" "$models_path" <<'PY'
+import json
+import pathlib
+import sys
+import tomllib
+
+config_path, models_path = map(pathlib.Path, sys.argv[1:])
+with config_path.open("rb") as handle:
+    backend = tomllib.load(handle).get("backend", {})
+model = backend.get("model")
+projector = backend.get("multimodal_projector")
+if not isinstance(model, str) or not model.strip():
+    raise SystemExit(f"{config_path}: backend.model is required for the function smoke")
+if not isinstance(projector, str) or not projector.strip():
+    raise SystemExit(
+        f"{config_path}: backend.multimodal_projector is required for gemma4-12b"
+    )
+models_path.write_text(
+    "version = 1\n\n"
+    "[models.gemma4-12b]\n"
+    f"path = {json.dumps(model)}\n\n"
+    "[models.gemma4-12b-mmproj]\n"
+    f"path = {json.dumps(projector)}\n",
+    encoding="utf-8",
+)
+PY
+fi
 
 cd "$repo_root"
 cargo build -p agl-cli
@@ -150,7 +187,11 @@ clear_attempt_2="$(runtime_attempt_id "$clear_dir_2/events.jsonl" 1)"
 require_response "$(attempt_file "$clear_dir_1" "$clear_attempt_1" response.json)"
 require_response "$(attempt_file "$clear_dir_2" "$clear_attempt_2" response.json)"
 require_model_state "$clear_dir_1" "$clear_attempt_1" loaded
-require_model_state "$clear_dir_2" "$clear_attempt_2" loaded
+require_model_state "$clear_dir_2" "$clear_attempt_2" reused
+require_contains "$(attempt_file "$clear_dir_2" "$clear_attempt_2" runtime.log)" \
+  "cached_prompt_tokens = 0"
+require_contains "$(attempt_file "$clear_dir_2" "$clear_attempt_2" runtime.log)" \
+  "context_state = reused"
 require_contains "$clear_stdout" "context_cleared=true"
 require_jsonl_kind_count_at_least "$clear_normalized" "context_cleared" 1
 

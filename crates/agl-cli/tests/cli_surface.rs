@@ -175,6 +175,24 @@ fn command_help_exits_successfully_for_advanced_commands() {
 }
 
 #[test]
+fn workspace_git_help_does_not_describe_artifacts_as_submodules() {
+    for args in [
+        &["init", "--help"][..],
+        &["repo", "init", "--help"][..],
+        &["skill", "init", "--help"][..],
+    ] {
+        let output = run_agl(args);
+
+        assert_success_no_stderr(&output);
+        let stdout = stdout(&output);
+        assert!(
+            !stdout.to_ascii_lowercase().contains("submodule"),
+            "Git artifact help still describes an independent checkout as a submodule:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn memory_commands_manage_explicit_user_memory() {
     let home = TempHome::new("memory-commands");
     let home_arg = home.path_string();
@@ -949,9 +967,16 @@ fn init_then_status_is_healthy_without_workspace_artifacts() {
     let output = run_agl_in(repo.path(), &["status"]);
 
     assert_success_no_stderr(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=ok");
-    assert!(!stdout.contains("component.skills"));
+    let status_stdout = stdout(&output);
+    assert_contains(&status_stdout, "state=ok");
+    assert!(!status_stdout.contains("component.skills"));
+
+    let artifact_status = run_agl_in(repo.path(), &["repo", "artifact", "status"]);
+    assert_success_no_stderr(&artifact_status);
+    let artifact_stdout = stdout(&artifact_status);
+    assert_contains(&artifact_stdout, "state=ok");
+    assert!(!artifact_stdout.contains("artifact_lock_missing"));
+    assert!(!artifact_stdout.contains("undeclared_artifact_root"));
 }
 
 #[test]

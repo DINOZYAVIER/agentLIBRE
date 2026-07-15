@@ -81,7 +81,7 @@ impl ModelBindings {
             self.version
         );
         for (id, binding) in &self.models {
-            validate_model_path(id, &binding.path)?;
+            validate_model_path_value(id, &binding.path)?;
         }
         Ok(())
     }
@@ -91,7 +91,7 @@ impl ModelBindings {
             .models
             .get(id)
             .with_context(|| format!("model `{id}` is not configured in {}", source.display()))?;
-        validate_model_path(id, &binding.path)
+        validate_model_file(id, &binding.path)
             .with_context(|| format!("invalid model `{id}` binding in {}", source.display()))?;
         Ok(binding.path.clone())
     }
@@ -156,11 +156,16 @@ pub fn resolve_inference_preset_with_bindings(
     Ok(config)
 }
 
-fn validate_model_path(id: &ModelId, path: &Path) -> Result<()> {
+fn validate_model_path_value(id: &ModelId, path: &Path) -> Result<()> {
     ensure!(
-        !path.as_os_str().is_empty(),
-        "model `{id}` path cannot be empty"
+        !path.as_os_str().is_empty() && !path.as_os_str().to_string_lossy().trim().is_empty(),
+        "model `{id}` path cannot be blank"
     );
+    Ok(())
+}
+
+fn validate_model_file(id: &ModelId, path: &Path) -> Result<()> {
+    validate_model_path_value(id, path)?;
     if !path.exists() {
         bail!("model `{id}` file does not exist: {}", path.display());
     }

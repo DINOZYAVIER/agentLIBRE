@@ -415,7 +415,7 @@ enum NotesCommands {
 
 #[derive(Debug, Subcommand)]
 enum SkillCommands {
-    /// Initialize the workspace skills submodule declared in .agl/workspace.toml.
+    /// Materialize the workspace skills Git artifact declared in .agl/workspace.toml.
     #[command(long_about = help::SKILL_INIT)]
     Init(SkillInitArgs),
     /// List core and workspace skills.
@@ -465,7 +465,7 @@ struct RepoInitArgs {
     #[arg(long = "artifact", value_name = "NAME=URL[@REV]")]
     artifacts: Vec<String>,
 
-    /// Skills repository URL for the .agl/skills submodule.
+    /// Skills repository URL for the .agl/skills Git artifact.
     #[arg(long, value_name = "URL")]
     skills_url: Option<String>,
 
@@ -473,7 +473,7 @@ struct RepoInitArgs {
     #[arg(long, value_name = "REV")]
     skills_rev: Option<String>,
 
-    /// Task/spec repository URL for the .agl/tasks submodule.
+    /// Task/spec repository URL for the .agl/tasks Git artifact.
     #[arg(long, value_name = "URL")]
     tasks_url: Option<String>,
 

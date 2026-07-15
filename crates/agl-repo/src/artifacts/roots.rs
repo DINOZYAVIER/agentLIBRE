@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 
 use crate::{ArtifactKind, ArtifactStatus, UndeclaredArtifactRoot};
 
+const NON_ARTIFACT_WORKSPACE_ROOTS: [&str; 2] = ["functions", "inference"];
+
 pub(super) fn undeclared_artifact_roots(
     workspace_root: &Path,
     artifacts: &[ArtifactStatus],
@@ -23,6 +25,13 @@ pub(super) fn undeclared_artifact_roots(
     {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| NON_ARTIFACT_WORKSPACE_ROOTS.contains(&name))
+        {
             continue;
         }
         let relative = PathBuf::from(".agl").join(entry.file_name());
