@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
@@ -17,7 +18,12 @@ pub(crate) fn sha256_text(value: &str) -> String {
 
 pub(crate) fn sha256_bytes(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
-    format!("sha256:{digest:x}")
+    let mut value = String::with_capacity("sha256:".len() + digest.len() * 2);
+    value.push_str("sha256:");
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    value
 }
 
 pub(crate) fn validate_relative_function_file_path(label: &str, value: &str) -> Result<()> {

@@ -14,7 +14,7 @@ use matrix_sdk::encryption::verification::{
 use matrix_sdk::ruma::events::key::verification::{
     VerificationMethod, request::ToDeviceKeyVerificationRequestEvent,
 };
-use matrix_sdk::ruma::events::relation::{InReplyTo, Thread};
+use matrix_sdk::ruma::events::relation::{Reply, Thread};
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
@@ -932,9 +932,7 @@ fn message_relation(context: &MatrixReplyContext) -> Result<MatrixMessageRelatio
         })?;
         Ok(Relation::Thread(Thread::reply(root, reply_to)))
     } else {
-        Ok(Relation::Reply {
-            in_reply_to: InReplyTo::new(reply_to),
-        })
+        Ok(Relation::Reply(Reply::with_event_id(reply_to)))
     }
 }
 
