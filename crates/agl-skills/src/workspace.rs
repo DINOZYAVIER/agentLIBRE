@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_capabilities::{CapabilityId, SkillId};
 use agl_repo::{
-    ComponentKind, ComponentState, ComponentStatus, RepoStatusOptions, status_repo_workspace,
+    ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceArtifactKind,
+    status_repo_workspace,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -224,7 +225,7 @@ pub struct SkillsLockFile {
 #[serde(deny_unknown_fields)]
 pub struct LockedComponent {
     pub path: PathBuf,
-    pub kind: ComponentKind,
+    pub kind: WorkspaceArtifactKind,
     pub remote: String,
     #[serde(rename = "ref")]
     pub ref_name: String,
@@ -326,7 +327,7 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
     let mut errors = status.errors;
 
     if component.is_none() {
-        errors.push("skills_component_missing".to_string());
+        errors.retain(|error| error != "component_not_found: skills");
     }
 
     let mut skills = if let Some(component) = &component {
@@ -359,13 +360,15 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         }
     }
 
-    append_lock_diagnostics(
-        component.as_ref(),
-        &skills,
-        &lock_path,
-        &mut warnings,
-        &mut errors,
-    );
+    if component.is_some() || lock_path.exists() {
+        append_lock_diagnostics(
+            component.as_ref(),
+            &skills,
+            &lock_path,
+            &mut warnings,
+            &mut errors,
+        );
+    }
 
     let mut report = WorkspaceSkillReport {
         state: SkillReportState::Ok,
@@ -772,7 +775,7 @@ pub fn lock_workspace_skills(
     let mut errors = Vec::new();
 
     let Some(component) = report.component.as_ref() else {
-        errors.push("skills_component_missing".to_string());
+        errors.push("skills_component_not_configured".to_string());
         return lock_error_report(report, options, errors);
     };
 
@@ -1322,8 +1325,11 @@ fn build_skills_lock(
     existing: Option<&SkillsLockFile>,
     locked_at: String,
 ) -> Result<SkillsLockFile> {
-    if component.kind != ComponentKind::Submodule {
-        bail!("skills component must be a submodule");
+    if !matches!(
+        component.kind,
+        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+    ) {
+        bail!("skills component must be Git-backed");
     }
     let remote = component
         .actual_url
@@ -1785,7 +1791,7 @@ fn append_report_diagnostic(
             folder_id: None,
             path: Some(report.lock_path.clone()),
         });
-    } else if message == "skills_component_missing" {
+    } else if message == "skills_component_not_configured" {
         diagnostics.push(WorkspaceSkillDiagnostic {
             severity,
             scope: WorkspaceSkillDiagnosticScope::Component,
@@ -1932,11 +1938,14 @@ fn diagnostic_code(message: &str) -> String {
 }
 
 fn component_git_usable(component: &ComponentStatus) -> bool {
-    component.kind == ComponentKind::Submodule
-        && component.exists
+    matches!(
+        component.kind,
+        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+    ) && component.exists
         && component.state == ComponentState::Ok
-        && component.submodule_registered == Some(true)
-        && component.gitlink_present == Some(true)
+        && (component.kind != WorkspaceArtifactKind::Submodule
+            || (component.submodule_registered == Some(true)
+                && component.gitlink_present == Some(true)))
         && component.tracked_dirty == Some(false)
         && component.untracked_suspicious == Some(false)
         && component.actual_url.is_some()

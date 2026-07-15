@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-use super::ResolvedArtifactContract;
-use crate::{ArtifactContract, ArtifactLockFile, ArtifactSourceStatus, LockedArtifact};
+use super::ResolvedArtifact;
+use crate::{ArtifactLockFile, LockedArtifact, WorkspaceArtifact};
 
 pub(super) fn read_artifact_lock(
     lock_path: &Path,
@@ -28,9 +28,11 @@ pub(super) fn read_artifact_lock(
 }
 
 pub(super) fn validate_locked_artifact(
-    resolved: &ResolvedArtifactContract,
+    resolved: &ResolvedArtifact,
     locked: Option<&LockedArtifact>,
-    source_status: Option<&ArtifactSourceStatus>,
+    actual_url: Option<&str>,
+    actual_commit: Option<&str>,
+    actual_tree: Option<&str>,
     warnings: &mut Vec<String>,
     errors: &mut Vec<String>,
 ) {
@@ -38,68 +40,72 @@ pub(super) fn validate_locked_artifact(
         warnings.push("lock_entry_missing".to_string());
         return;
     };
-    if locked.contract_hash != resolved.contract_hash {
-        errors.push("contract_changed".to_string());
+    if locked.definition_hash != resolved.definition_hash {
+        errors.push("definition_changed".to_string());
     }
-    if locked.source_id != resolved.source_id {
-        errors.push("source_id_changed".to_string());
+    if locked.storage != resolved.definition.kind {
+        errors.push("storage_changed".to_string());
     }
-    if locked.source_role != resolved.source.role {
-        errors.push("source_role_changed".to_string());
-    }
-    if locked.source_kind != resolved.source.kind {
-        errors.push("source_kind_changed".to_string());
-    }
-    if locked.source_path != resolved.source.path {
-        errors.push("source_path_changed".to_string());
-    }
-    if locked.path != resolved.contract.path {
+    if locked.path != resolved.definition.path {
         errors.push("path_changed".to_string());
     }
+    if locked.required != resolved.definition.required {
+        errors.push("required_changed".to_string());
+    }
+    if locked.kind != resolved.kind {
+        errors.push("kind_changed".to_string());
+    }
+    if locked.access != resolved.definition.access {
+        errors.push("access_changed".to_string());
+    }
+    if locked.validation != resolved.definition.validation {
+        errors.push("validation_changed".to_string());
+    }
 
-    let expected_url = source_status
-        .and_then(|source| source.actual_url.clone())
-        .or_else(|| resolved.source.url.clone());
-    let expected_commit = source_status
-        .and_then(|source| source.actual_commit.clone())
-        .or_else(|| resolved.source.commit.clone());
-    let expected_tree = source_status
-        .and_then(|source| source.actual_tree.clone())
-        .or_else(|| resolved.source.tree.clone());
-    if locked.source_url != expected_url {
-        errors.push("source_url_changed".to_string());
+    let expected_url = actual_url
+        .map(ToOwned::to_owned)
+        .or_else(|| resolved.definition.url.clone());
+    let expected_commit = actual_commit
+        .map(ToOwned::to_owned)
+        .or_else(|| resolved.definition.commit.clone());
+    let expected_tree = actual_tree
+        .map(ToOwned::to_owned)
+        .or_else(|| resolved.definition.tree.clone());
+    if locked.url != expected_url {
+        errors.push("url_changed".to_string());
     }
-    if locked.source_rev != resolved.source.rev {
-        errors.push("source_rev_changed".to_string());
+    if locked.rev != resolved.definition.rev {
+        errors.push("rev_changed".to_string());
     }
-    if locked.source_commit != expected_commit {
-        errors.push("source_commit_changed".to_string());
+    if locked.commit != expected_commit {
+        errors.push("commit_changed".to_string());
     }
-    if locked.source_tree != expected_tree {
-        errors.push("source_tree_changed".to_string());
+    if locked.tree != expected_tree {
+        errors.push("tree_changed".to_string());
     }
 }
 
 pub(super) fn artifact_lock_error_allows_refresh(error: &str) -> bool {
-    error.ends_with(".contract_changed")
-        || error.ends_with(".source_id_changed")
-        || error.ends_with(".source_role_changed")
-        || error.ends_with(".source_kind_changed")
-        || error.ends_with(".source_path_changed")
-        || error.ends_with(".source_url_changed")
-        || error.ends_with(".source_rev_changed")
-        || error.ends_with(".source_commit_changed")
-        || error.ends_with(".source_tree_changed")
+    error.ends_with(".definition_changed")
+        || error.ends_with(".storage_changed")
         || error.ends_with(".path_changed")
+        || error.ends_with(".required_changed")
+        || error.ends_with(".kind_changed")
+        || error.ends_with(".access_changed")
+        || error.ends_with(".validation_changed")
+        || error.ends_with(".url_changed")
+        || error.ends_with(".rev_changed")
+        || error.ends_with(".commit_changed")
+        || error.ends_with(".tree_changed")
 }
 
-pub(super) fn artifact_contract_hash(source_id: &str, contract: &ArtifactContract) -> String {
+pub(super) fn artifact_definition_hash(id: &str, artifact: &WorkspaceArtifact) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(source_id.as_bytes());
+    hasher.update(id.as_bytes());
     hasher.update(b"\0");
     hasher.update(
-        toml::to_string(contract)
-            .expect("artifact contract serializes")
+        toml::to_string(artifact)
+            .expect("artifact definition serializes")
             .as_bytes(),
     );
     hex(&hasher.finalize())

@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use agl_capabilities::SkillId;
-use agl_repo::{DEFAULT_SKILLS_URL, RepoInitOptions, init_repo_workspace};
+use agl_repo::{RepoInitOptions, init_repo_workspace};
 
 use super::*;
 
@@ -10,6 +10,7 @@ fn plain_skills_dir_is_discovered_but_not_usable() {
     let root = temp_root("plain-skills");
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    declare_git_skills(&root, "ssh://git@example.invalid/agentlibre/skills.git");
     let skill_dir = root.join(".agl/skills/agl/repo-change");
     write_workspace_skill(&skill_dir, "repo-change", &[], &[]);
 
@@ -35,6 +36,7 @@ fn invalid_workspace_manifest_is_reported() {
     let root = temp_root("invalid-skill");
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    declare_git_skills(&root, "ssh://git@example.invalid/agentlibre/skills.git");
     let skill_dir = root.join(".agl/skills/agl/bad-skill");
     fs::create_dir_all(&skill_dir).unwrap();
     fs::write(
@@ -176,6 +178,7 @@ fn workspace_status_reports_declared_skill_folders() {
     let root = temp_root("skill-folders");
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    declare_git_skills(&root, "ssh://git@example.invalid/agentlibre/skills.git");
     let skill_dir = root.join(".agl/skills/agl/repo-change");
     write_workspace_skill_with_folders(
         &skill_dir,
@@ -240,6 +243,7 @@ fn folder_sync_skips_missing_folders_without_create_rule() {
     let root = temp_root("skill-folder-no-create");
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    declare_git_skills(&root, "ssh://git@example.invalid/agentlibre/skills.git");
     let skill_dir = root.join(".agl/skills/agl/repo-change");
     write_workspace_skill_with_folders(
         &skill_dir,
@@ -278,6 +282,7 @@ fn lock_refuses_unusable_component() {
     let root = temp_root("lock-refuses");
     init_git_repo(&root);
     init_repo_workspace(&root, &RepoInitOptions::default()).unwrap();
+    declare_git_skills(&root, "ssh://git@example.invalid/agentlibre/skills.git");
     write_workspace_skill(
         &root.join(".agl/skills/agl/repo-change"),
         "repo-change",
@@ -871,7 +876,7 @@ fn clean_skills_submodule_fixture_with_writer(
         &source,
         [
             "-c",
-            "user.name=AgentLIBRE Test",
+            "user.name=agentLIBRE Test",
             "-c",
             "user.email=agentlibre-test@example.invalid",
             "commit",
@@ -895,11 +900,7 @@ fn clean_skills_submodule_fixture_with_writer(
             ".agl/skills",
         ],
     );
-    let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
-    let manifest = fs::read_to_string(&manifest_path)
-        .unwrap()
-        .replace(DEFAULT_SKILLS_URL, source.to_str().unwrap());
-    fs::write(&manifest_path, manifest).unwrap();
+    declare_git_skills(&root, source.to_str().unwrap());
 
     (root, source)
 }
@@ -912,6 +913,23 @@ fn temp_root(label: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
     root
+}
+
+fn declare_git_skills(root: &Path, url: &str) {
+    let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    manifest.push_str(&format!(
+        r#"
+
+[artifacts.skills]
+kind = "git"
+path = ".agl/skills"
+url = {url:?}
+required = true
+access = "read"
+"#
+    ));
+    fs::write(manifest_path, manifest).unwrap();
 }
 
 fn init_git_repo(root: &Path) {

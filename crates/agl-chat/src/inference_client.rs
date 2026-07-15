@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agl_config::LocalInferenceConfig;
+use agl_config::ResolvedInferenceConfig;
 use agl_ids::SessionId;
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
@@ -13,7 +13,7 @@ use anyhow::{Result, ensure};
 
 #[derive(Clone, Debug)]
 pub struct ChatInferenceJob {
-    pub config: LocalInferenceConfig,
+    pub config: ResolvedInferenceConfig,
     pub artifact_root: InferenceArtifactRoot,
     pub content_store_root: PathBuf,
     pub max_output_tokens: u32,
@@ -26,9 +26,14 @@ pub struct ChatInferenceJob {
 pub trait InferenceClient: Send + Sync + 'static {
     fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse>;
 
-    fn clear_context(&self, config: &LocalInferenceConfig, session_id: &SessionId) -> Result<()>;
+    fn clear_context(&self, config: &ResolvedInferenceConfig, session_id: &SessionId)
+    -> Result<()>;
 
-    fn release_context(&self, config: &LocalInferenceConfig, session_id: &SessionId) -> Result<()>;
+    fn release_context(
+        &self,
+        config: &ResolvedInferenceConfig,
+        session_id: &SessionId,
+    ) -> Result<()>;
 
     fn status(&self) -> Result<ModelManagerStatus>;
 }
@@ -51,7 +56,7 @@ impl InferenceClientHandle {
 
     pub fn clear_context(
         &self,
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
         session_id: &SessionId,
     ) -> Result<()> {
         self.inner.clear_context(config, session_id)
@@ -59,7 +64,7 @@ impl InferenceClientHandle {
 
     pub fn release_context(
         &self,
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
         session_id: &SessionId,
     ) -> Result<()> {
         self.inner.release_context(config, session_id)
@@ -89,12 +94,20 @@ impl InferenceClient for ModelManagerHandle {
         Ok(ModelManagerHandle::generate(self, inference_job)?)
     }
 
-    fn clear_context(&self, config: &LocalInferenceConfig, session_id: &SessionId) -> Result<()> {
+    fn clear_context(
+        &self,
+        config: &ResolvedInferenceConfig,
+        session_id: &SessionId,
+    ) -> Result<()> {
         let context_key = ContextKey::for_conversation(config, session_id.as_str())?;
         Ok(ModelManagerHandle::clear_context(self, &context_key)?)
     }
 
-    fn release_context(&self, config: &LocalInferenceConfig, session_id: &SessionId) -> Result<()> {
+    fn release_context(
+        &self,
+        config: &ResolvedInferenceConfig,
+        session_id: &SessionId,
+    ) -> Result<()> {
         let context_key = ContextKey::for_conversation(config, session_id.as_str())?;
         Ok(ModelManagerHandle::release_context(self, &context_key)?)
     }
@@ -132,7 +145,7 @@ pub(crate) fn test_inference_client() -> InferenceClientHandle {
 
         fn clear_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             _session_id: &SessionId,
         ) -> Result<()> {
             Ok(())
@@ -140,7 +153,7 @@ pub(crate) fn test_inference_client() -> InferenceClientHandle {
 
         fn release_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             _session_id: &SessionId,
         ) -> Result<()> {
             Ok(())

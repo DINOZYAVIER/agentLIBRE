@@ -38,24 +38,24 @@ pub fn init_repo_workspace(
 
     write_manifest_change(&manifest_path, &manifest, options, &mut changes)?;
 
-    for component in manifest.components.values() {
-        match component.kind {
-            ComponentKind::Local | ComponentKind::Generated | ComponentKind::Ignored => {
-                create_dir_change(
-                    &workspace_root,
-                    &component.path,
-                    options.dry_run,
-                    &mut changes,
-                )?;
-            }
-            ComponentKind::Submodule => changes.push(RepoInitChange {
-                path: component.path.clone(),
+    for artifact in manifest.artifacts.values() {
+        if artifact.create.iter().any(|path| path == Path::new(".")) {
+            create_dir_change(
+                &workspace_root,
+                &artifact.path,
+                options.dry_run,
+                &mut changes,
+            )?;
+        } else if artifact.kind == WorkspaceArtifactKind::Submodule {
+            changes.push(RepoInitChange {
+                path: artifact.path.clone(),
                 action: RepoInitAction::DeclaredSubmodule,
-            }),
-            ComponentKind::Git => changes.push(RepoInitChange {
-                path: component.path.clone(),
+            });
+        } else if artifact.kind == WorkspaceArtifactKind::Git {
+            changes.push(RepoInitChange {
+                path: artifact.path.clone(),
                 action: RepoInitAction::DeclaredGitComponent,
-            }),
+            });
         }
     }
 
@@ -120,13 +120,19 @@ pub fn status_repo_workspace(
     validate_manifest(&manifest, &mut errors);
 
     let mut components = Vec::new();
-    for (name, component) in manifest.components.iter() {
+    for (name, artifact) in &manifest.artifacts {
         if let Some(requested) = &options.component
             && requested != name
         {
             continue;
         }
-        components.push(component_status(&workspace_root, name, component));
+        let mut status = component_status(&workspace_root, name, artifact);
+        if !artifact.required && status.errors.iter().any(|error| error == "missing") {
+            status.errors.retain(|error| error != "missing");
+            status.warnings.push("missing_optional".to_string());
+            status.state = ComponentState::Warning;
+        }
+        components.push(status);
     }
 
     if options.component.is_some() && components.is_empty() {
@@ -178,7 +184,7 @@ pub fn status_repo_workspace(
 fn component_init_next_steps(components: &[ComponentStatus]) -> Vec<String> {
     let mut steps = BTreeSet::new();
     for component in components {
-        if component.kind != ComponentKind::Submodule {
+        if component.kind != WorkspaceArtifactKind::Submodule {
             continue;
         }
         let needs_init = matches!(component.state, ComponentState::Missing)
@@ -215,7 +221,7 @@ pub fn init_repo_component(
     let mut errors = Vec::new();
     validate_manifest(&manifest, &mut errors);
 
-    let Some(component) = manifest.components.get(&options.component) else {
+    let Some(artifact) = manifest.artifacts.get(&options.component) else {
         errors.push(format!("component_not_found: {}", options.component));
         return Ok(component_init_error_report(
             workspace_root,
@@ -225,11 +231,15 @@ pub fn init_repo_component(
             errors,
         ));
     };
+    let component = artifact.clone();
     let component_path = component.path.clone();
 
-    if component.kind != ComponentKind::Submodule {
+    if !matches!(
+        component.kind,
+        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+    ) {
         errors.push(format!(
-            "component_not_submodule: {} is {:?}",
+            "component_not_git_backed: {} is {:?}",
             options.component, component.kind
         ));
     }
@@ -244,6 +254,10 @@ pub fn init_repo_component(
             component_path,
             errors,
         ));
+    }
+
+    if component.kind == WorkspaceArtifactKind::Git {
+        return init_git_component(workspace_root, manifest_path, options, &component);
     }
 
     let mut actions = Vec::new();
@@ -340,12 +354,91 @@ pub fn init_repo_component(
     })
 }
 
+fn init_git_component(
+    workspace_root: PathBuf,
+    manifest_path: PathBuf,
+    options: &RepoComponentInitOptions,
+    component: &WorkspaceArtifact,
+) -> Result<RepoComponentInitReport> {
+    let component_path = component.path.clone();
+    let absolute_path = workspace_root.join(&component.path);
+    let mut actions = Vec::new();
+    let errors = Vec::new();
+
+    if absolute_path.exists() {
+        if options.dry_run {
+            actions.push(RepoComponentInitAction::WouldFetch);
+        } else {
+            git_run_with_file_protocol(&absolute_path, &["fetch", "--tags", "--quiet"])
+                .with_context(|| format!("failed to fetch {}", component.path.display()))?;
+            actions.push(RepoComponentInitAction::Fetched);
+        }
+    } else if options.dry_run {
+        actions.push(RepoComponentInitAction::WouldClone);
+    } else {
+        let url = component.url.as_deref().expect("url checked above");
+        git_run_with_file_protocol(
+            &workspace_root,
+            &["clone", "--quiet", url, &slash_path(&component.path)],
+        )
+        .with_context(|| format!("failed to clone {}", component.path.display()))?;
+        actions.push(RepoComponentInitAction::Cloned);
+    }
+
+    if let Some(rev) = component.rev.as_deref().filter(|rev| !rev.is_empty()) {
+        if options.dry_run {
+            actions.push(RepoComponentInitAction::WouldCheckoutRev);
+        } else {
+            git_run(&absolute_path, &["checkout", "--quiet", rev]).with_context(|| {
+                format!(
+                    "failed to checkout rev {} in {}",
+                    rev,
+                    component.path.display()
+                )
+            })?;
+            actions.push(RepoComponentInitAction::CheckedOutRev);
+        }
+    }
+
+    if actions.is_empty() {
+        actions.push(RepoComponentInitAction::AlreadyInitialized);
+    }
+    Ok(RepoComponentInitReport {
+        workspace_root,
+        manifest_path,
+        component: options.component.clone(),
+        path: component_path,
+        dry_run: options.dry_run,
+        actions,
+        errors,
+    })
+}
+
 pub fn verify_task_specs(
     start: impl AsRef<Path>,
     options: &TaskSpecVerifyOptions,
 ) -> Result<TaskSpecVerifyReport> {
+    let workspace_root = resolve_repo_root(start)?;
+    let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
+    let manifest = read_manifest(&manifest_path).with_context(|| {
+        format!(
+            "failed to read workspace manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let Some(tasks) = manifest.artifacts.get("tasks") else {
+        return Ok(TaskSpecVerifyReport {
+            state: TaskSpecVerifyState::NotConfigured,
+            workspace_root,
+            component: None,
+            root: PathBuf::new(),
+            files: Vec::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        });
+    };
     let status = status_repo_workspace(
-        start,
+        &workspace_root,
         &RepoStatusOptions {
             component: Some("tasks".to_string()),
             strict: options.strict,
@@ -356,13 +449,9 @@ pub fn verify_task_specs(
     let root = component
         .as_ref()
         .map(|component| workspace_root.join(&component.path))
-        .unwrap_or_else(|| workspace_root.join(".agl/tasks"));
+        .unwrap_or_else(|| workspace_root.join(&tasks.path));
     let warnings = status.warnings;
     let mut errors = status.errors;
-
-    if component.is_none() {
-        errors.push("tasks_component_missing".to_string());
-    }
 
     let discovery = if root.is_dir() {
         collect_planned_task_overviews(&root)?
@@ -522,8 +611,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
             version: profile.version,
             profile: profile.name,
             functions: WorkspaceFunctions::default(),
-            components: profile.components,
-            artifact_sources: profile.artifact_sources,
+            artifacts: profile.artifacts,
         }
     } else {
         if options.profile != DEFAULT_PROFILE {
@@ -542,57 +630,7 @@ pub(crate) fn default_manifest() -> WorkspaceManifest {
         version: 1,
         profile: DEFAULT_PROFILE.to_string(),
         functions: WorkspaceFunctions::default(),
-        components: BTreeMap::from([
-            (
-                "skills".to_string(),
-                WorkspaceComponent {
-                    path: PathBuf::from(".agl/skills"),
-                    kind: ComponentKind::Submodule,
-                    url: Some(DEFAULT_SKILLS_URL.to_string()),
-                    rev: Some(DEFAULT_SKILLS_REV.to_string()),
-                    commit: None,
-                    tree: None,
-                    lock: Some(PathBuf::from(".agl/skills.lock")),
-                },
-            ),
-            (
-                "tasks".to_string(),
-                WorkspaceComponent {
-                    path: PathBuf::from(".agl/tasks"),
-                    kind: ComponentKind::Local,
-                    url: None,
-                    rev: None,
-                    commit: None,
-                    tree: None,
-                    lock: None,
-                },
-            ),
-            (
-                "reviews".to_string(),
-                WorkspaceComponent {
-                    path: PathBuf::from(".agl/reviews"),
-                    kind: ComponentKind::Generated,
-                    url: None,
-                    rev: None,
-                    commit: None,
-                    tree: None,
-                    lock: None,
-                },
-            ),
-            (
-                "state".to_string(),
-                WorkspaceComponent {
-                    path: PathBuf::from(".agl/state"),
-                    kind: ComponentKind::Ignored,
-                    url: None,
-                    rev: None,
-                    commit: None,
-                    tree: None,
-                    lock: None,
-                },
-            ),
-        ]),
-        artifact_sources: artifacts::default_artifact_sources(),
+        artifacts: BTreeMap::new(),
     }
 }
 
@@ -604,32 +642,32 @@ fn apply_init_component_overrides(
         bail!("--tasks-rev requires --tasks-url");
     }
 
-    let mut overrides = options.artifact_sources.clone();
+    let mut overrides = options.artifacts.clone();
     if options.skills_url.is_some() || options.skills_rev.is_some() {
         let url = options
             .skills_url
             .clone()
             .or_else(|| {
                 manifest
-                    .components
+                    .artifacts
                     .get("skills")
-                    .and_then(|component| component.url.clone())
+                    .and_then(|artifact| artifact.url.clone())
             })
             .unwrap_or_else(|| DEFAULT_SKILLS_URL.to_string());
-        overrides.push(RepoArtifactSourceOverride {
+        overrides.push(RepoArtifactOverride {
             name: "skills".to_string(),
             url,
             rev: options.skills_rev.clone().or_else(|| {
                 manifest
-                    .components
+                    .artifacts
                     .get("skills")
-                    .and_then(|component| component.rev.clone())
+                    .and_then(|artifact| artifact.rev.clone())
             }),
         });
     }
 
     if let Some(tasks_url) = &options.tasks_url {
-        overrides.push(RepoArtifactSourceOverride {
+        overrides.push(RepoArtifactOverride {
             name: "tasks".to_string(),
             url: tasks_url.clone(),
             rev: options.tasks_rev.clone(),
@@ -640,71 +678,55 @@ fn apply_init_component_overrides(
     for override_source in overrides {
         if !seen.insert(override_source.name.clone()) {
             bail!(
-                "artifact source specified more than once: {}",
+                "artifact specified more than once: {}",
                 override_source.name
             );
         }
-        apply_artifact_source_override(manifest, override_source)?;
+        apply_artifact_override(manifest, override_source)?;
     }
 
     Ok(())
 }
 
-fn apply_artifact_source_override(
+fn apply_artifact_override(
     manifest: &mut WorkspaceManifest,
-    override_source: RepoArtifactSourceOverride,
+    override_source: RepoArtifactOverride,
 ) -> Result<()> {
-    validate_artifact_source_name(&override_source.name)?;
+    validate_artifact_name(&override_source.name)?;
 
     let path = manifest
-        .components
+        .artifacts
         .get(&override_source.name)
-        .map(|component| component.path.clone())
-        .or_else(|| {
-            manifest
-                .artifact_sources
-                .get(&override_source.name)
-                .map(|source| source.path.clone())
-        })
+        .map(|artifact| artifact.path.clone())
         .unwrap_or_else(|| default_artifact_component_path(&override_source.name));
-    let lock = default_artifact_component_lock(&override_source.name);
-
-    manifest.components.insert(
+    manifest.artifacts.insert(
         override_source.name.clone(),
-        WorkspaceComponent {
-            path: path.clone(),
-            kind: ComponentKind::Submodule,
+        WorkspaceArtifact {
+            kind: WorkspaceArtifactKind::Git,
+            path,
             url: Some(override_source.url.clone()),
             rev: override_source.rev.clone(),
             commit: None,
             tree: None,
-            lock,
+            required: true,
+            access: ArtifactAccess::ReadWrite,
+            validation: (override_source.name == "tasks").then(|| "agl.task_spec.v1".to_string()),
+            create: Vec::new(),
         },
-    );
-
-    manifest.artifact_sources.insert(
-        override_source.name.clone(),
-        artifacts::source_backed_artifact_source(
-            &override_source.name,
-            path,
-            ArtifactSourceKind::Submodule,
-            Some(override_source.url),
-            override_source.rev,
-        ),
     );
 
     Ok(())
 }
 
-fn validate_artifact_source_name(name: &str) -> Result<()> {
+fn validate_artifact_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
-        bail!("artifact source name cannot be blank");
+        bail!("artifact name cannot be blank");
     }
     if !name
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        bail!("artifact source name contains invalid characters: {name}");
+        bail!("artifact name contains invalid characters: {name}");
     }
     Ok(())
 }
@@ -713,65 +735,16 @@ fn default_artifact_component_path(name: &str) -> PathBuf {
     PathBuf::from(format!(".agl/{name}"))
 }
 
-fn default_artifact_component_lock(name: &str) -> Option<PathBuf> {
-    match name {
-        "skills" => Some(PathBuf::from(".agl/skills.lock")),
-        "tasks" => Some(PathBuf::from(".agl/tasks.lock")),
-        _ => None,
-    }
-}
-
 fn profile_from_workspace_manifest(
     manifest: &WorkspaceManifest,
-    status: &RepoStatusReport,
+    _status: &RepoStatusReport,
 ) -> WorkspaceProfile {
-    let skill_pack = workspace_skill_pack_identity(manifest, status);
-    let mut components = manifest.components.clone();
-    if let Some(identity) = &skill_pack
-        && let Some(component) = components.get_mut(&identity.component)
-    {
-        component.path = identity.path.clone();
-        component.url = identity.url.clone();
-        component.rev = identity.rev.clone();
-        component.commit = identity.commit.clone();
-        component.tree = identity.tree.clone();
-        component.lock = identity.lock.clone();
-    }
     WorkspaceProfile {
         version: manifest.version,
         name: manifest.profile.clone(),
-        components,
-        artifact_sources: manifest.artifact_sources.clone(),
+        artifacts: manifest.artifacts.clone(),
         policy: WorkspaceProfilePolicy::default(),
-        skill_pack,
     }
-}
-
-fn workspace_skill_pack_identity(
-    manifest: &WorkspaceManifest,
-    status: &RepoStatusReport,
-) -> Option<WorkspaceSkillPackIdentity> {
-    let component = manifest.components.get("skills")?;
-    let component_status = status
-        .components
-        .iter()
-        .find(|status| status.name == "skills");
-    Some(WorkspaceSkillPackIdentity {
-        component: "skills".to_string(),
-        path: component.path.clone(),
-        url: component_status
-            .and_then(|status| status.actual_url.clone())
-            .or_else(|| component.url.clone()),
-        rev: component.rev.clone(),
-        commit: component_status
-            .and_then(|status| status.actual_commit.clone())
-            .or_else(|| component.commit.clone()),
-        tree: component_status
-            .and_then(|status| status.actual_tree.clone())
-            .or_else(|| component.tree.clone()),
-        lock: component.lock.clone(),
-        same_ids_when_pinned: true,
-    })
 }
 
 pub(crate) fn resolve_repo_root(start: impl AsRef<Path>) -> Result<PathBuf> {
@@ -986,15 +959,27 @@ fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
         ));
     }
     let mut paths = BTreeMap::<PathBuf, String>::new();
-    for (name, component) in &manifest.components {
-        if let Err(err) = validate_component_path(&component.path) {
-            errors.push(format!("component.{name}.invalid_path: {err}"));
+    for (name, artifact) in &manifest.artifacts {
+        if let Err(err) = validate_component_path(&artifact.path) {
+            errors.push(format!("artifact.{name}.invalid_path: {err}"));
         }
-        if let Some(previous) = paths.insert(component.path.clone(), name.clone()) {
+        if let Some(previous) = paths.insert(artifact.path.clone(), name.clone()) {
             errors.push(format!(
-                "duplicate_component_path: {} used by {previous} and {name}",
-                component.path.display()
+                "duplicate_artifact_path: {} used by {previous} and {name}",
+                artifact.path.display()
             ));
+        }
+        for (other_name, other) in &manifest.artifacts {
+            if name != other_name
+                && (artifact.path.starts_with(&other.path)
+                    || other.path.starts_with(&artifact.path))
+            {
+                errors.push(format!(
+                    "overlapping_artifact_paths: {name}={} {other_name}={}",
+                    artifact.path.display(),
+                    other.path.display()
+                ));
+            }
         }
     }
 }
@@ -1015,12 +1000,6 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
     if profile.name.trim().is_empty() {
         bail!("workspace profile name cannot be blank");
     }
-    if profile.components.is_empty() {
-        bail!("workspace profile must define at least one component");
-    }
-    if profile.artifact_sources.is_empty() {
-        bail!("workspace profile must define artifact_sources");
-    }
     if profile.policy.trust.import_local_trust {
         bail!("workspace profile must not import local trust");
     }
@@ -1030,55 +1009,14 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
             version: profile.version,
             profile: profile.name.clone(),
             functions: WorkspaceFunctions::default(),
-            components: profile.components.clone(),
-            artifact_sources: profile.artifact_sources.clone(),
+            artifacts: profile.artifacts.clone(),
         },
         &mut errors,
     );
-    if let Some(skill_pack) = &profile.skill_pack {
-        match profile.components.get(&skill_pack.component) {
-            Some(component) => validate_skill_pack_matches_component(
-                &mut errors,
-                &skill_pack.component,
-                skill_pack,
-                component,
-            ),
-            None => errors.push(format!(
-                "skill_pack_component_missing: {}",
-                skill_pack.component
-            )),
-        }
-    }
     if !errors.is_empty() {
         bail!("workspace profile is invalid: {}", errors.join(", "));
     }
     Ok(())
-}
-
-fn validate_skill_pack_matches_component(
-    errors: &mut Vec<String>,
-    component_name: &str,
-    skill_pack: &WorkspaceSkillPackIdentity,
-    component: &WorkspaceComponent,
-) {
-    if skill_pack.path != component.path {
-        errors.push(format!("skill_pack.{component_name}.path_mismatch"));
-    }
-    if skill_pack.url != component.url {
-        errors.push(format!("skill_pack.{component_name}.url_mismatch"));
-    }
-    if skill_pack.rev != component.rev {
-        errors.push(format!("skill_pack.{component_name}.rev_mismatch"));
-    }
-    if skill_pack.commit != component.commit {
-        errors.push(format!("skill_pack.{component_name}.commit_mismatch"));
-    }
-    if skill_pack.tree != component.tree {
-        errors.push(format!("skill_pack.{component_name}.tree_mismatch"));
-    }
-    if skill_pack.lock != component.lock {
-        errors.push(format!("skill_pack.{component_name}.lock_mismatch"));
-    }
 }
 
 pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
@@ -1102,7 +1040,7 @@ pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
 pub(crate) fn component_status(
     workspace_root: &Path,
     name: &str,
-    component: &WorkspaceComponent,
+    component: &WorkspaceArtifact,
 ) -> ComponentStatus {
     let mut status = ComponentStatus {
         name: name.to_string(),
@@ -1127,7 +1065,7 @@ pub(crate) fn component_status(
     };
 
     let absolute_path = workspace_root.join(&component.path);
-    if component.kind == ComponentKind::Submodule {
+    if component.kind == WorkspaceArtifactKind::Submodule {
         let registered = submodule_registered(workspace_root, &component.path);
         status.submodule_registered = Some(registered);
         if !registered {
@@ -1143,11 +1081,11 @@ pub(crate) fn component_status(
 
     if !absolute_path.exists() {
         status.state = match component.kind {
-            ComponentKind::Submodule => ComponentState::Missing,
+            WorkspaceArtifactKind::Submodule => ComponentState::Missing,
             _ => ComponentState::Invalid,
         };
         let issue = "missing".to_string();
-        if component.kind == ComponentKind::Submodule {
+        if component.kind == WorkspaceArtifactKind::Submodule {
             status.warnings.push(issue);
         } else {
             status.errors.push(issue);
@@ -1158,7 +1096,7 @@ pub(crate) fn component_status(
 
     if matches!(
         component.kind,
-        ComponentKind::Git | ComponentKind::Submodule
+        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
     ) {
         fill_git_status(workspace_root, component, &mut status);
     }
@@ -1174,7 +1112,7 @@ pub(crate) fn component_status(
 
 fn fill_git_status(
     workspace_root: &Path,
-    component: &WorkspaceComponent,
+    component: &WorkspaceArtifact,
     status: &mut ComponentStatus,
 ) {
     let absolute_path = workspace_root.join(&component.path);

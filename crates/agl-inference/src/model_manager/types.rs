@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use agl_config::LocalInferenceConfig;
+use agl_config::ResolvedInferenceConfig;
 use agl_content::{ArtifactRef, ContentPart};
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use serde::Serialize;
@@ -86,7 +86,7 @@ fn validate_bounded(name: &str, value: usize, maximum: usize) -> Result<(), Mode
 pub struct ModelKey(String);
 
 impl ModelKey {
-    pub fn from_config(config: &LocalInferenceConfig) -> Result<Self, ModelManagerError> {
+    pub fn from_config(config: &ResolvedInferenceConfig) -> Result<Self, ModelManagerError> {
         config
             .validate()
             .map_err(|error| ModelManagerError::ProfileInvalid {
@@ -135,7 +135,7 @@ pub struct ContextKey {
 
 impl ContextKey {
     pub fn for_conversation(
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
         conversation: impl AsRef<str>,
     ) -> Result<Self, ModelManagerError> {
         let conversation = conversation.as_ref();
@@ -221,7 +221,7 @@ pub struct InferenceJobScope {
 
 #[derive(Clone, Debug)]
 pub struct InferenceJob {
-    config: LocalInferenceConfig,
+    config: ResolvedInferenceConfig,
     request: InferenceRequest,
     model_key: ModelKey,
     context_key: ContextKey,
@@ -235,7 +235,7 @@ pub struct InferenceJob {
 
 impl InferenceJob {
     pub fn new(
-        config: LocalInferenceConfig,
+        config: ResolvedInferenceConfig,
         request: InferenceRequest,
         context_key: ContextKey,
         artifact_root: InferenceArtifactRoot,
@@ -289,7 +289,7 @@ impl InferenceJob {
         self
     }
 
-    pub fn config(&self) -> &LocalInferenceConfig {
+    pub fn config(&self) -> &ResolvedInferenceConfig {
         &self.config
     }
 
@@ -457,7 +457,7 @@ impl fmt::Debug for ResolvedContentPart {
 }
 
 fn validate_content_profile(
-    config: &LocalInferenceConfig,
+    config: &ResolvedInferenceConfig,
     request: &InferenceRequest,
 ) -> Result<(), ModelManagerError> {
     let has_media = request

@@ -1,8 +1,9 @@
 Validate one agentFUNCTION without running inference.
 
 The status command checks the function manifest, system prompt, function-owned
-inference config or referenced inference profile path, declared subagent files,
-and the configured GGUF model path. It does not start a model process.
+inference preset or referenced inference profile, declared subagent files, and
+model ids resolved through `$AGL_HOME/config/models.toml`. It reports missing
+bindings without starting a model process.
 
 Examples:
   agl function status coding

@@ -116,7 +116,7 @@ impl RepoTools {
                     .profile
                     .unwrap_or_else(|| agl_repo::DEFAULT_PROFILE.to_string()),
                 profile_file: args.profile_file.map(PathBuf::from),
-                artifact_sources: Vec::new(),
+                artifacts: Vec::new(),
                 skills_url: None,
                 skills_rev: None,
                 tasks_url: None,
@@ -135,7 +135,7 @@ impl RepoTools {
             &RepoInitOptions {
                 profile: agl_repo::DEFAULT_PROFILE.to_string(),
                 profile_file: Some(PathBuf::from(args.profile_file)),
-                artifact_sources: Vec::new(),
+                artifacts: Vec::new(),
                 skills_url: None,
                 skills_rev: None,
                 tasks_url: None,
@@ -177,12 +177,12 @@ pub fn declaration() -> ProviderDeclaration {
     .expect("builtin repo provider declaration is valid")
     .with_action(action::<StatusArgs>(
         REPO_STATUS_TOOL_ID,
-        "Inspect AgentLIBRE workspace manifest and component health.",
+        "Inspect agentLIBRE workspace manifest and component health.",
         OperationKind::Read,
     ))
     .with_action(action::<ExportProfileArgs>(
         REPO_EXPORT_PROFILE_TOOL_ID,
-        "Render the current AgentLIBRE workspace profile without writing a file.",
+        "Render the current agentLIBRE workspace profile without writing a file.",
         OperationKind::Read,
     ))
     .with_action(action::<HooksStatusArgs>(
@@ -193,7 +193,7 @@ pub fn declaration() -> ProviderDeclaration {
     .with_action(
         action::<InitArgs>(
             REPO_INIT_TOOL_ID,
-            "Initialize AgentLIBRE workspace files.",
+            "Initialize agentLIBRE workspace files.",
             OperationKind::Admin,
         )
         .with_state_effects([StateEffect::RepoWorkspace]),
@@ -201,7 +201,7 @@ pub fn declaration() -> ProviderDeclaration {
     .with_action(
         action::<ImportProfileArgs>(
             REPO_IMPORT_PROFILE_TOOL_ID,
-            "Apply an explicit AgentLIBRE workspace profile file.",
+            "Apply an explicit agentLIBRE workspace profile file.",
             OperationKind::Admin,
         )
         .with_state_effects([StateEffect::RepoWorkspace]),
@@ -209,7 +209,7 @@ pub fn declaration() -> ProviderDeclaration {
     .with_action(
         action::<InstallHooksArgs>(
             REPO_INSTALL_HOOKS_TOOL_ID,
-            "Install AgentLIBRE managed git hooks.",
+            "Install agentLIBRE managed git hooks.",
             OperationKind::Admin,
         )
         .with_state_effects([StateEffect::RepoHooks]),
@@ -334,13 +334,7 @@ mod tests {
         assert_eq!(init["status"], "ok");
         assert!(root.join(".agl/workspace.toml").is_file());
         assert_eq!(status["tool"], REPO_STATUS_TOOL_ID);
-        assert!(
-            status["components"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|component| component["name"] == "skills")
-        );
+        assert!(status["components"].as_array().unwrap().is_empty());
         assert_eq!(profile["tool"], REPO_EXPORT_PROFILE_TOOL_ID);
         assert!(
             profile["profile"]
@@ -363,42 +357,20 @@ mod tests {
 version = 1
 name = "team-profile"
 
-[components.skills]
-path = ".agl/skills"
-kind = "local"
-
-[components.tasks]
-path = ".agl/tasks"
-kind = "local"
-
-[artifact_sources.skills]
-role = "community"
+[artifacts.skills]
 kind = "local"
 path = ".agl/skills"
 required = true
-provides = ["skills"]
-
-[[artifact_sources.skills.artifacts]]
-id = "skills"
-kind = "source"
-path = ".agl/skills"
 access = "read"
-provides = ["skills"]
+create = ["."]
 
-[artifact_sources.tasks]
-role = "planning"
+[artifacts.tasks]
 kind = "local"
 path = ".agl/tasks"
 required = true
-provides = ["tasks"]
-
-[[artifact_sources.tasks.artifacts]]
-id = "tasks"
-kind = "source"
-path = ".agl/tasks"
 access = "read_write"
-provides = ["tasks"]
-schema = "agl.task_spec.v1"
+validation = "agl.task_spec.v1"
+create = ["."]
 "#,
         )
         .unwrap();

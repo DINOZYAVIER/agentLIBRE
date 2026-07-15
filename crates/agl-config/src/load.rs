@@ -2,11 +2,29 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
-use crate::LocalInferenceConfig;
+use crate::{InferencePreset, ResolvedInferenceConfig};
 
-pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<LocalInferenceConfig> {
+pub fn load_inference_preset(path: impl AsRef<Path>) -> Result<InferencePreset> {
     let path = path.as_ref();
-    let config: LocalInferenceConfig = load_toml_file(path)?;
+    let preset: InferencePreset = load_toml_file(path)?;
+    preset
+        .validate()
+        .with_context(|| format!("invalid inference preset {}", path.display()))?;
+    Ok(preset)
+}
+
+pub fn load_inference_preset_from_str(source_name: &str, text: &str) -> Result<InferencePreset> {
+    let preset: InferencePreset =
+        toml::from_str(text).with_context(|| format!("failed to parse preset {source_name}"))?;
+    preset
+        .validate()
+        .with_context(|| format!("invalid inference preset {source_name}"))?;
+    Ok(preset)
+}
+
+pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<ResolvedInferenceConfig> {
+    let path = path.as_ref();
+    let config: ResolvedInferenceConfig = load_toml_file(path)?;
     config
         .validate()
         .with_context(|| format!("invalid config file {}", path.display()))?;
@@ -16,8 +34,8 @@ pub fn load_local_inference_config(path: impl AsRef<Path>) -> Result<LocalInfere
 pub fn load_local_inference_config_from_str(
     source_name: &str,
     text: &str,
-) -> Result<LocalInferenceConfig> {
-    let config: LocalInferenceConfig =
+) -> Result<ResolvedInferenceConfig> {
+    let config: ResolvedInferenceConfig =
         toml::from_str(text).with_context(|| format!("failed to parse config {source_name}"))?;
     config
         .validate()

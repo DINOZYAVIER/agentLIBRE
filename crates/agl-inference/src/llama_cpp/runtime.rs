@@ -6,7 +6,7 @@ use crate::model_manager::{
     InferenceJob, ModelGeneration, ModelKey, ModelRuntime, ResolvedContentPart,
     ResolvedModelContent, RuntimeFailure, RuntimeOperation,
 };
-use agl_config::{KvCacheType, LocalInferenceConfig, MtpRuntimeConfig};
+use agl_config::{KvCacheType, MtpRuntimeConfig, ResolvedInferenceConfig};
 use agl_content::Content;
 use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
@@ -43,7 +43,7 @@ impl ModelRuntime for LlamaCppModelRuntime {
     fn load_model(
         &mut self,
         _key: &ModelKey,
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
     ) -> std::result::Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
         let mut operation = capture_operation(|log| {
             init_llama_backend();
@@ -252,8 +252,7 @@ fn capture_operation<T>(
 
 pub(crate) fn init_llama_backend() {
     LLAMA_BACKEND.get_or_init(|| {
-        let lib_dir =
-            CString::new(env!("AGL_LLAMA_CPP_LIBRARY_DIR")).expect("valid llama.cpp lib dir");
+        let lib_dir = CString::new(ffi::library_dir()).expect("valid llama.cpp lib dir");
         unsafe {
             ffi::llama_log_set(Some(llama_log_callback), ptr::null_mut());
             ffi::ggml_backend_load_all_from_path(lib_dir.as_ptr());
@@ -359,11 +358,11 @@ fn selected_device_from_llama_logs(log: &str) -> Option<String> {
     None
 }
 
-fn runtime_log_header(config: &LocalInferenceConfig, supports_gpu_offload: bool) -> String {
+fn runtime_log_header(config: &ResolvedInferenceConfig, supports_gpu_offload: bool) -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
     log.push_str("library_dir = ");
-    log.push_str(env!("AGL_LLAMA_CPP_LIBRARY_DIR"));
+    log.push_str(ffi::library_dir());
     log.push('\n');
     log.push_str("gpu_layers_requested = ");
     log.push_str(&config.runtime.gpu_layers.to_string());

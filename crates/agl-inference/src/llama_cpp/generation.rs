@@ -2,7 +2,6 @@ use std::error::Error;
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -14,20 +13,17 @@ use crate::InferenceFinishReason;
 use super::ffi;
 
 pub(crate) struct LlamaCppGenerationControl<'a> {
-    signal: Option<NativeAbortSignal>,
-    _cancellation: PhantomData<&'a AtomicBool>,
+    signal: Option<NativeAbortSignal<'a>>,
 }
 
-struct NativeAbortSignal {
-    cancellation: NonNull<AtomicBool>,
+struct NativeAbortSignal<'a> {
+    cancellation: &'a AtomicBool,
     deadline: Option<Instant>,
 }
 
-impl NativeAbortSignal {
+impl NativeAbortSignal<'_> {
     fn is_cancelled(&self) -> bool {
-        // SAFETY: the generation control's lifetime marker keeps the admitted
-        // job flag alive through callback teardown.
-        unsafe { self.cancellation.as_ref() }.load(Ordering::Acquire)
+        self.cancellation.load(Ordering::Acquire)
     }
 }
 
@@ -35,10 +31,9 @@ impl<'a> LlamaCppGenerationControl<'a> {
     pub(crate) fn cancellable(cancellation: &'a AtomicBool) -> Self {
         Self {
             signal: Some(NativeAbortSignal {
-                cancellation: NonNull::from(cancellation),
+                cancellation,
                 deadline: None,
             }),
-            _cancellation: PhantomData,
         }
     }
 
@@ -95,8 +90,9 @@ impl<'a> LlamaCppGenerationControl<'a> {
         NativeAbortGuard {
             target_context: Some(target_context),
             draft_context,
-            _thread_bound: PhantomData,
-            _control: PhantomData,
+            callback_data: Some(signal),
+            // Callback teardown must happen on the installing thread.
+            _not_send: PhantomData,
         }
     }
 }
@@ -122,8 +118,8 @@ pub(crate) struct LlamaCppGenerationOutput {
 pub(super) struct NativeAbortGuard<'control> {
     target_context: Option<*mut c_void>,
     draft_context: Option<*mut c_void>,
-    _thread_bound: PhantomData<Rc<()>>,
-    _control: PhantomData<&'control ()>,
+    callback_data: Option<&'control NativeAbortSignal<'control>>,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl NativeAbortGuard<'_> {
@@ -131,8 +127,8 @@ impl NativeAbortGuard<'_> {
         Self {
             target_context: None,
             draft_context: None,
-            _thread_bound: PhantomData,
-            _control: PhantomData,
+            callback_data: None,
+            _not_send: PhantomData,
         }
     }
 }
@@ -147,6 +143,7 @@ impl Drop for NativeAbortGuard<'_> {
                 ffi::llama_set_abort_callback(context, None, std::ptr::null_mut());
             }
         }
+        self.callback_data = None;
     }
 }
 
@@ -190,7 +187,7 @@ mod tests {
     fn native_abort_callback_reads_the_current_flag_value() {
         let cancelled = AtomicBool::new(false);
         let signal = NativeAbortSignal {
-            cancellation: NonNull::from(&cancelled),
+            cancellation: &cancelled,
             deadline: None,
         };
         let data = std::ptr::from_ref(&signal).cast_mut().cast::<c_void>();
@@ -204,7 +201,7 @@ mod tests {
     fn native_abort_callback_observes_expired_deadline() {
         let cancelled = AtomicBool::new(false);
         let signal = NativeAbortSignal {
-            cancellation: NonNull::from(&cancelled),
+            cancellation: &cancelled,
             deadline: Some(Instant::now()),
         };
         let data = std::ptr::from_ref(&signal).cast_mut().cast::<c_void>();

@@ -3,27 +3,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{ArtifactKind, ArtifactSourceStatus, ArtifactStatus, UndeclaredArtifactRoot};
+use crate::{ArtifactKind, ArtifactStatus, UndeclaredArtifactRoot};
 
 pub(super) fn undeclared_artifact_roots(
     workspace_root: &Path,
     artifacts: &[ArtifactStatus],
-    sources: &[ArtifactSourceStatus],
 ) -> Result<Vec<UndeclaredArtifactRoot>> {
     let agl_root = workspace_root.join(".agl");
     if !agl_root.is_dir() {
         return Ok(Vec::new());
     }
-    let mut declared_paths = artifacts
+    let declared_paths = artifacts
         .iter()
         .map(|artifact| artifact.path.clone())
         .collect::<Vec<_>>();
-    declared_paths.extend(
-        sources
-            .iter()
-            .filter(|source| source.path != Path::new(".agl"))
-            .map(|source| source.path.clone()),
-    );
     let mut roots = Vec::new();
     for entry in
         fs::read_dir(&agl_root).with_context(|| format!("failed to read {}", agl_root.display()))?

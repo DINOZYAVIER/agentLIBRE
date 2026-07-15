@@ -1,7 +1,8 @@
 mod context_slot;
-mod ffi;
 mod generation;
 mod model;
 mod runtime;
+
+pub(crate) use agl_llama_cpp_sys as ffi;
 
 pub use runtime::LlamaCppModelRuntime;

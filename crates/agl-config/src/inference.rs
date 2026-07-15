@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::{ModelConfig, PromptConfig};
+use crate::{ModelConfig, ModelId, PromptConfig};
 
 pub const MAX_GPU_LAYERS: u32 = 4096;
 pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
@@ -15,7 +15,7 @@ const MTP_PROBABILITY_SCALE: u32 = 1_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LocalInferenceConfig {
+pub struct ResolvedInferenceConfig {
     pub backend: InferenceBackendConfig,
     pub runtime: InferenceRuntimeConfig,
     pub model: ModelConfig,
@@ -23,7 +23,7 @@ pub struct LocalInferenceConfig {
     pub prompt: PromptConfig,
 }
 
-impl LocalInferenceConfig {
+impl ResolvedInferenceConfig {
     pub fn validate(&self) -> Result<()> {
         self.backend.validate()?;
         self.runtime.validate()?;
@@ -33,6 +33,115 @@ impl LocalInferenceConfig {
         self.model.validate()?;
         self.prompt.validate()
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferencePreset {
+    pub backend: InferencePresetBackendConfig,
+    pub runtime: InferencePresetRuntimeConfig,
+    pub model: ModelConfig,
+    #[serde(default)]
+    pub prompt: PromptConfig,
+}
+
+impl InferencePreset {
+    pub fn validate(&self) -> Result<()> {
+        self.runtime.validate()?;
+        if self.backend.multimodal_projector_id.is_some() && self.runtime.mtp.enabled {
+            bail!("multimodal projector presets cannot enable speculative MTP");
+        }
+        self.model.validate()?;
+        self.prompt.validate()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferencePresetBackendConfig {
+    pub kind: BackendKind,
+    pub model_id: ModelId,
+    #[serde(default)]
+    pub multimodal_projector_id: Option<ModelId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferencePresetRuntimeConfig {
+    pub gpu_layers: u32,
+    pub context_tokens: u32,
+    pub threads: u32,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    #[serde(default)]
+    pub ubatch_size: Option<u32>,
+    #[serde(default)]
+    pub flash_attention: Option<RuntimeSwitch>,
+    #[serde(default)]
+    pub cache_type_k: Option<KvCacheType>,
+    #[serde(default)]
+    pub cache_type_v: Option<KvCacheType>,
+    #[serde(default)]
+    pub mmap: Option<bool>,
+    #[serde(default)]
+    pub kv_unified: Option<bool>,
+    #[serde(default)]
+    pub mtp: MtpPresetConfig,
+}
+
+impl InferencePresetRuntimeConfig {
+    fn validate(&self) -> Result<()> {
+        if self.mtp.enabled && self.mtp.draft_model_id.is_none() {
+            bail!("runtime.mtp enabled requires draft_model_id");
+        }
+        self.clone()
+            .into_resolved(
+                self.mtp
+                    .draft_model_id
+                    .as_ref()
+                    .map(|id| PathBuf::from(id.as_str())),
+            )
+            .validate()
+    }
+
+    pub(crate) fn into_resolved(self, draft_model: Option<PathBuf>) -> InferenceRuntimeConfig {
+        InferenceRuntimeConfig {
+            gpu_layers: self.gpu_layers,
+            context_tokens: self.context_tokens,
+            threads: self.threads,
+            device: self.device,
+            batch_size: self.batch_size,
+            ubatch_size: self.ubatch_size,
+            flash_attention: self.flash_attention,
+            cache_type_k: self.cache_type_k,
+            cache_type_v: self.cache_type_v,
+            mmap: self.mmap,
+            kv_unified: self.kv_unified,
+            mtp: MtpRuntimeConfig {
+                enabled: self.mtp.enabled,
+                draft_model,
+                draft_tokens: self.mtp.draft_tokens,
+                p_min: self.mtp.p_min,
+                gpu_layers: self.mtp.gpu_layers,
+                cache_type_k: self.mtp.cache_type_k,
+                cache_type_v: self.mtp.cache_type_v,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MtpPresetConfig {
+    pub enabled: bool,
+    pub draft_model_id: Option<ModelId>,
+    pub draft_tokens: u32,
+    pub p_min: MtpProbability,
+    pub gpu_layers: Option<u32>,
+    pub cache_type_k: Option<KvCacheType>,
+    pub cache_type_v: Option<KvCacheType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

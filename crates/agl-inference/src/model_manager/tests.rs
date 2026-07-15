@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agl_config::{
-    BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, LocalInferenceConfig, ModelConfig,
-    ModelDialect, MtpRuntimeConfig, PromptConfig, ToolCallFormat,
+    BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, ModelConfig, ModelDialect,
+    MtpRuntimeConfig, PromptConfig, ResolvedInferenceConfig, ToolCallFormat,
 };
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
@@ -104,7 +104,7 @@ impl ModelRuntime for FakeRuntime {
     fn load_model(
         &mut self,
         key: &ModelKey,
-        _config: &LocalInferenceConfig,
+        _config: &ResolvedInferenceConfig,
     ) -> Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
         self.control
             .state
@@ -619,8 +619,8 @@ fn manager(options: ModelManagerOptions, control: Arc<FakeControl>) -> ModelMana
     ModelManager::spawn(options, FakeRuntime { control }).unwrap()
 }
 
-fn config(model: &str) -> LocalInferenceConfig {
-    LocalInferenceConfig {
+fn config(model: &str) -> ResolvedInferenceConfig {
+    ResolvedInferenceConfig {
         backend: InferenceBackendConfig {
             kind: BackendKind::LlamaCpp,
             model: PathBuf::from("/models").join(model),
@@ -650,7 +650,7 @@ fn config(model: &str) -> LocalInferenceConfig {
 
 fn job(
     root: &Path,
-    config: &LocalInferenceConfig,
+    config: &ResolvedInferenceConfig,
     conversation: &str,
     attempt: u64,
 ) -> InferenceJob {

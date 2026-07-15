@@ -53,6 +53,7 @@ dependencies = [
 name = "agl-assets"
 version = "1.0.0-alpha.10"
 dependencies = [
+ "agl-config",
  "sha2",
 ]
 
@@ -82,6 +83,7 @@ dependencies = [
  "agl-host-tools",
  "agl-ids",
  "agl-inference",
+ "agl-llama-cpp-sys",
  "agl-loop",
  "agl-memory",
  "agl-oven",
@@ -112,6 +114,7 @@ dependencies = [
  "agl-functions",
  "agl-ids",
  "agl-inference",
+ "agl-llama-cpp-sys",
  "agl-memory",
  "agl-notes",
  "agl-protocol",
@@ -180,6 +183,7 @@ dependencies = [
  "agl-functions",
  "agl-ids",
  "agl-inference",
+ "agl-llama-cpp-sys",
  "agl-protocol",
  "agl-runtime",
  "agl-session",
@@ -266,14 +270,21 @@ dependencies = [
  "agl-content",
  "agl-events",
  "agl-ids",
+ "agl-llama-cpp-sys",
  "agl-oven",
  "agl-store",
  "anyhow",
- "cc",
  "serde",
  "serde_json",
  "sha2",
  "tracing",
+]
+
+[[package]]
+name = "agl-llama-cpp-sys"
+version = "1.0.0-alpha.10"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

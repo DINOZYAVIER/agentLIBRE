@@ -9,7 +9,7 @@ set -euo pipefail
 # The focused runtime cases require a GPU-offload config and default to
 # AGL_SMOKE_DEVICE=Vulkan0; override that device when the config uses another GPU.
 #
-# Static contracts only (no model or GGUF required):
+# Static validations only (no model or GGUF required):
 #   AGL_SMOKE_STATIC_ONLY=1 scripts/smoke-agentlibre-tools-pack.sh
 #
 # Optional overrides:
@@ -413,7 +413,7 @@ require_failed_case_process() {
     fail "$CASE_NAME unexpectedly exited successfully; evidence: $CASE_ROOT"
 }
 
-run_static_skill_contracts() {
+run_static_skill_validations() {
   local case_root="$run_root/static/skills"
   local workspace="$case_root/workspace"
   local home="$case_root/home"
@@ -519,9 +519,9 @@ PY
   record_case "builtin-skill-and-workspace-boundaries" "static"
 }
 
-run_static_repo_contract() {
-  local case_root="$run_root/static/repo-contract"
-  local tracked="$case_root/tracked-contract-paths.txt"
+run_static_repo_schema() {
+  local case_root="$run_root/static/repo-schema"
+  local tracked="$case_root/tracked-paths.txt"
   mkdir -p "$case_root"
   git -C "$repo_root" ls-files -- 'docs/specs/**' 'packs/**' '.agl/**' >"$tracked"
   python3 - "$tracked" <<'PY'
@@ -540,7 +540,7 @@ if unexpected:
 if ".agl/tasks" not in agl_paths:
     raise SystemExit("planned task component is not tracked at .agl/tasks")
 PY
-  record_case "repo-contract" "static"
+  record_case "repo-schema" "static"
 }
 
 run_focused_smoke() {
@@ -958,14 +958,14 @@ cargo build -p agl-cli
 agl_bin="$(smoke_abs_path "$agl_bin")"
 [[ -x "$agl_bin" ]] || fail "missing executable agl binary: $agl_bin"
 
-run_static_skill_contracts
-run_static_repo_contract
+run_static_skill_validations
+run_static_repo_schema
 
 if [[ "$static_only" == 1 ]]; then
   pack_passed=1
   echo "artifact root: $run_root"
   echo "case summary: $summary_path"
-  echo "AGL-067 static tools/skills contracts passed"
+  echo "AGL-067 static tools/skills validations passed"
   exit 0
 fi
 

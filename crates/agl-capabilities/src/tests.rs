@@ -221,7 +221,7 @@ fn operation_and_state_effect_invariants_are_enforced() {
 }
 
 #[test]
-fn mutating_delivery_requires_an_explicit_idempotency_contract() {
+fn mutating_delivery_requires_explicit_idempotency() {
     assert_eq!(read_action().delivery, ActionDelivery::ReplaySafe);
     assert_eq!(write_action().delivery, ActionDelivery::AtMostOnce);
     let idempotent = write_action().with_run_step_idempotency();

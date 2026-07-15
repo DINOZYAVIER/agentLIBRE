@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::rc::Rc;
 
-use agl_config::{LocalInferenceConfig, RuntimeSwitch};
+use agl_config::{ResolvedInferenceConfig, RuntimeSwitch};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::ffi;
@@ -21,7 +21,7 @@ pub(crate) struct LlamaCppModelKey {
 }
 
 impl LlamaCppModelKey {
-    pub(crate) fn from_config(config: &LocalInferenceConfig) -> Self {
+    pub(crate) fn from_config(config: &ResolvedInferenceConfig) -> Self {
         let mtp_enabled = config.runtime.mtp.enabled;
         Self {
             model: config.backend.model.clone(),
@@ -70,7 +70,7 @@ pub struct LlamaCppModel {
 }
 
 impl LlamaCppModel {
-    pub(crate) fn load(config: &LocalInferenceConfig, log: &mut String) -> Result<Self> {
+    pub(crate) fn load(config: &ResolvedInferenceConfig, log: &mut String) -> Result<Self> {
         let mut main_devices = SelectedDevices::from_config(config.runtime.device.as_deref())?;
         let mut main_params = model_params(
             config.runtime.gpu_layers,
@@ -161,7 +161,7 @@ impl LlamaCppModel {
         })
     }
 
-    pub(crate) fn matches_config(&self, config: &LocalInferenceConfig) -> bool {
+    pub(crate) fn matches_config(&self, config: &ResolvedInferenceConfig) -> bool {
         self.key == LlamaCppModelKey::from_config(config)
     }
 
@@ -303,7 +303,7 @@ impl VisionHandle {
     fn load(
         projector: &std::path::Path,
         model: *mut c_void,
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
     ) -> Result<Self> {
         let projector = path_cstring(projector)?;
         let threads = i32::try_from(config.runtime.threads)
@@ -431,8 +431,8 @@ mod tests {
 
     use super::*;
 
-    fn config() -> LocalInferenceConfig {
-        LocalInferenceConfig {
+    fn config() -> ResolvedInferenceConfig {
+        ResolvedInferenceConfig {
             backend: InferenceBackendConfig {
                 kind: BackendKind::LlamaCpp,
                 model: PathBuf::from("/models/main.gguf"),

@@ -140,7 +140,7 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Inspect and export the local AgentLIBRE store.
+    /// Inspect and export the local agentLIBRE store.
     #[command(long_about = help::STORE)]
     Store {
         #[command(subcommand)]
@@ -158,25 +158,25 @@ enum Commands {
         #[command(subcommand)]
         command: InferenceCommands,
     },
-    /// Manage local scheduled AgentLIBRE jobs.
+    /// Manage local scheduled agentLIBRE jobs.
     #[command(long_about = help::CRON)]
     Cron {
         #[command(subcommand)]
         command: CronCommands,
     },
-    /// Manage local AgentLIBRE memory.
+    /// Manage local agentLIBRE memory.
     #[command(long_about = help::MEMORY)]
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Manage local AgentLIBRE notes.
+    /// Manage local agentLIBRE notes.
     #[command(long_about = help::NOTES)]
     Notes {
         #[command(subcommand)]
         command: NotesCommands,
     },
-    /// Initialize the repo-local AgentLIBRE workspace.
+    /// Initialize the repo-local agentLIBRE workspace.
     #[command(long_about = help::INIT)]
     Init(RepoInitArgs),
     /// Run one prompt and print the final answer.
@@ -188,16 +188,16 @@ enum Commands {
     /// Run the local agent runtime daemon in the foreground.
     #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
-    /// Report repo-local AgentLIBRE workspace status.
+    /// Report repo-local agentLIBRE workspace status.
     #[command(long_about = help::STATUS)]
     Status(RepoStatusArgs),
-    /// Inspect and verify AgentLIBRE skills.
+    /// Inspect and verify agentLIBRE skills.
     #[command(long_about = help::SKILL)]
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
-    /// Install AgentLIBRE git hooks for this repository.
+    /// Install agentLIBRE git hooks for this repository.
     #[command(long_about = help::INSTALL_HOOKS)]
     InstallHooks(RepoHooksArgs),
     /// Advanced repo workspace commands.
@@ -309,19 +309,19 @@ enum CronCommands {
 
 #[derive(Debug, Subcommand)]
 enum RepoCommands {
-    /// Initialize the repo-local AgentLIBRE workspace.
+    /// Initialize the repo-local agentLIBRE workspace.
     #[command(long_about = help::REPO_INIT)]
     Init(RepoInitArgs),
-    /// Initialize a declared submodule component.
+    /// Materialize a declared Git-backed artifact.
     #[command(long_about = help::REPO_INIT_COMPONENT)]
     InitComponent(RepoComponentInitArgs),
     /// Apply an explicit workspace profile file.
     #[command(hide = true, long_about = help::REPO_IMPORT_PROFILE)]
     ImportProfile(RepoImportProfileArgs),
-    /// Report repo-local AgentLIBRE workspace status.
+    /// Report repo-local agentLIBRE workspace status.
     #[command(long_about = help::REPO_STATUS)]
     Status(RepoStatusArgs),
-    /// Verify planned task overview files in the tasks component.
+    /// Verify planned task overview files in the configured tasks artifact.
     #[command(long_about = help::REPO_VERIFY_TASKS)]
     VerifyTasks(TaskSpecVerifyArgs),
     /// Inspect and create declared .agl artifacts.
@@ -330,7 +330,7 @@ enum RepoCommands {
         #[command(subcommand)]
         command: ArtifactCommands,
     },
-    /// Install AgentLIBRE git hooks for this repository.
+    /// Install agentLIBRE git hooks for this repository.
     #[command(long_about = help::REPO_INSTALL_HOOKS)]
     InstallHooks(RepoHooksArgs),
     /// Export a portable workspace profile manifest.
@@ -461,9 +461,9 @@ struct RepoInitArgs {
     #[arg(long, value_name = "PATH")]
     profile_file: Option<PathBuf>,
 
-    /// Generic artifact source override as NAME=URL[@REV].
-    #[arg(long = "artifact-source", value_name = "NAME=URL[@REV]")]
-    artifact_sources: Vec<String>,
+    /// Workspace artifact override as NAME=URL[@REV].
+    #[arg(long = "artifact", value_name = "NAME=URL[@REV]")]
+    artifacts: Vec<String>,
 
     /// Skills repository URL for the .agl/skills submodule.
     #[arg(long, value_name = "URL")]
@@ -485,7 +485,7 @@ struct RepoInitArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Repair or replace AgentLIBRE-managed files.
+    /// Repair or replace agentLIBRE-managed files.
     #[arg(long)]
     force: bool,
 }
@@ -515,7 +515,7 @@ struct RepoImportProfileArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Repair or replace AgentLIBRE-managed files.
+    /// Repair or replace agentLIBRE-managed files.
     #[arg(long)]
     force: bool,
 }
@@ -612,7 +612,7 @@ struct RepoHooksArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Replace AgentLIBRE-managed hooks or overwrite conflicts.
+    /// Replace agentLIBRE-managed hooks or overwrite conflicts.
     #[arg(long)]
     force: bool,
 }
@@ -1562,10 +1562,10 @@ fn repo_init_options(args: RepoInitArgs) -> Result<RepoInitOptions> {
     Ok(RepoInitOptions {
         profile: args.profile,
         profile_file: args.profile_file,
-        artifact_sources: args
-            .artifact_sources
+        artifacts: args
+            .artifacts
             .iter()
-            .map(|source| parse_repo_artifact_source(source))
+            .map(|source| parse_repo_artifact(source))
             .collect::<Result<Vec<_>>>()?,
         skills_url: args.skills_url,
         skills_rev: args.skills_rev,
@@ -1576,24 +1576,24 @@ fn repo_init_options(args: RepoInitArgs) -> Result<RepoInitOptions> {
     })
 }
 
-fn parse_repo_artifact_source(input: &str) -> Result<RepoArtifactSourceOverride> {
+fn parse_repo_artifact(input: &str) -> Result<RepoArtifactOverride> {
     let Some((name, source)) = input.split_once('=') else {
-        bail!("artifact source must be NAME=URL[@REV]: {input}");
+        bail!("artifact must be NAME=URL[@REV]: {input}");
     };
     let name = name.trim();
     if name.is_empty() {
-        bail!("artifact source name cannot be blank: {input}");
+        bail!("artifact name cannot be blank: {input}");
     }
     if !name
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
-        bail!("artifact source name contains invalid characters: {name}");
+        bail!("artifact name contains invalid characters: {name}");
     }
 
     let source = source.trim();
     if source.is_empty() {
-        bail!("artifact source URL cannot be blank: {input}");
+        bail!("artifact URL cannot be blank: {input}");
     }
 
     let split_index = source.rfind('@').filter(|index| {
@@ -1604,7 +1604,7 @@ fn parse_repo_artifact_source(input: &str) -> Result<RepoArtifactSourceOverride>
         let (url, rev) = source.split_at(index);
         let rev = rev.trim_start_matches('@').trim();
         if rev.is_empty() {
-            bail!("artifact source revision cannot be blank: {input}");
+            bail!("artifact revision cannot be blank: {input}");
         }
         (url.trim().to_string(), Some(rev.to_string()))
     } else {
@@ -1612,10 +1612,10 @@ fn parse_repo_artifact_source(input: &str) -> Result<RepoArtifactSourceOverride>
     };
 
     if url.is_empty() {
-        bail!("artifact source URL cannot be blank: {input}");
+        bail!("artifact URL cannot be blank: {input}");
     }
 
-    Ok(RepoArtifactSourceOverride {
+    Ok(RepoArtifactOverride {
         name: name.to_string(),
         url,
         rev,
@@ -2342,7 +2342,7 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Inspect and export the local AgentLIBRE store.
+    /// Inspect and export the local agentLIBRE store.
     Store {
         #[command(subcommand)]
         command: StoreCommands,
@@ -2357,22 +2357,22 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: InferenceCommands,
     },
-    /// Manage local scheduled AgentLIBRE jobs.
+    /// Manage local scheduled agentLIBRE jobs.
     Cron {
         #[command(subcommand)]
         command: CronCommands,
     },
-    /// Manage local AgentLIBRE memory.
+    /// Manage local agentLIBRE memory.
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Manage local AgentLIBRE notes.
+    /// Manage local agentLIBRE notes.
     Notes {
         #[command(subcommand)]
         command: NotesCommands,
     },
-    /// Initialize the repo-local AgentLIBRE workspace.
+    /// Initialize the repo-local agentLIBRE workspace.
     Init(RepoInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
@@ -2380,14 +2380,14 @@ enum PublicCompletionCommands {
     Chat(ChatArgs),
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),
-    /// Report repo-local AgentLIBRE workspace status.
+    /// Report repo-local agentLIBRE workspace status.
     Status(RepoStatusArgs),
-    /// Inspect and verify AgentLIBRE skills.
+    /// Inspect and verify agentLIBRE skills.
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
-    /// Install AgentLIBRE git hooks for this repository.
+    /// Install agentLIBRE git hooks for this repository.
     InstallHooks(RepoHooksArgs),
 }
 

@@ -200,7 +200,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use agl_config::LocalInferenceConfig;
+    use agl_config::ResolvedInferenceConfig;
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
     };
@@ -282,7 +282,7 @@ mod tests {
 
         fn clear_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             _session_id: &SessionId,
         ) -> Result<()> {
             Ok(())
@@ -290,7 +290,7 @@ mod tests {
 
         fn release_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             session_id: &SessionId,
         ) -> Result<()> {
             self.state
