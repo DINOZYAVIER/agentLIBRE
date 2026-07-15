@@ -1227,7 +1227,7 @@ fn build_hook_repair_message(
         .collect::<Vec<_>>();
     let codes = summary.message_codes.join(", ");
     let mut message = format!(
-        "The previous answer failed AgentLIBRE hook validation for `{}`.",
+        "The previous answer failed agentLIBRE hook validation for `{}`.",
         event.as_str()
     );
     if !codes.is_empty() {

@@ -13,8 +13,9 @@ agl skill inspect repo-status --runtime
 agl run --skill repo-status --prompt "Summarize this repo status."
 ```
 
-Workspace skills live under `.agl/skills` and must pass the workspace trust
-flow before the runtime can inject them:
+Workspace skills may live under an explicitly configured `.agl/skills` Git
+artifact and must pass the workspace trust flow before the runtime can inject
+them. Core skills do not require this artifact.
 
 ```bash
 agl skill init
@@ -40,8 +41,8 @@ agl skill trust <name> --yes
 agl skill verify
 ```
 
-The lock records the workspace skill component identity in `.agl/skills.lock`.
-The local trust decision is stored under the AgentLIBRE state directory:
+The lock records the workspace skill Git identity in `.agl/skills.lock`.
+The local trust decision is stored under the agentLIBRE state directory:
 
 ```bash
 agl config paths

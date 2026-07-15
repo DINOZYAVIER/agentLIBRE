@@ -15,7 +15,7 @@ pub const DEFAULT_SKILLS_REV: &str = "v0.1.2";
 pub struct RepoInitOptions {
     pub profile: String,
     pub profile_file: Option<PathBuf>,
-    pub artifact_sources: Vec<RepoArtifactSourceOverride>,
+    pub artifacts: Vec<RepoArtifactOverride>,
     pub skills_url: Option<String>,
     pub skills_rev: Option<String>,
     pub tasks_url: Option<String>,
@@ -29,7 +29,7 @@ impl Default for RepoInitOptions {
         Self {
             profile: DEFAULT_PROFILE.to_string(),
             profile_file: None,
-            artifact_sources: Vec::new(),
+            artifacts: Vec::new(),
             skills_url: None,
             skills_rev: None,
             tasks_url: None,
@@ -41,7 +41,7 @@ impl Default for RepoInitOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepoArtifactSourceOverride {
+pub struct RepoArtifactOverride {
     pub name: String,
     pub url: String,
     pub rev: Option<String>,
@@ -152,7 +152,7 @@ pub enum RepoStatusState {
 pub struct ComponentStatus {
     pub name: String,
     pub path: PathBuf,
-    pub kind: ComponentKind,
+    pub kind: WorkspaceArtifactKind,
     pub exists: bool,
     pub state: ComponentState,
     pub warnings: Vec<String>,
@@ -200,6 +200,10 @@ impl RepoComponentInitReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoComponentInitAction {
+    WouldClone,
+    Cloned,
+    WouldFetch,
+    Fetched,
     WouldAddSubmodule,
     AddedSubmodule,
     WouldUpdateSubmodule,
@@ -240,6 +244,7 @@ impl TaskSpecVerifyReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskSpecVerifyState {
+    NotConfigured,
     Ok,
     Warning,
     Invalid,
@@ -260,7 +265,6 @@ pub struct ArtifactStatusReport {
     pub workspace_root: PathBuf,
     pub manifest_path: PathBuf,
     pub lock_path: PathBuf,
-    pub sources: Vec<ArtifactSourceStatus>,
     pub artifacts: Vec<ArtifactStatus>,
     pub undeclared: Vec<UndeclaredArtifactRoot>,
     pub warnings: Vec<String>,
@@ -277,34 +281,16 @@ impl ArtifactStatusReport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ArtifactStatus {
     pub id: String,
-    pub source_id: String,
-    pub source_role: ArtifactSourceRole,
-    pub source_kind: ArtifactSourceKind,
+    pub storage: WorkspaceArtifactKind,
     pub path: PathBuf,
     pub kind: ArtifactKind,
     pub access: ArtifactAccess,
-    pub provides: Vec<String>,
-    pub schema: Option<String>,
+    pub required: bool,
+    pub validation: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub create: Vec<ArtifactCreateRule>,
+    pub create: Vec<PathBuf>,
     pub state: ArtifactState,
     pub exists: bool,
-    pub contract_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub locked_contract_hash: Option<String>,
-    pub warnings: Vec<String>,
-    pub errors: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ArtifactSourceStatus {
-    pub id: String,
-    pub role: ArtifactSourceRole,
-    pub kind: ArtifactSourceKind,
-    pub path: PathBuf,
-    pub required: bool,
-    pub exists: bool,
-    pub state: ArtifactSourceState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,17 +309,11 @@ pub struct ArtifactSourceStatus {
     pub tracked_dirty: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untracked_suspicious: Option<bool>,
+    pub definition_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_definition_hash: Option<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactSourceState {
-    Ok,
-    Missing,
-    Warning,
-    Invalid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -352,15 +332,14 @@ pub struct ArtifactPathHandleRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ArtifactHandle {
     pub artifact_id: String,
-    pub source_id: String,
     pub root: PathBuf,
     pub relative_path: PathBuf,
     pub path_in_artifact: PathBuf,
     pub kind: ArtifactKind,
     pub access: ArtifactAccess,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    pub contract_hash: String,
+    pub validation: Option<String>,
+    pub definition_hash: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -442,25 +421,22 @@ pub struct ArtifactLockFile {
 #[serde(deny_unknown_fields)]
 pub struct LockedArtifact {
     pub id: String,
-    pub source_id: String,
-    pub source_role: ArtifactSourceRole,
-    pub source_kind: ArtifactSourceKind,
-    pub source_path: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_rev: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_tree: Option<String>,
+    pub storage: WorkspaceArtifactKind,
     pub path: PathBuf,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
     pub kind: ArtifactKind,
     pub access: ArtifactAccess,
-    pub provides: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    pub contract_hash: String,
+    pub validation: Option<String>,
+    pub definition_hash: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materialized_paths: Vec<PathBuf>,
 }
@@ -505,9 +481,8 @@ pub struct WorkspaceManifest {
     pub version: u32,
     pub profile: String,
     pub functions: WorkspaceFunctions,
-    pub components: BTreeMap<String, WorkspaceComponent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub artifact_sources: BTreeMap<String, ArtifactSource>,
+    pub artifacts: BTreeMap<String, WorkspaceArtifact>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -529,13 +504,32 @@ impl Default for WorkspaceFunctions {
 pub struct WorkspaceProfile {
     pub version: u32,
     pub name: String,
-    pub components: BTreeMap<String, WorkspaceComponent>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub artifact_sources: BTreeMap<String, ArtifactSource>,
+    pub artifacts: BTreeMap<String, WorkspaceArtifact>,
     #[serde(default)]
     pub policy: WorkspaceProfilePolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceArtifact {
+    pub kind: WorkspaceArtifactKind,
+    pub path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_pack: Option<WorkspaceSkillPackIdentity>,
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    pub access: ArtifactAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub create: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -569,24 +563,6 @@ pub struct WorkspaceTrustPolicy {
     pub import_local_trust: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceSkillPackIdentity {
-    pub component: String,
-    pub path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lock: Option<PathBuf>,
-    pub same_ids_when_pinned: bool,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RepoExportProfileReport {
     pub workspace_root: PathBuf,
@@ -595,95 +571,14 @@ pub struct RepoExportProfileReport {
     pub profile: WorkspaceProfile,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceComponent {
-    pub path: PathBuf,
-    pub kind: ComponentKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lock: Option<PathBuf>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ComponentKind {
-    Local,
-    Git,
-    Submodule,
-    Generated,
-    Ignored,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactSource {
-    pub role: ArtifactSourceRole,
-    pub kind: ArtifactSourceKind,
-    pub path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub provides: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<ArtifactContract>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactSourceRole {
-    Core,
-    Community,
-    Local,
-    Planning,
-    Generated,
-    State,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ArtifactSourceKind {
+pub enum WorkspaceArtifactKind {
     Git,
     Submodule,
     Local,
     Generated,
     Ignored,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactContract {
-    pub id: String,
-    pub kind: ArtifactKind,
-    pub path: PathBuf,
-    pub access: ArtifactAccess,
-    #[serde(default)]
-    pub provides: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    #[serde(default)]
-    pub create: Vec<ArtifactCreateRule>,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub shared: bool,
-    #[serde(default)]
-    pub conflict_policy: ArtifactConflictPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -701,19 +596,4 @@ pub enum ArtifactAccess {
     Read,
     Write,
     ReadWrite,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactCreateRule {
-    pub dir: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactConflictPolicy {
-    Identical,
-    SourcePriority,
-    #[default]
-    Reject,
 }

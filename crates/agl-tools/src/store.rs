@@ -192,7 +192,7 @@ pub fn declaration() -> ProviderDeclaration {
     .with_action(
         ActionDeclaration::from_schema::<MigrateArgs>(
             CapabilityId::new(STORE_MIGRATE_TOOL_ID).expect("builtin store action id is valid"),
-            "Run AgentLIBRE store migrations through an explicit admin boundary.",
+            "Run agentLIBRE store migrations through an explicit admin boundary.",
             OperationKind::Admin,
         )
         .expect("builtin store migration schema is valid")

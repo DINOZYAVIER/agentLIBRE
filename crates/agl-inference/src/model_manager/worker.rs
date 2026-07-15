@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{InferenceResponse, InferenceResponseMetadata};
-use agl_config::LocalInferenceConfig;
+use agl_config::ResolvedInferenceConfig;
 
 use super::evidence::AttemptEvidence;
 use super::{
@@ -23,7 +23,7 @@ pub trait ModelRuntime: Send + 'static {
     fn load_model(
         &mut self,
         key: &ModelKey,
-        config: &LocalInferenceConfig,
+        config: &ResolvedInferenceConfig,
     ) -> Result<RuntimeOperation<Self::Model>, RuntimeFailure>;
 
     fn create_context(

@@ -10,7 +10,7 @@ use super::*;
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
-fn trusted_script_hook_executes_json_contract() {
+fn trusted_script_hook_executes_json_interface() {
     let script = write_script(
         "pass",
         r#"#!/bin/sh
@@ -126,7 +126,7 @@ fn timeout_kills_child_and_returns_failure() {
 }
 
 #[test]
-fn batch_uses_shared_hook_contract_shape() {
+fn batch_uses_shared_hook_payload_shape() {
     let script = write_script(
         "batch",
         r#"#!/bin/sh

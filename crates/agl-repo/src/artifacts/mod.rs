@@ -1,9 +1,7 @@
-mod defaults;
 mod lock;
 mod path;
 mod roots;
 mod schema;
-mod source;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,9 +9,8 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-pub(crate) use defaults::{default_artifact_sources, source_backed_artifact_source};
 use lock::{
-    artifact_contract_hash, artifact_lock_error_allows_refresh, read_artifact_lock, unix_ms_now,
+    artifact_definition_hash, artifact_lock_error_allows_refresh, read_artifact_lock, unix_ms_now,
     validate_locked_artifact,
 };
 use path::{
@@ -22,24 +19,22 @@ use path::{
 };
 use roots::undeclared_artifact_roots;
 use schema::validate_artifact_schema;
-use source::artifact_source_statuses;
 
 use crate::{
-    ARTIFACT_LOCK_PATH, ArtifactConflictPolicy, ArtifactContract, ArtifactHandle, ArtifactKind,
-    ArtifactLockOptions, ArtifactLockReport, ArtifactPathHandleRequest, ArtifactReportState,
-    ArtifactSource, ArtifactSourceStatus, ArtifactState, ArtifactStatus, ArtifactStatusOptions,
-    ArtifactStatusReport, ArtifactSyncAction, ArtifactSyncActionKind, ArtifactSyncOptions,
-    ArtifactSyncReport, DEFAULT_PROFILE, LockedArtifact, WORKSPACE_MANIFEST_PATH,
-    WorkspaceFunctions, WorkspaceManifest, default_manifest, is_not_found, read_manifest,
-    resolve_repo_root,
+    ARTIFACT_LOCK_PATH, ArtifactHandle, ArtifactKind, ArtifactLockOptions, ArtifactLockReport,
+    ArtifactPathHandleRequest, ArtifactReportState, ArtifactState, ArtifactStatus,
+    ArtifactStatusOptions, ArtifactStatusReport, ArtifactSyncAction, ArtifactSyncActionKind,
+    ArtifactSyncOptions, ArtifactSyncReport, DEFAULT_PROFILE, LockedArtifact,
+    WORKSPACE_MANIFEST_PATH, WorkspaceArtifact, WorkspaceArtifactKind, WorkspaceFunctions,
+    WorkspaceManifest, component_status, is_not_found, read_manifest, resolve_repo_root,
 };
 
 #[derive(Clone, Debug)]
-struct ResolvedArtifactContract {
-    source_id: String,
-    source: ArtifactSource,
-    contract: ArtifactContract,
-    contract_hash: String,
+struct ResolvedArtifact {
+    id: String,
+    definition: WorkspaceArtifact,
+    kind: ArtifactKind,
+    definition_hash: String,
 }
 
 pub fn status_artifacts(
@@ -49,24 +44,19 @@ pub fn status_artifacts(
     let workspace_root = resolve_repo_root(start)?;
     let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
     let lock_path = workspace_root.join(ARTIFACT_LOCK_PATH);
-    let (manifest, mut warnings, mut errors) = artifact_manifest_or_compat(&workspace_root)?;
+    let (manifest, mut warnings, mut errors) = artifact_manifest_for_status(&workspace_root)?;
     let lock = read_artifact_lock(&lock_path, &mut errors);
-    let sources = artifact_source_statuses(&workspace_root, &manifest);
-    let resolved = resolve_artifact_contracts(&workspace_root, &manifest, &mut errors);
+    let resolved = resolve_artifacts(&workspace_root, &manifest, &mut errors);
     let mut all_artifacts = Vec::new();
 
     for resolved in resolved {
-        let source_status = sources
-            .iter()
-            .find(|source| source.id == resolved.source_id);
         let locked = lock
             .as_ref()
-            .and_then(|lock| lock.artifacts.get(&resolved.contract.id));
+            .and_then(|lock| lock.artifacts.get(&resolved.id));
         all_artifacts.push(artifact_status(
             &workspace_root,
             resolved,
             locked,
-            source_status,
             options.strict,
         ));
     }
@@ -86,21 +76,6 @@ pub fn status_artifacts(
             "artifact_not_found: {}",
             options.artifact.as_deref().unwrap_or_default()
         ));
-    }
-
-    for source in &sources {
-        warnings.extend(
-            source
-                .warnings
-                .iter()
-                .map(|warning| format!("artifact_source.{}.{}", source.id, warning)),
-        );
-        errors.extend(
-            source
-                .errors
-                .iter()
-                .map(|error| format!("artifact_source.{}.{}", source.id, error)),
-        );
     }
 
     for artifact in &artifacts {
@@ -128,7 +103,7 @@ pub fn status_artifacts(
         }
     }
 
-    let undeclared = undeclared_artifact_roots(&workspace_root, &all_artifacts, &sources)?;
+    let undeclared = undeclared_artifact_roots(&workspace_root, &all_artifacts)?;
     warnings.extend(undeclared.iter().map(|root| {
         format!(
             "undeclared_artifact_root: {} suggested_kind={:?} suggested_target={}",
@@ -158,7 +133,6 @@ pub fn status_artifacts(
         workspace_root,
         manifest_path,
         lock_path,
-        sources,
         artifacts,
         undeclared,
         warnings,
@@ -213,7 +187,7 @@ pub fn sync_artifacts(
             continue;
         }
         for create in &artifact.create {
-            let relative_path = artifact_create_path(&artifact.path, &create.dir);
+            let relative_path = artifact_create_path(&artifact.path, create);
             let absolute_path = status.workspace_root.join(&relative_path);
             if absolute_path.exists() {
                 actions.push(ArtifactSyncAction {
@@ -295,40 +269,34 @@ pub fn lock_artifacts(
             .artifacts
             .iter()
             .map(|artifact| {
-                let source = status
-                    .sources
-                    .iter()
-                    .find(|source| source.id == artifact.source_id);
                 (
                     artifact.id.clone(),
                     LockedArtifact {
                         id: artifact.id.clone(),
-                        source_id: artifact.source_id.clone(),
-                        source_role: artifact.source_role,
-                        source_kind: artifact.source_kind,
-                        source_path: source
-                            .map(|source| source.path.clone())
-                            .unwrap_or_else(PathBuf::new),
-                        source_url: source
-                            .and_then(|source| source.actual_url.clone())
-                            .or_else(|| source.and_then(|source| source.expected_url.clone())),
-                        source_rev: source.and_then(|source| source.expected_rev.clone()),
-                        source_commit: source
-                            .and_then(|source| source.actual_commit.clone())
-                            .or_else(|| source.and_then(|source| source.expected_commit.clone())),
-                        source_tree: source
-                            .and_then(|source| source.actual_tree.clone())
-                            .or_else(|| source.and_then(|source| source.expected_tree.clone())),
+                        storage: artifact.storage,
                         path: artifact.path.clone(),
+                        required: artifact.required,
+                        url: artifact
+                            .actual_url
+                            .clone()
+                            .or_else(|| artifact.expected_url.clone()),
+                        rev: artifact.expected_rev.clone(),
+                        commit: artifact
+                            .actual_commit
+                            .clone()
+                            .or_else(|| artifact.expected_commit.clone()),
+                        tree: artifact
+                            .actual_tree
+                            .clone()
+                            .or_else(|| artifact.expected_tree.clone()),
                         kind: artifact.kind,
                         access: artifact.access,
-                        provides: artifact.provides.clone(),
-                        schema: artifact.schema.clone(),
-                        contract_hash: artifact.contract_hash.clone(),
+                        validation: artifact.validation.clone(),
+                        definition_hash: artifact.definition_hash.clone(),
                         materialized_paths: artifact
                             .create
                             .iter()
-                            .map(|create| artifact_create_path(&artifact.path, &create.dir))
+                            .map(|create| artifact_create_path(&artifact.path, create))
                             .collect(),
                     },
                 )
@@ -379,28 +347,23 @@ pub fn lock_artifacts(
     })
 }
 
-fn artifact_manifest_or_compat(
+fn artifact_manifest_for_status(
     workspace_root: &Path,
 ) -> Result<(WorkspaceManifest, Vec<String>, Vec<String>)> {
     let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
     match read_manifest(&manifest_path) {
         Ok(manifest) => Ok((manifest, Vec::new(), Vec::new())),
-        Err(err) if is_not_found(&err) => {
-            let mut manifest = default_manifest();
-            manifest.components.clear();
-            Ok((
-                manifest,
-                vec!["workspace_manifest_missing".to_string()],
-                Vec::new(),
-            ))
-        }
+        Err(err) if is_not_found(&err) => Ok((
+            empty_workspace_manifest(),
+            Vec::new(),
+            vec!["workspace_manifest_missing".to_string()],
+        )),
         Err(err) => Ok((
             WorkspaceManifest {
                 version: 1,
                 profile: DEFAULT_PROFILE.to_string(),
                 functions: WorkspaceFunctions::default(),
-                components: BTreeMap::new(),
-                artifact_sources: default_artifact_sources(),
+                artifacts: BTreeMap::new(),
             },
             Vec::new(),
             vec![format!("workspace_manifest_invalid: {err:#}")],
@@ -408,114 +371,132 @@ fn artifact_manifest_or_compat(
     }
 }
 
-fn resolve_artifact_contracts(
+fn resolve_artifacts(
     workspace_root: &Path,
     manifest: &WorkspaceManifest,
     errors: &mut Vec<String>,
-) -> Vec<ResolvedArtifactContract> {
+) -> Vec<ResolvedArtifact> {
     let mut resolved = Vec::new();
-    let mut seen_ids = BTreeMap::<String, ArtifactContract>::new();
-    let mut seen_paths = BTreeMap::<PathBuf, ArtifactContract>::new();
+    let mut seen_paths = BTreeMap::<PathBuf, String>::new();
 
-    for (source_id, source) in &manifest.artifact_sources {
-        if let Err(err) = validate_artifact_path(&source.path) {
-            errors.push(format!("artifact_source.{source_id}.path_invalid: {err:#}"));
-        }
-        for contract in &source.artifacts {
-            validate_artifact_contract(workspace_root, source_id, contract, errors);
-            if let Some(existing) = seen_ids.insert(contract.id.clone(), contract.clone())
-                && existing != *contract
-            {
-                errors.push(format!("artifact.{}.duplicate_id_conflict", contract.id));
-            }
-            if let Some(existing) = seen_paths.insert(contract.path.clone(), contract.clone())
-                && existing != *contract
-                && (!existing.shared
-                    || !contract.shared
-                    || existing.conflict_policy != ArtifactConflictPolicy::Identical
-                    || contract.conflict_policy != ArtifactConflictPolicy::Identical)
-            {
+    for (id, artifact) in &manifest.artifacts {
+        validate_artifact_definition(workspace_root, id, artifact, errors);
+        for (other_path, other_id) in &seen_paths {
+            if artifact.path.starts_with(other_path) || other_path.starts_with(&artifact.path) {
                 errors.push(format!(
-                    "artifact.{}.path_conflict: {}",
-                    contract.id,
-                    contract.path.display()
+                    "artifact.{id}.path_overlap: {} overlaps artifact {other_id} at {}",
+                    artifact.path.display(),
+                    other_path.display()
                 ));
             }
-            resolved.push(ResolvedArtifactContract {
-                source_id: source_id.clone(),
-                source: source.clone(),
-                contract: contract.clone(),
-                contract_hash: artifact_contract_hash(source_id, contract),
-            });
         }
+        seen_paths.insert(artifact.path.clone(), id.clone());
+        let kind = artifact_kind(artifact.kind);
+        resolved.push(ResolvedArtifact {
+            id: id.clone(),
+            definition: artifact.clone(),
+            kind,
+            definition_hash: artifact_definition_hash(id, artifact),
+        });
     }
 
     resolved
 }
 
-fn validate_artifact_contract(
+fn empty_workspace_manifest() -> WorkspaceManifest {
+    WorkspaceManifest {
+        version: 1,
+        profile: DEFAULT_PROFILE.to_string(),
+        functions: WorkspaceFunctions::default(),
+        artifacts: BTreeMap::new(),
+    }
+}
+
+fn artifact_kind(storage: WorkspaceArtifactKind) -> ArtifactKind {
+    match storage {
+        WorkspaceArtifactKind::Generated => ArtifactKind::Generated,
+        WorkspaceArtifactKind::Ignored => ArtifactKind::State,
+        WorkspaceArtifactKind::Git
+        | WorkspaceArtifactKind::Submodule
+        | WorkspaceArtifactKind::Local => ArtifactKind::Source,
+    }
+}
+
+fn validate_artifact_definition(
     workspace_root: &Path,
-    source_id: &str,
-    contract: &ArtifactContract,
+    id: &str,
+    artifact: &WorkspaceArtifact,
     errors: &mut Vec<String>,
 ) {
-    if contract.id.trim().is_empty() {
-        errors.push(format!("artifact_source.{source_id}.artifact_id_blank"));
+    if id.trim().is_empty() {
+        errors.push("artifact.id_blank".to_string());
     }
-    if let Err(err) = validate_artifact_path(&contract.path) {
-        errors.push(format!("artifact.{}.path_invalid: {err:#}", contract.id));
+    if let Err(err) = validate_artifact_path(&artifact.path) {
+        errors.push(format!("artifact.{id}.path_invalid: {err:#}"));
     }
-    for create in &contract.create {
-        if create.dir.is_absolute() {
-            errors.push(format!("artifact.{}.create_dir_absolute", contract.id));
+    for create in &artifact.create {
+        if create.is_absolute() {
+            errors.push(format!("artifact.{id}.create_dir_absolute"));
         }
         if create
-            .dir
             .components()
             .any(|component| matches!(component, Component::ParentDir))
         {
-            errors.push(format!("artifact.{}.create_dir_parent", contract.id));
+            errors.push(format!("artifact.{id}.create_dir_parent"));
         }
     }
-    let absolute_path = workspace_root.join(&contract.path);
+    let absolute_path = workspace_root.join(&artifact.path);
     if absolute_path.exists()
         && let Err(err) = validate_no_symlink_escape(workspace_root, &absolute_path)
     {
-        errors.push(format!("artifact.{}.path_escape: {err:#}", contract.id));
+        errors.push(format!("artifact.{id}.path_escape: {err:#}"));
     }
 }
 
 fn artifact_status(
     workspace_root: &Path,
-    resolved: ResolvedArtifactContract,
+    resolved: ResolvedArtifact,
     locked: Option<&LockedArtifact>,
-    source_status: Option<&ArtifactSourceStatus>,
     strict_schema: bool,
 ) -> ArtifactStatus {
-    let absolute_path = workspace_root.join(&resolved.contract.path);
+    let absolute_path = workspace_root.join(&resolved.definition.path);
     let exists = absolute_path.exists();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
-    let locked_contract_hash = locked.map(|locked| locked.contract_hash.clone());
+    let locked_definition_hash = locked.map(|locked| locked.definition_hash.clone());
 
-    if !exists && resolved.contract.required {
-        errors.push("missing".to_string());
-    } else if !exists {
-        warnings.push("missing_optional".to_string());
-    } else if !absolute_path.is_dir() {
+    let component_status = component_status(workspace_root, &resolved.id, &resolved.definition);
+    warnings.extend(component_status.warnings.clone());
+    errors.extend(component_status.errors.clone());
+    if !resolved.definition.required {
+        errors.retain(|error| error != "missing");
+        if !exists && !warnings.iter().any(|warning| warning == "missing_optional") {
+            warnings.push("missing_optional".to_string());
+        }
+    }
+
+    if exists && !absolute_path.is_dir() {
         errors.push("not_directory".to_string());
     }
     if exists && absolute_path.is_dir() {
         validate_artifact_schema(
             workspace_root,
-            &resolved.contract.path,
-            resolved.contract.schema.as_deref(),
+            &resolved.definition.path,
+            resolved.definition.validation.as_deref(),
             strict_schema,
             &mut warnings,
             &mut errors,
         );
     }
-    validate_locked_artifact(&resolved, locked, source_status, &mut warnings, &mut errors);
+    validate_locked_artifact(
+        &resolved,
+        locked,
+        component_status.actual_url.as_deref(),
+        component_status.actual_commit.as_deref(),
+        component_status.actual_tree.as_deref(),
+        &mut warnings,
+        &mut errors,
+    );
 
     let state = if !errors.is_empty() {
         if errors.iter().any(|error| error == "missing") {
@@ -530,20 +511,27 @@ fn artifact_status(
     };
 
     ArtifactStatus {
-        id: resolved.contract.id,
-        source_id: resolved.source_id,
-        source_role: resolved.source.role,
-        source_kind: resolved.source.kind,
-        path: resolved.contract.path,
-        kind: resolved.contract.kind,
-        access: resolved.contract.access,
-        provides: resolved.contract.provides,
-        schema: resolved.contract.schema,
-        create: resolved.contract.create,
+        id: resolved.id,
+        storage: resolved.definition.kind,
+        path: resolved.definition.path,
+        kind: resolved.kind,
+        access: resolved.definition.access,
+        required: resolved.definition.required,
+        validation: resolved.definition.validation,
+        create: resolved.definition.create,
         state,
         exists,
-        contract_hash: resolved.contract_hash,
-        locked_contract_hash,
+        expected_url: resolved.definition.url,
+        actual_url: component_status.actual_url,
+        expected_rev: resolved.definition.rev,
+        expected_commit: resolved.definition.commit,
+        actual_commit: component_status.actual_commit,
+        expected_tree: resolved.definition.tree,
+        actual_tree: component_status.actual_tree,
+        tracked_dirty: component_status.tracked_dirty,
+        untracked_suspicious: component_status.untracked_suspicious,
+        definition_hash: resolved.definition_hash,
+        locked_definition_hash,
         warnings,
         errors,
     }
@@ -614,14 +602,13 @@ pub fn resolve_artifact_path_handle(
 
     Ok(ArtifactHandle {
         artifact_id: artifact.id.clone(),
-        source_id: artifact.source_id.clone(),
         root: artifact.path.clone(),
         relative_path: request.path.clone(),
         path_in_artifact,
         kind: artifact.kind,
         access: artifact.access,
-        schema: artifact.schema.clone(),
-        contract_hash: artifact.contract_hash.clone(),
+        validation: artifact.validation.clone(),
+        definition_hash: artifact.definition_hash.clone(),
     })
 }
 

@@ -15,11 +15,12 @@ fn agl_help_lists_public_commands() {
 
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
+    assert_no_noncanonical_product_spelling(&stdout);
     assert_contains(&stdout, "Usage: agl");
     assert_contains(&stdout, "Basics:");
     assert_contains(
         &stdout,
-        ".agl/workspace.toml lists the repo's AgentLIBRE folders",
+        ".agl/workspace.toml lists the repo's agentLIBRE folders",
     );
     assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
     assert_contains(&stdout, "run");
@@ -138,7 +139,9 @@ fn command_help_exits_successfully_for_public_commands() {
         let output = run_agl(args);
 
         assert_success_no_stderr(&output);
-        assert_contains(&stdout(&output), "Usage: agl");
+        let stdout = stdout(&output);
+        assert_contains(&stdout, "Usage: agl");
+        assert_no_noncanonical_product_spelling(&stdout);
     }
 }
 
@@ -165,7 +168,9 @@ fn command_help_exits_successfully_for_advanced_commands() {
         let output = run_agl(args);
 
         assert_success_no_stderr(&output);
-        assert_contains(&stdout(&output), "Usage: agl");
+        let stdout = stdout(&output);
+        assert_contains(&stdout, "Usage: agl");
+        assert_no_noncanonical_product_spelling(&stdout);
     }
 }
 
@@ -672,10 +677,10 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
     let stdout = stdout(&output);
     assert_contains(&stdout, "Usage: agl repo");
     assert_contains(&stdout, "Repo workspace:");
-    assert_contains(&stdout, "components list paths such as .agl/skills");
+    assert_contains(&stdout, "each opt-in root is declared once");
     assert_contains(
         &stdout,
-        "artifact_sources list the .agl folders agl is allowed to manage",
+        "undeclared roots are not created, inspected, or reported as missing",
     );
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "status");
@@ -683,6 +688,26 @@ fn hidden_repo_help_remains_available_for_advanced_usage() {
     assert!(
         !stdout.contains("import-profile"),
         "script-only import-profile command should stay hidden:\n{stdout}"
+    );
+}
+
+#[test]
+fn daemon_help_explains_process_boundaries() {
+    let output = run_agl(&["daemon", "--help"]);
+
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(
+        &stdout,
+        "The daemon serves long-running clients such as the Matrix bridge.",
+    );
+    assert_contains(
+        &stdout,
+        "Commands such as `agl run` and `agl chat` execute in the invoking process.",
+    );
+    assert_contains(
+        &stdout,
+        "`agl serve` starts the daemon, and `agl daemon status` inspects it.",
     );
 }
 
@@ -809,37 +834,29 @@ fn init_accepts_local_workspace_profile_file() {
 version = 1
 name = "portable-repo-workflow"
 
-[components.skills]
+[artifacts.skills]
+kind = "git"
 path = ".agl/skills"
-kind = "submodule"
-url = "git@example.com:agentlibre/agl-skills.git"
+url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
 rev = "v0.2.0"
-lock = ".agl/skills.lock"
+required = true
+access = "read"
 
-[components.tasks]
-path = ".agl/tasks"
+[artifacts.tasks]
 kind = "git"
-url = "git@example.com:agentlibre/tasks.git"
+path = ".agl/tasks"
+url = "ssh://git@example.invalid/agentlibre/tasks.git"
 rev = "main"
+required = true
+access = "read_write"
+validation = "agl.task_spec.v1"
 
-[components.state]
-path = ".agl/state"
-kind = "ignored"
-
-[artifact_sources.skills]
-role = "core"
-kind = "submodule"
-path = ".agl/skills"
-
-[artifact_sources.tasks]
-role = "planning"
-kind = "git"
-path = ".agl/tasks"
-
-[artifact_sources.state]
-role = "state"
+[artifacts.state]
 kind = "ignored"
 path = ".agl/state"
+required = false
+access = "read_write"
+create = ["."]
 "#,
     )
     .unwrap_or_else(|err| panic!("failed to write profile {}: {err}", profile_path.display()));
@@ -856,7 +873,10 @@ path = ".agl/state"
         &stdout,
         "change path=.agl/tasks action=declared_git_component",
     );
-    assert_contains(&stdout, "change path=.agl/skills action=declared_submodule");
+    assert_contains(
+        &stdout,
+        "change path=.agl/skills action=declared_git_component",
+    );
 }
 
 #[test]
@@ -878,12 +898,11 @@ fn repo_export_profile_writes_portable_policy_manifest() {
     let stdout = stdout(&export);
     assert_contains(&stdout, "profile.exported=true");
     assert_contains(&stdout, "profile.policy.trust.import_local_trust=false");
-    assert_contains(&stdout, "profile.skill_pack.same_ids_when_pinned=true");
 
     let content = fs::read_to_string(&out)
         .unwrap_or_else(|err| panic!("failed to read profile export {}: {err}", out.display()));
     assert_contains(&content, "[policy.hooks]");
-    assert_contains(&content, "[skill_pack]");
+    assert!(!content.contains("[artifacts."));
     assert!(
         !content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"),
         "profile export must not include local trust:\n{content}"
@@ -922,7 +941,7 @@ fn repo_import_profile_hidden_command_applies_explicit_profile() {
 }
 
 #[test]
-fn init_then_status_reports_missing_skills_submodule_warning() {
+fn init_then_status_is_healthy_without_workspace_artifacts() {
     let repo = TempRepo::new("status-after-init");
     let init = run_agl_in(repo.path(), &["init"]);
     assert_success(&init);
@@ -931,22 +950,20 @@ fn init_then_status_reports_missing_skills_submodule_warning() {
 
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
-    assert_contains(&stdout, "state=warning");
-    assert_contains(&stdout, "component.skills.warning=missing");
-    assert_contains(&stdout, "next_step=agl skill init");
+    assert_contains(&stdout, "state=ok");
+    assert!(!stdout.contains("component.skills"));
 }
 
 #[test]
-fn status_strict_fails_on_missing_skills_submodule_warning() {
+fn status_strict_accepts_workspace_without_optional_artifacts() {
     let repo = TempRepo::new("status-strict");
     let init = run_agl_in(repo.path(), &["init"]);
     assert_success(&init);
 
     let output = run_agl_in(repo.path(), &["status", "--strict"]);
 
-    assert_failure(&output);
-    assert_contains(&stdout(&output), "state=warning");
-    assert_contains(&stderr(&output), "repo workspace status is not healthy");
+    assert_success_no_stderr(&output);
+    assert_contains(&stdout(&output), "state=ok");
 }
 
 #[test]
@@ -1017,19 +1034,15 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
 }
 
 #[test]
-fn skill_verify_fails_until_skills_component_is_locked_and_healthy() {
+fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
     let repo = TempRepo::new("skill-verify-missing");
     let init = run_agl_in(repo.path(), &["init"]);
     assert_success(&init);
 
     let output = run_agl_in(repo.path(), &["skill", "verify"]);
 
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=warning");
-    assert_contains(&stdout, "warning=component.skills.missing");
-    assert_contains(&stdout, "warning=skills_lock_missing");
-    assert_contains(&stderr(&output), "workspace skill verification failed");
+    assert_success_no_stderr(&output);
+    assert_contains(&stdout(&output), "state=ok");
 }
 
 #[test]
@@ -1396,11 +1409,12 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         "function.model.config_path=assets/functions/gemma4-12b/inference.toml",
     );
     assert_contains(&status_stdout, "function.model.config_embedded=true");
+    assert_contains(&status_stdout, "function.model.id=gemma4-12b");
     assert_contains(
         &status_stdout,
-        "function.model.path=/home/dinozyavier/.dyno/models/gemma-4-12b-it-qat/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+        "function.model.multimodal_projector_id=gemma4-12b-mmproj",
     );
-    assert_contains(&status_stdout, "function.model.exists=");
+    assert_contains(&status_stdout, "models.toml");
 
     let show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-12b"]);
     assert_success_no_stderr(&show);
@@ -1412,6 +1426,30 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     );
     assert_contains(&show_stdout, "--- inference.toml ---");
     assert_contains(&show_stdout, "tool_call_format = \"gemma_function_call\"");
+}
+
+#[test]
+fn function_run_rejects_missing_model_binding_before_admission() {
+    let home = TempHome::new("missing-function-model-binding");
+    let home_arg = home.path_string();
+    let config_dir = home.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("models.toml"), "version = 1\nmodels = {}\n").unwrap();
+
+    let output = run_agl(&[
+        "--home",
+        &home_arg,
+        "run",
+        "--function",
+        "gemma4-12b",
+        "--prompt",
+        "This prompt must not reach model admission.",
+    ]);
+
+    assert_failure(&output);
+    assert_empty_stdout(&output);
+    assert_contains(&stderr(&output), "model `gemma4-12b` is not configured");
+    assert!(!home.path().join("data/runs").exists());
 }
 
 #[test]
@@ -1617,7 +1655,7 @@ fn submodule_workspace_with_skill(
         source.path(),
         &[
             "-c",
-            "user.name=AgentLIBRE Test",
+            "user.name=agentLIBRE Test",
             "-c",
             "user.email=agentlibre-test@example.invalid",
             "commit",
@@ -1673,6 +1711,22 @@ fn git_run(root: &std::path::Path, args: &[&str]) {
 }
 
 fn write_workspace_skill(repo: &std::path::Path, name: &str) {
+    let manifest_path = repo.join(".agl/workspace.toml");
+    let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+    if !manifest.contains("[artifacts.skills]") {
+        manifest.push_str(
+            r#"
+
+[artifacts.skills]
+kind = "git"
+path = ".agl/skills"
+url = "ssh://git@example.invalid/agentlibre/skills.git"
+required = true
+access = "read"
+"#,
+        );
+        fs::write(&manifest_path, manifest).unwrap();
+    }
     let skill_dir = repo.join(".agl/skills/agl").join(name);
     fs::create_dir_all(&skill_dir)
         .unwrap_or_else(|err| panic!("failed to create skill dir {}: {err}", skill_dir.display()));
@@ -1761,6 +1815,15 @@ fn assert_contains(haystack: &str, needle: &str) {
         haystack.contains(needle),
         "expected output to contain {needle:?}\noutput:\n{haystack}"
     );
+}
+
+fn assert_no_noncanonical_product_spelling(output: &str) {
+    for variant in ["AgentLIBRE", "AGENTLIBRE", "Agent Libre"] {
+        assert!(
+            !output.contains(variant),
+            "rendered CLI text contains noncanonical product spelling `{variant}`:\n{output}"
+        );
+    }
 }
 
 fn version_from_stdout<'a>(binary: &str, stdout: &'a str) -> &'a str {

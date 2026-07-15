@@ -12,6 +12,7 @@ agl-config.workspace = true
 agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
+agl-llama-cpp-sys.workspace = true
 agl-oven.workspace = true
 agl-store.workspace = true
 anyhow.workspace = true
@@ -21,4 +22,4 @@ sha2.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-cc = "1.2"
+agl-llama-cpp-sys.workspace = true

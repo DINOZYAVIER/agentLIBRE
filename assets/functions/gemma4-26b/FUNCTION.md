@@ -14,13 +14,12 @@ subagents:
   use: []
 doctor:
   smoke_prompt: "Reply with function=gemma4-26b and summarize the visible runtime identity."
-contracts:
-  identity:
-    mode: validate_claims
+validation:
+  runtime_identity:
+    required: false
     fields:
       - function
       - skills
       - subagents
-    repair: true
-    max_repair_attempts: 1
+    repair_attempts: 1
 ---

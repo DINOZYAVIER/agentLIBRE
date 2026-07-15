@@ -2077,10 +2077,6 @@ profile = "repo-workflow"
 
 [functions]
 default = "coding"
-
-[components.state]
-path = ".agl/state"
-kind = "ignored"
 "#,
         )
         .unwrap();

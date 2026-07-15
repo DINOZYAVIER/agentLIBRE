@@ -31,3 +31,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+agl-llama-cpp-sys.workspace = true

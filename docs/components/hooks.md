@@ -27,7 +27,7 @@ implemented yet.
 
 ## Goals
 
-- Make LLM claims about AgentLIBRE runtime state checkable.
+- Make LLM claims about agentLIBRE runtime state checkable.
 - Stop accepting hallucinated function, skill, profile, or subagent ids as
   operator-visible facts.
 - Repair simple identity mistakes with a bounded model retry before failing the
@@ -72,10 +72,10 @@ text. They compare model claims against the resolved runtime identity:
     "subagents": ["reviewer"],
     "workspace_root": "/repo"
   },
-  "identity_contract": {
-    "mode": "validate_claims",
+  "runtime_identity_validation": {
+    "required": false,
     "fields": ["function", "skills", "subagents"],
-    "require_all_fields": false
+    "repair_attempts": 1
   }
 }
 ```
@@ -88,7 +88,7 @@ text. They compare model claims against the resolved runtime identity:
 
 `runtime.identity.require` is strict:
 
-- Requires every field listed by `identity_contract.fields`.
+- Requires every field listed by `runtime_identity_validation.fields`.
 - Fails or requests repair if a required field is absent.
 - Fails or requests repair if any claimed field is incorrect.
 
@@ -123,7 +123,7 @@ claim.
 
 List comparisons should be order-insensitive and exact. Unknown extra ids are
 mismatches. Missing fields are mismatches only under `runtime.identity.require`
-or `identity_contract.require_all_fields=true`.
+or `runtime_identity_validation.required=true`.
 
 ## Message Codes
 
@@ -133,8 +133,8 @@ Identity hook failures should use stable codes:
 - `runtime_identity_mismatch`: a claimed id differs from runtime evidence.
 - `runtime_identity_unknown_field`: the answer claims an unsupported identity
   field.
-- `runtime_identity_unavailable`: runtime did not provide identity evidence
-  required by the contract.
+- `runtime_identity_unavailable`: runtime did not provide required identity
+  evidence.
 
 Each message should include a concise `fix` string suitable for repair:
 
@@ -145,44 +145,25 @@ Use function=repo-analyst; skills=repo-status; subagents=reviewer.
 Do not include secrets or hidden prompt text in hook messages. Paths may be
 included in evidence files, but repair prompts should prefer ids over paths.
 
-## Function Contract
+## Function Validation
 
 agentFUNCTIONs may declare identity validation policy:
 
 ```yaml
-contracts:
-  identity:
-    mode: validate_claims
+validation:
+  runtime_identity:
+    required: false
     fields:
       - function
       - skills
       - subagents
-    repair: true
-    max_repair_attempts: 1
+    repair_attempts: 1
 ```
 
-Valid modes:
-
-- `off`: do not add identity hooks for this function.
-- `validate_claims`: add `runtime.identity.validate`.
-- `require`: add `runtime.identity.require`.
-
-Default behavior:
-
-- Function-backed `agl chat` and `agl run`: `validate_claims`.
-- `agl function doctor`: `require`.
-- No function selected: `off`, unless a future runtime identity contract is
-  explicitly requested.
-
-CLI may override the function policy for diagnostics:
-
-```bash
-agl run --function repo-analyst --identity-check require --prompt "What is loaded?"
-agl function doctor repo-analyst --identity-check require
-```
-
-The MVP can defer CLI overrides, but the function schema should reserve the
-contract shape now.
+When the `validation.runtime_identity` block is absent, no identity hook is
+added. `required = false` selects claim-sensitive validation;
+`required = true` selects strict validation. `repair_attempts` bounds model
+regeneration after a repairable failure.
 
 ## Repair Loop
 
@@ -199,12 +180,12 @@ fails with a repairable code, the runner should:
    visible runtime capabilities.
 5. Re-parse the repaired model response and re-run the same hook batches.
 6. Accept the answer only if all required hooks pass.
-7. Fail closed after `max_repair_attempts`.
+7. Fail closed after `repair_attempts`.
 
 The repair message should be narrow and factual:
 
 ```text
-The previous answer claimed incorrect AgentLIBRE runtime identity.
+The previous answer claimed incorrect agentLIBRE runtime identity.
 Expected: function=repo-analyst; skills=repo-status; subagents=reviewer.
 Rewrite the answer. Do not invent ids. Keep all other user-requested content.
 ```
@@ -213,11 +194,8 @@ Repair messages must not be persisted as user or assistant transcript messages.
 They may be recorded in `agent-events.jsonl` and request artifacts so operators
 can audit why the second request happened.
 
-Recommended default:
-
-- `max_repair_attempts = 1` for normal chat/run.
-- `max_repair_attempts = 2` for doctor/smoke if explicitly requested.
-- `max_repair_attempts = 0` when the user or runtime disables repair.
+Configure `repair_attempts` in `validation.runtime_identity`. A value of zero
+disables regeneration after identity validation fails.
 
 ## FSM And Events
 
@@ -257,7 +235,7 @@ Every function-backed run should already write:
 Identity hooks should add:
 
 - `runtime-identity.json`: exact identity object used by hooks.
-- `identity-contract.json`: effective identity contract after defaults and CLI
+- `identity-validation.json`: effective identity validation after defaults and CLI
   overrides.
 
 `agent-events.jsonl` should show each repair attempt and final hook outcome.
@@ -272,11 +250,11 @@ assistant prose.
 1. Add `runtime.identity.validate` and `runtime.identity.require` constants,
    declarations, validators, and tests in `agl-tools`.
 2. Extend `artifact_write_payload` in `agl-loop` or the chat host so it can
-   include `runtime_identity` and `identity_contract`.
+   include `runtime_identity` and `runtime_identity_validation`.
 3. Extend `InferenceSession` to build runtime identity from resolved function,
    selected skills, subagents, model profile, workspace root, and tool mode.
-4. Extend function parsing to accept `contracts.identity` and write the
-   effective contract into evidence.
+4. Parse `validation.runtime_identity` and write the effective validation into
+   evidence.
 5. Add selected identity hook batches when a function is active or doctor mode
    requires identity.
 6. Implement generic hook repair in `agl-loop` with bounded retries and event

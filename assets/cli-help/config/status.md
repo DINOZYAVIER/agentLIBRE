@@ -1,4 +1,4 @@
-Report the active AgentLIBRE runtime and inference setup.
+Report the active agentLIBRE runtime and inference setup.
 
 This checks the main runtime config, the local inference profile, resolved log
 paths, session/store paths, and skill trust store. It does not start a model or

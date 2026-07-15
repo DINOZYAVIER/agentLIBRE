@@ -257,7 +257,7 @@ mod tests {
     const TURN_ID: &str = "turn_01890f17-4a00-7000-8000-000000000002";
     const ATTEMPT_ID: &str = "attempt_01890f17-4a00-7000-8000-000000000003";
 
-    macro_rules! assert_id_contract {
+    macro_rules! assert_id_format {
         ($type:ty, $prefix:literal) => {{
             let generated = <$type>::generate();
             assert!(generated.as_str().starts_with($prefix));
@@ -271,14 +271,14 @@ mod tests {
 
     #[test]
     fn every_id_type_generates_and_round_trips() {
-        assert_id_contract!(SessionId, "ses_");
-        assert_id_contract!(RunId, "run_");
-        assert_id_contract!(TurnId, "turn_");
-        assert_id_contract!(StepId, "step_");
-        assert_id_contract!(AttemptId, "attempt_");
-        assert_id_contract!(EventId, "evt_");
-        assert_id_contract!(RequestId, "req_");
-        assert_id_contract!(MessageId, "msg_");
+        assert_id_format!(SessionId, "ses_");
+        assert_id_format!(RunId, "run_");
+        assert_id_format!(TurnId, "turn_");
+        assert_id_format!(StepId, "step_");
+        assert_id_format!(AttemptId, "attempt_");
+        assert_id_format!(EventId, "evt_");
+        assert_id_format!(RequestId, "req_");
+        assert_id_format!(MessageId, "msg_");
     }
 
     #[test]

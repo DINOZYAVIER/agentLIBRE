@@ -1188,7 +1188,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use agl_capabilities::DispatchDenialCode;
-    use agl_config::LocalInferenceConfig;
+    use agl_config::ResolvedInferenceConfig;
     use agl_events::{
         EVENT_SCHEMA, EventDraft, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus,
     };
@@ -1359,7 +1359,7 @@ tool_call_format = "hermes_json"
 
         fn clear_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             session_id: &SessionId,
         ) -> Result<()> {
             self.calls.lock().unwrap().cleared.push(session_id.clone());
@@ -1368,7 +1368,7 @@ tool_call_format = "hermes_json"
 
         fn release_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             session_id: &SessionId,
         ) -> Result<()> {
             self.calls.lock().unwrap().released.push(session_id.clone());
@@ -1408,7 +1408,7 @@ tool_call_format = "hermes_json"
 
         fn clear_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             _session_id: &SessionId,
         ) -> Result<()> {
             Ok(())
@@ -1416,7 +1416,7 @@ tool_call_format = "hermes_json"
 
         fn release_context(
             &self,
-            _config: &LocalInferenceConfig,
+            _config: &ResolvedInferenceConfig,
             _session_id: &SessionId,
         ) -> Result<()> {
             Ok(())

@@ -494,6 +494,15 @@ mod tests {
 
     use super::*;
 
+    fn declare_artifact(root: &Path, id: &str, path: &str, access: &str) {
+        let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+        let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+        manifest.push_str(&format!(
+            "\n[artifacts.{id}]\nkind = \"local\"\npath = {path:?}\nrequired = true\naccess = {access:?}\n"
+        ));
+        fs::write(manifest_path, manifest).unwrap();
+    }
+
     #[test]
     fn declaration_registers_core_filesystem_tools() {
         let declaration = declaration();
@@ -613,6 +622,7 @@ mod tests {
         let root = temp_root("edit-artifact-writable");
         fs::create_dir_all(root.join(".git")).unwrap();
         agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
         fs::create_dir_all(root.join(".agl/tasks")).unwrap();
         fs::write(
             root.join(".agl/tasks/task.md"),
@@ -640,6 +650,7 @@ mod tests {
         let root = temp_root("edit-artifact-read-only");
         fs::create_dir_all(root.join(".git")).unwrap();
         agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "skills", ".agl/skills", "read");
         fs::create_dir_all(root.join(".agl/skills")).unwrap();
         fs::write(root.join(".agl/skills/SKILL.md"), "hello old\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -659,6 +670,7 @@ mod tests {
         let root = temp_root("edit-artifact-undeclared");
         fs::create_dir_all(root.join(".git")).unwrap();
         agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
         fs::create_dir_all(root.join(".agl/unknown")).unwrap();
         fs::write(root.join(".agl/unknown/file.md"), "hello old\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -678,6 +690,7 @@ mod tests {
         let root = temp_root("edit-artifact-not-directory");
         fs::create_dir_all(root.join(".git")).unwrap();
         agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
         let _ = fs::remove_dir_all(root.join(".agl/tasks"));
         fs::create_dir_all(root.join(".agl")).unwrap();
         fs::write(root.join(".agl/tasks"), "hello old\n").unwrap();

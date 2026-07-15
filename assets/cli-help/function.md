@@ -10,4 +10,4 @@ Common use:
   agl chat --function coding
 
 Workspace functions live under .agl/functions/<id>/ with FUNCTION.md and
-SYSTEM.md. Global functions live under the AgentLIBRE config directory.
+SYSTEM.md. Global functions live under the agentLIBRE config directory.

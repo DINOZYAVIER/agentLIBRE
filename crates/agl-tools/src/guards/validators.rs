@@ -295,10 +295,10 @@ pub(crate) fn validate_runtime_identity(input: HookInput, require_hook: bool) ->
         );
     };
 
-    let contract = input.payload.get("identity_contract");
-    let fields = identity_contract_fields(contract);
-    let require_all_fields = require_hook || identity_contract_requires_all_fields(contract);
-    let repair = identity_contract_repair_enabled(contract);
+    let validation = input.payload.get("runtime_identity_validation");
+    let fields = runtime_identity_validation_fields(validation);
+    let require_every_field = require_hook || runtime_identity_validation_required(validation);
+    let repair = runtime_identity_validation_repair_enabled(validation);
     let claims = extract_identity_claims(text);
     let mut messages = Vec::new();
     let mut unavailable = false;
@@ -312,7 +312,7 @@ pub(crate) fn validate_runtime_identity(input: HookInput, require_hook: bool) ->
                     field,
                     expected,
                     claim,
-                    require_all_fields,
+                    require_every_field,
                     &mut unavailable,
                     &mut messages,
                 );
@@ -324,7 +324,7 @@ pub(crate) fn validate_runtime_identity(input: HookInput, require_hook: bool) ->
                     field,
                     expected,
                     claim,
-                    require_all_fields,
+                    require_every_field,
                     &mut unavailable,
                     &mut messages,
                 );
@@ -454,9 +454,9 @@ fn clean_identity_token(raw: &str) -> String {
         .to_string()
 }
 
-fn identity_contract_fields(contract: Option<&serde_json::Value>) -> Vec<String> {
-    let fields = contract
-        .and_then(|contract| contract.get("fields"))
+fn runtime_identity_validation_fields(validation: Option<&serde_json::Value>) -> Vec<String> {
+    let fields = validation
+        .and_then(|validation| validation.get("fields"))
         .and_then(serde_json::Value::as_array)
         .map(|fields| {
             fields
@@ -477,23 +477,18 @@ fn identity_contract_fields(contract: Option<&serde_json::Value>) -> Vec<String>
     }
 }
 
-fn identity_contract_requires_all_fields(contract: Option<&serde_json::Value>) -> bool {
-    let mode_requires = contract
-        .and_then(|contract| contract.get("mode"))
-        .and_then(serde_json::Value::as_str)
-        == Some("require");
-    let explicit_requires = contract
-        .and_then(|contract| contract.get("require_all_fields"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    mode_requires || explicit_requires
-}
-
-fn identity_contract_repair_enabled(contract: Option<&serde_json::Value>) -> bool {
-    contract
-        .and_then(|contract| contract.get("repair"))
+fn runtime_identity_validation_required(validation: Option<&serde_json::Value>) -> bool {
+    validation
+        .and_then(|validation| validation.get("required"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+fn runtime_identity_validation_repair_enabled(validation: Option<&serde_json::Value>) -> bool {
+    validation
+        .and_then(|validation| validation.get("repair_attempts"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|attempts| attempts > 0)
 }
 
 fn expected_identity_scalar<'a>(identity: &'a serde_json::Value, field: &str) -> Option<&'a str> {
@@ -526,7 +521,7 @@ fn collect_scalar_identity_messages(
     field: &str,
     expected: Option<&str>,
     claim: Option<&str>,
-    require_all_fields: bool,
+    require_every_field: bool,
     unavailable: &mut bool,
     messages: &mut Vec<HookMessage>,
 ) {
@@ -539,7 +534,7 @@ fn collect_scalar_identity_messages(
                 fix: None,
             });
         }
-        (None, None) if require_all_fields => {
+        (None, None) if require_every_field => {
             *unavailable = true;
             messages.push(HookMessage {
                 code: "runtime_identity_unavailable".to_string(),
@@ -547,7 +542,7 @@ fn collect_scalar_identity_messages(
                 fix: None,
             });
         }
-        (Some(_), None) if require_all_fields => messages.push(HookMessage {
+        (Some(_), None) if require_every_field => messages.push(HookMessage {
             code: "runtime_identity_missing".to_string(),
             message: format!("answer must claim runtime identity field `{field}`"),
             fix: None,
@@ -567,7 +562,7 @@ fn collect_list_identity_messages(
     field: &str,
     expected: Option<Vec<String>>,
     claim: Option<&[String]>,
-    require_all_fields: bool,
+    require_every_field: bool,
     unavailable: &mut bool,
     messages: &mut Vec<HookMessage>,
 ) {
@@ -580,7 +575,7 @@ fn collect_list_identity_messages(
                 fix: None,
             });
         }
-        (None, None) if require_all_fields => {
+        (None, None) if require_every_field => {
             *unavailable = true;
             messages.push(HookMessage {
                 code: "runtime_identity_unavailable".to_string(),
@@ -588,7 +583,7 @@ fn collect_list_identity_messages(
                 fix: None,
             });
         }
-        (Some(_), None) if require_all_fields => messages.push(HookMessage {
+        (Some(_), None) if require_every_field => messages.push(HookMessage {
             code: "runtime_identity_missing".to_string(),
             message: format!("answer must claim runtime identity field `{field}`"),
             fix: None,

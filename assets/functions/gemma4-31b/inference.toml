@@ -1,6 +1,6 @@
 [backend]
 kind = "llama_cpp"
-model = "/home/dinozyavier/.dyno/models/gemma-4-31b-it-qat/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf"
+model_id = "gemma4-31b"
 
 [runtime]
 gpu_layers = 999

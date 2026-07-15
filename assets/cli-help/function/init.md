@@ -1,6 +1,6 @@
 Create a starter agentFUNCTION.
 
-By default, init writes to the global AgentLIBRE config directory. Use
+By default, init writes to the global agentLIBRE config directory. Use
 --workspace to write under the current workspace .agl/functions tree.
 It creates FUNCTION.md, SYSTEM.md, and subagents/.
 

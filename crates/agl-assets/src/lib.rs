@@ -149,6 +149,34 @@ mod tests {
     }
 
     #[test]
+    fn builtin_function_presets_use_model_ids_only() {
+        for function in BUILTIN_FUNCTIONS {
+            let text = function.inference_config.text().unwrap();
+            let preset = agl_config::load_inference_preset_from_str(function.id, text).unwrap();
+            assert!(!preset.backend.model_id.as_str().is_empty());
+            assert!(!text.contains("/home/"));
+            assert!(!text.contains(".dyno/models"));
+            assert!(!text.contains(".lmstudio/models"));
+        }
+
+        let direct_path = r#"
+[backend]
+kind = "llama_cpp"
+model = "/home/user/model.gguf"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 4096
+threads = 2
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#;
+        assert!(agl_config::load_inference_preset_from_str("direct path", direct_path).is_err());
+    }
+
+    #[test]
     fn builtin_skills_are_embedded_from_core_repo_checkout() {
         let skills = BUILTIN_SKILLS
             .iter()

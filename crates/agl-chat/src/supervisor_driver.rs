@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agl_capabilities::CapabilityId;
-use agl_config::LocalInferenceConfig;
+use agl_config::ResolvedInferenceConfig;
 use agl_content::Content;
 use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, RequestId, SessionId};
@@ -36,7 +36,7 @@ pub enum ChatRunInput {
         execution_turn_id: agl_ids::TurnId,
         workspace_root: PathBuf,
         artifact_root: PathBuf,
-        inference_config: LocalInferenceConfig,
+        inference_config: ResolvedInferenceConfig,
         delegation_plan: RuntimeDelegationPlan,
         authority_ceiling: BTreeSet<CapabilityId>,
     },

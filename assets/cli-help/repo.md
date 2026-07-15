@@ -2,8 +2,8 @@ Advanced repo workspace commands.
 
 Repo workspace:
 - .agl/workspace.toml lists the .agl folders for this repo.
-- components list paths such as .agl/skills and .agl/tasks.
-- artifact_sources list the .agl folders agl is allowed to manage.
+- each opt-in root is declared once under `[artifacts.<id>]`.
+- undeclared roots are not created, inspected, or reported as missing.
 - profiles can be exported, edited, checked with --dry-run, then applied.
 
 Typical workflow:
