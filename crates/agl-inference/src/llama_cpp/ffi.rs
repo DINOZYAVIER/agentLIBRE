@@ -157,6 +157,16 @@ unsafe extern "C" {
         buf: *mut c_char,
         length: i32,
     ) -> i32;
+    pub(crate) fn agl_llama_common_chat_apply_template(
+        model: *const c_void,
+        chat: *const llama_chat_message,
+        n_msg: usize,
+        add_ass: bool,
+        buf: *mut c_char,
+        buf_len: usize,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> i32;
     pub(crate) fn llama_tokenize(
         vocab: *const c_void,
         text: *const c_char,

@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 use std::ptr;
 
@@ -434,8 +434,20 @@ fn apply_chat_template_messages(
     messages: &[RenderedMessage],
     add_assistant: bool,
 ) -> Result<String> {
-    let template = unsafe { ffi::llama_model_chat_template(model, ptr::null()) };
     let prepared = PreparedChatMessages::new(messages)?;
+
+    apply_legacy_chat_template(model, &prepared, add_assistant).or_else(|legacy_err| {
+        apply_common_chat_template(model, &prepared, add_assistant)
+            .with_context(|| format!("legacy llama.cpp chat template path failed: {legacy_err:#}"))
+    })
+}
+
+fn apply_legacy_chat_template(
+    model: *const c_void,
+    prepared: &PreparedChatMessages,
+    add_assistant: bool,
+) -> Result<String> {
+    let template = unsafe { ffi::llama_model_chat_template(model, ptr::null()) };
     let needed = unsafe {
         ffi::llama_chat_apply_template(
             template,
@@ -469,6 +481,66 @@ fn apply_chat_template_messages(
         .map(|value| *value as u8)
         .collect::<Vec<_>>();
     String::from_utf8(bytes).context("llama.cpp chat template produced invalid UTF-8")
+}
+
+fn apply_common_chat_template(
+    model: *const c_void,
+    prepared: &PreparedChatMessages,
+    add_assistant: bool,
+) -> Result<String> {
+    let mut error = vec![0_i8; 4096];
+    let needed = unsafe {
+        ffi::agl_llama_common_chat_apply_template(
+            model,
+            prepared.messages.as_ptr(),
+            prepared.messages.len(),
+            add_assistant,
+            ptr::null_mut(),
+            0,
+            error.as_mut_ptr(),
+            error.len(),
+        )
+    };
+    ensure!(
+        needed >= 0,
+        "llama.cpp common chat template failed: {}",
+        c_error_message(&error)
+    );
+
+    let mut buf = vec![0_i8; usize::try_from(needed).unwrap_or(0) + 1];
+    let written = unsafe {
+        ffi::agl_llama_common_chat_apply_template(
+            model,
+            prepared.messages.as_ptr(),
+            prepared.messages.len(),
+            add_assistant,
+            buf.as_mut_ptr(),
+            buf.len(),
+            error.as_mut_ptr(),
+            error.len(),
+        )
+    };
+    ensure!(
+        written >= 0,
+        "llama.cpp common chat template failed: {}",
+        c_error_message(&error)
+    );
+    let len = usize::try_from(written).context("llama.cpp returned invalid prompt length")?;
+    let bytes = buf[..len]
+        .iter()
+        .map(|value| *value as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8(bytes).context("llama.cpp common chat template produced invalid UTF-8")
+}
+
+fn c_error_message(buf: &[c_char]) -> String {
+    if buf.first().copied().unwrap_or_default() == 0 {
+        return "unknown error".to_string();
+    }
+
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 struct PreparedChatMessages {

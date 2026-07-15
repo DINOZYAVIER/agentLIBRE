@@ -96,6 +96,6 @@ fi
 
 cmake "${cmake_args[@]}"
 
-cmake --build "$build_dir" --target llama --parallel "$jobs"
+cmake --build "$build_dir" --target llama llama-common --parallel "$jobs"
 
 printf '%s\n' "$build_dir/bin"
