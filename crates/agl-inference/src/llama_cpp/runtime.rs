@@ -4,7 +4,7 @@ use std::fmt;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
-use agl_config::LocalInferenceConfig;
+use agl_config::{KvCacheType, LocalInferenceConfig, MtpRuntimeConfig};
 use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
 
@@ -143,6 +143,13 @@ impl LlamaCppRuntime {
         &mut self,
         rendered: &RenderedModelRequest,
     ) -> Result<LlamaCppRuntimeOutput> {
+        if self.config().runtime.mtp.enabled {
+            return Err(runtime_error(
+                "llama.cpp in-process MTP is configured but the MTP decoder bridge is not implemented; set [runtime.mtp].enabled = false until the AGL-112 MTP bridge lands".to_string(),
+                mtp_runtime_gate_log(self.config()),
+            ));
+        }
+
         match &mut self.inner {
             LlamaCppRuntimeInner::Native(runtime) => runtime.generate(rendered),
             #[cfg(test)]
@@ -345,6 +352,7 @@ fn test_runtime_log(
 ) -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
+    append_mtp_config_log(&mut log, &config.runtime.mtp);
     log.push_str("model_state = ");
     log.push_str(model_state.as_str());
     log.push('\n');
@@ -495,6 +503,7 @@ fn runtime_log_header(config: &LocalInferenceConfig, supports_gpu_offload: bool)
         "false"
     });
     log.push('\n');
+    append_mtp_config_log(&mut log, &config.runtime.mtp);
     log.push_str("devices:\n");
     log.push_str(&available_devices());
     if let Some(system_info) = cstr_to_string(unsafe { ffi::llama_print_system_info() }) {
@@ -503,6 +512,59 @@ fn runtime_log_header(config: &LocalInferenceConfig, supports_gpu_offload: bool)
         log.push('\n');
     }
     log
+}
+
+fn mtp_runtime_gate_log(config: &LocalInferenceConfig) -> String {
+    let mut log = String::new();
+    log.push_str("backend = llama_cpp\n");
+    append_mtp_config_log(&mut log, &config.runtime.mtp);
+    log.push_str("mtp_runtime_state = unsupported\n");
+    log
+}
+
+fn append_mtp_config_log(log: &mut String, mtp: &MtpRuntimeConfig) {
+    log.push_str("mtp_enabled = ");
+    log.push_str(if mtp.enabled { "true" } else { "false" });
+    log.push('\n');
+    if let Some(path) = &mtp.draft_model {
+        log.push_str("mtp_draft_model = ");
+        log.push_str(&path.display().to_string());
+        log.push('\n');
+    }
+    if mtp.draft_tokens > 0 {
+        log.push_str("mtp_draft_tokens = ");
+        log.push_str(&mtp.draft_tokens.to_string());
+        log.push('\n');
+    }
+    if let Some(gpu_layers) = mtp.gpu_layers {
+        log.push_str("mtp_gpu_layers = ");
+        log.push_str(&gpu_layers.to_string());
+        log.push('\n');
+    }
+    if let Some(cache_type) = mtp.cache_type_k {
+        log.push_str("mtp_cache_type_k = ");
+        log.push_str(kv_cache_type_name(cache_type));
+        log.push('\n');
+    }
+    if let Some(cache_type) = mtp.cache_type_v {
+        log.push_str("mtp_cache_type_v = ");
+        log.push_str(kv_cache_type_name(cache_type));
+        log.push('\n');
+    }
+}
+
+fn kv_cache_type_name(cache_type: KvCacheType) -> &'static str {
+    match cache_type {
+        KvCacheType::F32 => "f32",
+        KvCacheType::F16 => "f16",
+        KvCacheType::Bf16 => "bf16",
+        KvCacheType::Q8_0 => "q8_0",
+        KvCacheType::Q4_0 => "q4_0",
+        KvCacheType::Q4_1 => "q4_1",
+        KvCacheType::Iq4Nl => "iq4_nl",
+        KvCacheType::Q5_0 => "q5_0",
+        KvCacheType::Q5_1 => "q5_1",
+    }
 }
 
 fn available_devices() -> String {

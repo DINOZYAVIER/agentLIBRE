@@ -259,6 +259,46 @@ fn build_request_injects_visible_tool_context_for_hermes() {
 }
 
 #[test]
+fn build_request_injects_visible_tool_context_for_gemma() {
+    let run_id = InferenceRunId::new("manual-test").unwrap();
+    let config = ModelConfig {
+        dialect: ModelDialect::Gemma4,
+        tool_call_format: ToolCallFormat::GemmaFunctionCall,
+    };
+
+    let request = build_inference_request(
+        run_id,
+        ModelRequest {
+            turn_id: "manual-test".to_string(),
+            request_index: 0,
+            messages: vec![TurnMessage::User {
+                content: "read README".to_string(),
+            }],
+            visible_tools: vec![
+                VisibleTool::new("fs.read")
+                    .describe("Read a repository file")
+                    .require_argument("path"),
+            ],
+        },
+        &config,
+        Some("system"),
+        None,
+        None,
+        Some("skill context"),
+    )
+    .unwrap();
+
+    assert_eq!(request.rendered.messages.len(), 4);
+    let tool_context = &request.rendered.messages[2].content;
+    assert!(tool_context.contains("# GEMMA NATIVE TOOL CALLING"));
+    assert!(tool_context.contains("<|tool_call>call:TOOL_NAME"));
+    assert!(tool_context.contains("fs.read"));
+    assert!(!tool_context.contains(r#"{"name":"TOOL_NAME""#));
+    assert_eq!(request.rendered.messages[3].content, "read README");
+    assert_eq!(request.rendered.tools[0].name, "fs.read");
+}
+
+#[test]
 fn selected_skill_ids_rejects_duplicates_across_config_and_cli() {
     let err =
         selected_skill_ids(&["task-spec".to_string()], &["task-spec".to_string()]).unwrap_err();

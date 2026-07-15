@@ -38,6 +38,12 @@ fn main() {
         "cargo:rerun-if-changed={}",
         repo_root.join("scripts/build-llama-cpp.sh").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("src/llama_cpp/chat_template_bridge.cpp")
+            .display()
+    );
     for env_name in [
         "AGL_LLAMA_CPP_SOURCE_DIR",
         "AGL_LLAMA_CPP_BUILD_DIR",
@@ -47,14 +53,38 @@ fn main() {
         "AGL_LLAMA_CPP_VULKAN_GLSLC",
         "AGL_LLAMA_CPP_VULKAN_GLSLANG_VALIDATOR",
         "AGL_LLAMA_CPP_SPIRV_INCLUDE_DIR",
+        "CXX",
     ] {
         println!("cargo:rerun-if-env-changed={env_name}");
     }
+
+    cc::Build::new()
+        .cpp(true)
+        .std("c++17")
+        .file(manifest_dir.join("src/llama_cpp/chat_template_bridge.cpp"))
+        .include(repo_root.join("vendor/llama.cpp/include"))
+        .include(repo_root.join("vendor/llama.cpp/common"))
+        .include(repo_root.join("vendor/llama.cpp/ggml/include"))
+        .include(repo_root.join("vendor/llama.cpp/vendor"))
+        .warnings(false)
+        .compile("agl_llama_chat_template_bridge");
+
     println!(
         "cargo:rustc-env=AGL_LLAMA_CPP_LIBRARY_DIR={}",
         lib_dir.display()
     );
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    if let Some(cxx_runtime_dir) = cxx_runtime_library_dir() {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            cxx_runtime_dir.display()
+        );
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            cxx_runtime_dir.display()
+        );
+    }
+    println!("cargo:rustc-link-lib=dylib=llama-common");
     println!("cargo:rustc-link-lib=dylib=llama");
     println!("cargo:rustc-link-lib=dylib=ggml");
     println!("cargo:rustc-link-lib=dylib=ggml-base");
@@ -65,6 +95,7 @@ fn main() {
 
 fn missing_required_libraries(lib_dir: &std::path::Path) -> Option<&'static str> {
     [
+        "libllama-common.so",
         "libllama.so",
         "libggml.so",
         "libggml-base.so",
@@ -73,4 +104,23 @@ fn missing_required_libraries(lib_dir: &std::path::Path) -> Option<&'static str>
     ]
     .into_iter()
     .find(|library| !lib_dir.join(library).is_file())
+}
+
+fn cxx_runtime_library_dir() -> Option<PathBuf> {
+    let compiler = env::var_os("CXX").unwrap_or_else(|| "c++".into());
+    let output = Command::new(compiler)
+        .arg("-print-file-name=libstdc++.so.6")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(path.trim());
+    if path.is_file() {
+        path.parent().map(PathBuf::from)
+    } else {
+        None
+    }
 }

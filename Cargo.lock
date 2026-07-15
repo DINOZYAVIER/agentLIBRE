@@ -182,6 +182,7 @@ dependencies = [
  "agl-config",
  "agl-oven",
  "anyhow",
+ "cc",
  "serde",
  "serde_json",
  "tracing",
