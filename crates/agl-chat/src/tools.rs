@@ -11,6 +11,7 @@ pub(crate) struct ChatToolRuntimeConfig<'a> {
     pub trust_store_path: &'a Path,
     pub workspace_root: &'a Path,
     pub permission_status: agl_tools::PermissionRuntimeStatus,
+    pub process_tools: Option<agl_tools::ProcessTools>,
     pub screen_admitted_run: Option<RunId>,
     pub delegation_handler: Option<crate::delegation::DelegationHandler>,
 }
@@ -64,13 +65,38 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         agl_tools::NotesTools::new(config.store_root),
         "builtin notes",
     )?;
+    let permission_tools = agl_tools::PermissionTools::new(config.store_root)
+        .with_runtime_status(config.permission_status);
+    let permission_tools = config
+        .process_tools
+        .as_ref()
+        .map(|process| {
+            permission_tools
+                .clone()
+                .with_process_handle(process.process_handle())
+        })
+        .unwrap_or(permission_tools);
     register_handlers(
         &mut runtime,
         PERMISSION_TOOL_IDS,
-        agl_tools::PermissionTools::new(config.store_root)
-            .with_runtime_status(config.permission_status),
+        permission_tools,
         "builtin permission",
     )?;
+    if let Some(process_tools) = config.process_tools {
+        register_handlers(
+            &mut runtime,
+            agl_tools::PROCESS_TOOL_IDS,
+            process_tools,
+            "builtin process",
+        )?;
+    } else {
+        register_handlers(
+            &mut runtime,
+            agl_tools::PROCESS_TOOL_IDS,
+            UnavailableProcessHandler,
+            "unavailable builtin process",
+        )?;
+    }
     register_handlers(
         &mut runtime,
         REPO_TOOL_IDS,
@@ -124,12 +150,26 @@ pub(crate) fn chat_tool_provider_declarations() -> Vec<ProviderDeclaration> {
         agl_tools::memory::declaration(),
         agl_tools::notes::declaration(),
         agl_tools::permissions::declaration(),
+        agl_tools::process::declaration(),
         agl_tools::repo::declaration(),
         agl_tools::skills::declaration(),
         agl_tools::store::declaration(),
         agl_host_tools::screen::declaration(),
         agl_capabilities::delegation_provider(),
     ]
+}
+
+#[derive(Clone, Copy)]
+struct UnavailableProcessHandler;
+
+impl ActionHandler for UnavailableProcessHandler {
+    fn dispatch(
+        &self,
+        _context: agl_capabilities::ActionDispatchContext,
+    ) -> std::result::Result<agl_capabilities::ActionResult, agl_capabilities::ActionHandlerError>
+    {
+        Err(anyhow::anyhow!("process runtime is unavailable").into())
+    }
 }
 
 fn register_handlers<H>(
@@ -253,6 +293,7 @@ mod tests {
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: &root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
+            process_tools: None,
             screen_admitted_run: None,
             delegation_handler: None,
         })
@@ -315,7 +356,13 @@ mod tests {
             json!({"path": "README.MD", "old_text": "old", "new_text": "new"}),
         );
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                agl_capabilities::ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().unwrap().code,
@@ -352,7 +399,13 @@ mod tests {
             json!({"path": "README.MD"}),
         );
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                agl_capabilities::ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().unwrap().code,
@@ -368,6 +421,7 @@ mod tests {
             trust_store_path: &root.join("skill-trust.toml"),
             workspace_root: root,
             permission_status: agl_tools::PermissionRuntimeStatus::default(),
+            process_tools: None,
             screen_admitted_run: None,
             delegation_handler: None,
         })

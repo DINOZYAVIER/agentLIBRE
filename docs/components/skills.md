@@ -55,20 +55,20 @@ Look for `state_dir`, then inspect `skill-trust.toml` below that directory.
 `agl run` loads selected skills when the command starts. Run the command again
 after changing a selected skill.
 
-`agl chat` loads the local inference profile/model when the chat session starts.
-Selected skill context and visible tools can be refreshed inside chat with:
+Bare `agl` opens the daemon-backed interactive session. Selected skill context
+and visible tools can be refreshed from Command mode with:
 
 ```text
 /reload
 ```
 
-Use `/session` in chat to print the session id, run id, artifact root, and
-workspace root. Use `/workspace PATH` to change the filesystem tool root; this
-also refreshes runtime skill/tool context.
+Use `/status` to print the current session and workspace state. Use
+`/workspace PATH` to change the filesystem tool root; this also refreshes
+runtime skill/tool context.
 
-Changing `--config`, `AGL_LOCAL_INFERENCE_CONFIG`, model paths, runtime model
-settings, or `[prompt].skills` in the local inference profile requires starting
-a new `agl chat` or running a new `agl run`.
+Changing the daemon inference profile, model paths, runtime model settings, or
+`[prompt].skills` requires starting a new interactive session or running a new
+`agl run`.
 
 ## Evidence And Logs
 

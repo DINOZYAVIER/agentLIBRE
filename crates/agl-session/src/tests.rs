@@ -144,7 +144,33 @@ fn assistant_envelope(
 }
 
 fn start_session(root: impl AsRef<std::path::Path>, session_id: SessionId) -> ChatSessionStore {
-    ChatSessionStore::start(root, session_id, TEST_CONFIG_PATH, TEST_BACKEND).unwrap()
+    ChatSessionStore::start(
+        root,
+        session_id,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+        execution_context(),
+    )
+    .unwrap()
+}
+
+fn execution_context() -> agl_process::ExecutionContextSnapshot {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    agl_process::ExecutionContextSnapshot {
+        workspace_root: workspace.clone(),
+        working_directory: workspace,
+        private_execution_roots: Vec::new(),
+        shell: agl_process::ShellProfileSnapshot {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+            environment_names: vec!["PATH".to_owned()],
+            executable_digest: "sha256:test-shell".to_owned(),
+            config_digest: "sha256:test-config".to_owned(),
+        },
+        revision: 1,
+        profile_metadata: "workspace".to_owned(),
+    }
 }
 
 fn start_test_session(root: impl AsRef<std::path::Path>) -> ChatSessionStore {
@@ -533,7 +559,14 @@ fn start_refuses_existing_session_but_allows_precreated_run_directory() {
     std::fs::create_dir_all(root.join(id.as_str()).join("runs").join(TEST_RUN_ID)).unwrap();
     let _store = start_session(&root, id.clone());
 
-    let err = ChatSessionStore::start(&root, id, TEST_CONFIG_PATH, TEST_BACKEND).unwrap_err();
+    let err = ChatSessionStore::start(
+        &root,
+        id,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+        execution_context(),
+    )
+    .unwrap_err();
     assert!(format!("{err:#}").contains("chat session already exists"));
 
     std::fs::remove_dir_all(root).unwrap();
@@ -573,6 +606,67 @@ fn malformed_transcript_reports_line_number() {
 
     let err = ChatSessionStore::open(&root, id).unwrap_err();
     assert!(format!("{err:#}").contains("line 2"));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn catalog_reports_durable_active_and_finished_sessions() {
+    let root = temp_root("catalog");
+    let id = session_id();
+    let mut store = start_session(&root, id.clone());
+
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].metadata.session_id, id);
+    assert_eq!(catalog[0].status, SessionCatalogStatus::Active);
+
+    store.request_exit().unwrap();
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog[0].status, SessionCatalogStatus::Finished);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(store.session_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for name in ["session.json", "transcript.jsonl"] {
+            assert_eq!(
+                std::fs::metadata(store.session_dir().join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn catalog_ignores_directories_outside_the_current_session_id_format() {
+    let root = temp_root("catalog-non-session-directory");
+    let id = session_id();
+    let _store = start_session(&root, id.clone());
+    let obsolete = root.join("session-legacy");
+    std::fs::create_dir_all(&obsolete).unwrap();
+    std::fs::write(
+        obsolete.join("session.json"),
+        b"not-current-session-metadata",
+    )
+    .unwrap();
+
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].metadata.session_id, id);
 
     std::fs::remove_dir_all(root).unwrap();
 }

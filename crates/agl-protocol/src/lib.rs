@@ -1,14 +1,25 @@
 use std::collections::BTreeMap;
 
+mod surface;
+pub use surface::*;
+
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
-use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_ids::{
+    AttemptId, DaemonInstanceId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
+    TurnId,
+};
+pub use agl_process::{
+    ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionOutputChunk, ExecutionOwner,
+    ExecutionPrivateCommand, ExecutionProfile, ExecutionReadResult, ExecutionState,
+    ExecutionStatus, KillMode, ProcessBytes, ProcessBytesEncoding, TerminalSize,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v3alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v3alpha";
-pub const PROTOCOL_VERSION: &str = "v3alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v5alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v5alpha";
+pub const PROTOCOL_VERSION: &str = "v5alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -69,6 +80,22 @@ pub enum DaemonRequestKind {
     RunCancel(RunCancelRequest),
     RunEvents(RunEventsRequest),
     RunSubscribe(RunSubscribeRequest),
+    CommandCatalog(CommandCatalogRequest),
+    CommandSuggestions(CommandSuggestionsRequest),
+    ApplicationAction(ApplicationActionRequest),
+    SessionPresentation(SessionPresentationRequest),
+    SessionPresentationSubscribe(SessionPresentationSubscribeRequest),
+    SubscriptionCancel(SubscriptionCancelRequest),
+    UserShellStart(UserShellStartRequest),
+    ExecutionList(ExecutionListRequest),
+    ExecutionStatus(ExecutionStatusRequest),
+    ExecutionRead(ExecutionReadRequest),
+    ExecutionAttach(ExecutionAttachRequest),
+    ExecutionLeaseRenew(ExecutionLeaseRenewRequest),
+    ExecutionInput(ExecutionInputRequest),
+    ExecutionResize(ExecutionResizeRequest),
+    ExecutionDetach(ExecutionDetachRequest),
+    ExecutionKill(ExecutionKillRequest),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -162,6 +189,26 @@ pub enum DaemonEventKind {
     RunSubscriptionStarted(RunSubscriptionStartedEvent),
     RunEvent(Box<SafeRuntimeEventEnvelope>),
     RunSubscriptionFinished(RunSubscriptionFinishedEvent),
+    CommandCatalog(CommandCatalogEvent),
+    CommandSuggestions(CommandSuggestionsEvent),
+    ApplicationActionResult(ApplicationActionResultEvent),
+    SessionPresentation(SessionPresentationEvent),
+    SessionPresentationSubscriptionStarted(SessionPresentationSubscriptionStartedEvent),
+    SessionPresentationEvent(Box<SessionPresentationEventEnvelope>),
+    SessionPresentationSubscriptionFinished(SessionPresentationSubscriptionFinishedEvent),
+    SubscriptionCancelled(SubscriptionCancelledEvent),
+    UserShellAccepted(UserShellAcceptedEvent),
+    ExecutionList(ExecutionListEvent),
+    ExecutionStatus(ExecutionStatusEvent),
+    ExecutionRead(ExecutionReadEvent),
+    ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent),
+    ExecutionLeaseRenewed(ExecutionLeaseRenewedEvent),
+    ExecutionOutput(ExecutionOutputEvent),
+    ExecutionInputAccepted(ExecutionInputAcceptedEvent),
+    ExecutionResizeAccepted(ExecutionResizeAcceptedEvent),
+    ExecutionDetachAccepted(ExecutionDetachAcceptedEvent),
+    ExecutionKillAccepted(ExecutionKillAcceptedEvent),
+    ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent),
     Error(ProtocolError),
 }
 
@@ -179,6 +226,7 @@ pub struct HelloRequest {
 pub struct HelloEvent {
     pub protocol_version: String,
     pub product_version: String,
+    pub daemon_instance_id: DaemonInstanceId,
     pub capabilities: Vec<DaemonCapability>,
 }
 
@@ -199,6 +247,15 @@ pub enum DaemonCapability {
     RunCancel,
     RunReplay,
     RunSubscribe,
+    ExecutionList,
+    ExecutionControl,
+    ExecutionAttach,
+    CommandCatalog,
+    CommandSuggestions,
+    ApplicationActions,
+    SessionPresentation,
+    UserShell,
+    AssistantDeltas,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,6 +267,8 @@ pub struct SessionOpenRequest {
     pub new_session: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -228,8 +287,7 @@ pub struct SessionOpenedEvent {
 pub struct RunSubmitRequest {
     pub session_id: SessionId,
     pub content: Content,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+    pub client_submission_id: String,
     #[serde(default)]
     pub budget: RunBudgetRequest,
 }
@@ -268,6 +326,85 @@ pub struct RunSubscribeRequest {
     pub run_id: RunId,
     #[serde(default)]
     pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_run_id: Option<RunId>,
+    #[serde(default)]
+    pub include_finished: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStatusRequest {
+    pub execution_id: ExecutionId,
+    #[serde(default)]
+    pub include_private_command: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReadRequest {
+    pub execution_id: ExecutionId,
+    #[serde(default)]
+    pub after_sequence: u64,
+    pub max_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAttachRequest {
+    pub execution_id: ExecutionId,
+    #[serde(default)]
+    pub after_sequence: u64,
+    #[serde(default = "default_true")]
+    pub writable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionInputRequest {
+    pub attachment_id: RequestId,
+    pub bytes: ProcessBytes,
+    #[serde(default)]
+    pub eof: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLeaseRenewRequest {
+    pub attachment_id: RequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionResizeRequest {
+    pub attachment_id: RequestId,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDetachRequest {
+    pub attachment_id: RequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionKillRequest {
+    pub execution_id: ExecutionId,
+    #[serde(default)]
+    pub mode: KillMode,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -366,6 +503,101 @@ pub struct RunSubscriptionFinishedEvent {
     pub terminal_result: Option<Value>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionListEvent {
+    pub executions: Vec<ExecutionStatus>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionStatusEvent {
+    pub status: ExecutionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_command: Option<ExecutionPrivateCommand>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionReadEvent {
+    pub output: ExecutionReadResult,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAttachmentStartedEvent {
+    pub attachment_id: RequestId,
+    pub status: ExecutionStatus,
+    pub writable: bool,
+    pub next_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_ttl_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_interval_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionLeaseRenewedEvent {
+    pub attachment_id: RequestId,
+    pub lease_ttl_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOutputEvent {
+    pub attachment_id: RequestId,
+    pub execution_id: ExecutionId,
+    pub chunk: ExecutionOutputChunk,
+    pub state: ExecutionState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionInputAcceptedEvent {
+    pub attachment_id: RequestId,
+    pub eof: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionResizeAcceptedEvent {
+    pub attachment_id: RequestId,
+    pub columns: u16,
+    pub rows: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDetachAcceptedEvent {
+    pub attachment_id: RequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionKillAcceptedEvent {
+    pub execution_id: ExecutionId,
+    pub mode: KillMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionAttachmentFinishedEvent {
+    pub attachment_id: RequestId,
+    pub execution_id: ExecutionId,
+    pub state: ExecutionState,
+    pub last_delivered_sequence: u64,
+    pub reason: ExecutionAttachmentFinishReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionAttachmentFinishReason {
+    Detached,
+    TargetTerminal,
+    InputLeaseExpired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -470,6 +702,7 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: SessionStatus,
+    pub updated_at_unix_ms: u128,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -626,6 +859,7 @@ mod tests {
     const MESSAGE_ID_2: &str = "msg_01890f17-4a00-7000-8000-000000000006";
     const MESSAGE_ID_3: &str = "msg_01890f17-4a00-7000-8000-000000000007";
     const ATTEMPT_ID: &str = "attempt_01890f17-4a00-7000-8000-000000000008";
+    const EXECUTION_ID: &str = "exec_01890f17-4a00-7000-8000-000000000009";
 
     fn request_id() -> RequestId {
         RequestId::parse(REQUEST_ID).unwrap()
@@ -651,6 +885,10 @@ mod tests {
         AttemptId::parse(ATTEMPT_ID).unwrap()
     }
 
+    fn execution_id() -> ExecutionId {
+        ExecutionId::parse(EXECUTION_ID).unwrap()
+    }
+
     #[test]
     fn run_submit_request_round_trips_as_jsonl_shape() {
         let request = DaemonRequest::new(
@@ -658,14 +896,14 @@ mod tests {
             DaemonRequestKind::RunSubmit(RunSubmitRequest {
                 session_id: session_id(),
                 content: Content::text("hello").unwrap(),
-                idempotency_key: Some("matrix-event-001".to_string()),
+                client_submission_id: "matrix-event-001".to_string(),
                 budget: RunBudgetRequest::default(),
             }),
         );
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v3alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v5alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
         assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -679,6 +917,7 @@ mod tests {
             DaemonEventKind::Hello(HelloEvent {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 product_version: "1.0.0-alpha.6".to_string(),
+                daemon_instance_id: DaemonInstanceId::generate(),
                 capabilities: vec![
                     DaemonCapability::SessionOpen,
                     DaemonCapability::RunSubmit,
@@ -847,7 +1086,7 @@ mod tests {
     #[test]
     fn previous_alpha_and_untyped_id_shapes_are_rejected() {
         let previous_alpha = serde_json::json!({
-            "schema": "agentlibre.daemon.request.v2alpha",
+            "schema": format!("agentlibre.daemon.request.v{}alpha", 4),
             "request_id": REQUEST_ID,
             "kind": "session_turn",
             "payload": {
@@ -918,5 +1157,114 @@ mod tests {
             "payload": { "legacy": true }
         });
         assert!(serde_json::from_value::<DaemonRequest>(unknown_payload_field).is_err());
+    }
+
+    #[test]
+    fn execution_frames_preserve_typed_ids_and_explicit_binary_encoding() {
+        let request = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::ExecutionInput(ExecutionInputRequest {
+                attachment_id: request_id(),
+                bytes: ProcessBytes::from_bytes(&[0xff, 0x00, 0x80]),
+                eof: true,
+            }),
+        );
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["kind"], "execution_input");
+        assert_eq!(value["payload"]["attachment_id"], REQUEST_ID);
+        assert_eq!(value["payload"]["bytes"]["encoding"], "base64");
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(value).unwrap(),
+            request
+        );
+
+        let output = DaemonEvent::new(
+            Some(request_id()),
+            DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                attachment_id: request_id(),
+                execution_id: execution_id(),
+                chunk: ExecutionOutputChunk {
+                    sequence: 7,
+                    channel: ExecutionChannel::Terminal,
+                    bytes: ProcessBytes::from_bytes(b"ready\n"),
+                },
+                state: ExecutionState::Running,
+            }),
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonEvent>(serde_json::to_value(&output).unwrap()).unwrap(),
+            output
+        );
+
+        let renewal = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::ExecutionLeaseRenew(ExecutionLeaseRenewRequest {
+                attachment_id: request_id(),
+            }),
+        );
+        let renewal_value = serde_json::to_value(&renewal).unwrap();
+        assert_eq!(renewal_value["kind"], "execution_lease_renew");
+        assert_eq!(renewal_value["payload"]["attachment_id"], REQUEST_ID);
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(renewal_value).unwrap(),
+            renewal
+        );
+
+        let finished = DaemonEvent::new(
+            Some(request_id()),
+            DaemonEventKind::ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent {
+                attachment_id: request_id(),
+                execution_id: execution_id(),
+                state: ExecutionState::Running,
+                last_delivered_sequence: 7,
+                reason: ExecutionAttachmentFinishReason::InputLeaseExpired,
+            }),
+        );
+        let finished_value = serde_json::to_value(&finished).unwrap();
+        assert_eq!(finished_value["payload"]["reason"], "input_lease_expired");
+        assert_eq!(
+            serde_json::from_value::<DaemonEvent>(finished_value).unwrap(),
+            finished
+        );
+    }
+
+    #[test]
+    fn execution_payloads_reject_unknown_fields_and_invalid_typed_values() {
+        let unknown = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "request_id": REQUEST_ID,
+            "kind": "execution_resize",
+            "payload": {
+                "attachment_id": REQUEST_ID,
+                "columns": 80,
+                "rows": 24,
+                "legacy": true
+            }
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(unknown).is_err());
+
+        let untyped_execution = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "request_id": REQUEST_ID,
+            "kind": "execution_status",
+            "payload": {
+                "execution_id": "process-9"
+            }
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(untyped_execution).is_err());
+
+        let invalid_bytes = ProcessBytes {
+            encoding: ProcessBytesEncoding::Base64,
+            data: "***".to_owned(),
+        };
+        assert!(invalid_bytes.decode(64).is_err());
+        assert!(
+            TerminalSize {
+                columns: 0,
+                rows: 24
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

@@ -28,6 +28,9 @@ pub(crate) fn transcript_event(
         ChatSessionEvent::SessionFailed { message, .. } => {
             Some(TranscriptEvent::SessionFailed { message })
         }
+        ChatSessionEvent::UserShellStarted { .. } | ChatSessionEvent::UserShellFinished { .. } => {
+            None
+        }
     }
 }
 

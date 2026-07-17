@@ -7,7 +7,7 @@ pub(crate) fn validate_json(input: HookInput) -> HookResult {
         return fail(
             input.hook_id,
             "missing_json_text",
-            "json.validate requires a string payload field named text, content, json, or artifact",
+            "core:json.validate requires a string payload field named text, content, json, or artifact",
             None,
         );
     };
@@ -55,7 +55,7 @@ pub(crate) fn validate_task_spec(input: HookInput) -> HookResult {
         return fail(
             input.hook_id,
             "missing_task_spec_text",
-            "task_spec.validate requires a string payload field named text, content, markdown, or artifact",
+            "core:task_spec.validate requires a string payload field named text, content, markdown, or artifact",
             None,
         );
     };
@@ -140,7 +140,7 @@ pub(crate) fn validate_verification(input: HookInput) -> HookResult {
         return fail(
             input.hook_id,
             "missing_verification_text",
-            "verification.validate requires text, content, markdown, or artifact payload",
+            "core:verification.validate requires text, content, markdown, or artifact payload",
             None,
         );
     };

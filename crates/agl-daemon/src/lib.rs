@@ -1,16 +1,22 @@
+mod activation;
 mod options;
 mod run_factory;
 mod scheduler;
 mod server;
 mod state;
+mod surface;
 #[cfg(test)]
 mod tests;
 mod transcript;
 
+pub use activation::ListenerSource;
 pub use options::{DEFAULT_SOCKET_FILE, DaemonOptions, default_socket_path};
 pub use scheduler::{
     CronExecution, CronNotification, CronNotifier, CronSchedulerReport, CronTargetExecutor,
     NoopCronNotifier, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 pub use server::DaemonServer;
+#[cfg(unix)]
+#[doc(hidden)]
+pub use server::serve_connection;
 pub use state::{DaemonState, SharedDaemonState};

@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -423,6 +423,99 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             BEGIN
                 SELECT RAISE(ABORT, 'invalid supervised subagent run shape');
             END;
+        "#,
+    },
+    StoreMigration {
+        version: 14,
+        name: "014_process_executions",
+        sql: r#"
+            ALTER TABLE runs ADD COLUMN execution_context_json TEXT;
+
+            CREATE TABLE executions (
+                id TEXT PRIMARY KEY,
+                owner_kind TEXT NOT NULL CHECK (owner_kind IN ('session', 'run')),
+                owner_session_id TEXT,
+                owner_run_id TEXT,
+                root_run_id TEXT NOT NULL,
+                creating_run_id TEXT NOT NULL,
+                creating_step_id TEXT NOT NULL,
+                execution_kind TEXT NOT NULL CHECK (execution_kind IN ('argv', 'shell')),
+                state TEXT NOT NULL CHECK (state IN (
+                    'admitting', 'starting', 'running', 'exited', 'signalled',
+                    'cancelled', 'timed_out', 'failed', 'outcome_unknown'
+                )),
+                profile TEXT NOT NULL CHECK (profile IN ('workspace', 'host')),
+                io TEXT NOT NULL CHECK (io IN ('pipes', 'pty')),
+                cwd TEXT NOT NULL,
+                terminal_columns INTEGER,
+                terminal_rows INTEGER,
+                supervisor_id TEXT NOT NULL,
+                exit_kind TEXT CHECK (exit_kind IN ('code', 'signal', 'error')),
+                exit_code INTEGER,
+                exit_signal INTEGER,
+                exit_error_code TEXT,
+                error_code TEXT,
+                started_at_ms INTEGER,
+                finished_at_ms INTEGER,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                first_retained_sequence INTEGER,
+                last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
+                retained_bytes INTEGER NOT NULL DEFAULT 0 CHECK (retained_bytes >= 0),
+                discarded_output_bytes INTEGER NOT NULL DEFAULT 0 CHECK (discarded_output_bytes >= 0),
+                accepted_input_bytes INTEGER NOT NULL DEFAULT 0 CHECK (accepted_input_bytes >= 0),
+                output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0, 1)),
+                output_expired INTEGER NOT NULL DEFAULT 0 CHECK (output_expired IN (0, 1)),
+                input_lease_id TEXT,
+                input_lease_renewed_at_ms INTEGER,
+                grant_lease_json TEXT,
+                invocation_json TEXT NOT NULL,
+                spool_ref TEXT NOT NULL,
+                retention_deadline_ms INTEGER,
+                cleanup_state TEXT NOT NULL DEFAULT 'live'
+                    CHECK (cleanup_state IN ('live', 'tombstoned', 'cleaned')),
+                CHECK (
+                    (owner_kind = 'session' AND owner_session_id IS NOT NULL AND owner_run_id IS NULL) OR
+                    (owner_kind = 'run' AND owner_session_id IS NULL AND owner_run_id IS NOT NULL)
+                ),
+                CHECK ((terminal_columns IS NULL) = (terminal_rows IS NULL)),
+                CHECK (
+                    (exit_kind IS NULL AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NULL) OR
+                    (exit_kind = 'code' AND exit_code IS NOT NULL AND exit_signal IS NULL AND exit_error_code IS NULL) OR
+                    (exit_kind = 'signal' AND exit_code IS NULL AND exit_signal IS NOT NULL AND exit_error_code IS NULL) OR
+                    (exit_kind = 'error' AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NOT NULL)
+                )
+            );
+            CREATE INDEX executions_owner_session_idx
+                ON executions(owner_session_id, state, created_at_ms);
+            CREATE INDEX executions_owner_run_idx
+                ON executions(owner_run_id, state, created_at_ms);
+            CREATE INDEX executions_root_run_idx
+                ON executions(root_run_id, state, created_at_ms);
+            CREATE INDEX executions_supervisor_idx
+                ON executions(supervisor_id, state);
+            CREATE INDEX executions_retention_idx
+                ON executions(cleanup_state, retention_deadline_ms);
+
+            CREATE TABLE execution_events (
+                execution_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence > 0),
+                kind TEXT NOT NULL,
+                channel TEXT CHECK (channel IN ('stdout', 'stderr', 'terminal', 'lifecycle')),
+                spool_offset INTEGER,
+                byte_length INTEGER NOT NULL DEFAULT 0 CHECK (byte_length >= 0),
+                bounded_preview_json TEXT,
+                occurred_at_ms INTEGER NOT NULL,
+                safe_digest TEXT NOT NULL,
+                PRIMARY KEY (execution_id, sequence),
+                FOREIGN KEY(execution_id) REFERENCES executions(id) ON DELETE CASCADE,
+                CHECK (
+                    (kind = 'output' AND channel IS NOT NULL AND spool_offset IS NOT NULL AND byte_length > 0) OR
+                    (kind != 'output' AND spool_offset IS NULL AND byte_length = 0)
+                )
+            );
+            CREATE INDEX execution_events_replay_idx
+                ON execution_events(execution_id, sequence);
         "#,
     },
 ];

@@ -1,0 +1,153 @@
+version = 1
+
+[[packages]]
+id = "gemma4-e4b"
+display_name = "Gemma 4 E4B QAT Q4"
+function_id = "gemma4-e4b"
+default = true
+capabilities = ["text", "tools", "vision"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "unsloth/gemma-4-E4B-it-qat-GGUF"
+revision = "e4a9ed86f935b06e87808789db3c56bba24cbd49"
+
+[[packages.artifacts]]
+role = "main"
+model_id = "gemma4-e4b"
+filename = "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf"
+byte_size = 4215693760
+sha256 = "b3052f962d6449b4eb2075733c068bdec1c51eadb7b237e6c3157bfbb7b1dae0"
+required = true
+
+[[packages.artifacts]]
+role = "projector"
+model_id = "gemma4-e4b-mmproj"
+filename = "mmproj-F16.gguf"
+byte_size = 990372672
+sha256 = "6a255159ee4b01b304f633a57f017dd7d5a69d30fff52abb2614bf0813cef034"
+required = true
+
+[[packages.profiles]]
+id = "cpu-8gb-32768"
+device = "cpu"
+benchmark_evidence = "model-benchmark:20260716-gemma4-e4b-32k-cpu"
+required_total_ram_bytes = 7000000000
+required_available_ram_bytes = 6000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 32768
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 120
+expected_speed = "usable"
+
+[[packages]]
+id = "gemma4-12b"
+display_name = "Gemma 4 12B QAT Q4"
+function_id = "gemma4-12b"
+default = false
+capabilities = ["text", "tools", "vision"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "unsloth/gemma-4-12B-it-qat-GGUF"
+revision = "f18012b8f690e563b7f872cb764b4cb3de90b14a"
+
+[[packages.artifacts]]
+role = "main"
+model_id = "gemma4-12b"
+filename = "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+byte_size = 6716355328
+sha256 = "cc9ff072e0a8203429ed854e6662c17a6c2bc1e5dca5b475dd4736caaacbc165"
+required = true
+
+[[packages.artifacts]]
+role = "projector"
+model_id = "gemma4-12b-mmproj"
+filename = "mmproj-F16.gguf"
+byte_size = 175115840
+sha256 = "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3"
+required = true
+
+[[packages.profiles]]
+id = "cpu-16gb-32768"
+device = "cpu"
+benchmark_evidence = "model-benchmark:20260716-gemma4-12b-32k-cpu"
+required_total_ram_bytes = 17179869184
+required_available_ram_bytes = 14000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 32768
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 300
+expected_speed = "slow"
+
+[[packages]]
+id = "gemma4-26b"
+display_name = "Gemma 4 26B-A4B QAT Q4"
+function_id = "gemma4-26b"
+default = false
+capabilities = ["text", "tools"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+revision = "c1f25db7cf31985b52caa1db777eb72d17ca1c7c"
+
+[[packages.artifacts]]
+role = "main"
+model_id = "gemma4-26b"
+filename = "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+byte_size = 14249045120
+sha256 = "dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e"
+required = true
+
+[[packages.profiles]]
+id = "cpu-20gb-32768"
+device = "cpu"
+benchmark_evidence = "model-benchmark:20260716-gemma4-26b-32k-cpu"
+required_total_ram_bytes = 21474836480
+required_available_ram_bytes = 20000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 32768
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 300
+expected_speed = "slow"
+
+[[packages]]
+id = "gemma4-31b"
+display_name = "Gemma 4 31B QAT Q4"
+function_id = "gemma4-31b"
+default = false
+capabilities = ["text", "tools"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "unsloth/gemma-4-31B-it-qat-GGUF"
+revision = "1f1e54258d4a2cf7522856a5789045d9f2ea6d16"
+
+[[packages.artifacts]]
+role = "main"
+model_id = "gemma4-31b"
+filename = "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf"
+byte_size = 17287668064
+sha256 = "9188a71055550f1e60b875d02b7abb63625ac11b4a6f148d6b22b3b28ba3d335"
+required = true
+
+[[packages.profiles]]
+id = "cpu-40gb-32768"
+device = "cpu"
+benchmark_evidence = "model-benchmark:20260716-gemma4-31b-32k-cpu"
+required_total_ram_bytes = 42949672960
+required_available_ram_bytes = 40000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 32768
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 600
+expected_speed = "slow"

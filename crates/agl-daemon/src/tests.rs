@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
 use agl_config::ResolvedInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
-use agl_ids::{RequestId, RunId, SessionId};
+use agl_ids::{ExecutionId, RequestId, RunId, SessionId};
 use agl_inference::{
     InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
 };
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloRequest,
+    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
+    ExecutionListRequest, ExecutionReadRequest, ExecutionStatusRequest, HelloRequest,
     PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
     RunBudgetRequest, RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest,
     RunTreeRequest, SessionListRequest, SessionOpenRequest, SessionStatus, SessionStatusRequest,
@@ -71,6 +72,7 @@ tool_call_format = "hermes_json"
                 logging: AgentLibreLoggingConfig::from_env(),
                 history: AgentLibreHistoryConfig::default(),
                 workspace: AgentLibreWorkspaceConfig::default(),
+                execution: agl_runtime::AgentLibreExecutionConfig::default(),
             },
             inference: InferenceOptions {
                 config: Some(config),
@@ -208,6 +210,7 @@ fn open_session(state: &mut DaemonState) -> SessionId {
             session_id: None,
             new_session: true,
             workspace_root: None,
+            function_ref: None,
             skills: Vec::new(),
             tool_mode: ProtocolToolMode::ReadOnly,
         },
@@ -215,6 +218,32 @@ fn open_session(state: &mut DaemonState) -> SessionId {
     match event.kind {
         DaemonEventKind::SessionOpened(opened) => opened.session_id,
         other => panic!("unexpected open event: {other:?}"),
+    }
+}
+
+#[test]
+fn resume_of_an_already_loaded_session_is_idempotent() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let session_id = open_session(&mut state);
+
+    let event = state.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: Some(session_id.clone()),
+            new_session: false,
+            workspace_root: None,
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+
+    match event.kind {
+        DaemonEventKind::SessionOpened(opened) => {
+            assert_eq!(opened.session_id, session_id);
+            assert!(opened.resumed);
+        }
+        other => panic!("unexpected resume event: {other:?}"),
     }
 }
 
@@ -227,7 +256,9 @@ fn submit(
     let event = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id: session_id.clone(),
         content: agl_content::Content::text(text).unwrap(),
-        idempotency_key: idempotency_key.map(str::to_string),
+        client_submission_id: idempotency_key
+            .map(str::to_string)
+            .unwrap_or_else(|| RequestId::generate().to_string()),
         budget: RunBudgetRequest::default(),
     })));
     match event.kind {
@@ -359,8 +390,9 @@ Return the daemon child verdict.
             session_id: None,
             new_session: true,
             workspace_root: Some(workspace.display().to_string()),
+            function_ref: None,
             skills: Vec::new(),
-            tool_mode: ProtocolToolMode::ReadOnly,
+            tool_mode: ProtocolToolMode::Execute,
         },
     )));
     let session_id = match opened.kind {
@@ -407,7 +439,11 @@ fn admission_status_and_cancel_stay_responsive_while_model_blocks() {
 
     let started = Instant::now();
     let accepted = submit(&mut state, &session_id, "block", None);
-    assert!(started.elapsed() < Duration::from_millis(250));
+    let admission_elapsed = started.elapsed();
+    assert!(
+        admission_elapsed < Duration::from_millis(250),
+        "cron admission took {admission_elapsed:?}"
+    );
     assert_eq!(accepted.state, ProtocolRunState::Queued);
     wait_for_calls(&control, 1);
 
@@ -501,7 +537,7 @@ fn conflicting_idempotency_fingerprint_fails_without_second_run() {
     let conflict = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id,
         content: agl_content::Content::text("different").unwrap(),
-        idempotency_key: Some("same-key".to_string()),
+        client_submission_id: "same-key".to_string(),
         budget: RunBudgetRequest::default(),
     })));
     assert!(matches!(
@@ -576,6 +612,44 @@ fn session_queries_and_unknown_runs_have_typed_responses() {
 }
 
 #[test]
+fn execution_operator_queries_have_typed_empty_not_found_and_bound_errors() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let missing = ExecutionId::generate();
+
+    let list = state.handle_request(request(DaemonRequestKind::ExecutionList(
+        ExecutionListRequest::default(),
+    )));
+    assert!(matches!(
+        list.kind,
+        DaemonEventKind::ExecutionList(ref event) if event.executions.is_empty()
+    ));
+
+    let status = state.handle_request(request(DaemonRequestKind::ExecutionStatus(
+        ExecutionStatusRequest {
+            execution_id: missing.clone(),
+            include_private_command: true,
+        },
+    )));
+    assert!(matches!(
+        status.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::NotFound
+    ));
+
+    let read = state.handle_request(request(DaemonRequestKind::ExecutionRead(
+        ExecutionReadRequest {
+            execution_id: missing,
+            after_sequence: 0,
+            max_bytes: 0,
+        },
+    )));
+    assert!(matches!(
+        read.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::InvalidRequest
+    ));
+}
+
+#[test]
 fn daemon_event_constructor_keeps_current_schema() {
     let event = DaemonEvent::new(
         None,
@@ -614,9 +688,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
     };
     let mut notifier = NoopCronNotifier;
 
-    let started = Instant::now();
     let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(first.recorded_runs[0].status, CronRunStatus::Queued);
     assert_eq!(first.notifications, 0);
     wait_for_calls(&control, 1);

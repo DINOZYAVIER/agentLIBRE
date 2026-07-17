@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 
 use agl_capabilities::{
-    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
-    CapabilityId, DeclarationError, DispatchDenial, EffectiveCapabilitySet, HookDeclaration,
-    HookId, ProviderDeclaration, ProviderId, ProviderTrust,
+    ActionDeclaration, ActionDispatchContext, ActionDispatchControl, ActionHandler,
+    ActionHandlerError, ActionInvocation, ActionResult, CapabilityId, DeclarationError,
+    DispatchDenial, EffectiveCapabilitySet, HookDeclaration, HookId, ProviderDeclaration,
+    ProviderId, ProviderTrust,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -171,6 +172,7 @@ impl ToolRuntime {
         &self,
         invocation: ActionInvocation,
         effective: &EffectiveCapabilitySet,
+        control: ActionDispatchControl,
     ) -> Result<ActionResult, ToolDispatchError> {
         effective
             .authorize(&invocation, self.catalog.providers())
@@ -181,8 +183,34 @@ impl ToolRuntime {
             .ok_or_else(|| ToolDispatchError::MissingHandler {
                 id: invocation.capability_id.clone(),
             })?;
+        let effective_capability = effective
+            .capability(&invocation.capability_id)
+            .expect("authorized invocation must have an effective capability")
+            .clone();
+        let requested_effects = handler
+            .preflight(&invocation)
+            .map_err(ToolDispatchError::Handler)?;
+        if !requested_effects
+            .is_subset(&effective_capability.declaration().conditional_state_effects)
+        {
+            return Err(ToolDispatchError::Denied(DispatchDenial {
+                capability_id: invocation.capability_id.clone(),
+                code: agl_capabilities::DispatchDenialCode::ConditionalEffectUndeclared,
+            }));
+        }
+        if !requested_effects.is_subset(effective_capability.authorized_state_effects()) {
+            return Err(ToolDispatchError::Denied(DispatchDenial {
+                capability_id: invocation.capability_id.clone(),
+                code: agl_capabilities::DispatchDenialCode::ConditionalEffectDenied,
+            }));
+        }
         handler
-            .dispatch(invocation)
+            .dispatch(ActionDispatchContext::new(
+                invocation,
+                effective_capability,
+                control,
+                requested_effects,
+            ))
             .map_err(ToolDispatchError::Handler)
     }
 }
@@ -312,8 +340,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use agl_capabilities::{
-        ActionDeclaration, CapabilityPolicyInput, DispatchDenialCode, OperationKind,
-        ProviderSource, ToolAccessMode,
+        ActionDeclaration, CapabilityGrant, CapabilityPolicyInput, DispatchDenialCode, HookEvent,
+        OperationKind, ProviderSource, SensitiveInput, StateEffect, ToolAccessMode,
     };
     use agl_ids::{ExecutionScope, RunId};
     use serde_json::json;
@@ -326,13 +354,146 @@ mod tests {
     impl ActionHandler for CountingHandler {
         fn dispatch(
             &self,
-            invocation: ActionInvocation,
+            context: ActionDispatchContext,
         ) -> Result<ActionResult, ActionHandlerError> {
+            let invocation = context.into_invocation();
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(ActionResult::new(json!({
                 "echo": invocation.arguments["value"]
             })))
         }
+    }
+
+    #[derive(Clone)]
+    struct ConditionalHandler {
+        requested: StateEffect,
+        dispatch_count: Arc<AtomicUsize>,
+    }
+
+    impl ActionHandler for ConditionalHandler {
+        fn preflight(
+            &self,
+            _invocation: &ActionInvocation,
+        ) -> Result<BTreeSet<StateEffect>, ActionHandlerError> {
+            Ok([self.requested].into_iter().collect())
+        }
+
+        fn dispatch(
+            &self,
+            context: ActionDispatchContext,
+        ) -> Result<ActionResult, ActionHandlerError> {
+            assert!(
+                context
+                    .authorized_conditional_effects()
+                    .contains(&self.requested)
+            );
+            self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+            Ok(ActionResult::new(json!({"ok": true})))
+        }
+    }
+
+    #[test]
+    fn provider_qualified_hooks_keep_local_names_isolated_from_model_tools() {
+        let mut catalog = ToolCatalog::new();
+        for provider in ["alpha", "beta"] {
+            catalog
+                .register(
+                    ProviderDeclaration::new(
+                        ProviderId::new(provider).unwrap(),
+                        format!("{provider} provider"),
+                        "1",
+                        ProviderSource::TestFixture,
+                        ProviderTrust::TrustedRegistered,
+                    )
+                    .unwrap()
+                    .with_hook(HookDeclaration {
+                        id: HookId::new(format!("{provider}:validate")).unwrap(),
+                        event: HookEvent::ArtifactWrite,
+                        required: true,
+                    }),
+                )
+                .unwrap();
+        }
+
+        for provider in ["alpha", "beta"] {
+            let hook_id = HookId::new(format!("{provider}:validate")).unwrap();
+            assert_eq!(
+                catalog.provider_for_hook(&hook_id).unwrap().id.as_str(),
+                provider
+            );
+            assert!(catalog.trusted_hook(&hook_id).is_some());
+        }
+        assert_eq!(catalog.capability_ids().count(), 0);
+    }
+
+    #[test]
+    fn catalog_rejects_invalid_hook_ownership_and_reserved_core_claims() {
+        let duplicate = ProviderDeclaration {
+            id: ProviderId::new("duplicate").unwrap(),
+            name: "Duplicate".to_string(),
+            version: "1".to_string(),
+            source: ProviderSource::TestFixture,
+            trust: ProviderTrust::TrustedRegistered,
+            hooks: vec![
+                HookDeclaration {
+                    id: HookId::new("duplicate:validate").unwrap(),
+                    event: HookEvent::ArtifactWrite,
+                    required: true,
+                },
+                HookDeclaration {
+                    id: HookId::new("duplicate:validate").unwrap(),
+                    event: HookEvent::ModelResponse,
+                    required: false,
+                },
+            ],
+            actions: Vec::new(),
+        };
+        assert!(matches!(
+            ToolCatalog::new().register(duplicate),
+            Err(ToolCatalogError::InvalidDeclaration(
+                DeclarationError::DuplicateId { kind: "hook", .. }
+            ))
+        ));
+
+        let mismatched = ProviderDeclaration {
+            id: ProviderId::new("alpha").unwrap(),
+            name: "Alpha".to_string(),
+            version: "1".to_string(),
+            source: ProviderSource::TestFixture,
+            trust: ProviderTrust::TrustedRegistered,
+            hooks: vec![HookDeclaration {
+                id: HookId::new("beta:validate").unwrap(),
+                event: HookEvent::ArtifactWrite,
+                required: true,
+            }],
+            actions: Vec::new(),
+        };
+        assert!(matches!(
+            ToolCatalog::new().register(mismatched),
+            Err(ToolCatalogError::InvalidDeclaration(
+                DeclarationError::HookProviderMismatch { .. }
+            ))
+        ));
+
+        let core_shadow = ProviderDeclaration {
+            id: ProviderId::new("core").unwrap(),
+            name: "Core shadow".to_string(),
+            version: "1".to_string(),
+            source: ProviderSource::ThirdPartyRegistered,
+            trust: ProviderTrust::TrustedRegistered,
+            hooks: vec![HookDeclaration {
+                id: HookId::new("core:validate").unwrap(),
+                event: HookEvent::ArtifactWrite,
+                required: true,
+            }],
+            actions: Vec::new(),
+        };
+        assert!(matches!(
+            ToolCatalog::new().register(core_shadow),
+            Err(ToolCatalogError::InvalidDeclaration(
+                DeclarationError::ReservedProviderNamespace { .. }
+            ))
+        ));
     }
 
     #[test]
@@ -343,7 +504,13 @@ mod tests {
         let runtime = runtime(provider.clone(), count.clone());
         let invocation = invocation(&provider, &effective, json!({"value": 7, "extra": true}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
@@ -360,7 +527,13 @@ mod tests {
         let runtime = runtime(provider.clone(), count.clone());
         let invocation = invocation(&provider, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
@@ -378,7 +551,13 @@ mod tests {
         let runtime = runtime(changed, count.clone());
         let invocation = invocation(&trusted, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
@@ -396,7 +575,13 @@ mod tests {
         let runtime = runtime(changed, count.clone());
         let invocation = invocation(&trusted, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
@@ -414,13 +599,64 @@ mod tests {
         let runtime = runtime(current, count.clone());
         let invocation = invocation(&original, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
             Some(DispatchDenialCode::StaleDeclaration)
         );
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn changed_operation_or_effect_invalidates_snapshot_before_handler_execution() {
+        let original = provider("Echo");
+        let effective = policy(&original, true);
+        let operation_changed = {
+            let mut provider = original.clone();
+            provider.actions[0] = ActionDeclaration::new(
+                capability_id(),
+                "Echo",
+                original.actions[0].input_schema.clone(),
+                OperationKind::Request,
+            )
+            .unwrap();
+            provider
+        };
+        let effect_changed = {
+            let mut provider = original.clone();
+            provider.actions[0] = provider.actions[0]
+                .clone()
+                .with_state_effects([StateEffect::HostScreenCapture])
+                .with_sensitive_inputs([SensitiveInput::ScreenCapture]);
+            provider
+        };
+
+        for current in [operation_changed, effect_changed] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let runtime = runtime(current, count.clone());
+            let invocation = invocation(&original, &effective, json!({"value": "hello"}));
+
+            let error = runtime
+                .dispatch(
+                    invocation,
+                    &effective,
+                    ActionDispatchControl::uncancellable(),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                error.denial().map(|denial| denial.code),
+                Some(DispatchDenialCode::StaleDeclaration)
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]
@@ -433,7 +669,13 @@ mod tests {
         let runtime = runtime(current, count.clone());
         let invocation = invocation(&original, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
@@ -467,11 +709,95 @@ mod tests {
         runtime.register_provider(changed_secondary).unwrap();
         let invocation = invocation(&primary, &effective, json!({"value": "hello"}));
 
-        let error = runtime.dispatch(invocation, &effective).unwrap_err();
+        let error = runtime
+            .dispatch(
+                invocation,
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
 
         assert_eq!(
             error.denial().map(|denial| denial.code),
             Some(DispatchDenialCode::CatalogChanged)
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn conditional_effect_requires_declaration_and_effective_grant_before_dispatch() {
+        let provider = conditional_provider(StateEffect::HostProcessExecution);
+        let denied = policy(&provider, true);
+        let count = Arc::new(AtomicUsize::new(0));
+        let runtime = conditional_runtime(
+            provider.clone(),
+            StateEffect::HostProcessExecution,
+            count.clone(),
+        );
+        let error = runtime
+            .dispatch(
+                invocation(&provider, &denied, json!({"value": "host"})),
+                &denied,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.denial().map(|denial| denial.code),
+            Some(DispatchDenialCode::ConditionalEffectDenied)
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        let admitted = CapabilityPolicyInput::new(
+            [provider.clone()],
+            [capability_id()],
+            ToolAccessMode::ReadOnly,
+        )
+        .with_grants([CapabilityGrant::new(capability_id(), OperationKind::Read)
+            .with_state_effects([StateEffect::HostProcessExecution])])
+        .resolve()
+        .unwrap();
+        runtime
+            .dispatch(
+                invocation(&provider, &admitted, json!({"value": "host"})),
+                &admitted,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn handler_cannot_request_an_undeclared_conditional_effect() {
+        let provider = conditional_provider(StateEffect::ShellLoginStartup);
+        let effective = CapabilityPolicyInput::new(
+            [provider.clone()],
+            [capability_id()],
+            ToolAccessMode::ReadOnly,
+        )
+        .with_grants([CapabilityGrant::new(capability_id(), OperationKind::Read)
+            .with_state_effects([
+                StateEffect::HostProcessExecution,
+                StateEffect::ShellLoginStartup,
+            ])])
+        .resolve()
+        .unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let runtime = conditional_runtime(
+            provider.clone(),
+            StateEffect::HostProcessExecution,
+            count.clone(),
+        );
+
+        let error = runtime
+            .dispatch(
+                invocation(&provider, &effective, json!({"value": "forged"})),
+                &effective,
+                ActionDispatchControl::uncancellable(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.denial().map(|denial| denial.code),
+            Some(DispatchDenialCode::ConditionalEffectUndeclared)
         );
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
@@ -506,6 +832,14 @@ mod tests {
         )
     }
 
+    fn conditional_provider(effect: StateEffect) -> ProviderDeclaration {
+        let mut provider = provider("Conditional echo");
+        provider.actions[0] = provider.actions[0]
+            .clone()
+            .with_conditional_state_effects([effect]);
+        provider
+    }
+
     fn policy(provider: &ProviderDeclaration, routed: bool) -> EffectiveCapabilitySet {
         CapabilityPolicyInput::new(
             [provider.clone()],
@@ -521,6 +855,25 @@ mod tests {
         runtime.register_provider(provider).unwrap();
         runtime
             .register_handler(capability_id(), CountingHandler(count))
+            .unwrap();
+        runtime
+    }
+
+    fn conditional_runtime(
+        provider: ProviderDeclaration,
+        requested: StateEffect,
+        dispatch_count: Arc<AtomicUsize>,
+    ) -> ToolRuntime {
+        let mut runtime = ToolRuntime::new();
+        runtime.register_provider(provider).unwrap();
+        runtime
+            .register_handler(
+                capability_id(),
+                ConditionalHandler {
+                    requested,
+                    dispatch_count,
+                },
+            )
             .unwrap();
         runtime
     }

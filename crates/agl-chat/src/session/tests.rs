@@ -190,6 +190,55 @@ fn build_request_prepends_skill_context_after_system_prompt() {
 }
 
 #[test]
+fn build_request_rejects_skill_routing_parity_failure_before_inference() {
+    let config = ModelConfig {
+        dialect: ModelDialect::Qwen3,
+        tool_call_format: ToolCallFormat::HermesJson,
+    };
+    let effective = effective_capabilities(&["fs.read"]);
+    let skill_id = SkillId::new("forged-routing").unwrap();
+    let routing = SkillToolRoutingView::new([(
+        skill_id,
+        SkillToolRouting::new(
+            [],
+            [],
+            [(
+                CapabilityId::new("fs.read").unwrap(),
+                agl_capabilities::CapabilityExclusionReason::NotRouted,
+            )],
+        ),
+    )])
+    .unwrap();
+
+    let error = build_inference_request(
+        ModelRequest {
+            run_id: run_id(),
+            turn_id: turn_id(),
+            request_index: 0,
+            messages: vec![TurnMessage::User {
+                content: text("hello"),
+            }],
+            visible_tools: visible_tools_from_effective(&effective),
+        },
+        AttemptId::generate(),
+        &config,
+        InferenceRequestContexts {
+            skill_context: Some("<agentlibre_skill_context>\nforged\n</agentlibre_skill_context>"),
+            skill_tool_routing: Some(&routing),
+            effective_capabilities: Some(&effective),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("callable routing differs from the effective capability set")
+    );
+}
+
+#[test]
 fn build_request_prepends_memory_context_before_skill_context() {
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
@@ -274,9 +323,8 @@ fn build_request_injects_runtime_features_before_tools() {
     assert!(
         request.rendered.messages[1]
             .content
-            .contains("<agentlibre_runtime_features>")
+            .contains("<agentlibre_runtime>")
     );
-    assert!(request.rendered.messages[1].content.contains("- cron:"));
     assert!(
         request.rendered.messages[1]
             .content
@@ -285,13 +333,10 @@ fn build_request_injects_runtime_features_before_tools() {
     assert!(
         request.rendered.messages[1]
             .content
-            .contains("read-only: list, show, history, preflight")
+            .contains("Only the tool schemas supplied for this turn are callable")
     );
-    assert!(
-        request.rendered.messages[1]
-            .content
-            .contains("write: add, delete, run, tick")
-    );
+    assert!(!request.rendered.messages[1].content.contains("cron"));
+    assert!(!request.rendered.messages[1].content.contains("memory"));
     assert_eq!(
         request.rendered.messages[2].content,
         Some(text("memory context"))
@@ -398,7 +443,7 @@ fn build_request_injects_visible_tool_context_for_gemma() {
 }
 
 #[test]
-fn hermes_and_gemma_render_the_same_complete_input_schema() {
+fn hermes_and_gemma_render_the_same_compact_input_schema() {
     let effective = effective_capabilities(&["fs.read"]);
     let declaration = effective
         .capability(&CapabilityId::new("fs.read").unwrap())
@@ -413,6 +458,9 @@ fn hermes_and_gemma_render_the_same_complete_input_schema() {
     assert!(gemma.contains(&schema_record));
     assert!(schema_record.contains(r#""additionalProperties":false"#));
     assert!(schema_record.contains(r#""path":{"type":"string"}"#));
+    assert!(!schema_record.contains(r#""$schema""#));
+    assert!(!schema_record.contains(r#""title""#));
+    assert!(!schema_record.contains(r#""format""#));
 }
 
 #[test]
@@ -518,7 +566,7 @@ fn selected_skill_hook_batches_use_declared_hook_events() {
             .iter()
             .map(HookId::as_str)
             .collect::<Vec<_>>(),
-        vec!["repo_path.validate", "task_spec.validate"]
+        vec!["core:repo_path.validate", "core:task_spec.validate"]
     );
     assert!(batches[0].optional_hooks.is_empty());
 }
@@ -556,7 +604,7 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
 }
 
 #[test]
-fn visible_tools_include_read_only_core_tools_without_skills() {
+fn no_skill_route_exposes_only_read_only_filesystem_tools() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
@@ -577,22 +625,12 @@ fn visible_tools_include_read_only_core_tools_without_skills() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.request",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.list", "fs.read", "fs.search"]
     );
 }
 
 #[test]
-fn visible_tools_include_edit_in_write_mode_without_skills() {
+fn no_skill_route_adds_only_filesystem_edit_in_write_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
@@ -613,18 +651,70 @@ fn visible_tools_include_edit_in_write_mode_without_skills() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.edit",
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.request",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+    );
+}
+
+#[test]
+fn process_skill_is_not_baseline_and_routes_only_mode_admitted_actions() {
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+
+    let baseline = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &[],
+        ToolAccessMode::Admin,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    assert!(
+        agl_tools::PROCESS_TOOL_IDS
+            .iter()
+            .all(|id| !baseline.contains(&CapabilityId::new((*id).to_string()).unwrap()))
+    );
+
+    let process_skill = [SkillId::new("process").unwrap()];
+    let read_only = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &process_skill,
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_only
+            .capabilities()
+            .map(|capability| capability.declaration().id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["process.pwd", "process.read", "process.status"]
+    );
+
+    let execute = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &process_skill,
+        ToolAccessMode::Execute,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        execute.capabilities().len(),
+        agl_tools::PROCESS_TOOL_IDS.len()
+    );
+    assert!(
+        !execute
+            .capability(&CapabilityId::new(agl_tools::SHELL_EXEC_TOOL_ID).unwrap())
+            .unwrap()
+            .authorized_state_effects()
+            .contains(&StateEffect::HostProcessExecution)
     );
 }
 
@@ -704,7 +794,7 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         &registry,
         &catalog,
         &[],
-        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         None,
         RuntimeCapabilityBoundary {
@@ -719,7 +809,7 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         &registry,
         &catalog,
         &[],
-        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         Some(FunctionToolPolicy::default()),
         RuntimeCapabilityBoundary {
@@ -739,7 +829,7 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         &registry,
         &catalog,
         &[],
-        ToolAccessMode::ReadOnly,
+        ToolAccessMode::Execute,
         &RuntimePermissionGrantSnapshot::default(),
         None,
         RuntimeCapabilityBoundary {
@@ -768,17 +858,7 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
         Case {
             id: "policy-absent",
             tools_yaml: "",
-            expected_ids: &[
-                "fs.list",
-                "fs.read",
-                "fs.search",
-                "permissions.request",
-                "permissions.status",
-                "skill.inspect",
-                "skill.list",
-                "skill.status",
-                "skill.verify",
-            ],
+            expected_ids: &["fs.list", "fs.read", "fs.search"],
             policy_present: false,
         },
         Case {
@@ -825,6 +905,7 @@ tool_call_format = "hermes_json"
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
         history: agl_runtime::AgentLibreHistoryConfig::default(),
         workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
     let catalog = full_tool_catalog();
     let catalog_ids = catalog
@@ -962,6 +1043,9 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
             state_effects: BTreeSet::from([StateEffect::StoreCron]),
             sensitive_inputs: BTreeSet::new(),
             run_id: run_id(),
+            duration: "one_turn".to_string(),
+            admitted_scope: "{}".to_string(),
+            scope_digest: format!("sha256:{}", "0".repeat(64)),
         }],
         ignored: Vec::new(),
     };
@@ -985,7 +1069,7 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
 }
 
 #[test]
-fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
+fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
     agl_tools::guards::register(&mut extension_registry).unwrap();
@@ -1006,20 +1090,7 @@ fn approve_mode_includes_permission_approval_tools_without_broad_write_hack() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "fs.edit",
-            "fs.list",
-            "fs.read",
-            "fs.search",
-            "permissions.grant",
-            "permissions.request",
-            "permissions.revoke",
-            "permissions.status",
-            "skill.inspect",
-            "skill.list",
-            "skill.status",
-            "skill.verify",
-        ]
+        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
     );
 }
 
@@ -1098,6 +1169,76 @@ fn dynamic_grant_admits_exact_tool_and_expires_one_turn() {
 }
 
 #[test]
+fn session_host_grant_retains_scope_provenance_and_remains_active() {
+    let root = temp_store_root("grant-host-session");
+    let store = AglStore::open_at(&root).unwrap();
+    let session_id = session_id();
+    let grant = store
+        .create_permission_grant(agl_store::PermissionGrantDraft {
+            request_id: None,
+            tool_id: agl_tools::SHELL_EXEC_TOOL_ID.to_string(),
+            max_operation_kind: "execute".to_string(),
+            state_effects: vec![
+                "spawn_process".to_string(),
+                "host_process_execution".to_string(),
+            ],
+            sensitive_inputs: Vec::new(),
+            scope: serde_json::json!({
+                "workspace_root": "/repo",
+                "session_id": session_id.clone(),
+            }),
+            duration: "session".to_string(),
+            granted_by_ref: "test".to_string(),
+        })
+        .unwrap();
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let selected = [SkillId::new("process").unwrap()];
+    let run_id = run_id();
+    let mut snapshot = admit_dynamic_permission_grants(
+        &skill_registry,
+        &catalog,
+        &selected,
+        &root,
+        std::path::Path::new("/repo"),
+        &run_id,
+        Some(&session_id),
+    )
+    .unwrap();
+    let effective = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Execute,
+        &snapshot,
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    finalize_permission_grants(&root, &run_id, &effective, &mut snapshot).unwrap();
+
+    let capability = effective
+        .capability(&CapabilityId::new(agl_tools::SHELL_EXEC_TOOL_ID).unwrap())
+        .unwrap();
+    assert!(
+        capability
+            .authorized_state_effects()
+            .contains(&StateEffect::HostProcessExecution)
+    );
+    let provenance = capability.grant_provenance().unwrap();
+    assert_eq!(provenance.grant_id, grant.id);
+    assert_eq!(provenance.duration, "session");
+    assert!(provenance.admitted_scope.contains(TEST_SESSION_ID));
+    assert!(provenance.scope_digest.starts_with("sha256:"));
+
+    let retained = store.permission_grant(&grant.id).unwrap().unwrap();
+    assert_eq!(retained.status, agl_store::PermissionGrantStatus::Active);
+    assert_eq!(retained.last_admitted_run_id.as_deref(), Some(TEST_RUN_ID));
+    assert!(retained.consumed_at.is_none());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn screen_grant_requires_sensitive_input_and_host_effect_together() {
     let root = temp_store_root("grant-screen-exact");
     let store = AglStore::open_at(&root).unwrap();
@@ -1138,6 +1279,7 @@ fn screen_grant_requires_sensitive_input_and_host_effect_together() {
             &policy,
             std::path::Path::new("/repo"),
             &run_id(),
+            None,
         )
         .unwrap_err(),
         "state_effect_denied"
@@ -1148,6 +1290,7 @@ fn screen_grant_requires_sensitive_input_and_host_effect_together() {
         &policy,
         std::path::Path::new("/repo"),
         &run_id(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -1301,22 +1444,28 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
 }
 
 #[test]
-fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
+fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
-
-    let tools = selected_skill_visible_tools(
+    let selected = [SkillId::new("cron-planner").unwrap()];
+    let effective = resolve_effective_capabilities(
         &skill_registry,
         &catalog,
-        &[SkillId::new("cron-planner").unwrap()],
-        ToolAccessMode::ReadOnly,
+        &selected,
+        ToolAccessMode::Write,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
+    let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
 
     assert_eq!(
-        tools
+        route
+            .callable_tools()
             .iter()
-            .map(|tool| tool.id.as_str())
+            .map(CapabilityId::as_str)
             .collect::<Vec<_>>(),
         vec![
             "cron.preflight",
@@ -1326,11 +1475,306 @@ fn selected_cron_planner_can_request_but_not_call_requestable_tools() {
             "permissions.status",
         ]
     );
-    assert!(!tools.iter().any(|tool| tool.id.as_str() == "cron.add"));
-    assert!(
-        !tools
+    assert_eq!(
+        route
+            .requestable_tools()
             .iter()
-            .any(|tool| tool.id.as_str() == "matrix.outbox.enqueue")
+            .map(CapabilityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["cron.add", "matrix.outbox.enqueue"]
+    );
+    assert_eq!(
+        route
+            .unavailable_tools()
+            .iter()
+            .map(|(tool, reason)| (tool.as_str(), reason.code()))
+            .collect::<Vec<_>>(),
+        vec![("matrix.outbox.deliver", "unknown_capability")]
+    );
+    ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
+
+    let bundle =
+        build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
+    assert!(bundle.content.contains(
+        "directly_callable_tools: cron.preflight, fs.read, fs.search, permissions.request, permissions.status"
+    ));
+    assert!(
+        bundle
+            .content
+            .contains("requestable_tools: cron.add, matrix.outbox.enqueue")
+    );
+    assert!(bundle.content.contains("id: schedule-matrix-cron"));
+}
+
+#[test]
+fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestable() {
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let selected = [SkillId::new("cron-planner").unwrap()];
+
+    let read_only = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing = derive_skill_tool_routing(&skill_registry, &selected, &read_only).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    assert!(route.requestable_tools().is_empty());
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
+    );
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("matrix.outbox.enqueue").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
+    );
+    let bundle =
+        build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
+    assert!(bundle.content.contains("requestable_tools: []"));
+    assert!(!bundle.content.contains("id: schedule-matrix-cron"));
+
+    let function_denied = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Write,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::default()),
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing = derive_skill_tool_routing(&skill_registry, &selected, &function_denied).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    assert!(route.callable_tools().is_empty());
+    assert!(route.requestable_tools().is_empty());
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+    );
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("permissions.request").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+    );
+    ensure_skill_tool_routing_parity(&routing, &function_denied).unwrap();
+
+    let request_path_denied = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Write,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::new(
+            tool_ids(&[
+                "cron.add",
+                "cron.preflight",
+                "fs.read",
+                "fs.search",
+                "matrix.outbox.enqueue",
+                "permissions.status",
+            ]),
+            [],
+        )),
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing =
+        derive_skill_tool_routing(&skill_registry, &selected, &request_path_denied).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    assert!(route.requestable_tools().is_empty());
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::NotRouted
+    );
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("permissions.request").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+    );
+
+    let explicitly_denied = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Write,
+        &RuntimePermissionGrantSnapshot::default(),
+        Some(FunctionToolPolicy::new(
+            tool_ids(&[
+                "cron.add",
+                "cron.preflight",
+                "fs.read",
+                "fs.search",
+                "matrix.outbox.deliver",
+                "matrix.outbox.enqueue",
+                "permissions.request",
+                "permissions.status",
+            ]),
+            tool_ids(&["fs.read"]),
+        )),
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing =
+        derive_skill_tool_routing(&skill_registry, &selected, &explicitly_denied).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    assert!(
+        !route
+            .callable_tools()
+            .contains(&CapabilityId::new("fs.read").unwrap())
+    );
+    assert_eq!(
+        route.unavailable_tools()[&CapabilityId::new("fs.read").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::FunctionDenied
+    );
+    ensure_skill_tool_routing_parity(&routing, &explicitly_denied).unwrap();
+}
+
+#[test]
+fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let selected = [SkillId::new("cron-planner").unwrap()];
+    let cron_add = CapabilityId::new("cron.add").unwrap();
+    let invalid_grant = RuntimePermissionGrantSnapshot {
+        admitted: vec![AdmittedPermissionGrant {
+            grant_id: "grant-invalid".to_string(),
+            capability_id: cron_add.clone(),
+            max_operation_kind: OperationKind::Read,
+            state_effects: BTreeSet::new(),
+            sensitive_inputs: BTreeSet::new(),
+            run_id: run_id(),
+            duration: "one_turn".to_string(),
+            admitted_scope: "{}".to_string(),
+            scope_digest: format!("sha256:{}", "0".repeat(64)),
+        }],
+        ignored: Vec::new(),
+    };
+    let effective = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Write,
+        &invalid_grant,
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        effective.exclusion(&cron_add).unwrap().reason,
+        agl_capabilities::CapabilityExclusionReason::GrantOperationDenied
+    );
+
+    let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    assert!(route.requestable_tools().contains(&cron_add));
+    ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
+}
+
+#[test]
+fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
+    let skill_registry = test_skill_registry();
+    let mut catalog = ToolCatalog::new();
+    catalog
+        .register(agl_capabilities::delegation_provider())
+        .unwrap();
+    agl_tools::guards::register(&mut catalog).unwrap();
+    catalog
+        .register(
+            agl_tools::cron::declaration().with_trust(agl_capabilities::ProviderTrust::Revoked),
+        )
+        .unwrap();
+    agl_tools::fs::register(&mut catalog).unwrap();
+    agl_tools::matrix::register(&mut catalog).unwrap();
+    agl_tools::memory::register(&mut catalog).unwrap();
+    agl_tools::notes::register(&mut catalog).unwrap();
+    agl_tools::permissions::register(&mut catalog).unwrap();
+    agl_tools::process::register(&mut catalog).unwrap();
+    agl_tools::repo::register(&mut catalog).unwrap();
+    agl_tools::skills::register(&mut catalog).unwrap();
+    agl_tools::store::register(&mut catalog).unwrap();
+    let selected = [SkillId::new("cron-planner").unwrap()];
+    let effective = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::Write,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
+    let route = routing.route(&selected[0]).unwrap();
+    for capability in ["cron.add", "cron.preflight"] {
+        assert_eq!(
+            route.unavailable_tools()[&CapabilityId::new(capability).unwrap()],
+            agl_capabilities::CapabilityExclusionReason::ProviderUntrusted
+        );
+    }
+    assert!(
+        !route
+            .requestable_tools()
+            .contains(&CapabilityId::new("cron.add").unwrap())
+    );
+    ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
+
+    let bundle =
+        build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
+    assert!(
+        bundle
+            .content
+            .contains("Use this test-only cron-planner skill.")
+    );
+    assert!(bundle.content.contains("cron.add [provider_untrusted]"));
+}
+
+#[test]
+fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
+    let skill_id = SkillId::new("unknown-tool").unwrap();
+    let mut registry = test_skill_registry();
+    registry
+        .register(agl_skills::RegisteredSkill::trusted_builtin(test_skill(
+            skill_id.as_str(),
+            &["core:repo_path.validate"],
+            &["unknown.capability"],
+            &[],
+            &[],
+            Vec::new(),
+        )))
+        .unwrap();
+    let mut catalog = ToolCatalog::new();
+    agl_tools::guards::register(&mut catalog).unwrap();
+    let selected = [skill_id.clone()];
+    let effective = resolve_effective_capabilities(
+        &registry,
+        &catalog,
+        &selected,
+        ToolAccessMode::ReadOnly,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary::default(),
+    )
+    .unwrap();
+    let routing = derive_skill_tool_routing(&registry, &selected, &effective).unwrap();
+    assert_eq!(
+        routing.route(&skill_id).unwrap().unavailable_tools()
+            [&CapabilityId::new("unknown.capability").unwrap()],
+        agl_capabilities::CapabilityExclusionReason::UnknownCapability
+    );
+
+    let bundle = build_verified_context_bundle(&registry, &catalog, &selected, &routing).unwrap();
+    assert!(
+        bundle
+            .content
+            .contains("Use this test-only unknown-tool skill.")
+    );
+    assert!(
+        bundle
+            .content
+            .contains("unknown.capability [unknown_capability]")
     );
 }
 
@@ -1384,6 +1828,7 @@ fn full_tool_catalog() -> ToolCatalog {
     agl_tools::memory::register(&mut catalog).unwrap();
     agl_tools::notes::register(&mut catalog).unwrap();
     agl_tools::permissions::register(&mut catalog).unwrap();
+    agl_tools::process::register(&mut catalog).unwrap();
     agl_tools::repo::register(&mut catalog).unwrap();
     agl_tools::skills::register(&mut catalog).unwrap();
     agl_tools::store::register(&mut catalog).unwrap();
@@ -1395,7 +1840,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
     for skill in [
         test_skill(
             "task-spec",
-            &["repo_path.validate", "task_spec.validate"],
+            &["core:repo_path.validate", "core:task_spec.validate"],
             &["fs.edit", "fs.list", "fs.read", "fs.search"],
             &[],
             &[],
@@ -1403,7 +1848,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
         ),
         test_skill(
             "tool-smoke",
-            &["repo_path.validate"],
+            &["core:repo_path.validate"],
             &["fs.read"],
             &[],
             &[],
@@ -1411,7 +1856,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
         ),
         test_skill(
             "notes-capture",
-            &["repo_path.validate"],
+            &["core:repo_path.validate"],
             &["notes.add", "notes.link"],
             &[],
             &["notes.delete"],
@@ -1419,7 +1864,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
         ),
         test_skill(
             "cron-planner",
-            &["repo_path.validate"],
+            &["core:repo_path.validate"],
             &[
                 "cron.preflight",
                 "fs.read",
@@ -1536,6 +1981,7 @@ fn resolves_default_paths_from_runtime_config() {
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
         history: agl_runtime::AgentLibreHistoryConfig::default(),
         workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
     let options = InferenceOptions::default();
 

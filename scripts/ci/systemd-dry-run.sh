@@ -35,12 +35,23 @@ daemon_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh
   --tool-mode write \
   --log-filter "agentlibre=debug")"
 
-require_output_contains "$daemon_output" "unit: agl-test.service"
+require_output_contains "$daemon_output" "service unit: agl-test.service"
+require_output_contains "$daemon_output" "socket unit: agl-test.socket"
 require_output_contains "$daemon_output" "unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.service"
+require_output_contains "$daemon_output" "socket unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.socket"
 require_output_contains "$daemon_output" "WorkingDirectory=$tmp_dir/workspace"
 require_output_contains "$daemon_output" "Environment=AGL_LOG=agentlibre=debug"
 require_output_contains "$daemon_output" "Environment=AGL_LOG_STDERR=always"
-require_output_contains "$daemon_output" "ExecStart=\"$tmp_dir/bin/agl\" serve --config \"$tmp_dir/config/local.toml\" --socket \"$tmp_dir/state/daemon/agl.sock\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
+require_output_contains "$daemon_output" "Requires=agl-test.socket"
+require_output_contains "$daemon_output" "ExecStart=\"$tmp_dir/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
+require_output_contains "$daemon_output" "ListenStream=$tmp_dir/state/daemon/agl.sock"
+require_output_contains "$daemon_output" "FileDescriptorName=agentlibre"
+require_output_contains "$daemon_output" "SocketMode=0600"
+require_output_contains "$daemon_output" "DirectoryMode=0700"
+require_output_contains "$daemon_output" "RemoveOnStop=true"
+require_output_contains "$daemon_output" "Accept=no"
+require_output_contains "$daemon_output" "Service=agl-test.service"
+require_output_contains "$daemon_output" "WantedBy=sockets.target"
 
 bridge_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-matrix-bridge-systemd-service.sh" \
   --dry-run \

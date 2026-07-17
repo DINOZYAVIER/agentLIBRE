@@ -16,8 +16,10 @@ members = [
     "crates/agl-llama-cpp-sys",
     "crates/agl-loop",
     "crates/agl-memory",
+    "crates/agl-models",
     "crates/agl-notes",
     "crates/agl-oven",
+    "crates/agl-process",
     "crates/agl-protocol",
     "crates/agl-repo",
     "crates/agl-session",
@@ -27,6 +29,7 @@ members = [
     "crates/agl-content",
     "crates/agl-events",
     "crates/agl-actions",
+    "crates/agl-app",
     "crates/agl-runtime",
     "crates/agl-store",
     "crates/agl-supervisor",
@@ -44,6 +47,7 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 agl-capabilities = { path = "crates/agl-capabilities" }
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
+agl-app = { path = "crates/agl-app" }
 agl-assets = { path = "crates/agl-assets" }
 agl-chat = { path = "crates/agl-chat" }
 agl-client = { path = "crates/agl-client" }
@@ -61,8 +65,10 @@ agl-inference = { path = "crates/agl-inference" }
 agl-llama-cpp-sys = { path = "crates/agl-llama-cpp-sys" }
 agl-loop = { path = "crates/agl-loop" }
 agl-memory = { path = "crates/agl-memory" }
+agl-models = { path = "crates/agl-models" }
 agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
+agl-process = { path = "crates/agl-process" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }
@@ -71,23 +77,32 @@ agl-skills = { path = "crates/agl-skills" }
 agl-store = { path = "crates/agl-store" }
 agl-supervisor = { path = "crates/agl-supervisor" }
 anyhow = "1.0.103"
+base64 = "0.22.1"
 ashpd = { version = "0.13.12", default-features = false, features = ["documents", "screenshot", "tokio"] }
 cc = "1.2.67"
 clap = { version = "4.6.2", features = ["derive"] }
 clap_complete = "4.6.7"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
 directories = "6.0.0"
-futures-util = "0.3.32"
+futures-util = { version = "0.3.32", features = ["sink"] }
+fs2 = "0.4.3"
+hf-hub = "=1.0.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2.186"
 matrix-sdk = { version = "=0.18.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 schemars = "1.2.1"
 jsonschema = { version = "0.47.0", default-features = false }
 sha2 = "0.11.0"
-tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+sysinfo = "=0.39.6"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.18", features = ["codec"] }
+unicode-segmentation = "1.12.0"
 toml = "1.1.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"

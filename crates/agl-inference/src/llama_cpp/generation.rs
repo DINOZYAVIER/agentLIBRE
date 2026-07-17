@@ -6,6 +6,13 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+#[cfg(test)]
+use std::time::Duration;
+
 use anyhow::{Result, bail};
 
 use crate::InferenceFinishReason;
@@ -19,6 +26,8 @@ pub(crate) struct LlamaCppGenerationControl<'a> {
 struct NativeAbortSignal<'a> {
     cancellation: &'a AtomicBool,
     deadline: Option<Instant>,
+    #[cfg(test)]
+    probe: Option<Arc<NativeAbortTestProbe>>,
 }
 
 impl NativeAbortSignal<'_> {
@@ -33,6 +42,8 @@ impl<'a> LlamaCppGenerationControl<'a> {
             signal: Some(NativeAbortSignal {
                 cancellation,
                 deadline: None,
+                #[cfg(test)]
+                probe: take_native_abort_test_probe(),
             }),
         }
     }
@@ -87,14 +98,161 @@ impl<'a> LlamaCppGenerationControl<'a> {
                 ffi::llama_set_abort_callback(draft_context, Some(llama_abort_callback), data);
             }
         }
-        NativeAbortGuard {
+        let guard = NativeAbortGuard {
             target_context: Some(target_context),
             draft_context,
             callback_data: Some(signal),
             // Callback teardown must happen on the installing thread.
             _not_send: PhantomData,
+        };
+        #[cfg(test)]
+        if let Some(probe) = &signal.probe {
+            probe.record_install_and_wait_for_cancellation(signal.cancellation);
+        }
+        guard
+    }
+}
+
+#[cfg(test)]
+static NATIVE_ABORT_TEST_PROBE_SLOT: OnceLock<Mutex<Option<Arc<NativeAbortTestProbe>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct NativeAbortTestProbe {
+    installed: AtomicUsize,
+    callback_calls: AtomicUsize,
+    aborting_callback_calls: AtomicUsize,
+    install_wait_timed_out: AtomicBool,
+    changed: Condvar,
+    wait_lock: Mutex<()>,
+}
+
+#[cfg(test)]
+impl NativeAbortTestProbe {
+    pub(crate) fn register() -> Result<(Arc<Self>, NativeAbortTestProbeRegistration), &'static str>
+    {
+        let probe = Arc::new(Self {
+            installed: AtomicUsize::new(0),
+            callback_calls: AtomicUsize::new(0),
+            aborting_callback_calls: AtomicUsize::new(0),
+            install_wait_timed_out: AtomicBool::new(false),
+            changed: Condvar::new(),
+            wait_lock: Mutex::new(()),
+        });
+        let mut slot = native_abort_test_probe_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            return Err("a native abort test probe is already registered");
+        }
+        *slot = Some(Arc::clone(&probe));
+        Ok((
+            Arc::clone(&probe),
+            NativeAbortTestProbeRegistration { probe },
+        ))
+    }
+
+    pub(crate) fn wait_for_install(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.installed.load(Ordering::Acquire) == 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, wait) = self
+                .changed
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
+            if wait.timed_out() && self.installed.load(Ordering::Acquire) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn installed(&self) -> usize {
+        self.installed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn callback_calls(&self) -> usize {
+        self.callback_calls.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn aborting_callback_calls(&self) -> usize {
+        self.aborting_callback_calls.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn install_wait_timed_out(&self) -> bool {
+        self.install_wait_timed_out.load(Ordering::Acquire)
+    }
+
+    fn record_install_and_wait_for_cancellation(&self, cancellation: &AtomicBool) {
+        self.installed.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_all();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !cancellation.load(Ordering::Acquire) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.install_wait_timed_out.store(true, Ordering::Release);
+                break;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(guard, remaining.min(Duration::from_millis(10)))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
         }
     }
+
+    fn record_callback(&self, aborting: bool) {
+        self.callback_calls.fetch_add(1, Ordering::AcqRel);
+        if aborting {
+            self.aborting_callback_calls.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct NativeAbortTestProbeRegistration {
+    probe: Arc<NativeAbortTestProbe>,
+}
+
+#[cfg(test)]
+impl Drop for NativeAbortTestProbeRegistration {
+    fn drop(&mut self) {
+        let mut slot = native_abort_test_probe_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|registered| Arc::ptr_eq(registered, &self.probe))
+        {
+            *slot = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn native_abort_test_probe_slot() -> &'static Mutex<Option<Arc<NativeAbortTestProbe>>> {
+    NATIVE_ABORT_TEST_PROBE_SLOT.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn take_native_abort_test_probe() -> Option<Arc<NativeAbortTestProbe>> {
+    native_abort_test_probe_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 #[derive(Debug)]
@@ -155,10 +313,15 @@ unsafe extern "C" fn llama_abort_callback(data: *mut c_void) -> bool {
     // `NativeAbortGuard`. The guard removes both callbacks before that control
     // can move or be dropped.
     let signal = unsafe { &*data.cast::<NativeAbortSignal>() };
-    signal.is_cancelled()
+    let aborting = signal.is_cancelled()
         || signal
             .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .is_some_and(|deadline| Instant::now() >= deadline);
+    #[cfg(test)]
+    if let Some(probe) = &signal.probe {
+        probe.record_callback(aborting);
+    }
+    aborting
 }
 
 #[cfg(test)]
@@ -189,6 +352,7 @@ mod tests {
         let signal = NativeAbortSignal {
             cancellation: &cancelled,
             deadline: None,
+            probe: None,
         };
         let data = std::ptr::from_ref(&signal).cast_mut().cast::<c_void>();
 
@@ -203,6 +367,7 @@ mod tests {
         let signal = NativeAbortSignal {
             cancellation: &cancelled,
             deadline: Some(Instant::now()),
+            probe: None,
         };
         let data = std::ptr::from_ref(&signal).cast_mut().cast::<c_void>();
 

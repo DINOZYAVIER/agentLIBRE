@@ -76,7 +76,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 requestable_tools: []
 context_budget_tokens: 256
@@ -139,7 +139,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 requestable_tools: []
 context_budget_tokens: 256
@@ -987,7 +987,7 @@ version: 1
 source: {source_kind}
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools:
 {allowed_tools}
 requestable_tools:
@@ -1017,7 +1017,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools:
   []
 requestable_tools:

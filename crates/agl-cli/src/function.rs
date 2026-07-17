@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use agl_functions::{
     FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionSource,
@@ -15,6 +16,7 @@ use crate::args::{
     FunctionCommand, FunctionDoctorOptions, FunctionInitOptions, FunctionListOptions,
     FunctionShowOptions, FunctionStatusOptions,
 };
+use crate::doctor::{FunctionSmokeRequest, run_function_smoke};
 
 pub(crate) fn run_function(
     command: FunctionCommand,
@@ -157,7 +159,7 @@ fn run_function_init(
         wrote: true,
         next_steps: vec![
             "agl function status <id>".to_string(),
-            "agl chat --function <id>".to_string(),
+            "start the daemon with the selected function, then run `agl`".to_string(),
         ],
     };
     crate::print_json_or(options.json, &report, || {
@@ -182,49 +184,57 @@ fn run_function_doctor(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let report = function_status(
-        &options.reference,
-        &workspace_root,
+    let timeout = doctor_timeout(&options.reference, &workspace_root, runtime)?;
+    let report = run_function_smoke(
+        runtime,
+        FunctionSmokeRequest {
+            reference: options.reference,
+            workspace_root,
+            bindings_path: None,
+            runtime_plan_override: None,
+            timeout,
+            max_output_tokens: 32,
+        },
+    )?;
+    crate::print_json_or(options.json, &report, || {
+        print_function_status_report(&report.static_status);
+        println!("doctor.smoke_prompt={}", report.prompt);
+        println!("doctor.answer={}", report.answer.trim());
+        println!("doctor.elapsed_ms={}", report.elapsed_ms);
+        println!("doctor.state=passed");
+    })
+}
+
+fn doctor_timeout(
+    reference: &str,
+    workspace_root: &std::path::Path,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<Duration> {
+    let function = agl_functions::resolve_runtime_function(
+        reference,
+        workspace_root,
         &runtime.paths.config_dir,
-    );
-    let smoke_prompt = if report.errors.is_empty() {
-        load_function(resolve_function_reference(
-            &options.reference,
-            &workspace_root,
-            &runtime.paths.config_dir,
-        )?)
-        .ok()
-        .and_then(|function| {
-            function
-                .front_matter
-                .doctor
-                .and_then(|doctor| doctor.smoke_prompt)
+    )?;
+    let seconds = function
+        .inference_config_toml
+        .as_deref()
+        .and_then(|toml| {
+            agl_config::load_inference_preset_from_str("function doctor inference.toml", toml).ok()
         })
-    } else {
-        None
-    };
-    let doctor = FunctionDoctorReport {
-        status: report,
-        smoke_prompt,
-    };
-
-    crate::print_json_or(options.json, &doctor, || {
-        print_function_status_report(&doctor.status);
-        if let Some(prompt) = &doctor.smoke_prompt {
-            println!("doctor.smoke_prompt={prompt}");
-            println!(
-                "next_step=agl run --function {} --prompt {:?}",
-                doctor.status.reference, prompt
-            );
-        } else if doctor.status.errors.is_empty() {
-            println!("warning=doctor.smoke_prompt not configured");
-        }
-    })?;
-
-    if !doctor.status.errors.is_empty() {
-        bail!("function doctor failed");
-    }
-    Ok(())
+        .and_then(|preset| {
+            agl_models::ModelCatalog::builtin()
+                .ok()?
+                .package_for_model(&preset.backend.model_id)
+                .and_then(|package| {
+                    package
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.smoke_timeout_seconds)
+                        .max()
+                })
+        })
+        .unwrap_or(300);
+    Ok(Duration::from_secs(seconds))
 }
 
 fn print_status_report(json: bool, report: &FunctionStatusReport) -> Result<()> {
@@ -462,10 +472,4 @@ struct FunctionInitReport {
     subagents_dir: PathBuf,
     wrote: bool,
     next_steps: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct FunctionDoctorReport {
-    status: FunctionStatusReport,
-    smoke_prompt: Option<String>,
 }

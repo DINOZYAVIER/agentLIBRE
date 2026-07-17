@@ -12,7 +12,7 @@ use crate::{
 };
 
 const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, input_json,
-    checkpoint_json, effective_policy_hash, budget_json, usage_json, lease_owner,
+    checkpoint_json, effective_policy_hash, execution_context_json, budget_json, usage_json, lease_owner,
     lease_generation, lease_expires_at_ms, cancellation_requested_at_ms, attempts,
     not_before_ms, created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
     terminal_result_json, error_code, error_message, parent_run_id, root_run_id, depth,
@@ -29,6 +29,61 @@ const STEP_COLUMNS: &str = "id, run_id, turn_id, effect_sequence, effect_kind,
 impl AglStore {
     pub fn admit_run(&self, draft: &DurableRunDraft) -> Result<DurableRunRecord> {
         self.admit_run_at(draft, unix_millis())
+    }
+
+    pub fn compare_and_set_run_execution_context(
+        &self,
+        run_id: &RunId,
+        expected_revision: u64,
+        next: &agl_process::ExecutionContextSnapshot,
+    ) -> Result<agl_process::ExecutionContextSnapshot> {
+        next.validate().map_err(|error| StoreError::InvalidValue {
+            field: "runs.execution_context_json",
+            value: error.code().as_str().to_owned(),
+            reason: "invalid execution context snapshot",
+        })?;
+        self.transaction(|tx| {
+            let current = load_run(tx, run_id)?;
+            if current.state != RunState::Running {
+                return Err(StoreError::TransitionRejected {
+                    resource: format!("run {run_id} execution context"),
+                    from: current.state.as_str().to_owned(),
+                    to: "updated".to_owned(),
+                });
+            }
+            let required_revision =
+                expected_revision
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::InvalidValue {
+                        field: "runs.execution_context_json.revision",
+                        value: expected_revision.to_string(),
+                        reason: "execution context revision overflow",
+                    })?;
+            if current.execution_context.revision != expected_revision
+                || next.revision != required_revision
+            {
+                return Err(StoreError::LeaseLost {
+                    resource: format!("run {run_id} execution context revision"),
+                });
+            }
+            if next.workspace_root != current.execution_context.workspace_root
+                || next.private_execution_roots != current.execution_context.private_execution_roots
+                || next.shell != current.execution_context.shell
+            {
+                return Err(StoreError::InvalidValue {
+                    field: "runs.execution_context_json",
+                    value: serde_json::to_string(next)?,
+                    reason: "workspace, private roots, and shell admission are immutable",
+                });
+            }
+            let changed = tx.execute(
+                "UPDATE runs SET execution_context_json = ?1, updated_at_ms = ?2
+                 WHERE id = ?3 AND state = 'running'",
+                params![serde_json::to_string(next)?, unix_millis(), run_id.as_str()],
+            )?;
+            require_fenced_change(changed, format!("run {run_id} execution context"))?;
+            Ok(next.clone())
+        })
     }
 
     pub fn admit_run_at(&self, draft: &DurableRunDraft, now_ms: i64) -> Result<DurableRunRecord> {
@@ -68,6 +123,14 @@ impl AglStore {
                 || step.effect_kind != "capability_dispatch"
             {
                 return delegation_denied("invalid_spawn_step");
+            }
+            if draft.execution_context.workspace_root != parent.execution_context.workspace_root
+                || draft.execution_context.private_execution_roots
+                    != parent.execution_context.private_execution_roots
+                || draft.execution_context.shell != parent.execution_context.shell
+                || draft.execution_context.revision < parent.execution_context.revision
+            {
+                return delegation_denied("execution_context_mismatch");
             }
 
             let root = load_run(tx, &parent.root_run_id)?;
@@ -188,10 +251,10 @@ impl AglStore {
                   created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
                   terminal_result_json, error_code, error_message, parent_run_id, root_run_id,
                   depth, subagent_id, spawned_by_step_id, child_spec_digest,
-                  model_profile_digest)
+                  model_profile_digest, execution_context_json)
                  VALUES (?1, NULL, NULL, 'subagent', 'queued', ?2, ?3, NULL, ?4, ?5, ?6,
                          NULL, 0, NULL, NULL, 0, NULL, ?7, ?7, NULL, NULL, NULL, NULL, NULL,
-                         ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                         ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     draft.run_id.as_str(),
                     draft.priority,
@@ -207,6 +270,7 @@ impl AglStore {
                     draft.spawned_by_step_id.as_str(),
                     draft.child_spec_digest,
                     draft.model_profile_digest,
+                    serde_json::to_string(&draft.execution_context)?,
                 ],
             )?;
             tx.execute(
@@ -1017,12 +1081,12 @@ fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Res
     tx.execute(
         "INSERT INTO runs
          (id, session_id, turn_id, kind, state, priority, input_json, checkpoint_json,
-          effective_policy_hash, budget_json, usage_json, lease_owner, lease_generation,
+          effective_policy_hash, execution_context_json, budget_json, usage_json, lease_owner, lease_generation,
           lease_expires_at_ms, cancellation_requested_at_ms, attempts, not_before_ms,
           created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
           terminal_result_json, error_code, error_message, root_run_id, depth)
-         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10,
-                 NULL, 0, NULL, NULL, 0, ?11, ?12, ?12, NULL, NULL, NULL, NULL, NULL,
+         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                 NULL, 0, NULL, NULL, 0, ?12, ?13, ?13, NULL, NULL, NULL, NULL, NULL,
                  ?1, 0)",
         params![
             draft.run_id.as_str(),
@@ -1037,6 +1101,7 @@ fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Res
                 .map(serde_json::to_string)
                 .transpose()?,
             draft.effective_policy_hash,
+            serde_json::to_string(&draft.execution_context)?,
             serde_json::to_string(&draft.budget)?,
             serde_json::to_string(&RunUsage::default())?,
             draft.not_before_ms,
@@ -1047,6 +1112,14 @@ fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Res
 }
 
 fn validate_run_draft(draft: &DurableRunDraft) -> Result<()> {
+    draft
+        .execution_context
+        .validate()
+        .map_err(|error| StoreError::InvalidValue {
+            field: "runs.execution_context_json",
+            value: error.code().as_str().to_owned(),
+            reason: "invalid execution context snapshot",
+        })?;
     if draft.session_id.is_some() != draft.turn_id.is_some() {
         return invalid(
             "runs.identity",
@@ -1075,6 +1148,12 @@ fn validate_child_run_draft(draft: &ChildRunDraft) -> Result<()> {
     if draft.run_id == draft.parent_run_id {
         return delegation_denied("self_parent");
     }
+    draft
+        .execution_context
+        .validate()
+        .map_err(|_| StoreError::DelegationDenied {
+            code: "invalid_execution_context",
+        })?;
     validate_non_blank(&draft.subagent_id, "runs.subagent_id")?;
     if draft.subagent_id.trim() != draft.subagent_id
         || !draft.subagent_id.bytes().all(|byte| {
@@ -1462,6 +1541,7 @@ struct RawRunRow {
     input_json: String,
     checkpoint_json: Option<String>,
     effective_policy_hash: Option<String>,
+    execution_context_json: Option<String>,
     budget_json: String,
     usage_json: String,
     lease_owner: Option<String>,
@@ -1503,34 +1583,35 @@ fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
         input_json: row.get(6)?,
         checkpoint_json: row.get(7)?,
         effective_policy_hash: row.get(8)?,
-        budget_json: row.get(9)?,
-        usage_json: row.get(10)?,
-        lease_owner: row.get(11)?,
-        lease_generation: row.get(12)?,
-        lease_expires_at_ms: row.get(13)?,
-        cancellation_requested_at_ms: row.get(14)?,
-        attempts: row.get(15)?,
-        not_before_ms: row.get(16)?,
-        created_at_ms: row.get(17)?,
-        updated_at_ms: row.get(18)?,
-        started_at_ms: row.get(19)?,
-        finished_at_ms: row.get(20)?,
-        terminal_result_json: row.get(21)?,
-        error_code: row.get(22)?,
-        error_message: row.get(23)?,
-        parent_run_id: row.get(24)?,
-        root_run_id: row.get(25)?,
-        depth: row.get(26)?,
-        subagent_id: row.get(27)?,
-        spawned_by_step_id: row.get(28)?,
-        child_spec_digest: row.get(29)?,
-        model_profile_digest: row.get(30)?,
-        result_delivered_at_ms: row.get(31)?,
-        tree_usage_recorded_at_ms: row.get(32)?,
-        delegation_budget_json: row.get(33)?,
-        delegation_reserved_descendants: row.get(34)?,
-        delegation_reserved_output_tokens: row.get(35)?,
-        delegation_used_output_tokens: row.get(36)?,
+        execution_context_json: row.get(9)?,
+        budget_json: row.get(10)?,
+        usage_json: row.get(11)?,
+        lease_owner: row.get(12)?,
+        lease_generation: row.get(13)?,
+        lease_expires_at_ms: row.get(14)?,
+        cancellation_requested_at_ms: row.get(15)?,
+        attempts: row.get(16)?,
+        not_before_ms: row.get(17)?,
+        created_at_ms: row.get(18)?,
+        updated_at_ms: row.get(19)?,
+        started_at_ms: row.get(20)?,
+        finished_at_ms: row.get(21)?,
+        terminal_result_json: row.get(22)?,
+        error_code: row.get(23)?,
+        error_message: row.get(24)?,
+        parent_run_id: row.get(25)?,
+        root_run_id: row.get(26)?,
+        depth: row.get(27)?,
+        subagent_id: row.get(28)?,
+        spawned_by_step_id: row.get(29)?,
+        child_spec_digest: row.get(30)?,
+        model_profile_digest: row.get(31)?,
+        result_delivered_at_ms: row.get(32)?,
+        tree_usage_recorded_at_ms: row.get(33)?,
+        delegation_budget_json: row.get(34)?,
+        delegation_reserved_descendants: row.get(35)?,
+        delegation_reserved_output_tokens: row.get(36)?,
+        delegation_used_output_tokens: row.get(37)?,
     })
 }
 
@@ -1557,6 +1638,15 @@ fn decode_run(raw: RawRunRow) -> Result<DurableRunRecord> {
             .map(serde_json::from_str)
             .transpose()?,
         effective_policy_hash: raw.effective_policy_hash,
+        execution_context: raw
+            .execution_context_json
+            .as_deref()
+            .ok_or_else(|| StoreError::InvalidValue {
+                field: "runs.execution_context_json",
+                value: "null".to_owned(),
+                reason: "missing alpha execution context snapshot",
+            })
+            .and_then(|value| Ok(serde_json::from_str(value)?))?,
         budget: serde_json::from_str(&raw.budget_json)?,
         usage: serde_json::from_str(&raw.usage_json)?,
         lease_owner: raw.lease_owner,

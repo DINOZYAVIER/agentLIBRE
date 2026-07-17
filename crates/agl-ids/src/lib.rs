@@ -112,6 +112,8 @@ define_id!(AttemptId, "attempt_");
 define_id!(EventId, "evt_");
 define_id!(RequestId, "req_");
 define_id!(MessageId, "msg_");
+define_id!(ExecutionId, "exec_");
+define_id!(DaemonInstanceId, "daemon_");
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct ExecutionScope {
@@ -279,6 +281,7 @@ mod tests {
         assert_id_format!(EventId, "evt_");
         assert_id_format!(RequestId, "req_");
         assert_id_format!(MessageId, "msg_");
+        assert_id_format!(ExecutionId, "exec_");
     }
 
     #[test]

@@ -5,6 +5,8 @@ use agl_turn::{ModelRequest, TurnMessage};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+const MAX_GEMMA_VALUE_DEPTH: usize = 32;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderedModelRequest {
     pub run_id: RunId,
@@ -179,16 +181,9 @@ fn render_gemma_function_call(name: &str, arguments: &serde_json::Value) -> Resu
     let Some(arguments) = arguments.as_object() else {
         bail!("Gemma function calls require object arguments");
     };
-
-    let mut fields = Vec::with_capacity(arguments.len());
-    for (key, value) in arguments {
-        ensure_gemma_argument_name(key)?;
-        fields.push(format!("{key}:{}", render_gemma_value(value)?));
-    }
-
     Ok(format!(
-        "<|tool_call>call:{name}{{{}}}<tool_call|>",
-        fields.join(",")
+        "<|tool_call>call:{name}{}<tool_call|>",
+        render_gemma_object(arguments, 0)?
     ))
 }
 
@@ -224,7 +219,11 @@ fn ensure_gemma_argument_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_gemma_value(value: &serde_json::Value) -> Result<String> {
+fn render_gemma_value(value: &serde_json::Value, depth: usize) -> Result<String> {
+    ensure!(
+        depth <= MAX_GEMMA_VALUE_DEPTH,
+        "Gemma function-call argument nesting exceeds {MAX_GEMMA_VALUE_DEPTH}"
+    );
     match value {
         serde_json::Value::String(value) => {
             ensure!(
@@ -235,8 +234,39 @@ fn render_gemma_value(value: &serde_json::Value) -> Result<String> {
         }
         serde_json::Value::Number(value) => Ok(value.to_string()),
         serde_json::Value::Bool(value) => Ok(value.to_string()),
-        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            bail!("Gemma function calls support scalar argument values only")
-        }
+        serde_json::Value::Null => Ok("null".to_string()),
+        serde_json::Value::Array(values) => render_gemma_array(values, depth),
+        serde_json::Value::Object(values) => render_gemma_object(values, depth),
     }
+}
+
+fn render_gemma_array(values: &[serde_json::Value], depth: usize) -> Result<String> {
+    let values = values
+        .iter()
+        .map(|value| render_gemma_value(value, depth + 1))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!("[{}]", values.join(",")))
+}
+
+fn render_gemma_object(
+    values: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+) -> Result<String> {
+    ensure!(
+        depth <= MAX_GEMMA_VALUE_DEPTH,
+        "Gemma function-call argument nesting exceeds {MAX_GEMMA_VALUE_DEPTH}"
+    );
+    let mut keys = values.keys().collect::<Vec<_>>();
+    keys.sort_unstable();
+    let fields = keys
+        .into_iter()
+        .map(|key| {
+            ensure_gemma_argument_name(key)?;
+            Ok(format!(
+                "{key}:{}",
+                render_gemma_value(&values[key], depth + 1)?
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!("{{{}}}", fields.join(",")))
 }

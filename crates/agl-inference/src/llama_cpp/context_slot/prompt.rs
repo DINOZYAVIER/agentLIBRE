@@ -38,6 +38,13 @@ impl LlamaCppContextSlot {
         }
 
         let mut messages = self.cache.messages.clone();
+        if rendered.tool_call_format == ToolCallFormat::GemmaFunctionCall {
+            restore_cached_gemma_tool_calls(
+                &mut messages,
+                &rendered.messages,
+                self.cache.rendered_message_history_len,
+            );
+        }
         messages.extend(
             rendered.messages[self.cache.rendered_message_history_len..]
                 .iter()
@@ -189,6 +196,25 @@ pub(super) fn rendered_history_is_prefix(
             .iter()
             .zip(&incoming[..history_len])
             .all(|(recorded, incoming)| rendered_history_message_matches(recorded, incoming))
+}
+
+pub(super) fn restore_cached_gemma_tool_calls(
+    cached: &mut [RenderedMessage],
+    incoming: &[RenderedMessage],
+    history_len: usize,
+) {
+    for (cached, incoming) in
+        cached
+            .iter_mut()
+            .zip(incoming)
+            .take(history_len)
+            .filter(|(_, incoming)| {
+                incoming.role == RenderedMessageRole::Assistant && !incoming.tool_calls.is_empty()
+            })
+    {
+        cached.name.clone_from(&incoming.name);
+        cached.tool_calls.clone_from(&incoming.tool_calls);
+    }
 }
 
 pub(super) fn rendered_history_message_matches(

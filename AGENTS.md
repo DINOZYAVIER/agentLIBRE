@@ -45,6 +45,18 @@ materially shaped the patch, not when it was merely run as a routine check.
 A human must review, understand, and take responsibility for the final commit
 before submission.
 
+## Human decision gate
+
+For task planning and implementation, follow the decision-document workflow in
+`.agl/tasks/AGENTS.md`. A recommendation, an inferred preference, or an LLM's
+engineering judgment is not a human decision.
+
+Do not implement a material product, architecture, naming, API, workflow,
+scope, security, data-ownership, or compatibility choice while it remains open.
+Collect related open choices in the task's existing decision document, record
+the exported human result in the spec, and do not ask again for choices already
+recorded there.
+
 ## Review checkpoints and versions
 
 Git tags are the source of truth for project checkpoint versions. Do not derive

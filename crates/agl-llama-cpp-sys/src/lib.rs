@@ -30,6 +30,11 @@ pub const GGML_TYPE_Q5_1: c_int = 7;
 pub const GGML_TYPE_Q8_0: c_int = 8;
 pub const GGML_TYPE_IQ4_NL: c_int = 20;
 pub const GGML_TYPE_BF16: c_int = 30;
+pub const GGML_BACKEND_DEVICE_TYPE_CPU: c_int = 0;
+pub const GGML_BACKEND_DEVICE_TYPE_GPU: c_int = 1;
+pub const GGML_BACKEND_DEVICE_TYPE_IGPU: c_int = 2;
+pub const GGML_BACKEND_DEVICE_TYPE_ACCEL: c_int = 3;
+pub const GGML_BACKEND_DEVICE_TYPE_META: c_int = 4;
 
 #[repr(C)]
 pub struct llama_model_params {
@@ -141,9 +146,14 @@ unsafe extern "C" {
     pub fn ggml_backend_dev_name(device: ggml_backend_dev_t) -> *const c_char;
     pub fn ggml_backend_dev_description(device: ggml_backend_dev_t) -> *const c_char;
     pub fn ggml_backend_dev_memory(device: ggml_backend_dev_t, free: *mut usize, total: *mut usize);
+    pub fn ggml_backend_dev_type(device: ggml_backend_dev_t) -> c_int;
 
     pub fn llama_backend_init();
     pub fn llama_log_set(
+        log_callback: Option<unsafe extern "C" fn(c_int, *const c_char, *mut c_void)>,
+        user_data: *mut c_void,
+    );
+    pub fn mtmd_log_set(
         log_callback: Option<unsafe extern "C" fn(c_int, *const c_char, *mut c_void)>,
         user_data: *mut c_void,
     );

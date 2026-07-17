@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agl_capabilities::{
-    CapabilityGrant, CapabilityId, CapabilityPolicyInput, EffectiveCapabilitySet,
-    FunctionToolPolicy, HookEvent, HookId, OperationKind, SensitiveInput, SkillCapabilityPolicy,
-    SkillId, StateEffect, render_canonical_json,
+    CapabilityGrant, CapabilityGrantProvenance, CapabilityId, CapabilityPolicyInput,
+    EffectiveCapabilitySet, FunctionToolPolicy, HookEvent, HookId, OperationKind, SensitiveInput,
+    SkillCapabilityPolicy, SkillId, StateEffect, render_canonical_json,
 };
 use agl_config::{
-    ModelConfig, ResolvedInferenceConfig, ToolCallFormat, load_inference_preset_from_str,
-    load_local_inference_config, model_bindings_path, resolve_inference_preset,
+    ModelConfig, ResolvedInferenceConfig, ToolCallFormat, bind_inference_preset,
+    load_inference_preset_from_str, load_local_inference_config, model_bindings_path,
 };
 use agl_content::Content;
 use agl_functions::{
@@ -19,8 +19,15 @@ use agl_functions::{
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
-use agl_inference::{InferenceCancellation, InferenceRequest, InferenceResponse};
+use agl_inference::{
+    InferenceCancellation, InferenceRequest, InferenceResponse, LlamaCppDeviceKind,
+    llama_cpp_device_inventory,
+};
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
+use agl_models::{
+    HostResources, LlamaDeviceInfo, LlamaDeviceKind, ModelCatalog, RuntimePlanSet, RuntimePlanner,
+    hugging_face_cache_dir,
+};
 use agl_oven::render_model_request;
 use agl_runtime::{
     AgentLibreRuntimeConfig, RenderedRuntimeFeatureContext, RuntimeFeatureRenderOptions,
@@ -28,9 +35,9 @@ use agl_runtime::{
 };
 use agl_skills::{
     SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
-    SkillFolderPrepareReport, build_verified_context_bundle,
-    prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
-    trusted_workspace_registry,
+    SkillFolderPrepareReport, SkillToolRouting, SkillToolRoutingView,
+    build_verified_context_bundle, prepare_workspace_skill_artifact_write,
+    prepare_workspace_skill_folders, trusted_workspace_registry,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::ToolCatalog;
@@ -44,10 +51,12 @@ const CONFIG_ENV: &str = "AGL_LOCAL_INFERENCE_CONFIG";
 const ARTIFACT_ROOT_ENV: &str = "AGL_INFERENCE_ARTIFACT_ROOT";
 const MEMORY_CONTEXT_ENTRY_LIMIT: usize = 8;
 
+#[derive(Clone)]
 pub struct InferenceSession {
     inference_client: InferenceClientHandle,
     inference_config: ResolvedInferenceConfig,
     session_id: SessionId,
+    scope_session_id: Option<SessionId>,
     max_output_tokens: u32,
     model_config: ModelConfig,
     system_prompt: Option<String>,
@@ -62,6 +71,7 @@ pub struct InferenceSession {
     runtime_identity: Option<RuntimeIdentityEvidence>,
     runtime_identity_validation: Option<RuntimeIdentityValidation>,
     skill_context: Option<String>,
+    skill_tool_routing: SkillToolRoutingView,
     skill_hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
     effective_capabilities: EffectiveCapabilitySet,
@@ -83,6 +93,7 @@ pub struct InferenceSession {
     authority_ceiling: Option<BTreeSet<CapabilityId>>,
     allow_dynamic_grants: bool,
     tool_policy_override: Option<FunctionToolPolicy>,
+    automatic_runtime_plan: Option<RuntimePlanSet>,
 }
 
 pub(crate) struct SubagentSessionConfig {
@@ -164,12 +175,12 @@ impl InferenceSession {
 
         if !use_function_embedded_config && !config_path.is_file() {
             bail!(
-                "local inference config not found: {}\nCreate this file or pass --config PATH.\nRun `agl config paths` to see default locations.\nModel setup/download commands are planned but not implemented in this alpha; point [backend].model at an existing local GGUF file.",
+                "local inference config not found: {}\nCreate this file or pass --config PATH.\nRun `agl init` for guided model setup, or `agl config paths` to inspect locations.",
                 config_path.display()
             );
         }
 
-        let config = if use_function_embedded_config {
+        let (config, automatic_runtime_plan) = if use_function_embedded_config {
             let preset = load_inference_preset_from_str(
                 &config_path.display().to_string(),
                 function_embedded_config.expect("checked above"),
@@ -180,21 +191,87 @@ impl InferenceSession {
                     config_path.display()
                 )
             })?;
-            resolve_inference_preset(preset, model_bindings_path(&config_dir)).with_context(
-                || {
-                    format!(
-                        "failed to resolve function inference models for {}",
-                        config_path.display()
-                    )
-                },
-            )?
+            let bindings_path = options
+                .model_bindings_path
+                .clone()
+                .unwrap_or_else(|| model_bindings_path(&config_dir));
+            let bound = bind_inference_preset(preset, &bindings_path).with_context(|| {
+                format!(
+                    "failed to bind function inference models for {}",
+                    config_path.display()
+                )
+            })?;
+            match &bound.runtime {
+                agl_config::InferencePresetRuntimeConfig::Auto(_) => {
+                    let catalog = ModelCatalog::builtin()?;
+                    let package = catalog
+                        .package_for_model(&bound.backend.model_id)
+                        .with_context(|| {
+                            format!(
+                                "automatic runtime model `{}` is not in the embedded catalog; use mode = \"fixed\" for custom models",
+                                bound.backend.model_id
+                            )
+                        })?;
+                    let devices = llama_cpp_device_inventory()
+                        .into_iter()
+                        .map(model_device_info)
+                        .collect();
+                    let host = HostResources::inspect(hugging_face_cache_dir(), devices)?;
+                    let planner = RuntimePlanner;
+                    let policy = bound
+                        .runtime
+                        .auto_policy()
+                        .context("automatic runtime preset lost its policy")?;
+                    // A plan override is an internal setup/repair path whose
+                    // low-memory consent was already recorded by `agl init`.
+                    let allow_low_memory = options.runtime_plan_override.is_some();
+                    let plan_set = planner
+                        .plan_set(package, &host, policy, allow_low_memory)
+                        .with_context(|| {
+                            format!(
+                                "failed to plan automatic runtime for {}",
+                                config_path.display()
+                            )
+                        })?;
+                    let active_plan = options
+                        .runtime_plan_override
+                        .as_ref()
+                        .unwrap_or(&plan_set.selected);
+                    let config = planner
+                        .resolve_bound_with_plan(
+                            bound,
+                            package,
+                            &host,
+                            allow_low_memory,
+                            active_plan,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "failed to plan automatic runtime for {}",
+                                config_path.display()
+                            )
+                        })?;
+                    (config, Some(plan_set))
+                }
+                agl_config::InferencePresetRuntimeConfig::Fixed(_) => {
+                    let config = agl_config::resolve_inference_preset(
+                        load_inference_preset_from_str(
+                            &config_path.display().to_string(),
+                            function_embedded_config.expect("checked above"),
+                        )?,
+                        &bindings_path,
+                    )?;
+                    (config, None)
+                }
+            }
         } else {
-            load_local_inference_config(&config_path).with_context(|| {
+            let config = load_local_inference_config(&config_path).with_context(|| {
                 format!(
                     "failed to load local inference config {}",
                     config_path.display()
                 )
-            })?
+            })?;
+            (config, None)
         };
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
@@ -224,6 +301,7 @@ impl InferenceSession {
             tool_mode,
             artifact_root: &artifact_root,
             run_id: None,
+            session_id: Some(&session_id),
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
@@ -263,6 +341,7 @@ impl InferenceSession {
         Ok(Self {
             inference_client,
             inference_config: config,
+            scope_session_id: Some(session_id.clone()),
             session_id,
             max_output_tokens: options.max_output_tokens,
             model_config,
@@ -278,6 +357,7 @@ impl InferenceSession {
             runtime_identity,
             runtime_identity_validation,
             skill_context: skill_context.context,
+            skill_tool_routing: skill_context.tool_routing,
             skill_hook_batches: hook_batches,
             visible_tools: skill_context.visible_tools,
             effective_capabilities: skill_context.effective_capabilities,
@@ -299,6 +379,7 @@ impl InferenceSession {
             authority_ceiling: None,
             allow_dynamic_grants: true,
             tool_policy_override: None,
+            automatic_runtime_plan,
         })
     }
 
@@ -336,6 +417,7 @@ impl InferenceSession {
             tool_mode,
             artifact_root: &artifact_root,
             run_id: None,
+            session_id: None,
             workspace_root: &workspace_root,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
@@ -373,6 +455,7 @@ impl InferenceSession {
             inference_client,
             inference_config,
             session_id: execution_session_id,
+            scope_session_id: None,
             max_output_tokens,
             model_config,
             system_prompt: Some(spec.system_body.clone()),
@@ -387,6 +470,7 @@ impl InferenceSession {
             runtime_identity: None,
             runtime_identity_validation: None,
             skill_context: skill_context.context,
+            skill_tool_routing: skill_context.tool_routing,
             skill_hook_batches: skill_context.hook_batches,
             visible_tools: skill_context.visible_tools,
             effective_capabilities: skill_context.effective_capabilities,
@@ -408,6 +492,7 @@ impl InferenceSession {
             authority_ceiling: Some(authority_ceiling),
             allow_dynamic_grants: false,
             tool_policy_override: Some(tool_policy),
+            automatic_runtime_plan: None,
         })
     }
 
@@ -441,6 +526,10 @@ impl InferenceSession {
 
     pub fn artifact_root(&self) -> &std::path::Path {
         &self.artifact_root
+    }
+
+    pub(crate) fn automatic_runtime_plan(&self) -> Option<&RuntimePlanSet> {
+        self.automatic_runtime_plan.as_ref()
     }
 
     pub(crate) fn delegation_plan(&self) -> Option<&RuntimeDelegationPlan> {
@@ -612,6 +701,7 @@ impl InferenceSession {
                 function_context: self.function_context.as_deref(),
                 memory_context: self.memory_context.as_deref(),
                 skill_context: self.skill_context.as_deref(),
+                skill_tool_routing: Some(&self.skill_tool_routing),
                 effective_capabilities: Some(effective_capabilities),
             },
         )?;
@@ -676,6 +766,7 @@ impl InferenceSession {
             tool_mode: self.tool_mode,
             artifact_root: &self.artifact_root,
             run_id,
+            session_id: self.scope_session_id.as_ref(),
             workspace_root: &self.workspace_root,
             trust_store_path: &self.trust_store_path,
             store_root: &self.store_root,
@@ -704,6 +795,7 @@ impl InferenceSession {
             )?;
         }
         self.skill_context = skill_context.context;
+        self.skill_tool_routing = skill_context.tool_routing;
         let mut hook_batches = skill_context.hook_batches;
         add_identity_hook_batch(&mut hook_batches, self.runtime_identity_validation.as_ref())?;
         self.skill_hook_batches = hook_batches;
@@ -785,6 +877,25 @@ impl InferenceSession {
             && run.usage.model_input_tokens < run.budget.model_input_tokens
             && run.usage.model_attempts < run.budget.model_attempts
             && run.usage.capability_calls < run.budget.capability_calls)
+    }
+}
+
+fn model_device_info(device: agl_inference::LlamaCppDeviceInfo) -> LlamaDeviceInfo {
+    LlamaDeviceInfo {
+        name: device.name,
+        description: device.description,
+        kind: match device.kind {
+            LlamaCppDeviceKind::Cpu => LlamaDeviceKind::Cpu,
+            LlamaCppDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
+            LlamaCppDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
+            LlamaCppDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
+            LlamaCppDeviceKind::Metadata => LlamaDeviceKind::Metadata,
+            LlamaCppDeviceKind::Unknown => LlamaDeviceKind::Unknown,
+        },
+        free_memory_bytes: device.free_memory_bytes,
+        total_memory_bytes: device.total_memory_bytes,
+        usable: device.usable,
+        supports_gpu_offload: device.supports_gpu_offload,
     }
 }
 
@@ -998,6 +1109,14 @@ fn build_inference_request(
         .effective_capabilities
         .context("effective capability set is missing from inference request context")?;
     ensure_visible_tool_parity(&request.visible_tools, effective_capabilities)?;
+    if non_empty_context(contexts.skill_context)
+        .is_some_and(|context| context.contains("<agentlibre_skill_context>"))
+    {
+        let skill_tool_routing = contexts
+            .skill_tool_routing
+            .context("skill tool routing is missing from inference request context")?;
+        ensure_skill_tool_routing_parity(skill_tool_routing, effective_capabilities)?;
+    }
     if effective_capabilities.capabilities().len() != 0 {
         request_messages.push(TurnMessage::System {
             content: Content::text(render_tool_context(
@@ -1053,6 +1172,7 @@ struct InferenceRequestContexts<'a> {
     function_context: Option<&'a str>,
     memory_context: Option<&'a str>,
     skill_context: Option<&'a str>,
+    skill_tool_routing: Option<&'a SkillToolRoutingView>,
     effective_capabilities: Option<&'a EffectiveCapabilitySet>,
 }
 
@@ -1140,8 +1260,29 @@ fn render_action_schema(declaration: &agl_capabilities::ActionDeclaration) -> St
     render_canonical_json(&serde_json::json!({
         "name": declaration.id,
         "description": declaration.description,
-        "input_schema": declaration.input_schema,
+        "input_schema": compact_prompt_schema(&declaration.input_schema),
     }))
+}
+
+fn compact_prompt_schema(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(compact_prompt_schema).collect())
+        }
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "$schema" | "title" | "description" | "default" | "examples" | "format"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), compact_prompt_schema(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn ensure_visible_tool_parity(
@@ -1163,9 +1304,28 @@ fn ensure_visible_tool_parity(
     Ok(())
 }
 
+fn ensure_skill_tool_routing_parity(
+    routing: &SkillToolRoutingView,
+    capabilities: &EffectiveCapabilitySet,
+) -> Result<()> {
+    for (skill_id, route) in routing.routes() {
+        let expected = route
+            .declared_tools()
+            .into_iter()
+            .filter(|tool| capabilities.contains(tool))
+            .collect::<BTreeSet<_>>();
+        ensure!(
+            &expected == route.callable_tools(),
+            "skill `{skill_id}` callable routing differs from the effective capability set"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedSkillContext {
     context: Option<String>,
+    tool_routing: SkillToolRoutingView,
     hook_batches: Vec<TurnHookBatch>,
     visible_tools: Vec<VisibleTool>,
     effective_capabilities: EffectiveCapabilitySet,
@@ -1201,6 +1361,12 @@ impl RuntimePermissionGrantSnapshot {
                 CapabilityGrant::new(grant.capability_id.clone(), grant.max_operation_kind)
                     .with_state_effects(grant.state_effects.iter().copied())
                     .with_sensitive_inputs(grant.sensitive_inputs.iter().copied())
+                    .with_provenance(CapabilityGrantProvenance::new(
+                        grant.grant_id.clone(),
+                        grant.duration.clone(),
+                        grant.admitted_scope.clone(),
+                        grant.scope_digest.clone(),
+                    ))
             })
             .collect()
     }
@@ -1227,6 +1393,9 @@ struct AdmittedPermissionGrant {
     state_effects: BTreeSet<StateEffect>,
     sensitive_inputs: BTreeSet<SensitiveInput>,
     run_id: RunId,
+    duration: String,
+    admitted_scope: String,
+    scope_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1256,6 +1425,7 @@ struct SkillContextRequest<'a> {
     tool_mode: ToolAccessMode,
     artifact_root: &'a std::path::Path,
     run_id: Option<&'a RunId>,
+    session_id: Option<&'a SessionId>,
     workspace_root: &'a std::path::Path,
     trust_store_path: &'a std::path::Path,
     store_root: &'a std::path::Path,
@@ -1353,8 +1523,8 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         trusted_workspace_registry(request.workspace_root, request.trust_store_path)
             .context("failed to load skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
-    let (context, hook_batches) = if selected_skills.is_empty() {
-        (None, Vec::new())
+    let hook_batches = if selected_skills.is_empty() {
+        Vec::new()
     } else {
         let folder_prepare = prepare_workspace_skill_folders(
             request.workspace_root,
@@ -1380,15 +1550,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
             "selected skill runtime folder preparation failed: {}",
             folder_prepare.errors.join(", ")
         );
-        let bundle =
-            build_verified_context_bundle(&skill_registry, &tool_catalog, &selected_skills)
-                .context("failed to build verified skill context")?;
-        let hook_batches =
-            selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?;
-        if let Some(run_id) = request.run_id {
-            write_skill_context_evidence(request.artifact_root, run_id, &bundle.evidence)?;
-        }
-        (Some(bundle.content), hook_batches)
+        selected_skill_hook_batches(&skill_registry, &tool_catalog, &selected_skills)?
     };
     let mut permission_grants = if request.allow_dynamic_grants
         && let Some(run_id) = request.run_id
@@ -1400,6 +1562,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
             request.store_root,
             request.workspace_root,
             run_id,
+            request.session_id,
         )?
     } else {
         RuntimePermissionGrantSnapshot::default()
@@ -1427,9 +1590,27 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         }
         write_capability_policy_evidence(request.artifact_root, run_id, &effective_capabilities)?;
     }
+    let tool_routing =
+        derive_skill_tool_routing(&skill_registry, &selected_skills, &effective_capabilities)?;
+    let context = if selected_skills.is_empty() {
+        None
+    } else {
+        let bundle = build_verified_context_bundle(
+            &skill_registry,
+            &tool_catalog,
+            &selected_skills,
+            &tool_routing,
+        )
+        .context("failed to build verified skill context")?;
+        if let Some(run_id) = request.run_id {
+            write_skill_context_evidence(request.artifact_root, run_id, &bundle.evidence)?;
+        }
+        Some(bundle.content)
+    };
     let visible_tools = visible_tools_from_effective(&effective_capabilities);
     Ok(ResolvedSkillContext {
         context,
+        tool_routing,
         hook_batches,
         visible_tools,
         effective_capabilities,
@@ -1609,6 +1790,7 @@ fn selected_skill_visible_tools_with_dynamic_grants(
         store_root,
         workspace_root,
         run_id,
+        None,
     )?;
     let effective = resolve_effective_capabilities(
         skill_registry,
@@ -1653,13 +1835,13 @@ fn resolve_effective_capabilities(
     }
     let mut skill_policies = Vec::with_capacity(selected_skills.len());
     for skill_id in selected_skills {
-        skill_registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = skill_registry.resolve_for_context_injection(skill_id)?;
         skill_policies.push(
             SkillCapabilityPolicy::new(
                 skill_id.clone(),
                 skill.harness.allowed_tools.iter().cloned(),
             )
+            .with_requestable(skill.harness.requestable_tools.iter().cloned())
             .with_denied(skill.harness.denied_tools.iter().cloned()),
         );
     }
@@ -1700,6 +1882,66 @@ fn visible_tools_from_effective(effective: &EffectiveCapabilitySet) -> Vec<Visib
         .collect()
 }
 
+fn derive_skill_tool_routing(
+    skill_registry: &agl_skills::SkillRegistry,
+    selected_skills: &[SkillId],
+    effective: &EffectiveCapabilitySet,
+) -> Result<SkillToolRoutingView> {
+    let permission_request_id = CapabilityId::new(agl_tools::PERMISSIONS_REQUEST_TOOL_ID)?;
+    let request_path_effective = effective.contains(&permission_request_id);
+    let mut routes = Vec::with_capacity(selected_skills.len());
+
+    for skill_id in selected_skills {
+        let skill = skill_registry.resolve_for_context_injection(skill_id)?;
+        let requestable_declarations = skill
+            .harness
+            .requestable_tools
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let declared = skill
+            .harness
+            .allowed_tools
+            .iter()
+            .chain(&skill.harness.requestable_tools)
+            .chain(&skill.harness.denied_tools)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut callable = BTreeSet::new();
+        let mut requestable = BTreeSet::new();
+        let mut unavailable = BTreeMap::new();
+
+        for capability_id in declared {
+            if effective.contains(&capability_id) {
+                callable.insert(capability_id);
+                continue;
+            }
+            let reason = effective
+                .exclusion(&capability_id)
+                .with_context(|| {
+                    format!(
+                        "selected skill `{skill_id}` tool `{capability_id}` has no effective-policy outcome"
+                    )
+                })?
+                .reason;
+            if request_path_effective
+                && requestable_declarations.contains(&capability_id)
+                && reason.is_grant_resolvable()
+            {
+                requestable.insert(capability_id);
+            } else {
+                unavailable.insert(capability_id, reason);
+            }
+        }
+        routes.push((
+            skill_id.clone(),
+            SkillToolRouting::new(callable, requestable, unavailable),
+        ));
+    }
+
+    SkillToolRoutingView::new(routes).context("failed to construct skill tool routing")
+}
+
 fn admit_dynamic_permission_grants(
     skill_registry: &agl_skills::SkillRegistry,
     tool_catalog: &ToolCatalog,
@@ -1707,6 +1949,7 @@ fn admit_dynamic_permission_grants(
     store_root: &std::path::Path,
     workspace_root: &std::path::Path,
     run_id: &RunId,
+    session_id: Option<&SessionId>,
 ) -> Result<RuntimePermissionGrantSnapshot> {
     let store = AglStore::open_at(store_root)
         .with_context(|| format!("failed to open permission store {}", store_root.display()))?;
@@ -1715,16 +1958,17 @@ fn admit_dynamic_permission_grants(
     let mut snapshot = RuntimePermissionGrantSnapshot::default();
 
     for grant in grants {
-        match evaluate_permission_grant(&grant, tool_catalog, &policy, workspace_root, run_id) {
+        match evaluate_permission_grant(
+            &grant,
+            tool_catalog,
+            &policy,
+            workspace_root,
+            run_id,
+            session_id,
+        ) {
             Ok(capability_grant) => {
-                if grant.duration != "one_turn" {
-                    snapshot.ignored.push(IgnoredPermissionGrant {
-                        grant_id: grant.id,
-                        tool_id: grant.tool_id,
-                        reason: format!("unsupported_duration_{}", grant.duration),
-                    });
-                    continue;
-                }
+                let admitted_scope = render_canonical_json(&grant.scope);
+                let scope_digest = sha256_text(&admitted_scope);
                 snapshot.admitted.push(AdmittedPermissionGrant {
                     grant_id: grant.id,
                     capability_id: capability_grant.capability_id,
@@ -1732,6 +1976,9 @@ fn admit_dynamic_permission_grants(
                     state_effects: capability_grant.state_effects,
                     sensitive_inputs: capability_grant.sensitive_inputs,
                     run_id: run_id.clone(),
+                    duration: grant.duration,
+                    admitted_scope,
+                    scope_digest,
                 });
             }
             Err(reason) => snapshot.ignored.push(IgnoredPermissionGrant {
@@ -1809,6 +2056,7 @@ fn evaluate_permission_grant(
     policy: &SelectedSkillGrantPolicy,
     workspace_root: &std::path::Path,
     run_id: &RunId,
+    session_id: Option<&SessionId>,
 ) -> std::result::Result<CapabilityGrant, String> {
     let capability_id = CapabilityId::new(grant.tool_id.clone())
         .map_err(|_| "invalid_capability_id".to_string())?;
@@ -1824,6 +2072,33 @@ fn evaluate_permission_grant(
         && scoped_run_id != run_id.as_str()
     {
         return Err("run_scope_mismatch".to_string());
+    }
+    match grant.duration.as_str() {
+        "one_turn" => {
+            if let Some(scoped_session_id) = grant
+                .scope
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                && session_id.map(SessionId::as_str) != Some(scoped_session_id)
+            {
+                return Err("session_scope_mismatch".to_string());
+            }
+        }
+        "session" => {
+            let current_session = session_id.ok_or_else(|| "session_scope_required".to_string())?;
+            let scoped_session = grant
+                .scope
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "session_scope_required".to_string())?;
+            if scoped_session != current_session.as_str() {
+                return Err("session_scope_mismatch".to_string());
+            }
+            if grant.scope.get("run_id").is_some() {
+                return Err("session_grant_cannot_have_run_scope".to_string());
+            }
+        }
+        duration => return Err(format!("unsupported_duration_{duration}")),
     }
     if policy.denied_tools.contains(&capability_id) {
         return Err("denied_by_selected_skill".to_string());
@@ -1880,6 +2155,7 @@ fn evaluate_permission_grant(
 fn parse_operation_kind(value: &str) -> std::result::Result<OperationKind, String> {
     match value {
         "read" => Ok(OperationKind::Read),
+        "request" => Ok(OperationKind::Request),
         "write" => Ok(OperationKind::Write),
         "execute" => Ok(OperationKind::Execute),
         "approve" => Ok(OperationKind::Approve),
@@ -1894,6 +2170,11 @@ fn parse_state_effects(values: &[String]) -> std::result::Result<BTreeSet<StateE
         .map(|value| match value.as_str() {
             "host_screen_capture" => Ok(StateEffect::HostScreenCapture),
             "spawn_subagent" => Ok(StateEffect::SpawnSubagent),
+            "session_working_directory" => Ok(StateEffect::SessionWorkingDirectory),
+            "spawn_process" => Ok(StateEffect::SpawnProcess),
+            "control_process" => Ok(StateEffect::ControlProcess),
+            "host_process_execution" => Ok(StateEffect::HostProcessExecution),
+            "shell_login_startup" => Ok(StateEffect::ShellLoginStartup),
             "repo_files" => Ok(StateEffect::RepoFiles),
             "repo_workspace" => Ok(StateEffect::RepoWorkspace),
             "repo_hooks" => Ok(StateEffect::RepoHooks),
@@ -1925,21 +2206,25 @@ fn parse_sensitive_inputs(
         .collect()
 }
 
+fn sha256_text(value: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(value.as_bytes());
+    let mut rendered = String::with_capacity(71);
+    rendered.push_str("sha256:");
+    for byte in digest {
+        write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    rendered
+}
+
 fn core_tool_ids() -> Result<BTreeSet<CapabilityId>> {
     [
-        agl_host_tools::SCREEN_CAPTURE_TOOL_ID,
         agl_tools::FS_READ_TOOL_ID,
         agl_tools::FS_LIST_TOOL_ID,
         agl_tools::FS_SEARCH_TOOL_ID,
         agl_tools::FS_EDIT_TOOL_ID,
-        agl_tools::PERMISSIONS_STATUS_TOOL_ID,
-        agl_tools::PERMISSIONS_REQUEST_TOOL_ID,
-        agl_tools::PERMISSIONS_GRANT_TOOL_ID,
-        agl_tools::PERMISSIONS_REVOKE_TOOL_ID,
-        agl_tools::SKILL_LIST_TOOL_ID,
-        agl_tools::SKILL_INSPECT_TOOL_ID,
-        agl_tools::SKILL_STATUS_TOOL_ID,
-        agl_tools::SKILL_VERIFY_TOOL_ID,
     ]
     .into_iter()
     .map(CapabilityId::new)

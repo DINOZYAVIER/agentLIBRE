@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agl_capabilities::CapabilityId;
 use agl_config::ResolvedInferenceConfig;
@@ -128,6 +128,19 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
         run: &DurableRunRecord,
         cancellation: RunCancellation,
     ) -> SupervisorResult<Box<dyn DurableRunDriver>> {
+        let process_handle = self
+            .runtime
+            .as_ref()
+            .map(crate::shared_process_handle)
+            .transpose()
+            .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+        let terminal_run_owner =
+            run.session_id
+                .is_none()
+                .then(|| agl_process::ExecutionOwner::Run {
+                    run_id: run.run_id.clone(),
+                    root_run_id: run.root_run_id.clone(),
+                });
         let input: ChatRunInput = serde_json::from_value(run.input.clone())?;
         let (turn_id, request_id, content, mut service, expected_policy_hash) = match input {
             ChatRunInput::Root {
@@ -261,7 +274,13 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
             }
         };
 
-        let (execution, checkpoint_policy_hash) = if let Some(checkpoint) = &run.checkpoint {
+        if run.session_id.is_none() {
+            service
+                .install_run_execution_context(run.execution_context.clone())
+                .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
+        }
+
+        let (mut execution, checkpoint_policy_hash) = if let Some(checkpoint) = &run.checkpoint {
             let checkpoint: ChatDriverCheckpoint = serde_json::from_value(checkpoint.clone())?;
             let store = AglStore::open_current_at(&self.store_root)?;
             let event_sequence = store.latest_run_event_sequence(&run.run_id)?;
@@ -284,6 +303,12 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                 .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
             (execution, None)
         };
+        let remaining_wall_time_ms = run
+            .budget
+            .wall_time_ms
+            .saturating_sub(run.usage.wall_time_ms);
+        execution
+            .set_deadline(Instant::now() + Duration::from_millis(remaining_wall_time_ms.max(1)));
         for (expected_policy_hash, label) in [
             (expected_policy_hash.as_deref(), "admitted subagent"),
             (checkpoint_policy_hash.as_deref(), "durable checkpoint"),
@@ -321,6 +346,9 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
             bridge_finished,
             terminal: None,
             usage: run.usage.clone(),
+            process_handle,
+            terminal_run_owner,
+            creating_run_id: run.run_id.clone(),
         }))
     }
 }
@@ -333,6 +361,9 @@ struct ChatSupervisorDriver {
     bridge_finished: Arc<AtomicBool>,
     terminal: Option<SupervisorTerminal>,
     usage: RunUsage,
+    process_handle: Option<agl_process::ProcessHandle>,
+    terminal_run_owner: Option<agl_process::ExecutionOwner>,
+    creating_run_id: agl_ids::RunId,
 }
 
 impl DurableRunDriver for ChatSupervisorDriver {
@@ -501,6 +532,26 @@ impl Drop for ChatSupervisorDriver {
         };
         let mut service = service;
         let terminal = self.execution.is_terminal();
+        if terminal && let Some(process) = &self.process_handle {
+            if let Err(error) = process.expire_run_grants(&self.creating_run_id, "one_turn") {
+                tracing::warn!(
+                    target: "agentlibre::chat",
+                    run_id = %self.creating_run_id,
+                    error = %error,
+                    "failed to terminate process executions after one-turn grant expiry"
+                );
+            }
+            if let Some(owner) = &self.terminal_run_owner
+                && let Err(error) = process.terminate_owner(owner)
+            {
+                tracing::warn!(
+                    target: "agentlibre::chat",
+                    run_id = %self.creating_run_id,
+                    error = %error,
+                    "failed to terminate run-owned process executions"
+                );
+            }
+        }
         if !terminal {
             service.suspend_durable_turn();
         }

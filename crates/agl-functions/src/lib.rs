@@ -18,7 +18,7 @@ pub use render::render_function_context;
 pub use runtime::{
     RuntimeFunction, resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
 };
-pub use status::{FunctionStatusReport, function_status};
+pub use status::{FunctionStatusReport, function_status, function_status_with_model_bindings};
 pub use subagent::*;
 pub use validation::{is_valid_function_id, validate_function_id};
 

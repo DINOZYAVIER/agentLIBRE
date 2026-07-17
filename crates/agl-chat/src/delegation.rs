@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use agl_capabilities::{
-    ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, CapabilityId,
-    DelegateActionArgs,
+    ActionDispatchContext, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    CapabilityId, DelegateActionArgs,
 };
 use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
@@ -34,6 +35,7 @@ struct DelegationContext {
     plan: RuntimeDelegationPlan,
     children: BTreeSet<String>,
     authority_ceiling: BTreeSet<CapabilityId>,
+    execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
 }
 
 impl DelegationHandler {
@@ -41,7 +43,10 @@ impl DelegationHandler {
         Self { context: None }
     }
 
-    pub(crate) fn from_session(session: &crate::InferenceSession) -> Option<Self> {
+    pub(crate) fn from_session(
+        session: &crate::InferenceSession,
+        execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    ) -> Option<Self> {
         let plan = session.delegation_plan()?.clone();
         let children = session
             .delegation_children()
@@ -62,6 +67,7 @@ impl DelegationHandler {
                 plan,
                 children,
                 authority_ceiling,
+                execution_context_state,
             }),
         })
     }
@@ -160,6 +166,13 @@ impl DelegationHandler {
             child_spec_digest: spec.spec_digest.clone(),
             model_profile_digest: inference_config_digest(&inference_config)?,
             tree_budget,
+            execution_context: context
+                .execution_context_state
+                .lock()
+                .map_err(|error| {
+                    anyhow::anyhow!("delegation execution context lock is poisoned: {error}")
+                })?
+                .clone(),
         };
         let admission = match store.admit_child_run(&draft) {
             Ok(admission) => admission,
@@ -184,8 +197,9 @@ impl DelegationHandler {
 impl ActionHandler for DelegationHandler {
     fn dispatch(
         &self,
-        invocation: ActionInvocation,
+        context: ActionDispatchContext,
     ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         self.dispatch_inner(invocation)
             .map_err(|error| std::io::Error::other(format!("{error:#}")).into())
     }
@@ -354,6 +368,7 @@ mod tests {
             input: serde_json::json!({}),
             checkpoint: None,
             effective_policy_hash: Some(format!("sha256:{}", "a".repeat(64))),
+            execution_context: test_execution_context(),
             budget: RunBudget::default(),
             usage: RunUsage::default(),
             lease_owner: None,
@@ -382,6 +397,25 @@ mod tests {
             delegation_reserved_descendants: 0,
             delegation_reserved_output_tokens: 0,
             delegation_used_output_tokens: 0,
+        }
+    }
+
+    fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
+        let workspace = std::env::temp_dir().canonicalize().unwrap();
+        agl_process::ExecutionContextSnapshot {
+            workspace_root: workspace.clone(),
+            working_directory: workspace,
+            private_execution_roots: Vec::new(),
+            shell: agl_process::ShellProfileSnapshot {
+                program: std::path::PathBuf::from("/bin/sh"),
+                command_args: vec!["-c".to_owned()],
+                login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+                environment_names: vec!["PATH".to_owned()],
+                executable_digest: "sha256:test-shell".to_owned(),
+                config_digest: "sha256:test-config".to_owned(),
+            },
+            revision: 1,
+            profile_metadata: "workspace".to_owned(),
         }
     }
 }

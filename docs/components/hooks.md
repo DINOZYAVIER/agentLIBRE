@@ -6,18 +6,22 @@ claims.
 
 ## What Exists
 
-Core guard hooks are registered by the builtin `core-guards` provider and run
+Core guard hooks are registered by the builtin `core` provider and run
 through the turn FSM:
 
-- `json.validate`
-- `repo_path.validate`
-- `task_spec.validate`
-- `secret_scan.validate`
-- `diff_scope.validate`
-- `verification.validate`
-- `commit_message.validate`
-- `skill_manifest.validate`
-- `review_pack.validate`
+- `core:json.validate`
+- `core:repo_path.validate`
+- `core:task_spec.validate`
+- `core:secret_scan.validate`
+- `core:diff_scope.validate`
+- `core:verification.validate`
+- `core:commit_message.validate`
+- `core:skill_manifest.validate`
+- `core:review_pack.validate`
+
+Hook IDs are always provider-qualified as `<provider>:<local-name>`. The
+namespace must equal the declaring provider ID, `core` is reserved for builtin
+AgentLIBRE hooks, and unqualified legacy IDs are rejected rather than aliased.
 
 Selected skills declare required hooks. The chat/run runtime groups selected
 skill hooks by event and passes those batches into each turn. Required hook
@@ -49,8 +53,8 @@ implemented yet.
 
 Add two builtin guard hooks:
 
-- `runtime.identity.validate`
-- `runtime.identity.require`
+- `core:runtime.identity.validate`
+- `core:runtime.identity.require`
 
 Both hooks run on `artifact.write`, because that event has the final answer
 text. They compare model claims against the resolved runtime identity:
@@ -80,20 +84,20 @@ text. They compare model claims against the resolved runtime identity:
 }
 ```
 
-`runtime.identity.validate` is claim-sensitive:
+`core:runtime.identity.validate` is claim-sensitive:
 
 - Pass if the answer does not claim runtime ids.
 - Pass if all claimed ids match the structured identity.
 - Fail or request repair if the answer claims ids that do not match.
 
-`runtime.identity.require` is strict:
+`core:runtime.identity.require` is strict:
 
 - Requires every field listed by `runtime_identity_validation.fields`.
 - Fails or requests repair if a required field is absent.
 - Fails or requests repair if any claimed field is incorrect.
 
-Use `runtime.identity.validate` for normal function-backed chat. Use
-`runtime.identity.require` for smoke tests, `agl function doctor`, profile
+Use `core:runtime.identity.validate` for normal function-backed chat. Use
+`core:runtime.identity.require` for smoke tests, `agl function doctor`, profile
 manager diagnostics, and explicit user questions such as "what function,
 skills, and subagents are loaded?".
 
@@ -122,7 +126,7 @@ repository skill" without an id, validation should treat that as no explicit id
 claim.
 
 List comparisons should be order-insensitive and exact. Unknown extra ids are
-mismatches. Missing fields are mismatches only under `runtime.identity.require`
+mismatches. Missing fields are mismatches only under `core:runtime.identity.require`
 or `runtime_identity_validation.required=true`.
 
 ## Message Codes
@@ -247,7 +251,7 @@ assistant prose.
 
 ## Implementation Plan
 
-1. Add `runtime.identity.validate` and `runtime.identity.require` constants,
+1. Add `core:runtime.identity.validate` and `core:runtime.identity.require` constants,
    declarations, validators, and tests in `agl-tools`.
 2. Extend `artifact_write_payload` in `agl-loop` or the chat host so it can
    include `runtime_identity` and `runtime_identity_validation`.
