@@ -2,13 +2,13 @@
 use std::path::PathBuf;
 
 #[cfg(unix)]
-use agl_client::UnixTransport;
-use agl_client::{AgentLibreClient, DaemonTransport};
+use agl_client::{AgentLibreClient, RunSubscriptionEvent};
 use agl_content::Content;
 use agl_ids::SessionId;
 use agl_protocol::{
-    HelloRequest, PROTOCOL_VERSION, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
-    SessionOpenRequest, SessionStatus, SessionStatusRequest, TurnTerminalStatus,
+    ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
+    SessionOpenRequest, SessionStatus, SessionStatusRequest, SessionTranscriptRequest,
+    TranscriptEvent,
 };
 #[cfg(unix)]
 use anyhow::Context;
@@ -19,7 +19,8 @@ use crate::AgentClient;
 #[cfg(unix)]
 pub struct LazyDaemonClient {
     socket_path: PathBuf,
-    inner: Option<AgentLibreClient<UnixTransport>>,
+    runtime: Option<tokio::runtime::Runtime>,
+    inner: Option<AgentLibreClient>,
 }
 
 #[cfg(unix)]
@@ -27,58 +28,51 @@ impl LazyDaemonClient {
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
+            runtime: Some(tokio::runtime::Runtime::new().expect("matrix daemon client runtime")),
             inner: None,
         }
     }
 
-    fn inner(&mut self) -> Result<&mut AgentLibreClient<UnixTransport>> {
+    fn ensure_connected(&mut self) -> Result<()> {
         if self.inner.is_none() {
-            self.inner = Some(
-                AgentLibreClient::connect(&self.socket_path).with_context(|| {
-                    format!(
-                        "failed to connect to daemon socket {}",
-                        self.socket_path.display()
-                    )
-                })?,
-            );
+            let socket_path = self.socket_path.clone();
+            self.inner = Some(self.runtime().block_on(async move {
+                AgentLibreClient::connect(&socket_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to connect to daemon socket {}",
+                            socket_path.display()
+                        )
+                    })
+            })?);
         }
-        Ok(self.inner.as_mut().expect("client initialized"))
+        Ok(())
+    }
+
+    fn client(&self) -> &AgentLibreClient {
+        self.inner.as_ref().expect("client initialized")
+    }
+
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime.as_ref().expect("client runtime initialized")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LazyDaemonClient {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
 #[cfg(unix)]
 impl AgentClient for LazyDaemonClient {
     fn daemon_status(&mut self) -> Result<String> {
-        AgentClient::daemon_status(self.inner()?)
-    }
-
-    fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
-        AgentClient::validate_session(self.inner()?, session_id)
-    }
-
-    fn open_session(&mut self) -> Result<SessionId> {
-        AgentClient::open_session(self.inner()?)
-    }
-
-    fn send_message(
-        &mut self,
-        session_id: &SessionId,
-        message: &str,
-        idempotency_key: &str,
-    ) -> Result<String> {
-        AgentClient::send_message(self.inner()?, session_id, message, idempotency_key)
-    }
-}
-
-impl<T> AgentClient for AgentLibreClient<T>
-where
-    T: DaemonTransport,
-{
-    fn daemon_status(&mut self) -> Result<String> {
-        let hello = self.hello(HelloRequest {
-            client_name: Some("agl-matrix-bridge".to_string()),
-            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
-        })?;
+        self.ensure_connected()?;
+        let hello = self.client().hello()?;
         Ok(format!(
             "state=running protocol_version={} product_version={}",
             hello.protocol_version, hello.product_version
@@ -86,9 +80,13 @@ where
     }
 
     fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
-        let status = self.session_status(SessionStatusRequest {
-            session_id: session_id.clone(),
-        })?;
+        self.ensure_connected()?;
+        let client = self.client().clone();
+        let status = self
+            .runtime()
+            .block_on(client.session_status(SessionStatusRequest {
+                session_id: session_id.clone(),
+            }))?;
         match status.status {
             SessionStatus::Open | SessionStatus::Busy => Ok(()),
             SessionStatus::Finished | SessionStatus::Failed => {
@@ -98,13 +96,18 @@ where
     }
 
     fn open_session(&mut self) -> Result<SessionId> {
-        let opened = self.open_session(SessionOpenRequest {
-            session_id: None,
-            new_session: true,
-            workspace_root: None,
-            skills: Vec::new(),
-            tool_mode: ProtocolToolMode::ReadOnly,
-        })?;
+        self.ensure_connected()?;
+        let client = self.client().clone();
+        let opened = self
+            .runtime()
+            .block_on(client.open_session(SessionOpenRequest {
+                session_id: None,
+                new_session: true,
+                workspace_root: None,
+                function_ref: None,
+                skills: Vec::new(),
+                tool_mode: ProtocolToolMode::ReadOnly,
+            }))?;
         Ok(opened.session_id)
     }
 
@@ -114,19 +117,55 @@ where
         message: &str,
         idempotency_key: &str,
     ) -> Result<String> {
-        let response = self.send_turn(RunSubmitRequest {
-            session_id: session_id.clone(),
-            content: Content::text(message)?,
-            idempotency_key: Some(idempotency_key.to_string()),
-            budget: RunBudgetRequest::default(),
-        })?;
-        match response.status {
-            TurnTerminalStatus::Answered => Ok(response.assistant_text),
-            TurnTerminalStatus::Stopped
-            | TurnTerminalStatus::Failed
-            | TurnTerminalStatus::Cancelled => {
-                bail!("daemon turn ended with {:?}", response.status)
+        self.ensure_connected()?;
+        let client = self.client().clone();
+        let session_id = session_id.clone();
+        let message = message.to_owned();
+        let idempotency_key = idempotency_key.to_owned();
+        self.runtime().block_on(async move {
+            let accepted = client
+                .submit_run(RunSubmitRequest {
+                    session_id: session_id.clone(),
+                    content: Content::text(message)?,
+                    client_submission_id: idempotency_key,
+                    budget: RunBudgetRequest::default(),
+                })
+                .await?;
+            let mut subscription = client
+                .subscribe_run(RunSubscribeRequest {
+                    run_id: accepted.run_id.clone(),
+                    after_sequence: 0,
+                })
+                .await?;
+            let terminal = loop {
+                match subscription.next().await? {
+                    Some(RunSubscriptionEvent::Event(_)) => {}
+                    Some(RunSubscriptionEvent::Finished(event)) => break event,
+                    None => bail!("daemon run subscription ended without terminal state"),
+                }
+            };
+            if terminal.state != ProtocolRunState::Succeeded {
+                bail!("daemon turn ended with {:?}", terminal.state);
             }
-        }
+            let transcript = client
+                .read_transcript(SessionTranscriptRequest {
+                    session_id,
+                    include_content: true,
+                })
+                .await?;
+            transcript
+                .events
+                .into_iter()
+                .rev()
+                .find_map(|event| match event {
+                    TranscriptEvent::AssistantMessage {
+                        run_id, content, ..
+                    } if run_id == accepted.run_id => {
+                        content.and_then(|content| content.text_only())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("daemon turn produced no assistant message"))
+        })
     }
 }

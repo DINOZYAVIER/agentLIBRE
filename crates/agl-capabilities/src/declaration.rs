@@ -14,6 +14,7 @@ use crate::{
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     Read,
+    Request,
     Write,
     Execute,
     Approve,
@@ -42,10 +43,11 @@ impl OperationKind {
     pub fn rank(self) -> u8 {
         match self {
             Self::Read => 0,
-            Self::Write => 1,
-            Self::Execute => 2,
-            Self::Approve => 3,
-            Self::Admin => 4,
+            Self::Request => 1,
+            Self::Write => 2,
+            Self::Execute => 3,
+            Self::Approve => 4,
+            Self::Admin => 5,
         }
     }
 
@@ -60,6 +62,7 @@ impl OperationKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Request => "request",
             Self::Write => "write",
             Self::Execute => "execute",
             Self::Approve => "approve",
@@ -73,6 +76,11 @@ impl OperationKind {
 pub enum StateEffect {
     HostScreenCapture,
     SpawnSubagent,
+    SessionWorkingDirectory,
+    SpawnProcess,
+    ControlProcess,
+    HostProcessExecution,
+    ShellLoginStartup,
     RepoFiles,
     RepoWorkspace,
     RepoHooks,
@@ -94,6 +102,11 @@ impl StateEffect {
         match self {
             Self::HostScreenCapture => "host_screen_capture",
             Self::SpawnSubagent => "spawn_subagent",
+            Self::SessionWorkingDirectory => "session_working_directory",
+            Self::SpawnProcess => "spawn_process",
+            Self::ControlProcess => "control_process",
+            Self::HostProcessExecution => "host_process_execution",
+            Self::ShellLoginStartup => "shell_login_startup",
             Self::RepoFiles => "repo_files",
             Self::RepoWorkspace => "repo_workspace",
             Self::RepoHooks => "repo_hooks",
@@ -126,20 +139,6 @@ impl SensitiveInput {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActionVisibility {
-    pub visible_in_read_only: bool,
-}
-
-impl ActionVisibility {
-    pub fn for_operation(operation_kind: OperationKind) -> Self {
-        Self {
-            visible_in_read_only: operation_kind == OperationKind::Read,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionDeclaration {
@@ -149,8 +148,8 @@ pub struct ActionDeclaration {
     pub operation_kind: OperationKind,
     pub delivery: ActionDelivery,
     pub state_effects: BTreeSet<StateEffect>,
+    pub conditional_state_effects: BTreeSet<StateEffect>,
     pub sensitive_inputs: BTreeSet<SensitiveInput>,
-    pub visibility: ActionVisibility,
 }
 
 impl ActionDeclaration {
@@ -167,8 +166,8 @@ impl ActionDeclaration {
             operation_kind,
             delivery: ActionDelivery::for_operation(operation_kind),
             state_effects: BTreeSet::new(),
+            conditional_state_effects: BTreeSet::new(),
             sensitive_inputs: BTreeSet::new(),
-            visibility: ActionVisibility::for_operation(operation_kind),
         };
         declaration.validate_shape()?;
         Ok(declaration)
@@ -192,6 +191,14 @@ impl ActionDeclaration {
         self
     }
 
+    pub fn with_conditional_state_effects(
+        mut self,
+        effects: impl IntoIterator<Item = StateEffect>,
+    ) -> Self {
+        self.conditional_state_effects = effects.into_iter().collect();
+        self
+    }
+
     pub fn with_sensitive_inputs(
         mut self,
         inputs: impl IntoIterator<Item = SensitiveInput>,
@@ -205,17 +212,37 @@ impl ActionDeclaration {
         self
     }
 
-    pub fn with_visibility(mut self, visibility: ActionVisibility) -> Self {
-        self.visibility = visibility;
-        self
-    }
-
     pub fn validate(&self) -> Result<(), DeclarationError> {
         self.validate_shape()?;
-        if self.operation_kind.is_state_mutating() && self.state_effects.is_empty() {
+        if self
+            .state_effects
+            .iter()
+            .any(|effect| self.conditional_state_effects.contains(effect))
+        {
+            return Err(DeclarationError::InvalidOperation {
+                id: self.id.clone(),
+                message: "mandatory and conditional state effects must be disjoint",
+            });
+        }
+        if self.operation_kind.is_state_mutating()
+            && self.operation_kind != OperationKind::Request
+            && self.state_effects.is_empty()
+        {
             return Err(DeclarationError::InvalidOperation {
                 id: self.id.clone(),
                 message: "state-mutating operations must declare state effects",
+            });
+        }
+        if self.operation_kind == OperationKind::Request
+            && self
+                .state_effects
+                .iter()
+                .chain(&self.conditional_state_effects)
+                .any(|effect| *effect != StateEffect::StorePermissionRequests)
+        {
+            return Err(DeclarationError::InvalidOperation {
+                id: self.id.clone(),
+                message: "request operations may only store pending permission requests",
             });
         }
         if !self.operation_kind.is_state_mutating()
@@ -537,11 +564,24 @@ impl ProviderDeclaration {
                 field: "provider version",
             });
         }
+        if self.id.as_str() == "core" && self.source != ProviderSource::Builtin {
+            return Err(DeclarationError::ReservedProviderNamespace {
+                provider_id: self.id.clone(),
+            });
+        }
         reject_duplicates(self.hooks.iter().map(|hook| hook.id.as_str()), "hook")?;
         reject_duplicates(
             self.actions.iter().map(|action| action.id.as_str()),
             "action",
         )?;
+        for hook in &self.hooks {
+            if hook.id.provider_namespace() != self.id.as_str() {
+                return Err(DeclarationError::HookProviderMismatch {
+                    hook_id: hook.id.clone(),
+                    provider_id: self.id.clone(),
+                });
+            }
+        }
         for action in &self.actions {
             action.validate()?;
         }
@@ -580,6 +620,13 @@ pub enum DeclarationError {
         id: CapabilityId,
         message: &'static str,
     },
+    HookProviderMismatch {
+        hook_id: HookId,
+        provider_id: ProviderId,
+    },
+    ReservedProviderNamespace {
+        provider_id: ProviderId,
+    },
 }
 
 impl Display for DeclarationError {
@@ -597,6 +644,17 @@ impl Display for DeclarationError {
                     "action `{id}` has invalid operation metadata: {message}"
                 )
             }
+            Self::HookProviderMismatch {
+                hook_id,
+                provider_id,
+            } => write!(
+                formatter,
+                "hook `{hook_id}` namespace must match provider `{provider_id}`"
+            ),
+            Self::ReservedProviderNamespace { provider_id } => write!(
+                formatter,
+                "provider namespace `{provider_id}` is reserved for builtin AgentLIBRE hooks"
+            ),
         }
     }
 }

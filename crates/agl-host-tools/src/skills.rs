@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use agl_capabilities::{
-    ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, CapabilityId,
+    ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult, CapabilityId,
 };
 use agl_skills::{
     SkillHarness, SkillLockOptions, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
@@ -212,7 +212,8 @@ impl SkillTools {
 }
 
 impl ActionHandler for SkillTools {
-    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         self.dispatch_action(&invocation.capability_id, invocation.arguments)
             .map_err(Into::into)
     }

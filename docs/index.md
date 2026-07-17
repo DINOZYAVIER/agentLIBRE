@@ -17,6 +17,7 @@ This directory is the human-facing documentation map for agentLIBRE.
 - [Functions](components/functions.md) - agentFUNCTION specs that bind profiles, skills, tools, memory, and subagents.
 - [Skills](components/skills.md) - git-pinned trusted instruction packs that shape context and tool routing.
 - [Tools](components/tools.md) - explicitly callable runtime operations with permission and trust boundaries.
+- [Processes](components/processes.md) - sandboxed argv/shell execution, PTY ownership, durable output, and operator controls.
 - [Artifacts](components/artifacts.md) - workspace data under `.agl`, including locks, tasks, reviews, and generated state.
 - [Store](components/store.md) - SQLite-backed durable domain state, migrations, and idempotency records.
 - [Daemon](components/daemon.md) - long-running local service for turn execution and background work.
@@ -26,6 +27,6 @@ This directory is the human-facing documentation map for agentLIBRE.
 - [Cron](components/cron.md) - scheduled jobs for builtins and trusted skills.
 - [Config](components/config.md) - XDG paths, workspace settings, inference profiles, and runtime options.
 - [Events](components/events.md) - structured runtime and FSM evidence emitted during commands and turns.
-- [Hooks](components/hooks.md) - validation and guard checks such as `repo_path.validate`.
+- [Hooks](components/hooks.md) - validation and guard checks such as `core:repo_path.validate`.
 - [Tasks](components/tasks.md) - implementation specs and decisions distributed through the tasks component.
 - [Docs](components/docs.md) - documentation and future wiki-style synthesis over code, specs, and evidence.

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use agl_ids::SessionId;
+use agl_ids::{ExecutionId, RunId, SessionId};
 use clap::ValueEnum;
 use clap_complete::Shell;
 
@@ -12,6 +12,7 @@ pub(crate) struct CliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
+    Interactive(InteractiveOptions),
     Help { bin_name: &'static str },
     HelpPrinted,
     Completion { shell: Shell },
@@ -20,15 +21,99 @@ pub(crate) enum CliCommand {
     Store(StoreCommand),
     Function(FunctionCommand),
     Inference(InferenceCommand),
-    Init(RepoInitOptions),
+    Init(SetupInitOptions),
+    Model(ModelCommand),
     Memory(MemoryCommand),
     Notes(NotesCommand),
     Repo(RepoCommand),
     Skill(SkillCommand),
+    Process(ProcessCommand),
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
     Run(RunOptions),
-    Chat(RunOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InteractiveOptions {
+    pub(crate) resume: Option<String>,
+    pub(crate) input_history: bool,
+    pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) function_ref: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) operation_mode: Option<ToolAccessMode>,
+    pub(crate) skills: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SetupInitOptions {
+    pub(crate) model: Option<String>,
+    pub(crate) yes: bool,
+    pub(crate) non_interactive: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) offline: bool,
+    pub(crate) json: bool,
+    pub(crate) allow_low_memory: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ModelCommand {
+    Pull(ModelPullOptions),
+    Import(ModelImportOptions),
+    List(ModelListOptions),
+    Status(ModelStatusOptions),
+    Verify(ModelStatusOptions),
+    Unbind(ModelMutationOptions),
+    Remove(ModelMutationOptions),
+    Prune(ModelPruneOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelPullOptions {
+    pub(crate) source: String,
+    pub(crate) id: Option<String>,
+    pub(crate) mmproj: Option<String>,
+    pub(crate) replace: bool,
+    pub(crate) yes: bool,
+    pub(crate) non_interactive: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) offline: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelImportOptions {
+    pub(crate) path: PathBuf,
+    pub(crate) id: Option<String>,
+    pub(crate) mmproj: Option<PathBuf>,
+    pub(crate) replace: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelListOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelStatusOptions {
+    pub(crate) model_id: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelMutationOptions {
+    pub(crate) model_id: String,
+    pub(crate) yes: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelPruneOptions {
+    pub(crate) yes: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,7 +142,6 @@ pub(crate) enum FunctionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum InferenceCommand {
     Run(RunOptions),
-    Chat(RunOptions),
     Serve(ServeOptions),
 }
 
@@ -122,6 +206,59 @@ pub(crate) enum SkillCommand {
     Lock(SkillLockOptions),
     Trust(SkillTrustOptions),
     Revoke(SkillRevokeOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessCommand {
+    List(ProcessListOptions),
+    Status(ProcessStatusOptions),
+    Read(ProcessReadOptions),
+    Attach(ProcessAttachOptions),
+    Kill(ProcessKillOptions),
+    Doctor(ProcessDoctorOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessListOptions {
+    pub(crate) session_id: Option<SessionId>,
+    pub(crate) root_run_id: Option<RunId>,
+    pub(crate) include_finished: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessStatusOptions {
+    pub(crate) execution_id: ExecutionId,
+    pub(crate) private_command: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessReadOptions {
+    pub(crate) execution_id: ExecutionId,
+    pub(crate) after_sequence: u64,
+    pub(crate) max_bytes: usize,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessAttachOptions {
+    pub(crate) execution_id: ExecutionId,
+    pub(crate) after_sequence: u64,
+    pub(crate) read_only: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessKillOptions {
+    pub(crate) execution_id: ExecutionId,
+    pub(crate) immediate: bool,
+    pub(crate) yes: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessDoctorOptions {
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -595,6 +732,7 @@ pub(crate) struct FunctionDoctorOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServeOptions {
     pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) systemd_activation: bool,
     pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,

@@ -1,20 +1,25 @@
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{InferenceResponse, InferenceResponseMetadata};
 use agl_config::ResolvedInferenceConfig;
+use serde::Serialize;
 
 use super::evidence::AttemptEvidence;
+use super::queue::{PendingQueue, PendingWaitGuard, QueueCommand, WaitAbandonReason};
 use super::{
     ContextKey, InferenceJob, ModelGeneration, ModelKey, ModelManagerError, ModelManagerOptions,
     ModelManagerStatus, RuntimeFailure, RuntimeOperation,
 };
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+static NEXT_MODEL_LEASE: AtomicU64 = AtomicU64::new(1);
 
 pub trait ModelRuntime: Send + 'static {
     type Model: 'static;
@@ -57,32 +62,25 @@ impl ModelManager {
         R: ModelRuntime,
     {
         options.validate()?;
-        let (sender, receiver) = mpsc::sync_channel(options.queue_capacity);
         let status = Arc::new(Mutex::new(ModelManagerStatus::default()));
-        let queue_depth = Arc::new(AtomicUsize::new(0));
-        let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let worker_available = Arc::new(AtomicBool::new(true));
+        let queue = Arc::new(PendingQueue::new(
+            options.queue_capacity,
+            Arc::clone(&status),
+        ));
         let worker_status = Arc::clone(&status);
-        let worker_depth = Arc::clone(&queue_depth);
+        let worker_queue = Arc::clone(&queue);
         let worker_options = options.clone();
-        let worker_availability = Arc::clone(&worker_available);
         let worker = thread::Builder::new()
             .name("agl-model-manager".to_string())
             .spawn(move || {
-                let _availability = AvailabilityGuard(worker_availability);
-                Worker::new(runtime, worker_options, worker_status).run(receiver, &worker_depth);
+                let mut availability = AvailabilityGuard::new(Arc::clone(&worker_queue));
+                Worker::new(runtime, worker_options, worker_status).run(worker_queue);
+                availability.finish();
             })
             .map_err(|_| ModelManagerError::ManagerUnavailable)?;
         Ok(Self {
             handle: ModelManagerHandle {
-                inner: Arc::new(HandleInner {
-                    sender,
-                    status,
-                    queue_depth,
-                    shutdown_requested,
-                    worker_available,
-                    queue_capacity: options.queue_capacity,
-                }),
+                inner: Arc::new(HandleInner { queue, status }),
             },
             worker: Some(worker),
         })
@@ -115,12 +113,8 @@ pub struct ModelManagerHandle {
 }
 
 struct HandleInner {
-    sender: SyncSender<Command>,
+    queue: Arc<PendingQueue<Command>>,
     status: Arc<Mutex<ModelManagerStatus>>,
-    queue_depth: Arc<AtomicUsize>,
-    shutdown_requested: Arc<AtomicBool>,
-    worker_available: Arc<AtomicBool>,
-    queue_capacity: usize,
 }
 
 impl ModelManagerHandle {
@@ -129,27 +123,52 @@ impl ModelManagerHandle {
         let cancellation = job.cancellation().clone();
         let deadline = job.deadline();
         let (reply, receiver) = mpsc::channel();
-        self.try_send(Command::Generate {
+        let id = self.inner.queue.enqueue(Command::Generate {
             job: Box::new(job),
             reply,
         })?;
+        let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
+        let mut gate_requested = false;
 
         loop {
-            if cancellation.is_cancelled() {
-                return Err(ModelManagerError::Cancelled);
+            match receiver.try_recv() {
+                Ok(result) => {
+                    guard.disarm();
+                    return result;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    guard.disarm();
+                    return Err(ModelManagerError::ManagerUnavailable);
+                }
             }
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return Err(ModelManagerError::DeadlineExceeded);
+            if !gate_requested && cancellation.is_cancelled() {
+                guard.abandon(WaitAbandonReason::Cancelled);
+                gate_requested = true;
+                continue;
             }
-            let wait = deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                .map_or(CANCELLATION_POLL_INTERVAL, |remaining| {
-                    remaining.min(CANCELLATION_POLL_INTERVAL)
-                });
+            if !gate_requested && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                guard.abandon(WaitAbandonReason::DeadlineExceeded);
+                gate_requested = true;
+                continue;
+            }
+            let wait = if gate_requested {
+                CANCELLATION_POLL_INTERVAL
+            } else {
+                deadline
+                    .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                    .map_or(CANCELLATION_POLL_INTERVAL, |remaining| {
+                        remaining.min(CANCELLATION_POLL_INTERVAL)
+                    })
+            };
             match receiver.recv_timeout(wait) {
-                Ok(result) => return result,
+                Ok(result) => {
+                    guard.disarm();
+                    return result;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    guard.disarm();
                     return Err(ModelManagerError::ManagerUnavailable);
                 }
             }
@@ -158,80 +177,70 @@ impl ModelManagerHandle {
 
     pub fn clear_context(&self, key: &ContextKey) -> Result<(), ModelManagerError> {
         let (reply, receiver) = mpsc::channel();
-        self.try_send(Command::ClearContext {
+        let id = self.inner.queue.enqueue(Command::ClearContext {
             key: key.clone(),
             reply,
         })?;
-        receiver
+        let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
+        let result = receiver
             .recv()
-            .map_err(|_| ModelManagerError::ManagerUnavailable)?
+            .map_err(|_| ModelManagerError::ManagerUnavailable)?;
+        guard.disarm();
+        result
     }
 
     pub fn release_context(&self, key: &ContextKey) -> Result<(), ModelManagerError> {
         let (reply, receiver) = mpsc::channel();
-        self.try_send(Command::ReleaseContext {
+        let id = self.inner.queue.enqueue(Command::ReleaseContext {
             key: key.clone(),
             reply,
         })?;
-        receiver
+        let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
+        let result = receiver
             .recv()
-            .map_err(|_| ModelManagerError::ManagerUnavailable)?
+            .map_err(|_| ModelManagerError::ManagerUnavailable)?;
+        guard.disarm();
+        result
     }
 
     pub fn status(&self) -> Result<ModelManagerStatus, ModelManagerError> {
-        if self.inner.shutdown_requested.load(Ordering::Acquire)
-            || !self.inner.worker_available.load(Ordering::Acquire)
-        {
-            return Err(ModelManagerError::ManagerUnavailable);
-        }
+        let queue = self.inner.queue.snapshot()?;
         let mut status = lock_status(&self.inner.status).clone();
-        status.queue_depth = self.inner.queue_depth.load(Ordering::Acquire);
+        status.queue_depth = queue.depth;
+        status.active_scope = queue.active_scope;
         Ok(status)
     }
 
     pub fn shutdown(&self) -> Result<(), ModelManagerError> {
-        if self.inner.shutdown_requested.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let (reply, receiver) = mpsc::channel();
-        self.inner.queue_depth.fetch_add(1, Ordering::AcqRel);
-        if self.inner.sender.send(Command::Shutdown { reply }).is_err() {
-            self.inner.queue_depth.fetch_sub(1, Ordering::AcqRel);
-            return Err(ModelManagerError::ManagerUnavailable);
-        }
-        receiver
-            .recv()
-            .map_err(|_| ModelManagerError::ManagerUnavailable)
-    }
-
-    fn try_send(&self, command: Command) -> Result<(), ModelManagerError> {
-        if self.inner.shutdown_requested.load(Ordering::Acquire)
-            || !self.inner.worker_available.load(Ordering::Acquire)
-        {
-            return Err(ModelManagerError::ManagerUnavailable);
-        }
-        self.inner.queue_depth.fetch_add(1, Ordering::AcqRel);
-        match self.inner.sender.try_send(command) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                self.inner.queue_depth.fetch_sub(1, Ordering::AcqRel);
-                Err(ModelManagerError::QueueFull {
-                    capacity: self.inner.queue_capacity,
-                })
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.inner.queue_depth.fetch_sub(1, Ordering::AcqRel);
-                Err(ModelManagerError::ManagerUnavailable)
-            }
-        }
+        self.inner.queue.close_for_shutdown();
+        self.inner.queue.wait_for_worker()
     }
 }
 
-struct AvailabilityGuard(Arc<AtomicBool>);
+struct AvailabilityGuard {
+    queue: Arc<PendingQueue<Command>>,
+    finished: bool,
+}
+
+impl AvailabilityGuard {
+    fn new(queue: Arc<PendingQueue<Command>>) -> Self {
+        Self {
+            queue,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.queue.worker_stopped(true);
+        self.finished = true;
+    }
+}
 
 impl Drop for AvailabilityGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        if !self.finished {
+            self.queue.worker_stopped(false);
+        }
     }
 }
 
@@ -248,9 +257,44 @@ enum Command {
         key: ContextKey,
         reply: mpsc::Sender<Result<(), ModelManagerError>>,
     },
-    Shutdown {
-        reply: mpsc::Sender<()>,
-    },
+}
+
+impl QueueCommand for Command {
+    fn is_generation(&self) -> bool {
+        matches!(self, Self::Generate { .. })
+    }
+
+    fn cancellation(&self) -> Option<&super::InferenceCancellation> {
+        match self {
+            Self::Generate { job, .. } => Some(job.cancellation()),
+            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Generate { job, .. } => job.deadline(),
+            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+        }
+    }
+
+    fn active_scope(&self) -> Option<super::InferenceJobScope> {
+        match self {
+            Self::Generate { job, .. } => Some(job.scope()),
+            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+        }
+    }
+
+    fn complete(self, error: ModelManagerError) {
+        match self {
+            Self::Generate { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::ClearContext { reply, .. } | Self::ReleaseContext { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
 }
 
 struct Worker<R: ModelRuntime> {
@@ -265,6 +309,8 @@ struct ModelEntry<M, C> {
     // Contexts precede the model so normal and unwind drops preserve native ownership order.
     contexts: BTreeMap<ContextKey, ContextEntry<C>>,
     model: M,
+    // The cache lease outlives the native model and every native context.
+    _lease: Option<ModelLease>,
     last_used: u64,
 }
 
@@ -289,26 +335,25 @@ impl<R: ModelRuntime> Worker<R> {
         }
     }
 
-    fn run(mut self, receiver: mpsc::Receiver<Command>, queue_depth: &AtomicUsize) {
-        while let Ok(command) = receiver.recv() {
-            queue_depth.fetch_sub(1, Ordering::AcqRel);
+    fn run(mut self, queue: Arc<PendingQueue<Command>>) {
+        while let Some(active) = queue.pop() {
+            let id = active.id;
             self.prune_expired_contexts();
-            match command {
+            match active.command {
                 Command::Generate { job, reply } => {
-                    let _ = reply.send(self.process_job(*job));
+                    let result = self.process_job(*job);
+                    queue.complete_active(id);
+                    let _ = reply.send(result);
                 }
                 Command::ClearContext { key, reply } => {
-                    let _ = reply.send(self.clear_context(&key));
+                    let result = self.clear_context(&key);
+                    queue.complete_active(id);
+                    let _ = reply.send(result);
                 }
                 Command::ReleaseContext { key, reply } => {
                     self.release_context(&key);
+                    queue.complete_active(id);
                     let _ = reply.send(Ok(()));
-                }
-                Command::Shutdown { reply } => {
-                    self.models.clear();
-                    self.refresh_resource_status();
-                    let _ = reply.send(());
-                    break;
                 }
             }
         }
@@ -320,10 +365,6 @@ impl<R: ModelRuntime> Worker<R> {
         &mut self,
         mut job: InferenceJob,
     ) -> Result<InferenceResponse, ModelManagerError> {
-        {
-            let mut status = lock_status(&self.status);
-            status.active_scope = Some(job.scope());
-        }
         let started = Instant::now();
         let mut log = format!(
             "model_key_digest = {}\ncontext_key_digest = {}\n",
@@ -371,7 +412,6 @@ impl<R: ModelRuntime> Worker<R> {
         };
         {
             let mut status = lock_status(&self.status);
-            status.active_scope = None;
             match &result {
                 Ok(_) => status.completed_jobs = status.completed_jobs.saturating_add(1),
                 Err(ModelManagerError::Cancelled) => {
@@ -470,6 +510,16 @@ impl<R: ModelRuntime> Worker<R> {
         while self.models.len() >= self.options.max_loaded_models {
             self.evict_lru_model();
         }
+        let lease = self
+            .options
+            .model_lease_root
+            .as_deref()
+            .map(|root| ModelLease::acquire(root, job.model_key(), job.config()))
+            .transpose()
+            .map_err(|message| ModelManagerError::LoadFailed {
+                model_digest: job.model_key().digest().to_string(),
+                message,
+            })?;
         let model = match self.runtime.load_model(job.model_key(), job.config()) {
             Ok(operation) => {
                 append_operation_log(log, "model_load", &operation.log);
@@ -489,6 +539,7 @@ impl<R: ModelRuntime> Worker<R> {
             ModelEntry {
                 contexts: BTreeMap::new(),
                 model,
+                _lease: lease,
                 last_used: tick,
             },
         );
@@ -662,6 +713,105 @@ impl<R: ModelRuntime> Worker<R> {
     fn next_tick(&mut self) -> u64 {
         self.lru_clock = self.lru_clock.saturating_add(1);
         self.lru_clock
+    }
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelLeaseRecord<'a> {
+    version: u32,
+    model_key: &'a str,
+    pid: u32,
+    paths: Vec<PathBuf>,
+}
+
+struct ModelLease {
+    path: PathBuf,
+    _file: File,
+}
+
+impl ModelLease {
+    fn acquire(
+        root: &Path,
+        key: &ModelKey,
+        config: &ResolvedInferenceConfig,
+    ) -> Result<Self, String> {
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("failed to create model lease directory: {error}"))?;
+        let sequence = NEXT_MODEL_LEASE.fetch_add(1, Ordering::Relaxed);
+        let name = format!("{}-{sequence}-{}.json", std::process::id(), key.digest());
+        let path = root.join(&name);
+        let temporary = root.join(format!(".{name}.tmp"));
+        let current_dir = std::env::current_dir()
+            .map_err(|error| format!("failed to resolve model lease paths: {error}"))?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("failed to create model lease: {error}"))?;
+        if let Err(error) = file.lock() {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("failed to lock model lease: {error}"));
+        }
+        let absolute = |path: &Path| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                current_dir.join(path)
+            }
+        };
+        let mut paths = BTreeSet::new();
+        paths.insert(absolute(&config.backend.model));
+        paths.extend(
+            config
+                .backend
+                .multimodal_projector
+                .iter()
+                .map(|path| absolute(path)),
+        );
+        if config.runtime.mtp.enabled {
+            paths.extend(
+                config
+                    .runtime
+                    .mtp
+                    .draft_model
+                    .iter()
+                    .map(|path| absolute(path)),
+            );
+        }
+        let record = ModelLeaseRecord {
+            version: 1,
+            model_key: key.digest(),
+            pid: std::process::id(),
+            paths: paths.into_iter().collect(),
+        };
+        let bytes = match serde_json::to_vec_pretty(&record) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(format!("failed to encode model lease: {error}"));
+            }
+        };
+        if let Err(error) = file
+            .write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| std::fs::rename(&temporary, &path))
+        {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("failed to publish model lease: {error}"));
+        }
+        Ok(Self { path, _file: file })
+    }
+}
+
+impl Drop for ModelLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

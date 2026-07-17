@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use agl_capabilities::SkillId;
-use agl_ids::SessionId;
+use agl_ids::{ExecutionId, RunId, SessionId};
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -23,7 +23,6 @@ macro_rules! cli_help {
 mod help {
     pub(super) const WELCOME: &str = cli_help!("welcome");
     pub(super) const AGL: &str = cli_help!("agl");
-    pub(super) const CHAT: &str = cli_help!("chat");
     pub(super) const COMPLETION: &str = cli_help!("completion");
     pub(super) const CONFIG: &str = cli_help!("config");
     pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
@@ -49,7 +48,6 @@ mod help {
     pub(super) const DAEMON_STATUS: &str = cli_help!("daemon/status");
     pub(super) const INIT: &str = cli_help!("init");
     pub(super) const INFERENCE: &str = cli_help!("inference");
-    pub(super) const INFERENCE_CHAT: &str = cli_help!("inference/chat");
     pub(super) const INFERENCE_RUN: &str = cli_help!("inference/run");
     pub(super) const INFERENCE_SERVE: &str = cli_help!("inference/serve");
     pub(super) const INSTALL_HOOKS: &str = cli_help!("install-hooks");
@@ -63,6 +61,15 @@ mod help {
     pub(super) const MEMORY_SEARCH: &str = cli_help!("memory/search");
     pub(super) const MEMORY_SHOW: &str = cli_help!("memory/show");
     pub(super) const MEMORY_SUGGEST: &str = cli_help!("memory/suggest");
+    pub(super) const MODEL: &str = cli_help!("model");
+    pub(super) const MODEL_IMPORT: &str = cli_help!("model/import");
+    pub(super) const MODEL_LIST: &str = cli_help!("model/list");
+    pub(super) const MODEL_PRUNE: &str = cli_help!("model/prune");
+    pub(super) const MODEL_PULL: &str = cli_help!("model/pull");
+    pub(super) const MODEL_REMOVE: &str = cli_help!("model/remove");
+    pub(super) const MODEL_STATUS: &str = cli_help!("model/status");
+    pub(super) const MODEL_UNBIND: &str = cli_help!("model/unbind");
+    pub(super) const MODEL_VERIFY: &str = cli_help!("model/verify");
     pub(super) const NOTES: &str = cli_help!("notes");
     pub(super) const NOTES_ADD: &str = cli_help!("notes/add");
     pub(super) const NOTES_DELETE: &str = cli_help!("notes/delete");
@@ -72,6 +79,13 @@ mod help {
     pub(super) const NOTES_SEARCH: &str = cli_help!("notes/search");
     pub(super) const NOTES_SHOW: &str = cli_help!("notes/show");
     pub(super) const NOTES_UPDATE: &str = cli_help!("notes/update");
+    pub(super) const PROCESS: &str = cli_help!("process");
+    pub(super) const PROCESS_ATTACH: &str = cli_help!("process/attach");
+    pub(super) const PROCESS_DOCTOR: &str = cli_help!("process/doctor");
+    pub(super) const PROCESS_KILL: &str = cli_help!("process/kill");
+    pub(super) const PROCESS_LIST: &str = cli_help!("process/list");
+    pub(super) const PROCESS_READ: &str = cli_help!("process/read");
+    pub(super) const PROCESS_STATUS: &str = cli_help!("process/status");
     pub(super) const REPO: &str = cli_help!("repo");
     pub(super) const REPO_ARTIFACT: &str = cli_help!("repo/artifact");
     pub(super) const REPO_ARTIFACT_LOCK: &str = cli_help!("repo/artifact/lock");
@@ -117,6 +131,43 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
 
+    /// Resume the latest session or an explicit session ID in the interactive UI.
+    #[arg(
+        long,
+        value_name = "latest|SESSION_ID",
+        num_args = 0..=1,
+        default_missing_value = "latest"
+    )]
+    resume: Option<String>,
+
+    /// Disable private prompt and shell input history for this UI.
+    #[arg(long)]
+    no_input_history: bool,
+
+    /// Daemon Unix socket for the interactive UI.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
+    /// Initial interactive workspace root.
+    #[arg(long, value_name = "DIR")]
+    workspace_root: Option<PathBuf>,
+
+    /// Initial agentFUNCTION reference.
+    #[arg(long = "function", value_name = "REF")]
+    function_ref: Option<String>,
+
+    /// Initial installed model binding.
+    #[arg(long, value_name = "MODEL_ID")]
+    model: Option<String>,
+
+    /// Initial operation mode.
+    #[arg(long, value_enum)]
+    mode: Option<ToolAccessMode>,
+
+    /// Initial admitted skill selection.
+    #[arg(long = "skill", value_name = "SKILL_ID")]
+    skills: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -152,6 +203,12 @@ enum Commands {
         #[command(subcommand)]
         command: FunctionCommands,
     },
+    /// Acquire and manage explicit local model bindings.
+    #[command(long_about = help::MODEL)]
+    Model {
+        #[command(subcommand)]
+        command: ModelCommands,
+    },
     /// Low-level direct local inference commands.
     #[command(long_about = help::INFERENCE)]
     Inference {
@@ -178,13 +235,16 @@ enum Commands {
     },
     /// Initialize the repo-local agentLIBRE workspace.
     #[command(long_about = help::INIT)]
-    Init(RepoInitArgs),
+    Init(SetupInitArgs),
     /// Run one prompt and print the final answer.
     #[command(long_about = help::RUN)]
     Run(RunArgs),
-    /// Start an interactive chat session.
-    #[command(long_about = help::CHAT)]
-    Chat(ChatArgs),
+    /// Inspect and control durable local process executions.
+    #[command(long_about = help::PROCESS)]
+    Process {
+        #[command(subcommand)]
+        command: ProcessCommands,
+    },
     /// Run the local agent runtime daemon in the foreground.
     #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
@@ -264,13 +324,38 @@ enum FunctionCommands {
 }
 
 #[derive(Debug, Subcommand)]
+enum ModelCommands {
+    /// Download a GGUF from Hugging Face and bind it explicitly.
+    #[command(long_about = help::MODEL_PULL)]
+    Pull(ModelPullArgs),
+    /// Register an existing local GGUF without copying it.
+    #[command(long_about = help::MODEL_IMPORT)]
+    Import(ModelImportArgs),
+    /// List model bindings and agentLIBRE install records.
+    #[command(long_about = help::MODEL_LIST)]
+    List(ModelListArgs),
+    /// Inspect one model binding and install record.
+    #[command(long_about = help::MODEL_STATUS)]
+    Status(ModelStatusArgs),
+    /// Validate one model's file, size, digest, and GGUF header.
+    #[command(long_about = help::MODEL_VERIFY)]
+    Verify(ModelStatusArgs),
+    /// Remove one explicit binding without deleting model data.
+    #[command(long_about = help::MODEL_UNBIND)]
+    Unbind(ModelMutationArgs),
+    /// Tombstone an unbound agentLIBRE install record.
+    #[command(long_about = help::MODEL_REMOVE)]
+    Remove(ModelMutationArgs),
+    /// Delete only removed, agentLIBRE-provenanced cache entries.
+    #[command(long_about = help::MODEL_PRUNE)]
+    Prune(ModelPruneArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum InferenceCommands {
     /// Run one direct inference prompt and print the final answer.
     #[command(long_about = help::INFERENCE_RUN)]
     Run(InferenceRunArgs),
-    /// Start a direct inference chat session.
-    #[command(long_about = help::INFERENCE_CHAT)]
-    Chat(InferenceChatArgs),
     /// Run the direct inference daemon in the foreground.
     #[command(long_about = help::INFERENCE_SERVE)]
     Serve(InferenceServeArgs),
@@ -451,6 +536,28 @@ enum DaemonCommands {
     Status(StatusArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum ProcessCommands {
+    /// List live or retained process executions.
+    #[command(long_about = help::PROCESS_LIST)]
+    List(ProcessListArgs),
+    /// Show one process execution.
+    #[command(long_about = help::PROCESS_STATUS)]
+    Status(ProcessStatusArgs),
+    /// Replay retained process output.
+    #[command(long_about = help::PROCESS_READ)]
+    Read(ProcessReadArgs),
+    /// Attach the local terminal to a live execution.
+    #[command(long_about = help::PROCESS_ATTACH)]
+    Attach(ProcessAttachArgs),
+    /// Terminate a live execution.
+    #[command(long_about = help::PROCESS_KILL)]
+    Kill(ProcessKillArgs),
+    /// Diagnose the native process sandbox backend.
+    #[command(long_about = help::PROCESS_DOCTOR)]
+    Doctor(ProcessDoctorArgs),
+}
+
 #[derive(Debug, Args)]
 struct RepoInitArgs {
     /// Repo workflow profile to initialize.
@@ -488,6 +595,151 @@ struct RepoInitArgs {
     /// Repair or replace agentLIBRE-managed files.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Args)]
+struct SetupInitArgs {
+    /// Supported model package to install; E4B is the conservative default.
+    #[arg(long, value_name = "PACKAGE")]
+    model: Option<String>,
+
+    /// Confirm the complete displayed setup plan.
+    #[arg(long)]
+    yes: bool,
+
+    /// Disable all prompts and fail when an answer is missing.
+    #[arg(long)]
+    non_interactive: bool,
+
+    /// Inspect and print the setup plan without writing or downloading.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Use complete Hugging Face cache entries only.
+    #[arg(long)]
+    offline: bool,
+
+    /// Print one machine-readable final report.
+    #[arg(long)]
+    json: bool,
+
+    /// Attempt best-effort setup below the recommended 8 GB memory floor.
+    #[arg(long)]
+    allow_low_memory: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelPullArgs {
+    /// Canonical huggingface.co repository or GGUF file URL.
+    #[arg(value_name = "HF_URL")]
+    source: String,
+
+    /// Logical model id to write in models.toml.
+    #[arg(long, value_name = "MODEL_ID")]
+    id: Option<String>,
+
+    /// Explicit Hugging Face projector GGUF URL.
+    #[arg(long, value_name = "HF_URL")]
+    mmproj: Option<String>,
+
+    /// Replace a conflicting logical binding without deleting either artifact.
+    #[arg(long)]
+    replace: bool,
+
+    /// Confirm the displayed multi-gigabyte download plan.
+    #[arg(long)]
+    yes: bool,
+
+    /// Disable prompts and require an exact file URL.
+    #[arg(long)]
+    non_interactive: bool,
+
+    /// Resolve metadata and print the plan without downloading or writing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Use complete Hugging Face cache entries only.
+    #[arg(long)]
+    offline: bool,
+
+    /// Print one machine-readable final report.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelImportArgs {
+    /// Existing local GGUF file.
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+
+    /// Logical model id to write in models.toml.
+    #[arg(long, value_name = "MODEL_ID")]
+    id: Option<String>,
+
+    /// Explicit local projector GGUF file.
+    #[arg(long, value_name = "PATH")]
+    mmproj: Option<PathBuf>,
+
+    /// Replace a conflicting logical binding without deleting either artifact.
+    #[arg(long)]
+    replace: bool,
+
+    /// Print one machine-readable final report.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelListArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelStatusArgs {
+    /// Logical model id.
+    #[arg(value_name = "MODEL_ID")]
+    model_id: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelMutationArgs {
+    /// Logical model id.
+    #[arg(value_name = "MODEL_ID")]
+    model_id: String,
+
+    /// Confirm the exact displayed mutation plan.
+    #[arg(long)]
+    yes: bool,
+
+    /// Print the exact mutation plan without writing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print one machine-readable report.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModelPruneArgs {
+    /// Confirm the exact displayed prune plan.
+    #[arg(long)]
+    yes: bool,
+
+    /// Print the exact prune plan without deleting.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print one machine-readable report.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1352,31 +1604,17 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args)]
-struct ChatArgs {
-    #[command(flatten)]
-    common: CommonRunArgs,
-
-    /// Resume or write a specific chat session id.
-    #[arg(long, value_name = "ID")]
-    session_id: Option<SessionId>,
-
-    /// Start a new chat session even when a session id is configured.
-    #[arg(long)]
-    new_session: bool,
-
-    /// Disable persisted chat history for this process.
-    #[arg(long)]
-    no_history: bool,
-}
-
-#[derive(Debug, Args)]
 struct ServeArgs {
     #[command(flatten)]
     common: CommonRunArgs,
 
     /// Unix socket path for the daemon.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "systemd_activation")]
     socket: Option<PathBuf>,
+
+    /// Adopt the single Unix listener passed by systemd on file descriptor 3.
+    #[arg(long, conflicts_with = "socket")]
+    systemd_activation: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1425,24 +1663,6 @@ struct InferenceRunArgs {
 }
 
 #[derive(Debug, Args)]
-struct InferenceChatArgs {
-    #[command(flatten)]
-    common: CommonInferenceArgs,
-
-    /// Resume or write a specific chat session id.
-    #[arg(long, value_name = "ID")]
-    session_id: Option<SessionId>,
-
-    /// Start a new chat session even when a session id is configured.
-    #[arg(long)]
-    new_session: bool,
-
-    /// Disable persisted chat history for this process.
-    #[arg(long)]
-    no_history: bool,
-}
-
-#[derive(Debug, Args)]
 struct InferenceServeArgs {
     #[command(flatten)]
     common: CommonInferenceArgs,
@@ -1450,6 +1670,100 @@ struct InferenceServeArgs {
     /// Unix socket path for the daemon.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ProcessListArgs {
+    /// Limit results to one session owner.
+    #[arg(long, value_name = "SESSION_ID")]
+    session: Option<String>,
+
+    /// Limit results to one root run.
+    #[arg(long = "run", value_name = "RUN_ID")]
+    root_run: Option<String>,
+
+    /// Include retained terminal executions.
+    #[arg(long = "all")]
+    include_finished: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProcessStatusArgs {
+    /// Durable execution identity.
+    #[arg(value_name = "EXECUTION_ID")]
+    execution_id: String,
+
+    /// Include the bounded private display command.
+    #[arg(long)]
+    private_command: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProcessReadArgs {
+    /// Durable execution identity.
+    #[arg(value_name = "EXECUTION_ID")]
+    execution_id: String,
+
+    /// Replay output strictly after this sequence.
+    #[arg(long, default_value_t = 0)]
+    after: u64,
+
+    /// Maximum decoded bytes to return.
+    #[arg(long, default_value_t = 65_536)]
+    max_bytes: usize,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProcessAttachArgs {
+    /// Durable execution identity.
+    #[arg(value_name = "EXECUTION_ID")]
+    execution_id: String,
+
+    /// Replay output strictly after this sequence.
+    #[arg(long, default_value_t = 0)]
+    after: u64,
+
+    /// Do not acquire the execution's writable input lease.
+    #[arg(long)]
+    read_only: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProcessKillArgs {
+    /// Durable execution identity.
+    #[arg(value_name = "EXECUTION_ID")]
+    execution_id: String,
+
+    /// Send immediate termination instead of graceful termination.
+    #[arg(long)]
+    immediate: bool,
+
+    /// Confirm termination without an interactive prompt.
+    #[arg(long)]
+    yes: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProcessDoctorArgs {
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1486,6 +1800,9 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInv
 
 impl Cli {
     fn into_invocation(self, display_name: &'static str) -> Result<CliInvocation> {
+        if (self.resume.is_some() || self.no_input_history) && self.command.is_some() {
+            bail!("--resume and --no-input-history are available only with bare `agl`");
+        }
         let command = match self.command {
             Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
             Some(Commands::Config { command }) => CliCommand::Config(match command {
@@ -1501,15 +1818,16 @@ impl Cli {
             Some(Commands::Function { command }) => {
                 CliCommand::Function(function_command(command)?)
             }
+            Some(Commands::Model { command }) => CliCommand::Model(model_command(command)),
             Some(Commands::Inference { command }) => {
                 CliCommand::Inference(inference_command(command)?)
             }
             Some(Commands::Cron { command }) => CliCommand::Cron(cron_command(command)?),
             Some(Commands::Memory { command }) => CliCommand::Memory(memory_command(command)?),
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
-            Some(Commands::Init(args)) => CliCommand::Init(repo_init_options(args)?),
+            Some(Commands::Init(args)) => CliCommand::Init(setup_init_options(args)),
             Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
-            Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
+            Some(Commands::Process { command }) => CliCommand::Process(process_command(command)?),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
             Some(Commands::Status(args)) => {
                 CliCommand::Repo(RepoCommand::Status(repo_status_options(args)))
@@ -1545,6 +1863,21 @@ impl Cli {
                     socket_path: args.socket,
                 }),
             },
+            None if self.prompt.is_empty()
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal() =>
+            {
+                CliCommand::Interactive(InteractiveOptions {
+                    resume: self.resume,
+                    input_history: !self.no_input_history,
+                    socket_path: self.socket,
+                    workspace_root: self.workspace_root,
+                    function_ref: self.function_ref,
+                    model_id: self.model,
+                    operation_mode: self.mode,
+                    skills: validate_skill_ids(self.skills)?,
+                })
+            }
             None if self.prompt.is_empty() => CliCommand::Help {
                 bin_name: display_name,
             },
@@ -1555,6 +1888,67 @@ impl Cli {
             command,
             home: self.home,
         })
+    }
+}
+
+fn setup_init_options(args: SetupInitArgs) -> SetupInitOptions {
+    SetupInitOptions {
+        model: args.model,
+        yes: args.yes,
+        non_interactive: args.non_interactive,
+        dry_run: args.dry_run,
+        offline: args.offline,
+        json: args.json,
+        allow_low_memory: args.allow_low_memory,
+    }
+}
+
+fn model_command(command: ModelCommands) -> ModelCommand {
+    match command {
+        ModelCommands::Pull(args) => ModelCommand::Pull(ModelPullOptions {
+            source: args.source,
+            id: args.id,
+            mmproj: args.mmproj,
+            replace: args.replace,
+            yes: args.yes,
+            non_interactive: args.non_interactive,
+            dry_run: args.dry_run,
+            offline: args.offline,
+            json: args.json,
+        }),
+        ModelCommands::Import(args) => ModelCommand::Import(ModelImportOptions {
+            path: args.path,
+            id: args.id,
+            mmproj: args.mmproj,
+            replace: args.replace,
+            json: args.json,
+        }),
+        ModelCommands::List(args) => ModelCommand::List(ModelListOptions { json: args.json }),
+        ModelCommands::Status(args) => ModelCommand::Status(ModelStatusOptions {
+            model_id: args.model_id,
+            json: args.json,
+        }),
+        ModelCommands::Verify(args) => ModelCommand::Verify(ModelStatusOptions {
+            model_id: args.model_id,
+            json: args.json,
+        }),
+        ModelCommands::Unbind(args) => ModelCommand::Unbind(ModelMutationOptions {
+            model_id: args.model_id,
+            yes: args.yes,
+            dry_run: args.dry_run,
+            json: args.json,
+        }),
+        ModelCommands::Remove(args) => ModelCommand::Remove(ModelMutationOptions {
+            model_id: args.model_id,
+            yes: args.yes,
+            dry_run: args.dry_run,
+            json: args.json,
+        }),
+        ModelCommands::Prune(args) => ModelCommand::Prune(ModelPruneOptions {
+            yes: args.yes,
+            dry_run: args.dry_run,
+            json: args.json,
+        }),
     }
 }
 
@@ -1755,9 +2149,6 @@ fn inference_command(command: InferenceCommands) -> Result<InferenceCommand> {
     Ok(match command {
         InferenceCommands::Run(args) => {
             InferenceCommand::Run(inference_run_options_from_args(args)?)
-        }
-        InferenceCommands::Chat(args) => {
-            InferenceCommand::Chat(inference_chat_options_from_args(args)?)
         }
         InferenceCommands::Serve(args) => {
             InferenceCommand::Serve(inference_serve_options_from_args(args)?)
@@ -2073,6 +2464,63 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
     }
 }
 
+fn process_command(command: ProcessCommands) -> Result<ProcessCommand> {
+    Ok(match command {
+        ProcessCommands::List(args) => ProcessCommand::List(ProcessListOptions {
+            session_id: args
+                .session
+                .map(|value| {
+                    SessionId::parse(&value)
+                        .with_context(|| format!("invalid --session identity `{value}`"))
+                })
+                .transpose()?,
+            root_run_id: args
+                .root_run
+                .map(|value| {
+                    RunId::parse(&value)
+                        .with_context(|| format!("invalid --run identity `{value}`"))
+                })
+                .transpose()?,
+            include_finished: args.include_finished,
+            json: args.json,
+        }),
+        ProcessCommands::Status(args) => ProcessCommand::Status(ProcessStatusOptions {
+            execution_id: parse_execution_id(&args.execution_id)?,
+            private_command: args.private_command,
+            json: args.json,
+        }),
+        ProcessCommands::Read(args) => {
+            if args.max_bytes == 0 || args.max_bytes > 65_536 {
+                bail!("--max-bytes must be between 1 and 65536");
+            }
+            ProcessCommand::Read(ProcessReadOptions {
+                execution_id: parse_execution_id(&args.execution_id)?,
+                after_sequence: args.after,
+                max_bytes: args.max_bytes,
+                json: args.json,
+            })
+        }
+        ProcessCommands::Attach(args) => ProcessCommand::Attach(ProcessAttachOptions {
+            execution_id: parse_execution_id(&args.execution_id)?,
+            after_sequence: args.after,
+            read_only: args.read_only,
+        }),
+        ProcessCommands::Kill(args) => ProcessCommand::Kill(ProcessKillOptions {
+            execution_id: parse_execution_id(&args.execution_id)?,
+            immediate: args.immediate,
+            yes: args.yes,
+            json: args.json,
+        }),
+        ProcessCommands::Doctor(args) => {
+            ProcessCommand::Doctor(ProcessDoctorOptions { json: args.json })
+        }
+    })
+}
+
+fn parse_execution_id(value: &str) -> Result<ExecutionId> {
+    ExecutionId::parse(value).with_context(|| format!("invalid execution identity `{value}`"))
+}
+
 fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
     let prompt = args.prompt_option.or_else(|| {
         if args.prompt.is_empty() {
@@ -2099,22 +2547,10 @@ fn run_options_from_prompt(prompt: String) -> Result<RunOptions> {
     })
 }
 
-fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
-    if args.new_session && args.session_id.is_some() {
-        bail!("--new-session cannot be used with --session-id");
-    }
-
-    Ok(RunOptions {
-        session_id: args.session_id,
-        no_history: args.no_history,
-        new_session: args.new_session,
-        ..run_options_from_common(args.common)?
-    })
-}
-
 fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
+        systemd_activation: args.systemd_activation,
         config: args.common.config,
         function_ref: args.common.function_ref,
         artifact_root: args.common.artifact_root,
@@ -2148,22 +2584,10 @@ fn inference_run_options_from_args(args: InferenceRunArgs) -> Result<RunOptions>
     })
 }
 
-fn inference_chat_options_from_args(args: InferenceChatArgs) -> Result<RunOptions> {
-    if args.new_session && args.session_id.is_some() {
-        bail!("--new-session cannot be used with --session-id");
-    }
-
-    Ok(RunOptions {
-        session_id: args.session_id,
-        no_history: args.no_history,
-        new_session: args.new_session,
-        ..run_options_from_inference_common(args.common)?
-    })
-}
-
 fn inference_serve_options_from_args(args: InferenceServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
+        systemd_activation: false,
         config: args.common.config,
         function_ref: None,
         artifact_root: args.common.artifact_root,
@@ -2264,7 +2688,7 @@ fn top_level_prompt_command(parts: Vec<String>) -> Result<CliCommand> {
     let first = parts.first().map(String::as_str);
     if matches!(
         first,
-        Some("infer" | "generate" | "setup" | "doctor" | "model")
+        Some("chat" | "infer" | "generate" | "setup" | "doctor" | "model")
     ) {
         let name = first.expect("checked by matches");
         bail!("unknown command `{name}`. Use `agl run --prompt TEXT` for a one-shot prompt.");
@@ -2352,6 +2776,11 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: FunctionCommands,
     },
+    /// Acquire and manage explicit local model bindings.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommands,
+    },
     /// Low-level direct local inference commands.
     Inference {
         #[command(subcommand)]
@@ -2373,11 +2802,14 @@ enum PublicCompletionCommands {
         command: NotesCommands,
     },
     /// Initialize the repo-local agentLIBRE workspace.
-    Init(RepoInitArgs),
+    Init(SetupInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
-    /// Start an interactive chat session.
-    Chat(ChatArgs),
+    /// Inspect and control durable local process executions.
+    Process {
+        #[command(subcommand)]
+        command: ProcessCommands,
+    },
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),
     /// Report repo-local agentLIBRE workspace status.

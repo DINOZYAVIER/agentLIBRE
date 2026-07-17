@@ -21,6 +21,7 @@ pub struct SupervisedChat {
     session_id: SessionId,
     options: ChatOptions,
     delegation_plan: Option<RuntimeDelegationPlan>,
+    execution_context: agl_process::ExecutionContextSnapshot,
 }
 
 impl SupervisedChat {
@@ -31,6 +32,7 @@ impl SupervisedChat {
     ) -> Result<Self> {
         let service = ChatService::open(options.clone(), runtime, inference_client.clone())?;
         let session_id = service.session_id().clone();
+        let execution_context = service.execution_context().clone();
         let delegation_plan = service.delegation_plan();
         let persisted_options = ChatOptions {
             session_id: Some(session_id.clone()),
@@ -54,6 +56,7 @@ impl SupervisedChat {
             session_id,
             options: persisted_options,
             delegation_plan,
+            execution_context,
         })
     }
 
@@ -72,6 +75,12 @@ impl SupervisedChat {
         })
     }
 
+    pub fn execution_context(&self) -> Result<agl_process::ExecutionContextSnapshot> {
+        self.factory.with_session(&self.session_id, |service| {
+            Ok(service.execution_context().clone())
+        })
+    }
+
     pub fn artifact_root(&self) -> Result<PathBuf> {
         self.factory.with_session(&self.session_id, |service| {
             Ok(service.artifact_root().to_path_buf())
@@ -85,12 +94,27 @@ impl SupervisedChat {
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         let workspace_root = workspace_root.as_ref().to_path_buf();
-        self.factory.with_session(&self.session_id, |service| {
-            service.set_workspace_root(&workspace_root)
+        let execution_context = self.factory.with_session(&self.session_id, |service| {
+            service.set_workspace_root(&workspace_root)?;
+            Ok(service.execution_context().clone())
         })?;
         self.options.workspace_root = Some(workspace_root.clone());
         self.options.inference.workspace_root = Some(workspace_root);
+        self.execution_context = execution_context;
         Ok(())
+    }
+
+    pub fn set_working_directory(
+        &mut self,
+        working_directory: impl AsRef<Path>,
+        host: bool,
+    ) -> Result<agl_process::ExecutionContextSnapshot> {
+        let snapshot = self.factory.with_session(&self.session_id, |service| {
+            service.set_working_directory(working_directory, host)?;
+            Ok(service.execution_context().clone())
+        })?;
+        self.execution_context = snapshot.clone();
+        Ok(snapshot)
     }
 
     pub fn clear_context(&self) -> Result<usize> {
@@ -109,8 +133,17 @@ impl SupervisedChat {
     }
 
     pub fn run_user_turn(&self, input: &str) -> Result<ChatTurnOutput> {
+        self.run_user_turn_with_budget(input, RunBudget::default())
+    }
+
+    pub fn run_user_turn_with_budget(
+        &self,
+        input: &str,
+        budget: RunBudget,
+    ) -> Result<ChatTurnOutput> {
         let run_id = RunId::generate();
         let turn_id = TurnId::generate();
+        let execution_context = self.execution_context()?;
         self.handle.submit(RunSpec {
             run: DurableRunDraft {
                 run_id: run_id.clone(),
@@ -126,7 +159,8 @@ impl SupervisedChat {
                 })?,
                 checkpoint: None,
                 effective_policy_hash: None,
-                budget: RunBudget::default(),
+                execution_context,
+                budget,
                 not_before_ms: None,
             },
             idempotency: None,
@@ -433,6 +467,7 @@ tool_call_format = "hermes_json"
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
             history: agl_runtime::AgentLibreHistoryConfig::default(),
             workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
@@ -452,9 +487,11 @@ tool_call_format = "hermes_json"
                 artifact_root: Some(root.join("artifacts")),
                 workspace_root: Some(root.clone()),
                 max_output_tokens: 128,
-                tool_mode: ToolAccessMode::Write,
+                tool_mode: ToolAccessMode::Execute,
                 skills: Vec::new(),
                 memory: false,
+                model_bindings_path: None,
+                runtime_plan_override: None,
             },
             workspace_root: Some(root.clone()),
             session_id: None,

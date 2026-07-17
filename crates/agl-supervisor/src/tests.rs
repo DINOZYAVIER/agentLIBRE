@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -447,8 +448,28 @@ fn turn_draft() -> DurableRunDraft {
         input: json!({"text": "test"}),
         checkpoint: None,
         effective_policy_hash: None,
+        execution_context: execution_context(),
         budget: RunBudget::default(),
         not_before_ms: None,
+    }
+}
+
+fn execution_context() -> agl_process::ExecutionContextSnapshot {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    agl_process::ExecutionContextSnapshot {
+        workspace_root: workspace.clone(),
+        working_directory: workspace,
+        private_execution_roots: Vec::new(),
+        shell: agl_process::ShellProfileSnapshot {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+            environment_names: vec!["PATH".to_owned()],
+            executable_digest: "sha256:test-shell".to_owned(),
+            config_digest: "sha256:test-config".to_owned(),
+        },
+        revision: 1,
+        profile_metadata: "workspace".to_owned(),
     }
 }
 

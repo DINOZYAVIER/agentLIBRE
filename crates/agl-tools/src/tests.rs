@@ -56,7 +56,7 @@ fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
         .flat_map(|provider| provider.actions.iter())
         .collect::<Vec<_>>();
 
-    assert_eq!(actions.len(), 51);
+    assert_eq!(actions.len(), 61);
     for provider in catalog.providers() {
         provider.validate().unwrap();
         for action in &provider.actions {
@@ -237,7 +237,7 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
         (PERMISSIONS_STATUS_TOOL_ID, OperationKind::Read, &[]),
         (
             PERMISSIONS_REQUEST_TOOL_ID,
-            OperationKind::Approve,
+            OperationKind::Request,
             &[StateEffect::StorePermissionRequests],
         ),
         (
@@ -253,9 +253,47 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
             OperationKind::Approve,
             &[StateEffect::StorePermissionGrants],
         ),
+        (PROCESS_PWD_TOOL_ID, OperationKind::Read, &[]),
+        (
+            PROCESS_CD_TOOL_ID,
+            OperationKind::Write,
+            &[StateEffect::SessionWorkingDirectory],
+        ),
+        (
+            PROCESS_EXEC_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::SpawnProcess],
+        ),
+        (
+            PROCESS_START_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::SpawnProcess],
+        ),
+        (PROCESS_STATUS_TOOL_ID, OperationKind::Read, &[]),
+        (PROCESS_READ_TOOL_ID, OperationKind::Read, &[]),
+        (
+            PROCESS_WRITE_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::ControlProcess],
+        ),
+        (
+            PROCESS_RESIZE_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::ControlProcess],
+        ),
+        (
+            PROCESS_KILL_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::ControlProcess],
+        ),
+        (
+            SHELL_EXEC_TOOL_ID,
+            OperationKind::Execute,
+            &[StateEffect::SpawnProcess],
+        ),
     ];
 
-    assert_eq!(expected.len(), 51);
+    assert_eq!(expected.len(), 61);
     for (id, operation_kind, effects) in expected {
         assert_action_metadata(&catalog, id, operation_kind, effects);
     }

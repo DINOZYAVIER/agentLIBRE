@@ -149,6 +149,35 @@ fn rendered_history_matches_only_isolated_semantic_tool_calls() {
 }
 
 #[test]
+fn cached_gemma_history_restores_structured_tool_calls_from_the_transcript() {
+    let native_call = "<|tool_call>call:process.exec{args:[<|\"|>ok<|\"|>],program:<|\"|>/usr/bin/printf<|\"|>}<tool_call|>";
+    let mut cached = vec![RenderedMessage {
+        role: RenderedMessageRole::Assistant,
+        content: text(native_call),
+        name: None,
+        tool_calls: Vec::new(),
+    }];
+    let incoming = vec![RenderedMessage {
+        role: RenderedMessageRole::Assistant,
+        content: text(native_call),
+        name: Some("process.exec".to_string()),
+        tool_calls: vec![RenderedToolCall {
+            name: "process.exec".to_string(),
+            arguments: json!({
+                "args": ["ok"],
+                "program": "/usr/bin/printf",
+            }),
+        }],
+    }];
+
+    restore_cached_gemma_tool_calls(&mut cached, &incoming, 1);
+
+    assert_eq!(cached[0].name.as_deref(), Some("process.exec"));
+    assert_eq!(cached[0].tool_calls, incoming[0].tool_calls);
+    assert_eq!(cached[0].content, text(native_call));
+}
+
+#[test]
 fn stop_marker_truncates_generated_user_continuation() {
     let mut content = "hello\n\nUser:\nnext".to_string();
 

@@ -15,5 +15,5 @@ After editing a workspace skill:
 
 Runtime visibility:
   agl run reloads skills on each invocation.
-  agl chat can refresh selected skill context with /reload.
-  Start a new chat after changing --config or [prompt].skills in a profile.
+  bare agl can refresh selected skill context with /reload.
+  Start a new interactive session after changing a daemon profile.

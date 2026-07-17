@@ -6,6 +6,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib.sh"
 
 ci_need_tool cargo
+ci_need_tool ldd
 ci_need_tool readelf
 
 ci_cd_repo
@@ -34,10 +35,17 @@ linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|
 [[ "$linked_libraries" == *"libggml"* ]] || ci_fail "$agl_bin is not linked to libggml"
 printf '%s\n' "$linked_libraries"
 
+startup_libraries="$(ldd "$agl_bin")"
+[[ "$startup_libraries" != *"libvulkan"* ]] ||
+  ci_fail "$agl_bin has a hard Vulkan startup dependency; accelerator backends must load dynamically"
+printf '%s\n' "$startup_libraries"
+
 ci_section "Checking public CLI surface"
 ci_run "$agl_bin" --version
 ci_run "$agl_bin" --help
 ci_run "$agl_bin" config paths --home "$smoke_home"
+ci_run "$agl_bin" model --help
+ci_run "$agl_bin" --home "$smoke_home" model list --json
 
 expect_failure_contains() {
   local expected="$1"
@@ -53,6 +61,5 @@ expect_failure_contains() {
 
 expect_failure_contains 'unknown command `setup`' "$agl_bin" setup
 expect_failure_contains 'unknown command `doctor`' "$agl_bin" doctor
-expect_failure_contains 'unknown command `model`' "$agl_bin" model pull
 
 ci_section "Release CLI smoke passed"

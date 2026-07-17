@@ -10,6 +10,8 @@ Basics:
 - Workspace skills need .agl/skills.lock and local approval before --skill can use them.
 
 Common commands:
+  agl
+  agl --resume
   agl init --dry-run
   agl status
   agl function list

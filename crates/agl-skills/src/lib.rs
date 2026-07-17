@@ -9,8 +9,8 @@ mod audit;
 
 pub use context::{
     SkillContextBlock, SkillContextBundle, SkillContextError, SkillContextEvidence,
-    SkillContextReferenceEvidence, SkillPermissionRequestTemplateEvidence,
-    build_verified_context_bundle,
+    SkillContextReferenceEvidence, SkillPermissionRequestTemplateEvidence, SkillToolRouting,
+    SkillToolRoutingView, SkillUnavailableToolEvidence, build_verified_context_bundle,
 };
 pub use manifest::{
     MemoryPermissionScope, SkillArtifactAccess, SkillArtifactDeclaration, SkillArtifactKind,

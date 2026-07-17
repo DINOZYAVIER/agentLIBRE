@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, SessionId, StepId, TurnId};
+use agl_process::ExecutionContextSnapshot;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StoreError};
@@ -556,6 +557,7 @@ pub struct ChildRunDraft {
     pub child_spec_digest: String,
     pub model_profile_digest: String,
     pub tree_budget: DelegationTreeBudget,
+    pub execution_context: ExecutionContextSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -574,6 +576,7 @@ pub struct DurableRunDraft {
     pub input: serde_json::Value,
     pub checkpoint: Option<serde_json::Value>,
     pub effective_policy_hash: Option<String>,
+    pub execution_context: ExecutionContextSnapshot,
     pub budget: RunBudget,
     pub not_before_ms: Option<i64>,
 }
@@ -589,6 +592,7 @@ pub struct DurableRunRecord {
     pub input: serde_json::Value,
     pub checkpoint: Option<serde_json::Value>,
     pub effective_policy_hash: Option<String>,
+    pub execution_context: ExecutionContextSnapshot,
     pub budget: RunBudget,
     pub usage: RunUsage,
     pub lease_owner: Option<String>,

@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, ModelConfig, ModelDialect,
     MtpRuntimeConfig, PromptConfig, ResolvedInferenceConfig, ToolCallFormat,
-    load_local_inference_config,
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
@@ -164,29 +163,4 @@ fn local_llama_cpp_config_has_no_executable_path() {
     assert!(value["backend"].get("args").is_none());
 }
 
-#[test]
-#[ignore = "requires AGL_LOCAL_INFERENCE_CONFIG, AGL_INFERENCE_ARTIFACT_ROOT, and AGL_STORE_ROOT"]
-fn manual_llama_cpp_smoke_from_env() -> anyhow::Result<()> {
-    let config_path = std::env::var("AGL_LOCAL_INFERENCE_CONFIG")?;
-    let artifact_root = std::env::var("AGL_INFERENCE_ARTIFACT_ROOT")?;
-    let config = load_local_inference_config(config_path)?;
-    let context = ContextKey::for_conversation(&config, "manual-smoke")?;
-    let job = InferenceJob::new(
-        config,
-        inference_request(),
-        context,
-        InferenceArtifactRoot::new(artifact_root),
-        PathBuf::from(std::env::var("AGL_STORE_ROOT")?),
-        64,
-    )?;
-    let mut manager =
-        ModelManager::spawn(ModelManagerOptions::default(), LlamaCppModelRuntime::new())?;
-    let response = manager.handle().generate(job);
-    let shutdown = manager.shutdown();
-
-    let response = response?;
-    shutdown?;
-    assert!(!response.content.trim().is_empty());
-    assert_eq!(response.attempt_id, attempt_id());
-    Ok(())
-}
+mod agl139_native_smoke;

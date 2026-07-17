@@ -1,10 +1,12 @@
-Initialize a local agentLIBRE workspace.
+Set up a working local agentLIBRE model and workspace.
 
-This runs the repo workspace initializer, writes the workspace default function
-in .agl/workspace.toml, creates the local function workspace root at
-.agl/functions, and reports packaged builtin functions that are ready to
-inspect or run.
+The conservative default is Gemma 4 E4B QAT Q4 with its required vision
+projector. Before any large transfer, init inspects memory, disk, llama.cpp
+devices, the Hugging Face cache, and unfinished setup state, then shows one
+deterministic plan. Success means a bounded generation passed through the normal
+chat and model-manager path.
 
-It does not declare or fetch workspace artifacts by default. Use
-install-hooks and skill init explicitly for those operations. Start with
---dry-run to see planned local changes.
+Interrupted setup is resumed on the next invocation. Machines below the
+recommended 8 GB memory floor stop before acquisition unless
+--allow-low-memory is supplied. In automation, use --yes to accept the displayed
+plan; no prompt is attempted without a terminal.

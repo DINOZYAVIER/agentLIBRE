@@ -883,6 +883,24 @@ fn model_bindings_reject_a_blank_path() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn automatic_profiles_require_a_32k_context_floor() {
+    let mut policy = AutoRuntimePolicy {
+        max_context_tokens: MIN_AUTO_CONTEXT_TOKENS,
+        max_batch_size: 128,
+        max_ubatch_size: 64,
+        flash_attention: RuntimeSwitch::On,
+        cache_type_k: KvCacheType::Q8_0,
+        cache_type_v: KvCacheType::Q8_0,
+    };
+    policy.validate().unwrap();
+
+    policy.max_context_tokens = MIN_AUTO_CONTEXT_TOKENS - 1;
+    let error = policy.validate().unwrap_err();
+    assert_error_contains(&error, "automatic agent profiles");
+    assert_error_contains(&error, "32768");
+}
+
 fn preset_text(backend_extra: &str, runtime_extra: &str) -> String {
     format!(
         r#"
@@ -892,6 +910,7 @@ model_id = "main"
 {backend_extra}
 
 [runtime]
+mode = "fixed"
 gpu_layers = 0
 context_tokens = 4096
 threads = 2

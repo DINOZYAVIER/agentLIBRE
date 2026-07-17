@@ -18,10 +18,10 @@ cat >/dev/null
 printf '{"schema":"agentlibre.script_hook_result.v1","status":"pass","messages":[]}\n'
 "#,
     );
-    let runtime = runtime_for_script("local.pass", &script);
+    let runtime = runtime_for_script("local:pass", &script);
 
     let result = runtime.run_hook(input(
-        "local.pass",
+        "local:pass",
         HookEvent::ModelRequest,
         json!({"a": 1}),
     ));
@@ -44,14 +44,14 @@ printf '{{"schema":"agentlibre.script_hook_result.v1","status":"pass","messages"
         ),
     );
     let hook = ScriptHook::trusted_hash(
-        HookId::new("local.hash").unwrap(),
+        HookId::new("local:hash").unwrap(),
         HookEvent::ModelRequest,
         script,
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
     let runtime = ScriptHookRuntime::new(vec![hook]).unwrap();
 
-    let result = runtime.run_hook(input("local.hash", HookEvent::ModelRequest, json!({})));
+    let result = runtime.run_hook(input("local:hash", HookEvent::ModelRequest, json!({})));
 
     assert_eq!(result.status, HookStatus::Fail);
     assert_eq!(result.messages[0].code, "script_hook.hash_mismatch");
@@ -62,14 +62,14 @@ printf '{{"schema":"agentlibre.script_hook_result.v1","status":"pass","messages"
 fn unsupported_trust_blocks_execution() {
     let script = write_script("unsupported", "#!/bin/sh\nexit 0\n");
     let hook = ScriptHook::unsupported(
-        HookId::new("local.unsupported").unwrap(),
+        HookId::new("local:unsupported").unwrap(),
         HookEvent::ModelRequest,
         script,
     );
     let runtime = ScriptHookRuntime::new(vec![hook]).unwrap();
 
     let result = runtime.run_hook(input(
-        "local.unsupported",
+        "local:unsupported",
         HookEvent::ModelRequest,
         json!({}),
     ));
@@ -84,9 +84,9 @@ fn nonzero_exit_is_distinguishable() {
         "nonzero",
         "#!/bin/sh\ncat >/dev/null\necho nope >&2\nexit 7\n",
     );
-    let runtime = runtime_for_script("local.nonzero", &script);
+    let runtime = runtime_for_script("local:nonzero", &script);
 
-    let result = runtime.run_hook(input("local.nonzero", HookEvent::ModelRequest, json!({})));
+    let result = runtime.run_hook(input("local:nonzero", HookEvent::ModelRequest, json!({})));
 
     assert_eq!(result.status, HookStatus::Fail, "{result:?}");
     assert_eq!(
@@ -98,9 +98,9 @@ fn nonzero_exit_is_distinguishable() {
 #[test]
 fn malformed_output_is_distinguishable() {
     let script = write_script("malformed", "#!/bin/sh\nprintf 'not json\\n'\n");
-    let runtime = runtime_for_script("local.malformed", &script);
+    let runtime = runtime_for_script("local:malformed", &script);
 
-    let result = runtime.run_hook(input("local.malformed", HookEvent::ModelRequest, json!({})));
+    let result = runtime.run_hook(input("local:malformed", HookEvent::ModelRequest, json!({})));
 
     assert_eq!(result.status, HookStatus::Fail);
     assert_eq!(result.messages[0].code, "script_hook.malformed_output");
@@ -111,7 +111,7 @@ fn timeout_kills_child_and_returns_failure() {
     let script = write_script("timeout", "#!/bin/sh\nwhile true; do :; done\n");
     let sha256 = sha256_file(&script).unwrap();
     let hook = ScriptHook::trusted_hash(
-        HookId::new("local.timeout").unwrap(),
+        HookId::new("local:timeout").unwrap(),
         HookEvent::ModelRequest,
         script,
         sha256,
@@ -119,7 +119,7 @@ fn timeout_kills_child_and_returns_failure() {
     .with_timeout(Duration::from_millis(25));
     let runtime = ScriptHookRuntime::new(vec![hook]).unwrap();
 
-    let result = runtime.run_hook(input("local.timeout", HookEvent::ModelRequest, json!({})));
+    let result = runtime.run_hook(input("local:timeout", HookEvent::ModelRequest, json!({})));
 
     assert_eq!(result.status, HookStatus::Fail, "{result:?}");
     assert_eq!(result.messages[0].code, "script_hook.timeout", "{result:?}");
@@ -134,11 +134,11 @@ cat >/dev/null
 printf '{"schema":"agentlibre.script_hook_result.v1","status":"warn","messages":[{"code":"local.warn","message":"warned","fix":null}]}\n'
 "#,
     );
-    let runtime = runtime_for_script("local.batch", &script);
+    let runtime = runtime_for_script("local:batch", &script);
 
     let result = runtime.run_batch(HookBatchRequest {
         event: HookEvent::ModelRequest,
-        hooks: vec![HookId::new("local.batch").unwrap()],
+        hooks: vec![HookId::new("local:batch").unwrap()],
         payload: json!({"ok": true}),
     });
 

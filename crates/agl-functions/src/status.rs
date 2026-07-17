@@ -42,6 +42,15 @@ pub fn function_status(
     workspace_root: impl AsRef<Path>,
     config_dir: impl AsRef<Path>,
 ) -> FunctionStatusReport {
+    function_status_with_model_bindings(reference, workspace_root, config_dir, None)
+}
+
+pub fn function_status_with_model_bindings(
+    reference: &str,
+    workspace_root: impl AsRef<Path>,
+    config_dir: impl AsRef<Path>,
+    model_bindings: Option<&Path>,
+) -> FunctionStatusReport {
     let workspace_root = workspace_root.as_ref();
     let config_dir = config_dir.as_ref();
     let mut report = FunctionStatusReport {
@@ -115,17 +124,17 @@ pub fn function_status(
                     .map(ToString::to_string);
                 report.inference_draft_model_id = preset
                     .runtime
-                    .mtp
-                    .draft_model_id
-                    .as_ref()
+                    .fixed()
+                    .and_then(|runtime| runtime.mtp.draft_model_id.as_ref())
                     .map(ToString::to_string);
-                let bindings_path = agl_config::model_bindings_path(config_dir);
-                match agl_config::resolve_inference_preset(preset, &bindings_path) {
-                    Ok(config) => {
-                        report.inference_model_path = Some(config.backend.model);
+                let bindings_path = model_bindings
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| agl_config::model_bindings_path(config_dir));
+                match agl_config::bind_inference_preset(preset, &bindings_path) {
+                    Ok(bound) => {
+                        report.inference_model_path = Some(bound.backend.model);
                         report.inference_multimodal_projector_path =
-                            config.backend.multimodal_projector;
-                        report.inference_draft_model_path = config.runtime.mtp.draft_model;
+                            bound.backend.multimodal_projector;
                         report.inference_model_exists = Some(true);
                     }
                     Err(error) => {
@@ -188,4 +197,63 @@ pub fn function_status(
         };
     }
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use agl_config::{ModelBinding, ModelBindings, ModelId};
+
+    use super::*;
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn staged_model_bindings_are_used_for_static_status() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-function-status-staged-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let workspace = root.join("workspace");
+        let config = root.join("config");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let main = root.join("main.gguf");
+        let projector = root.join("projector.gguf");
+        std::fs::write(&main, b"model").unwrap();
+        std::fs::write(&projector, b"projector").unwrap();
+        let staged = root.join("staged-models.toml");
+        agl_config::write_model_bindings(
+            &staged,
+            &ModelBindings {
+                version: 1,
+                models: BTreeMap::from([
+                    (
+                        ModelId::new("gemma4-e4b").unwrap(),
+                        ModelBinding { path: main.clone() },
+                    ),
+                    (
+                        ModelId::new("gemma4-e4b-mmproj").unwrap(),
+                        ModelBinding {
+                            path: projector.clone(),
+                        },
+                    ),
+                ]),
+            },
+        )
+        .unwrap();
+
+        let report =
+            function_status_with_model_bindings("gemma4-e4b", &workspace, &config, Some(&staged));
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.inference_model_path.as_deref(), Some(main.as_path()));
+        assert_eq!(
+            report.inference_multimodal_projector_path.as_deref(),
+            Some(projector.as_path())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -1,6 +1,8 @@
 use super::*;
 
 const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
+const RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000002";
+const EXECUTION_ID: &str = "exec_01890f17-4a00-7000-8000-000000000003";
 
 fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
     parse_cli(args.into_iter().map(str::to_string))
@@ -28,6 +30,7 @@ fn assert_parse_error_contains(args: impl IntoIterator<Item = &'static str>, nee
 fn serve_options_default() -> ServeOptions {
     ServeOptions {
         socket_path: None,
+        systemd_activation: false,
         config: None,
         function_ref: None,
         artifact_root: None,
@@ -188,6 +191,7 @@ fn parse_serve_command_with_daemon_options() {
         ],
         CliCommand::Serve(ServeOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
+            systemd_activation: false,
             config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
@@ -197,6 +201,27 @@ fn parse_serve_command_with_daemon_options() {
             skills: vec!["tool-smoke".to_string()],
             memory: false,
         }),
+    );
+}
+
+#[test]
+fn parse_serve_systemd_activation_and_reject_socket_conflict() {
+    assert_command(
+        ["agl", "serve", "--systemd-activation"],
+        CliCommand::Serve(ServeOptions {
+            systemd_activation: true,
+            ..serve_options_default()
+        }),
+    );
+    assert_parse_error_contains(
+        [
+            "agl",
+            "serve",
+            "--systemd-activation",
+            "--socket",
+            "/tmp/agl.sock",
+        ],
+        "cannot be used with",
     );
 }
 
@@ -260,13 +285,7 @@ fn parse_inference_commands_are_raw_without_function_refs() {
             ..RunOptions::default()
         })),
     );
-    assert_command(
-        ["agl", "inference", "chat", "--no-history"],
-        CliCommand::Inference(InferenceCommand::Chat(RunOptions {
-            no_history: true,
-            ..RunOptions::default()
-        })),
-    );
+    assert_parse_error_contains(["agl", "inference", "chat"], "unrecognized subcommand");
     assert_command(
         ["agl", "inference", "serve", "--config", "local.toml"],
         CliCommand::Inference(InferenceCommand::Serve(ServeOptions {
@@ -295,17 +314,26 @@ fn parse_inference_rejects_function_ref() {
 #[test]
 fn parse_init_command() {
     assert_command(
-        ["agl", "init", "--dry-run"],
-        CliCommand::Init(RepoInitOptions {
-            profile: "repo-workflow".to_string(),
-            profile_file: None,
-            artifacts: Vec::new(),
-            skills_url: None,
-            skills_rev: None,
-            tasks_url: None,
-            tasks_rev: None,
+        [
+            "agl",
+            "init",
+            "--model",
+            "gemma4-e4b",
+            "--yes",
+            "--non-interactive",
+            "--dry-run",
+            "--offline",
+            "--json",
+            "--allow-low-memory",
+        ],
+        CliCommand::Init(SetupInitOptions {
+            model: Some("gemma4-e4b".to_string()),
+            yes: true,
+            non_interactive: true,
             dry_run: true,
-            force: false,
+            offline: true,
+            json: true,
+            allow_low_memory: true,
         }),
     );
 }
@@ -336,10 +364,11 @@ fn parse_repo_init_hidden_alias() {
 }
 
 #[test]
-fn parse_init_command_with_external_artifacts() {
+fn parse_repo_init_command_with_external_artifacts() {
     assert_command(
         [
             "agl",
+            "repo",
             "init",
             "--skills-url",
             "ssh://git@example.invalid/agentlibre/skills.git",
@@ -350,7 +379,7 @@ fn parse_init_command_with_external_artifacts() {
             "--tasks-rev",
             "main",
         ],
-        CliCommand::Init(RepoInitOptions {
+        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             artifacts: Vec::new(),
@@ -360,22 +389,23 @@ fn parse_init_command_with_external_artifacts() {
             tasks_rev: Some("main".to_string()),
             dry_run: false,
             force: false,
-        }),
+        })),
     );
 }
 
 #[test]
-fn parse_init_command_with_generic_artifacts() {
+fn parse_repo_init_command_with_generic_artifacts() {
     assert_command(
         [
             "agl",
+            "repo",
             "init",
             "--artifact",
             "tasks=ssh://git@example.invalid/agentlibre/agl-specs.git@main",
             "--artifact",
             "reviews=ssh://git@example.invalid/agentlibre/reviews.git",
         ],
-        CliCommand::Init(RepoInitOptions {
+        CliCommand::Repo(RepoCommand::Init(RepoInitOptions {
             profile: "repo-workflow".to_string(),
             profile_file: None,
             artifacts: vec![
@@ -396,7 +426,54 @@ fn parse_init_command_with_generic_artifacts() {
             tasks_rev: None,
             dry_run: false,
             force: false,
-        }),
+        })),
+    );
+}
+
+#[test]
+fn top_level_init_rejects_advanced_repo_options() {
+    assert_parse_error_contains(
+        ["agl", "init", "--profile", "repo-workflow"],
+        "unexpected argument",
+    );
+}
+
+#[test]
+fn parse_model_pull_and_lifecycle_commands() {
+    assert_command(
+        [
+            "agl",
+            "model",
+            "pull",
+            "https://huggingface.co/owner/repo/resolve/main/model.gguf",
+            "--id",
+            "model",
+            "--yes",
+            "--non-interactive",
+            "--dry-run",
+            "--offline",
+            "--json",
+        ],
+        CliCommand::Model(ModelCommand::Pull(ModelPullOptions {
+            source: "https://huggingface.co/owner/repo/resolve/main/model.gguf".to_string(),
+            id: Some("model".to_string()),
+            mmproj: None,
+            replace: false,
+            yes: true,
+            non_interactive: true,
+            dry_run: true,
+            offline: true,
+            json: true,
+        })),
+    );
+    assert_command(
+        ["agl", "model", "unbind", "model", "--yes", "--dry-run"],
+        CliCommand::Model(ModelCommand::Unbind(ModelMutationOptions {
+            model_id: "model".to_string(),
+            yes: true,
+            dry_run: true,
+            json: false,
+        })),
     );
 }
 
@@ -961,6 +1038,103 @@ fn parse_daemon_status_command_with_socket_override() {
 }
 
 #[test]
+fn parse_process_operator_commands() {
+    assert_command(
+        [
+            "agl",
+            "process",
+            "list",
+            "--session",
+            SESSION_ID,
+            "--run",
+            RUN_ID,
+            "--all",
+            "--json",
+        ],
+        CliCommand::Process(ProcessCommand::List(ProcessListOptions {
+            session_id: Some(SessionId::parse(SESSION_ID).unwrap()),
+            root_run_id: Some(RunId::parse(RUN_ID).unwrap()),
+            include_finished: true,
+            json: true,
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "process",
+            "status",
+            EXECUTION_ID,
+            "--private-command",
+            "--json",
+        ],
+        CliCommand::Process(ProcessCommand::Status(ProcessStatusOptions {
+            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
+            private_command: true,
+            json: true,
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "process",
+            "read",
+            EXECUTION_ID,
+            "--after",
+            "8",
+            "--max-bytes",
+            "4096",
+        ],
+        CliCommand::Process(ProcessCommand::Read(ProcessReadOptions {
+            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
+            after_sequence: 8,
+            max_bytes: 4096,
+            json: false,
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "process",
+            "attach",
+            EXECUTION_ID,
+            "--after",
+            "9",
+            "--read-only",
+        ],
+        CliCommand::Process(ProcessCommand::Attach(ProcessAttachOptions {
+            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
+            after_sequence: 9,
+            read_only: true,
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "process",
+            "kill",
+            EXECUTION_ID,
+            "--immediate",
+            "--yes",
+            "--json",
+        ],
+        CliCommand::Process(ProcessCommand::Kill(ProcessKillOptions {
+            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
+            immediate: true,
+            yes: true,
+            json: true,
+        })),
+    );
+    assert_command(
+        ["agl", "process", "doctor", "--json"],
+        CliCommand::Process(ProcessCommand::Doctor(ProcessDoctorOptions { json: true })),
+    );
+    assert_parse_error_contains(
+        ["agl", "process", "read", EXECUTION_ID, "--max-bytes", "0"],
+        "--max-bytes must be between 1 and 65536",
+    );
+}
+
+#[test]
 fn parse_bare_prompt_as_run() {
     assert_command(
         ["agl", "hello"],
@@ -973,7 +1147,7 @@ fn parse_bare_prompt_as_run() {
 
 #[test]
 fn removed_command_names_do_not_fall_through_to_bare_prompt() {
-    for command in ["infer", "generate", "setup", "doctor", "model"] {
+    for command in ["chat", "infer", "generate", "setup", "doctor"] {
         let message = parse_error(["agl", command, "--help"]);
         assert!(message.contains("unknown command"), "{message}");
         assert!(message.contains("Use `agl run --prompt TEXT`"), "{message}");
@@ -1001,45 +1175,8 @@ fn parse_home_override() {
 }
 
 #[test]
-fn parse_chat_session_options() {
-    assert_command(
-        [
-            "agl",
-            "chat",
-            "--session-id",
-            SESSION_ID,
-            "--no-history",
-            "--workspace-root",
-            "/tmp/workspace",
-        ],
-        CliCommand::Chat(RunOptions {
-            session_id: Some(SessionId::parse(SESSION_ID).unwrap()),
-            no_history: true,
-            workspace_root: Some(PathBuf::from("/tmp/workspace")),
-            ..RunOptions::default()
-        }),
-    );
-}
-
-#[test]
-fn parse_chat_rejects_non_canonical_session_id() {
-    assert_parse_error_contains(
-        ["agl", "chat", "--session-id", "session-001"],
-        "ID must start with ses_",
-    );
-}
-
-#[test]
-fn parse_chat_rejects_new_session_with_session_id() {
-    assert_parse_error_contains(
-        ["agl", "chat", "--new-session", "--session-id", SESSION_ID],
-        "--new-session cannot be used with --session-id",
-    );
-}
-
-#[test]
-fn parse_chat_rejects_prompt() {
-    assert_parse_error_contains(["agl", "chat", "--prompt", "hello"], "unexpected argument");
+fn removed_chat_command_is_rejected() {
+    assert_parse_error_contains(["agl", "chat"], "unknown command");
 }
 
 #[test]

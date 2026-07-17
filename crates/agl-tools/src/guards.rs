@@ -6,18 +6,18 @@ use crate::{ToolCatalog, ToolCatalogError};
 
 mod validators;
 
-pub const PROVIDER_ID: &str = "core-guards";
-pub const JSON_VALIDATE_HOOK_ID: &str = "json.validate";
-pub const REPO_PATH_VALIDATE_HOOK_ID: &str = "repo_path.validate";
-pub const TASK_SPEC_VALIDATE_HOOK_ID: &str = "task_spec.validate";
-pub const SECRET_SCAN_VALIDATE_HOOK_ID: &str = "secret_scan.validate";
-pub const DIFF_SCOPE_VALIDATE_HOOK_ID: &str = "diff_scope.validate";
-pub const VERIFICATION_VALIDATE_HOOK_ID: &str = "verification.validate";
-pub const COMMIT_MESSAGE_VALIDATE_HOOK_ID: &str = "commit_message.validate";
-pub const SKILL_MANIFEST_VALIDATE_HOOK_ID: &str = "skill_manifest.validate";
-pub const REVIEW_PACK_VALIDATE_HOOK_ID: &str = "review_pack.validate";
-pub const RUNTIME_IDENTITY_VALIDATE_HOOK_ID: &str = "runtime.identity.validate";
-pub const RUNTIME_IDENTITY_REQUIRE_HOOK_ID: &str = "runtime.identity.require";
+pub const PROVIDER_ID: &str = "core";
+pub const JSON_VALIDATE_HOOK_ID: &str = "core:json.validate";
+pub const REPO_PATH_VALIDATE_HOOK_ID: &str = "core:repo_path.validate";
+pub const TASK_SPEC_VALIDATE_HOOK_ID: &str = "core:task_spec.validate";
+pub const SECRET_SCAN_VALIDATE_HOOK_ID: &str = "core:secret_scan.validate";
+pub const DIFF_SCOPE_VALIDATE_HOOK_ID: &str = "core:diff_scope.validate";
+pub const VERIFICATION_VALIDATE_HOOK_ID: &str = "core:verification.validate";
+pub const COMMIT_MESSAGE_VALIDATE_HOOK_ID: &str = "core:commit_message.validate";
+pub const SKILL_MANIFEST_VALIDATE_HOOK_ID: &str = "core:skill_manifest.validate";
+pub const REVIEW_PACK_VALIDATE_HOOK_ID: &str = "core:review_pack.validate";
+pub const RUNTIME_IDENTITY_VALIDATE_HOOK_ID: &str = "core:runtime.identity.validate";
+pub const RUNTIME_IDENTITY_REQUIRE_HOOK_ID: &str = "core:runtime.identity.require";
 
 #[derive(Clone, Debug)]
 pub struct CoreGuards {

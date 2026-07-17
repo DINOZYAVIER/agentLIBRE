@@ -6,6 +6,7 @@ pub mod matrix_delivery;
 pub mod memory;
 pub mod notes;
 pub mod permissions;
+pub mod process;
 mod registry;
 pub mod repo;
 pub mod skills;
@@ -37,6 +38,12 @@ pub use permissions::{
     PERMISSIONS_GRANT_TOOL_ID, PERMISSIONS_REQUEST_TOOL_ID, PERMISSIONS_REVOKE_TOOL_ID,
     PERMISSIONS_STATUS_TOOL_ID, PermissionRuntimeStatus, PermissionTools,
 };
+pub use process::{
+    PROCESS_CD_TOOL_ID, PROCESS_EXEC_TOOL_ID, PROCESS_KILL_TOOL_ID, PROCESS_PWD_TOOL_ID,
+    PROCESS_READ_TOOL_ID, PROCESS_RESIZE_TOOL_ID, PROCESS_START_TOOL_ID, PROCESS_STATUS_TOOL_ID,
+    PROCESS_TOOL_IDS, PROCESS_WRITE_TOOL_ID, ProcessExecutionAdmission, ProcessExecutionContext,
+    ProcessToolRuntimeConfig, ProcessTools, SHELL_EXEC_TOOL_ID,
+};
 pub use registry::{
     HandlerCoverageError, ToolCatalog, ToolCatalogError, ToolDispatchError, ToolRuntime,
     verify_handler_coverage,
@@ -67,6 +74,7 @@ pub fn builtin_tool_catalog() -> Result<ToolCatalog, ToolCatalogError> {
     memory::register(&mut catalog)?;
     notes::register(&mut catalog)?;
     permissions::register(&mut catalog)?;
+    process::register(&mut catalog)?;
     repo::register(&mut catalog)?;
     skills::register(&mut catalog)?;
     store::register(&mut catalog)?;

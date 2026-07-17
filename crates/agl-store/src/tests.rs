@@ -1,11 +1,21 @@
 use super::*;
 use crate::artifacts::ArtifactWriteFailpoint;
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, ImageDimensions,
     MediaType,
 };
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
+use agl_ids::{EventId, ExecutionId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_process::{
+    EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit, ExecutionIo,
+    ExecutionKind, ExecutionLimits, ExecutionOutputChunk, ExecutionOwner, ExecutionProfile,
+    ExecutionRepository, ExecutionRequest, ExecutionState, ExecutionStatus,
+    ExecutionTerminalUpdate, FileOutputSpool, InputLease, OutputSpool, ProcessBytes,
+    ProcessErrorCode, ProcessSupervisor, ProcessSupervisorOptions,
+};
 use serde_json::json;
 
 #[test]
@@ -238,11 +248,13 @@ fn durable_run_repository_enforces_fifo_fencing_and_event_uniqueness() {
 
 #[test]
 fn child_admission_is_atomic_clamped_and_replay_safe() {
-    let (_root, store) = open_temp_store("child-admission");
+    let (temp_root, store) = open_temp_store("child-admission");
     let (parent, _parent_lease, step, _step_lease) = running_delegation_step(&store, 1);
     let mut draft = child_run_draft(&parent.run_id, &step.step_id);
     draft.budget.model_output_tokens = 100;
     draft.tree_budget.max_total_output_tokens = 40;
+    draft.execution_context.working_directory = temp_root.canonicalize().unwrap();
+    draft.execution_context.revision += 1;
 
     let admitted = store.admit_child_run_at(&draft, 5).unwrap();
     assert!(!admitted.replayed);
@@ -253,6 +265,7 @@ fn child_admission_is_atomic_clamped_and_replay_safe() {
     assert_eq!(admitted.run.root_run_id, parent.run_id);
     assert_eq!(admitted.run.depth, 1);
     assert_eq!(admitted.run.budget.model_output_tokens, 40);
+    assert_eq!(admitted.run.execution_context, draft.execution_context);
 
     let root = store.run(&parent.run_id).unwrap().unwrap();
     assert_eq!(root.delegation_budget, Some(draft.tree_budget.clone()));
@@ -785,6 +798,479 @@ fn recovery_requeues_safe_work_and_fails_uncertain_at_most_once_work() {
 }
 
 #[test]
+fn process_owner_recovery_fences_the_linked_at_most_once_step() {
+    let (root, store) = open_temp_store("process-owner-recovery");
+    let run = run_draft(None);
+    store.admit_run_at(&run, 1).unwrap();
+    let run_lease = store
+        .claim_next_run("old-run-owner", 2, 10_000)
+        .unwrap()
+        .unwrap();
+    let step = RunStepDraft {
+        step_id: StepId::generate(),
+        turn_id: None,
+        effect_sequence: 1,
+        effect_kind: "capability_dispatch".to_owned(),
+        delivery_class: EffectDeliveryClass::AtMostOnce,
+        request: json!({"capability_id": "process.start"}),
+    };
+    store
+        .publish_run_step(&run_lease, &json!({}), &step, &[], 3)
+        .unwrap();
+    store
+        .claim_run_step(&run_lease, &step.step_id, 10_004, 4)
+        .unwrap();
+    drop(store);
+
+    let (status, request) =
+        execution_fixture(&run.run_id, &step.step_id, Vec::new(), BTreeMap::new());
+    let repository = AglExecutionRepository::open_at(&root, Duration::from_secs(60)).unwrap();
+    repository
+        .admit(&status, &request, "old-process-owner")
+        .unwrap();
+    repository
+        .mark_running(&status.execution_id, "old-process-owner", 5)
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .recover_prior_owners("new-process-owner", 6)
+            .unwrap(),
+        vec![status.execution_id.clone()]
+    );
+    assert!(
+        repository
+            .recover_prior_owners("newer-process-owner", 7)
+            .unwrap()
+            .is_empty()
+    );
+    let recovered = repository.status(&status.execution_id).unwrap();
+    assert_eq!(recovered.state, ExecutionState::OutcomeUnknown);
+    assert_eq!(recovered.error_code.as_deref(), Some("owner_lost"));
+
+    let store = AglStore::open_current_at(&root).unwrap();
+    let linked_step = store.run_steps(&run.run_id).unwrap().remove(0);
+    assert_eq!(linked_step.state, RunStepState::OutcomeUnknown);
+    assert_eq!(
+        linked_step.error_code.as_deref(),
+        Some("effect_outcome_unknown")
+    );
+    let linked_run = store.run(&run.run_id).unwrap().unwrap();
+    assert_eq!(linked_run.state, RunState::Failed);
+    assert_eq!(
+        linked_run.error_code.as_deref(),
+        Some("effect_outcome_unknown")
+    );
+}
+
+#[test]
+fn execution_transitions_are_sequence_owner_and_input_lease_fenced() {
+    let root = temp_root("execution-transition-fencing");
+    let repository = AglExecutionRepository::open_at(&root, Duration::from_secs(60)).unwrap();
+    let run_id = RunId::generate();
+    let step_id = StepId::generate();
+    let (status, request) = execution_fixture(&run_id, &step_id, Vec::new(), BTreeMap::new());
+    repository.admit(&status, &request, "owner").unwrap();
+
+    assert_eq!(
+        repository
+            .mark_running(&status.execution_id, "stale-owner", 2)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    assert_eq!(
+        repository.status(&status.execution_id).unwrap().state,
+        ExecutionState::Starting
+    );
+    repository
+        .mark_running(&status.execution_id, "owner", 3)
+        .unwrap();
+
+    let chunk = ExecutionOutputChunk {
+        sequence: 2,
+        channel: ExecutionChannel::Stdout,
+        bytes: ProcessBytes::from_bytes(b"payload"),
+    };
+    assert_eq!(
+        repository
+            .append_indexed_chunk(&status.execution_id, "owner", &chunk, 9, 7, 4)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    let unchanged = repository.status(&status.execution_id).unwrap();
+    assert_eq!(unchanged.last_sequence, 0);
+    assert_eq!(unchanged.retained_bytes, 0);
+    assert!(
+        repository
+            .committed_output_frames(&status.execution_id)
+            .unwrap()
+            .is_empty()
+    );
+
+    let chunk = ExecutionOutputChunk {
+        sequence: 1,
+        ..chunk
+    };
+    repository
+        .append_indexed_chunk(&status.execution_id, "owner", &chunk, 9, 7, 5)
+        .unwrap();
+    assert_eq!(
+        repository
+            .append_indexed_chunk(&status.execution_id, "owner", &chunk, 9, 7, 6)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    let after_duplicate = repository.status(&status.execution_id).unwrap();
+    assert_eq!(after_duplicate.last_sequence, 1);
+    assert_eq!(after_duplicate.retained_bytes, 7);
+    assert_eq!(
+        repository
+            .committed_output_frames(&status.execution_id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let first_lease = InputLease {
+        attachment_id: RequestId::generate(),
+        writable: true,
+    };
+    let second_lease = InputLease {
+        attachment_id: RequestId::generate(),
+        writable: true,
+    };
+    repository
+        .bind_input_lease(&status.execution_id, "owner", &first_lease, 7)
+        .unwrap();
+    repository
+        .renew_input_lease(&status.execution_id, "owner", &first_lease, 8)
+        .unwrap();
+    assert_eq!(
+        repository
+            .renew_input_lease(&status.execution_id, "owner", &second_lease, 9)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::InputLeaseExpired
+    );
+    assert_eq!(
+        repository
+            .bind_input_lease(&status.execution_id, "owner", &second_lease, 10)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::InputLeaseBusy
+    );
+    assert_eq!(
+        repository
+            .accept_input(&status.execution_id, "owner", &second_lease, 1, false, 11)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    repository
+        .accept_input(&status.execution_id, "owner", &first_lease, 7, false, 12)
+        .unwrap();
+    assert_eq!(
+        repository
+            .release_input_lease(&status.execution_id, "owner", &second_lease, 13)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    repository
+        .release_input_lease(&status.execution_id, "owner", &first_lease, 14)
+        .unwrap();
+
+    let terminal = ExecutionTerminalUpdate {
+        state: ExecutionState::Exited,
+        exit: Some(ExecutionExit::Code { code: 0 }),
+        error_code: None,
+        finished_at_unix_ms: 14,
+        output_truncated: false,
+        discarded_output_bytes: 0,
+    };
+    assert_eq!(
+        repository
+            .mark_terminal(&status.execution_id, "owner", 3, &terminal)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+    assert_eq!(
+        repository.status(&status.execution_id).unwrap().state,
+        ExecutionState::Running
+    );
+    repository
+        .mark_terminal(&status.execution_id, "owner", 2, &terminal)
+        .unwrap();
+    assert_eq!(
+        repository
+            .append_lifecycle(&status.execution_id, "owner", 3, "late", 15)
+            .unwrap_err()
+            .code(),
+        ProcessErrorCode::StateConflict
+    );
+
+    let store = AglStore::open_current_at(&root).unwrap();
+    let sequences = store
+        .connection()
+        .prepare("SELECT sequence FROM execution_events WHERE execution_id = ?1 ORDER BY sequence")
+        .unwrap()
+        .query_map([status.execution_id.as_str()], |row| row.get::<_, u64>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(sequences, [1, 2]);
+}
+
+#[test]
+fn supervisor_recovery_validates_full_committed_spool_and_truncates_only_orphans() {
+    let root = temp_root("execution-integrated-recovery");
+    let store_root = root.join("store");
+    let spool_root = root.join("spool");
+    let state_root = root.join("state");
+    let repository = std::sync::Arc::new(
+        AglExecutionRepository::open_at(&store_root, Duration::from_secs(60)).unwrap(),
+    );
+    let spool = std::sync::Arc::new(FileOutputSpool::new(&spool_root).unwrap());
+    let run_id = RunId::generate();
+    let step_id = StepId::generate();
+    let (status, request) = execution_fixture(&run_id, &step_id, Vec::new(), BTreeMap::new());
+    repository.admit(&status, &request, "dead-owner").unwrap();
+    spool.prepare(&status.execution_id).unwrap();
+    repository
+        .mark_running(&status.execution_id, "dead-owner", 1)
+        .unwrap();
+    let committed = ExecutionOutputChunk {
+        sequence: 1,
+        channel: ExecutionChannel::Stdout,
+        bytes: ProcessBytes::from_bytes(b"committed"),
+    };
+    let offset = spool.append(&status.execution_id, &committed).unwrap();
+    spool.sync(&status.execution_id).unwrap();
+    repository
+        .append_indexed_chunk(&status.execution_id, "dead-owner", &committed, offset, 9, 2)
+        .unwrap();
+    let orphan = ExecutionOutputChunk {
+        sequence: 2,
+        channel: ExecutionChannel::Stderr,
+        bytes: ProcessBytes::from_bytes(b"orphan"),
+    };
+    spool.append(&status.execution_id, &orphan).unwrap();
+    spool.sync(&status.execution_id).unwrap();
+
+    let supervisor = ProcessSupervisor::start(
+        process_supervisor_options(&root, &spool_root, &state_root),
+        repository.clone(),
+        spool.clone(),
+    )
+    .unwrap();
+    let recovered = repository.status(&status.execution_id).unwrap();
+    assert_eq!(recovered.state, ExecutionState::OutcomeUnknown);
+    assert_eq!(recovered.error_code.as_deref(), Some("owner_lost"));
+    assert_eq!(
+        spool
+            .read(&status.execution_id, 0, recovered.last_sequence, 64)
+            .unwrap(),
+        [committed]
+    );
+    supervisor.shutdown().unwrap();
+
+    let corrupt_root = root.join("corrupt");
+    let corrupt_store_root = corrupt_root.join("store");
+    let corrupt_spool_root = corrupt_root.join("spool");
+    let corrupt_state_root = corrupt_root.join("state");
+    let corrupt_repository = std::sync::Arc::new(
+        AglExecutionRepository::open_at(&corrupt_store_root, Duration::from_secs(60)).unwrap(),
+    );
+    let corrupt_spool = std::sync::Arc::new(FileOutputSpool::new(&corrupt_spool_root).unwrap());
+    let (corrupt_status, corrupt_request) =
+        execution_fixture(&run_id, &step_id, Vec::new(), BTreeMap::new());
+    corrupt_repository
+        .admit(&corrupt_status, &corrupt_request, "dead-owner")
+        .unwrap();
+    corrupt_spool.prepare(&corrupt_status.execution_id).unwrap();
+    corrupt_repository
+        .mark_running(&corrupt_status.execution_id, "dead-owner", 1)
+        .unwrap();
+    let chunk = ExecutionOutputChunk {
+        sequence: 1,
+        channel: ExecutionChannel::Stdout,
+        bytes: ProcessBytes::from_bytes(b"committed"),
+    };
+    let offset = corrupt_spool
+        .append(&corrupt_status.execution_id, &chunk)
+        .unwrap();
+    corrupt_spool.sync(&corrupt_status.execution_id).unwrap();
+    corrupt_repository
+        .append_indexed_chunk(
+            &corrupt_status.execution_id,
+            "dead-owner",
+            &chunk,
+            offset,
+            9,
+            2,
+        )
+        .unwrap();
+    {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let path = corrupt_spool_root
+            .join(corrupt_status.execution_id.as_str())
+            .join("stream.aglspool");
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"X").unwrap();
+        file.sync_data().unwrap();
+    }
+    let error = match ProcessSupervisor::start(
+        process_supervisor_options(&corrupt_root, &corrupt_spool_root, &corrupt_state_root),
+        corrupt_repository.clone(),
+        corrupt_spool,
+    ) {
+        Ok(_) => panic!("corrupt committed spool unexpectedly started a supervisor"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), ProcessErrorCode::StoreCorrupt);
+    assert_eq!(
+        corrupt_repository
+            .status(&corrupt_status.execution_id)
+            .unwrap()
+            .state,
+        ExecutionState::OutcomeUnknown
+    );
+}
+
+#[test]
+fn execution_private_command_and_retention_remain_bounded_and_private() {
+    let root = temp_root("execution-private-retention");
+    let repository = AglExecutionRepository::open_at(&root, Duration::from_millis(10)).unwrap();
+    let run_id = RunId::generate();
+    let step_id = StepId::generate();
+    let mut environment = BTreeMap::new();
+    environment.insert(
+        "TOKEN".to_owned(),
+        "super-secret-environment-value".to_owned(),
+    );
+    let (status, mut request) = execution_fixture(
+        &run_id,
+        &step_id,
+        vec!["a-very-long-private-command-argument".to_owned()],
+        environment,
+    );
+    request.stdin = Some(ProcessBytes::from_bytes(b"super-secret-stdin"));
+    repository.admit(&status, &request, "owner").unwrap();
+
+    let command = repository
+        .private_command(&status.execution_id, 24)
+        .unwrap();
+    assert!(command.truncated);
+    assert!(command.display.len() <= 24);
+    assert!(!command.display.contains("super-secret"));
+    let store = AglStore::open_current_at(&root).unwrap();
+    let invocation: String = store
+        .connection()
+        .query_row(
+            "SELECT invocation_json FROM executions WHERE id = ?1",
+            [status.execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(invocation.contains("TOKEN"));
+    assert!(!invocation.contains("super-secret-environment-value"));
+    assert!(!invocation.contains("super-secret-stdin"));
+    let accepted_input_bytes: u64 = store
+        .connection()
+        .query_row(
+            "SELECT accepted_input_bytes FROM executions WHERE id = ?1",
+            [status.execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(accepted_input_bytes, b"super-secret-stdin".len() as u64);
+    drop(store);
+
+    repository
+        .mark_running(&status.execution_id, "owner", 90)
+        .unwrap();
+    let chunk = ExecutionOutputChunk {
+        sequence: 1,
+        channel: ExecutionChannel::Stdout,
+        bytes: ProcessBytes::from_bytes(b"payload"),
+    };
+    repository
+        .append_indexed_chunk(&status.execution_id, "owner", &chunk, 9, 7, 95)
+        .unwrap();
+    repository
+        .mark_terminal(
+            &status.execution_id,
+            "owner",
+            2,
+            &ExecutionTerminalUpdate {
+                state: ExecutionState::Exited,
+                exit: Some(ExecutionExit::Code { code: 0 }),
+                error_code: None,
+                finished_at_unix_ms: 100,
+                output_truncated: false,
+                discarded_output_bytes: 9,
+            },
+        )
+        .unwrap();
+
+    let committed = repository
+        .committed_output_frames(&status.execution_id)
+        .unwrap();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].sequence, 1);
+    assert_eq!(committed[0].channel, ExecutionChannel::Stdout);
+    assert_eq!(committed[0].spool_offset, 9);
+    assert_eq!(committed[0].byte_length, 7);
+    assert!(committed[0].safe_digest.starts_with("sha256:"));
+    assert!(
+        repository
+            .output_retention_candidates(109, 8)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository.output_retention_candidates(110, 8).unwrap(),
+        vec![status.execution_id.clone()]
+    );
+    repository
+        .tombstone_output(&status.execution_id, 110)
+        .unwrap();
+    repository
+        .tombstone_output(&status.execution_id, 111)
+        .unwrap();
+    repository
+        .mark_output_expired(&status.execution_id, 112)
+        .unwrap();
+    assert!(
+        repository
+            .output_retention_candidates(1_000, 8)
+            .unwrap()
+            .is_empty()
+    );
+    let expired = repository.status(&status.execution_id).unwrap();
+    assert!(expired.output_expired);
+    assert_eq!(expired.discarded_output_bytes, 9);
+    assert_eq!(expired.retained_bytes, 0);
+    assert_eq!(expired.first_retained_sequence, None);
+    let store = AglStore::open_current_at(&root).unwrap();
+    let preview: Option<String> = store
+        .connection()
+        .query_row(
+            "SELECT bounded_preview_json FROM execution_events
+             WHERE execution_id = ?1 AND sequence = 1",
+            [status.execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preview, None);
+}
+
+#[test]
 fn artifacts_are_private_deduplicated_and_run_scoped() {
     let (root, store) = open_temp_store("artifacts");
     let first_run = run_draft(None);
@@ -1314,6 +1800,89 @@ fn permission_requests_grants_and_revokes_are_persisted() {
 }
 
 #[test]
+fn session_permission_expiry_is_exact_and_idempotent() {
+    let (_root, store) = open_temp_store("permission-session-expiry");
+    let session = SessionId::generate();
+    let other_session = SessionId::generate();
+    let grant = |session_id: &SessionId, duration: &str| PermissionGrantDraft {
+        request_id: None,
+        tool_id: "process.start".to_owned(),
+        max_operation_kind: "execute".to_owned(),
+        state_effects: vec![
+            "spawn_process".to_owned(),
+            "host_process_execution".to_owned(),
+        ],
+        sensitive_inputs: Vec::new(),
+        scope: json!({"session_id": session_id.as_str()}),
+        duration: duration.to_owned(),
+        granted_by_ref: "cli:operator".to_owned(),
+    };
+    let expiring = store
+        .create_permission_grant(grant(&session, "session"))
+        .unwrap();
+    let other = store
+        .create_permission_grant(grant(&other_session, "session"))
+        .unwrap();
+    let one_turn = store
+        .create_permission_grant(grant(&session, "one_turn"))
+        .unwrap();
+
+    let run = run_draft(None);
+    store.admit_run_at(&run, 1).unwrap();
+    let lease = store.claim_next_run("grant-run", 2, 100).unwrap().unwrap();
+    store
+        .admit_permission_grant(&one_turn.id, run.run_id.as_str())
+        .unwrap();
+    let live = store.live_process_permission_grant_ids().unwrap();
+    assert!(live.contains(&expiring.id));
+    assert!(live.contains(&other.id));
+    assert!(live.contains(&one_turn.id));
+
+    store
+        .finish_run(
+            &lease,
+            RunState::Succeeded,
+            None,
+            &RunUsage::default(),
+            None,
+            None,
+            None,
+            &[],
+            3,
+        )
+        .unwrap();
+    assert!(
+        !store
+            .live_process_permission_grant_ids()
+            .unwrap()
+            .contains(&one_turn.id)
+    );
+
+    assert_eq!(store.expire_session_permission_grants(&session).unwrap(), 1);
+    assert_eq!(store.expire_session_permission_grants(&session).unwrap(), 0);
+    assert_eq!(
+        store
+            .permission_grant(&expiring.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        PermissionGrantStatus::Expired
+    );
+    assert_eq!(
+        store.permission_grant(&other.id).unwrap().unwrap().status,
+        PermissionGrantStatus::Active
+    );
+    assert_eq!(
+        store
+            .permission_grant(&one_turn.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        PermissionGrantStatus::Expired
+    );
+}
+
+#[test]
 fn grant_permission_request_rolls_back_grants_when_resolution_fails() {
     let (_root, store) = open_temp_store("permission-grant-transaction");
 
@@ -1620,8 +2189,112 @@ fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
         input: json!({"prompt": "test"}),
         checkpoint: None,
         effective_policy_hash: None,
+        execution_context: execution_context(),
         budget: RunBudget::default(),
         not_before_ms: None,
+    }
+}
+
+fn execution_context() -> agl_process::ExecutionContextSnapshot {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    agl_process::ExecutionContextSnapshot {
+        workspace_root: workspace.clone(),
+        working_directory: workspace,
+        private_execution_roots: Vec::new(),
+        shell: agl_process::ShellProfileSnapshot {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+            environment_names: vec!["PATH".to_owned()],
+            executable_digest: "sha256:test-shell".to_owned(),
+            config_digest: "sha256:test-config".to_owned(),
+        },
+        revision: 1,
+        profile_metadata: "workspace".to_owned(),
+    }
+}
+
+fn execution_fixture(
+    run_id: &RunId,
+    step_id: &StepId,
+    args: Vec<String>,
+    environment: BTreeMap<String, String>,
+) -> (ExecutionStatus, ExecutionRequest) {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    let execution_id = ExecutionId::generate();
+    let owner = ExecutionOwner::Run {
+        run_id: run_id.clone(),
+        root_run_id: run_id.clone(),
+    };
+    let status = ExecutionStatus {
+        execution_id,
+        owner: owner.clone(),
+        state: ExecutionState::Starting,
+        profile: ExecutionProfile::Workspace,
+        io: ExecutionIo::Pipes,
+        cwd: workspace.clone(),
+        terminal_size: None,
+        exit: None,
+        first_retained_sequence: None,
+        last_sequence: 0,
+        retained_bytes: 0,
+        discarded_output_bytes: 0,
+        output_truncated: false,
+        output_expired: false,
+        started_at_unix_ms: None,
+        finished_at_unix_ms: None,
+        error_code: None,
+    };
+    let request = ExecutionRequest {
+        owner,
+        creating_run_id: run_id.clone(),
+        creating_step_id: step_id.clone(),
+        kind: ExecutionKind::Argv,
+        program: PathBuf::from("/bin/echo"),
+        program_digest: None,
+        args,
+        workspace_root: workspace.clone(),
+        cwd: workspace,
+        read_only_roots: Vec::new(),
+        environment: EnvironmentOverride {
+            values: environment,
+        },
+        stdin: None,
+        close_stdin_after_initial: true,
+        io: ExecutionIo::Pipes,
+        terminal_size: None,
+        profile: ExecutionProfile::Workspace,
+        authorization: ExecutionAuthorization::default(),
+        grant_lease: None,
+        limits: ExecutionLimits {
+            timeout_ms: None,
+            max_input_bytes: 65_536,
+            max_output_bytes: 65_536,
+        },
+    };
+    (status, request)
+}
+
+fn process_supervisor_options(
+    root: &std::path::Path,
+    spool_root: &std::path::Path,
+    state_root: &std::path::Path,
+) -> ProcessSupervisorOptions {
+    ProcessSupervisorOptions {
+        launcher_path: root.join("unused-launcher"),
+        data_root: spool_root.to_path_buf(),
+        state_root: state_root.to_path_buf(),
+        max_active: 2,
+        command_capacity: 8,
+        poll_interval: Duration::from_millis(1),
+        setup_timeout: Duration::from_millis(100),
+        termination_grace: Duration::from_millis(10),
+        max_input_bytes: 65_536,
+        max_result_bytes: 65_536,
+        max_spool_bytes: 1_048_576,
+        termination_output_headroom_bytes: 65_536,
+        finished_retention: Duration::from_secs(60),
+        runtime_read_only_roots: Vec::new(),
     }
 }
 
@@ -1688,6 +2361,7 @@ fn child_run_draft(parent_run_id: &RunId, step_id: &StepId) -> ChildRunDraft {
             max_total_output_tokens: 1_000,
             timeout_ms: 10_000,
         },
+        execution_context: execution_context(),
     }
 }
 

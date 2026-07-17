@@ -52,10 +52,22 @@ version = 1
 "permissions.request" = "agl-tools/permissions"
 "permissions.grant" = "agl-tools/permissions"
 "permissions.revoke" = "agl-tools/permissions"
+"process.pwd" = "agl-tools/process"
+"process.cd" = "agl-tools/process"
+"process.exec" = "agl-tools/process"
+"process.start" = "agl-tools/process"
+"process.status" = "agl-tools/process"
+"process.read" = "agl-tools/process"
+"process.write" = "agl-tools/process"
+"process.resize" = "agl-tools/process"
+"process.kill" = "agl-tools/process"
+"shell.exec" = "agl-tools/process"
 
 [skill_classifications]
+process = "process_execution"
 "repo-status" = "read_only_analysis"
 skill = "filesystem_mutating"
 
 [skill_risks]
-skill = ["fs.edit changes builtin skill assets; skill_manifest.validate must stay required."]
+process = ["Process actions can spawn, control, and terminate owned programs; workspace confinement and exact host grants must remain enforced."]
+skill = ["fs.edit changes builtin skill assets; core:skill_manifest.validate must stay required."]

@@ -110,6 +110,69 @@ fn identifiers_are_typed_strict_and_ordered() {
     assert!(CapabilityId::new("FS.read").is_err());
     assert!(ProviderId::new("two:namespace:parts").is_err());
     assert!(serde_json::from_str::<SkillId>(r#""bad id""#).is_err());
+
+    let hook = HookId::new("core:repo_path.validate").unwrap();
+    assert_eq!(hook.provider_namespace(), "core");
+    assert_eq!(hook.local_name(), "repo_path.validate");
+    assert_eq!(
+        serde_json::to_string(&hook).unwrap(),
+        r#""core:repo_path.validate""#
+    );
+    assert_eq!(
+        serde_json::from_str::<HookId>(r#""core:repo_path.validate""#).unwrap(),
+        hook
+    );
+    assert!(HookId::new("repo_path.validate").is_err());
+    assert!(HookId::new("core:one:two").is_err());
+}
+
+#[test]
+fn provider_hook_namespace_and_core_reservation_are_enforced() {
+    let mismatched = ProviderDeclaration::new(
+        provider_id("workspace"),
+        "Workspace",
+        "1",
+        ProviderSource::ThirdPartyRegistered,
+        ProviderTrust::TrustedRegistered,
+    )
+    .unwrap()
+    .with_hook(HookDeclaration {
+        id: HookId::new("other:validate").unwrap(),
+        event: HookEvent::ArtifactWrite,
+        required: true,
+    });
+    assert!(matches!(
+        mismatched.validate(),
+        Err(DeclarationError::HookProviderMismatch { .. })
+    ));
+
+    assert!(matches!(
+        ProviderDeclaration::new(
+            provider_id("core"),
+            "Core shadow",
+            "1",
+            ProviderSource::ThirdPartyRegistered,
+            ProviderTrust::TrustedRegistered,
+        ),
+        Err(DeclarationError::ReservedProviderNamespace { .. })
+    ));
+
+    let duplicate = ProviderDeclaration::builtin(provider_id("core"), "Core", "1")
+        .unwrap()
+        .with_hook(HookDeclaration {
+            id: HookId::new("core:validate").unwrap(),
+            event: HookEvent::ArtifactWrite,
+            required: true,
+        })
+        .with_hook(HookDeclaration {
+            id: HookId::new("core:validate").unwrap(),
+            event: HookEvent::ModelResponse,
+            required: false,
+        });
+    assert!(matches!(
+        duplicate.validate(),
+        Err(DeclarationError::DuplicateId { kind: "hook", .. })
+    ));
 }
 
 #[test]
@@ -218,12 +281,43 @@ fn operation_and_state_effect_invariants_are_enforced() {
             .validate()
             .is_err()
     );
+    assert!(
+        ActionDeclaration::from_schema::<EmptyArgs>(
+            capability("permissions.request"),
+            "Request an explicit permission grant",
+            OperationKind::Request,
+        )
+        .unwrap()
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        ActionDeclaration::from_schema::<EmptyArgs>(
+            capability("permissions.request"),
+            "Request an explicit permission grant",
+            OperationKind::Request,
+        )
+        .unwrap()
+        .with_state_effects([StateEffect::StorePermissionRequests])
+        .validate()
+        .is_ok()
+    );
 }
 
 #[test]
 fn mutating_delivery_requires_explicit_idempotency() {
     assert_eq!(read_action().delivery, ActionDelivery::ReplaySafe);
     assert_eq!(write_action().delivery, ActionDelivery::AtMostOnce);
+    assert_eq!(
+        ActionDeclaration::from_schema::<EmptyArgs>(
+            capability("permissions.request"),
+            "Request an explicit permission grant",
+            OperationKind::Request,
+        )
+        .unwrap()
+        .delivery,
+        ActionDelivery::AtMostOnce
+    );
     let idempotent = write_action().with_run_step_idempotency();
     assert_eq!(idempotent.delivery, ActionDelivery::IdempotentRunStep);
     assert!(idempotent.validate().is_ok());
@@ -298,7 +392,7 @@ fn absent_function_policy_inherits_and_present_empty_allow_denies_all() {
 }
 
 #[test]
-fn deny_wins_over_function_allow_skill_visibility_and_grant() {
+fn deny_wins_over_function_allow_skill_routing_and_grant() {
     let id = capability("fs.edit");
     let set = CapabilityPolicyInput::new([provider()], [], ToolAccessMode::Write)
         .with_selected_skills([SkillCapabilityPolicy::new(
@@ -313,6 +407,83 @@ fn deny_wins_over_function_allow_skill_visibility_and_grant() {
     assert_eq!(
         set.exclusion(&id).unwrap().reason,
         CapabilityExclusionReason::FunctionDenied
+    );
+}
+
+#[test]
+fn read_only_admits_permission_requests_but_not_permission_grants() {
+    let request_id = capability("permissions.request");
+    let grant_id = capability("permissions.grant");
+    let provider =
+        ProviderDeclaration::builtin(provider_id("permission-tools"), "Permissions", "1")
+            .unwrap()
+            .with_action(
+                ActionDeclaration::from_schema::<EmptyArgs>(
+                    request_id.clone(),
+                    "Create one pending permission request",
+                    OperationKind::Request,
+                )
+                .unwrap()
+                .with_state_effects([StateEffect::StorePermissionRequests]),
+            )
+            .with_action(
+                ActionDeclaration::from_schema::<EmptyArgs>(
+                    grant_id.clone(),
+                    "Approve one pending permission request",
+                    OperationKind::Approve,
+                )
+                .unwrap()
+                .with_state_effects([
+                    StateEffect::StorePermissionRequests,
+                    StateEffect::StorePermissionGrants,
+                ]),
+            );
+    let effective = CapabilityPolicyInput::new(
+        [provider],
+        [request_id.clone(), grant_id.clone()],
+        ToolAccessMode::ReadOnly,
+    )
+    .resolve()
+    .unwrap();
+
+    assert!(effective.contains(&request_id));
+    assert!(!effective.contains(&grant_id));
+    assert_eq!(
+        effective.exclusion(&grant_id).unwrap().reason,
+        CapabilityExclusionReason::ToolModeDenied
+    );
+}
+
+#[test]
+fn requestable_skill_policy_changes_the_snapshot_and_preserves_exclusions() {
+    let requestable = capability("fs.edit");
+    let skill_id = SkillId::new("request-editor").unwrap();
+    let without_requestable = CapabilityPolicyInput::new([provider()], [], ToolAccessMode::Write)
+        .with_selected_skills([SkillCapabilityPolicy::new(skill_id.clone(), [])])
+        .resolve()
+        .unwrap();
+    let with_requestable = CapabilityPolicyInput::new([provider()], [], ToolAccessMode::Write)
+        .with_selected_skills([
+            SkillCapabilityPolicy::new(skill_id, []).with_requestable([requestable.clone()])
+        ])
+        .resolve()
+        .unwrap();
+
+    assert_ne!(
+        without_requestable.policy_hash(),
+        with_requestable.policy_hash()
+    );
+    assert!(!with_requestable.contains(&requestable));
+    assert_eq!(
+        with_requestable.exclusion(&requestable).unwrap().reason,
+        CapabilityExclusionReason::NotRouted
+    );
+    assert!(
+        with_requestable
+            .exclusion(&requestable)
+            .unwrap()
+            .reason
+            .is_grant_resolvable()
     );
 }
 
@@ -411,50 +582,111 @@ fn delegation_declaration_has_strict_bounded_arguments() {
 }
 
 #[test]
-fn read_only_mode_requires_explicit_visibility_for_mutating_actions() {
-    let id = capability("permissions.request");
-    let hidden = ActionDeclaration::from_schema::<EmptyArgs>(
-        id.clone(),
-        "Request an explicit permission grant",
+fn tool_access_mode_uses_the_complete_operation_matrix() {
+    let operations = [
+        OperationKind::Read,
+        OperationKind::Request,
+        OperationKind::Write,
+        OperationKind::Execute,
         OperationKind::Approve,
-    )
-    .unwrap()
-    .with_state_effects([StateEffect::StorePermissionRequests]);
-    let hidden_provider =
-        ProviderDeclaration::builtin(provider_id("permission-tools"), "Permissions", "1")
-            .unwrap()
-            .with_action(hidden);
-    let hidden_set =
-        CapabilityPolicyInput::new([hidden_provider], [id.clone()], ToolAccessMode::ReadOnly)
-            .resolve()
-            .unwrap();
-    assert!(!hidden_set.contains(&id));
+        OperationKind::Admin,
+    ];
+    let cases = [
+        (
+            ToolAccessMode::ReadOnly,
+            [true, true, false, false, false, false],
+        ),
+        (
+            ToolAccessMode::Write,
+            [true, true, true, false, false, false],
+        ),
+        (
+            ToolAccessMode::Execute,
+            [true, true, true, true, false, false],
+        ),
+        (
+            ToolAccessMode::Approve,
+            [true, true, true, true, true, false],
+        ),
+        (ToolAccessMode::Admin, [true, true, true, true, true, true]),
+    ];
 
-    let visible = ActionDeclaration::from_schema::<EmptyArgs>(
-        id.clone(),
+    for (mode, expected) in cases {
+        for (index, operation) in operations.into_iter().enumerate() {
+            let declaration = ActionDeclaration::from_schema::<EmptyArgs>(
+                capability("matrix.operation"),
+                "Operation matrix fixture",
+                operation,
+            )
+            .unwrap();
+            assert_eq!(
+                mode.permits(&declaration),
+                expected[index],
+                "mode={} operation={}",
+                mode.as_str(),
+                operation.as_str()
+            );
+        }
+    }
+}
+
+#[test]
+fn request_operations_reject_every_non_request_store_effect() {
+    let invalid_effects = [
+        StateEffect::HostScreenCapture,
+        StateEffect::SpawnSubagent,
+        StateEffect::SessionWorkingDirectory,
+        StateEffect::SpawnProcess,
+        StateEffect::ControlProcess,
+        StateEffect::HostProcessExecution,
+        StateEffect::ShellLoginStartup,
+        StateEffect::RepoFiles,
+        StateEffect::RepoWorkspace,
+        StateEffect::RepoHooks,
+        StateEffect::StoreMemoryEntries,
+        StateEffect::StoreMemorySuggestions,
+        StateEffect::StoreNotes,
+        StateEffect::StoreNoteLinks,
+        StateEffect::StoreCron,
+        StateEffect::StoreSchema,
+        StateEffect::MatrixOutbox,
+        StateEffect::StoreIdempotency,
+        StateEffect::StorePermissionGrants,
+        StateEffect::SkillTrust,
+    ];
+    for effect in invalid_effects {
+        let declaration = ActionDeclaration::from_schema::<EmptyArgs>(
+            capability("permissions.request"),
+            "Request an explicit permission grant",
+            OperationKind::Request,
+        )
+        .unwrap()
+        .with_state_effects([effect]);
+        assert!(
+            declaration.validate().is_err(),
+            "effect={}",
+            effect.as_str()
+        );
+    }
+
+    let conditional = ActionDeclaration::from_schema::<EmptyArgs>(
+        capability("permissions.request"),
         "Request an explicit permission grant",
-        OperationKind::Approve,
+        OperationKind::Request,
     )
     .unwrap()
-    .with_state_effects([StateEffect::StorePermissionRequests])
-    .with_visibility(ActionVisibility {
-        visible_in_read_only: true,
-    });
-    let visible_provider =
-        ProviderDeclaration::builtin(provider_id("permission-tools"), "Permissions", "1")
-            .unwrap()
-            .with_action(visible);
-    for mode in [
-        ToolAccessMode::ReadOnly,
-        ToolAccessMode::Write,
-        ToolAccessMode::Execute,
-    ] {
-        let visible_set =
-            CapabilityPolicyInput::new([visible_provider.clone()], [id.clone()], mode)
-                .resolve()
-                .unwrap();
-        assert!(visible_set.contains(&id));
-    }
+    .with_conditional_state_effects([StateEffect::RepoFiles]);
+    assert!(conditional.validate().is_err());
+}
+
+#[test]
+fn removed_visibility_field_is_rejected_during_deserialization() {
+    let mut value = serde_json::to_value(read_action()).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "visibility".to_string(),
+        json!({["visible", "in", "read", "only"].join("_"): true}),
+    );
+    assert!(serde_json::from_value::<ActionDeclaration>(value).is_err());
 }
 
 #[test]

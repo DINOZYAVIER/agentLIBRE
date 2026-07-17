@@ -92,14 +92,48 @@ fn parses_gemma_json_quoted_string_with_escaped_quote_and_comma() {
 }
 
 #[test]
-fn rejects_nested_gemma_json_object_argument() {
-    let action =
-        parse_model_action(r#"<|tool_call>call:fs.read{payload:{"path":"README.MD"}}<tool_call|>"#);
+fn parses_nested_gemma_object_argument() {
+    assert_eq!(
+        parse_model_action(
+            r#"<|tool_call>call:process.exec{options:{env:{MODE:<|"|>live<|"|>},stdin:null}}<tool_call|>"#
+        ),
+        ModelAction::ToolCall(ToolCall {
+            name: "process.exec".to_string(),
+            arguments: json!({
+                "options": {
+                    "env": {"MODE": "live"},
+                    "stdin": null,
+                },
+            }),
+        })
+    );
+}
+
+#[test]
+fn parses_live_gemma_process_array_argument() {
+    assert_eq!(
+        parse_model_action(
+            r#"<|tool_call>call:process.exec{args:[<|"|>PTY_LIVE_OK<|"|>],program:<|"|>/usr/bin/printf<|"|>}<tool_call|>"#
+        ),
+        ModelAction::ToolCall(ToolCall {
+            name: "process.exec".to_string(),
+            arguments: json!({
+                "args": ["PTY_LIVE_OK"],
+                "program": "/usr/bin/printf",
+            }),
+        })
+    );
+}
+
+#[test]
+fn rejects_duplicate_gemma_object_keys() {
+    let action = parse_model_action(
+        r#"<|tool_call>call:process.exec{program:<|"|>first<|"|>,program:<|"|>second<|"|>}<tool_call|>"#,
+    );
 
     let ModelAction::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
-
     assert_eq!(
         malformed.classification,
         MalformedToolJsonKind::InvalidShape
@@ -108,13 +142,15 @@ fn rejects_nested_gemma_json_object_argument() {
 }
 
 #[test]
-fn rejects_nested_gemma_json_array_argument() {
-    let action = parse_model_action(r#"<|tool_call>call:fs.read{items:[1,2]}<tool_call|>"#);
+fn rejects_gemma_values_beyond_the_nesting_limit() {
+    let nested = format!("{}0{}", "[".repeat(33), "]".repeat(33));
+    let action = parse_model_action(&format!(
+        "<|tool_call>call:test.deep{{value:{nested}}}<tool_call|>"
+    ));
 
     let ModelAction::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
-
     assert_eq!(
         malformed.classification,
         MalformedToolJsonKind::InvalidShape

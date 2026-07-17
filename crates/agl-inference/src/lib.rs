@@ -11,7 +11,9 @@ pub use attempt_fsm::{
 pub use backend::{
     InferenceFinishReason, InferenceRequest, InferenceResponse, InferenceResponseMetadata,
 };
-pub use llama_cpp::LlamaCppModelRuntime;
+pub use llama_cpp::{
+    LlamaCppDeviceInfo, LlamaCppDeviceKind, LlamaCppModelRuntime, llama_cpp_device_inventory,
+};
 pub use model_manager::{
     ContextKey, DEFAULT_IDLE_CONTEXT_RETENTION, DEFAULT_MAX_CONTEXTS_PER_MODEL,
     DEFAULT_MAX_LOADED_MODELS, DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY, InferenceCancellation,
