@@ -1,21 +1,34 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use agl_events::{SafeRuntimeEvent, TurnFinishStatus};
 use agl_ids::{EventId, RequestId, RunId, SessionId, TurnId};
 use agl_protocol::{
-    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent, HelloRequest,
-    ProtocolError, ProtocolErrorCode, ProtocolRunState, RunCancelRequest, RunEventsEvent,
-    RunEventsRequest, RunStatusEvent, RunStatusRequest, RunSubmitRequest, RunSubscribeRequest,
-    RunTreeEvent, RunTreeRequest, SessionClearRequest, SessionFinishRequest, SessionFinishedEvent,
+    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, ExecutionAttachRequest,
+    ExecutionAttachmentFinishedEvent, ExecutionAttachmentStartedEvent,
+    ExecutionDetachAcceptedEvent, ExecutionDetachRequest, ExecutionInputAcceptedEvent,
+    ExecutionInputRequest, ExecutionKillAcceptedEvent, ExecutionKillRequest,
+    ExecutionLeaseRenewRequest, ExecutionLeaseRenewedEvent, ExecutionListEvent,
+    ExecutionListRequest, ExecutionOutputEvent, ExecutionReadEvent, ExecutionReadRequest,
+    ExecutionResizeAcceptedEvent, ExecutionResizeRequest, ExecutionStatusEvent,
+    ExecutionStatusRequest, HelloEvent, HelloRequest, ProcessBytes, ProtocolError,
+    ProtocolErrorCode, ProtocolRunState, RunCancelRequest, RunEventsEvent, RunEventsRequest,
+    RunStatusEvent, RunStatusRequest, RunSubmitRequest, RunSubscribeRequest, RunTreeEvent,
+    RunTreeRequest, SessionClearRequest, SessionFinishRequest, SessionFinishedEvent,
     SessionListEvent, SessionListRequest, SessionOpenRequest, SessionOpenedEvent,
     SessionStatusEvent, SessionStatusRequest, SessionTranscriptEvent, SessionTranscriptRequest,
     TurnTerminalStatus,
 };
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
@@ -36,6 +49,10 @@ pub enum ClientError {
     UnexpectedEvent {
         expected: &'static str,
         actual: String,
+    },
+    AttachmentDisconnected {
+        last_delivered_sequence: u64,
+        reason: String,
     },
     EmptyResponse,
 }
@@ -63,6 +80,13 @@ impl fmt::Display for ClientError {
             Self::UnexpectedEvent { expected, actual } => {
                 write!(f, "daemon returned event {actual}, expected {expected}")
             }
+            Self::AttachmentDisconnected {
+                last_delivered_sequence,
+                reason,
+            } => write!(
+                f,
+                "execution attachment disconnected after sequence {last_delivered_sequence}: {reason}"
+            ),
             Self::EmptyResponse => write!(f, "daemon closed the connection without a response"),
         }
     }
@@ -93,6 +117,10 @@ impl From<serde_json::Error> for ClientError {
 pub trait DaemonTransport {
     fn write_line(&mut self, line: &str) -> Result<(), ClientError>;
     fn read_line(&mut self) -> Result<String, ClientError>;
+
+    fn wait_readable(&self, _timeout: Duration) -> Result<bool, ClientError> {
+        Ok(true)
+    }
 }
 
 #[cfg(unix)]
@@ -112,6 +140,33 @@ impl UnixTransport {
 
 #[cfg(unix)]
 impl DaemonTransport for UnixTransport {
+    fn wait_readable(&self, timeout: Duration) -> Result<bool, ClientError> {
+        let milliseconds = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd: self.reader.get_ref().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(ClientError::Io(error));
+        }
+        if ready == 0 {
+            return Ok(false);
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(ClientError::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "daemon socket became invalid",
+            )));
+        }
+        Ok(descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+    }
+
     fn write_line(&mut self, line: &str) -> Result<(), ClientError> {
         self.writer.write_all(line.as_bytes())?;
         self.writer.write_all(b"\n")?;
@@ -338,6 +393,101 @@ where
         }
     }
 
+    pub fn execution_list(
+        &mut self,
+        request: ExecutionListRequest,
+    ) -> Result<ExecutionListEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::ExecutionList(request))? {
+            DaemonEventKind::ExecutionList(event) => Ok(event),
+            other => Err(unexpected("execution_list", &other)),
+        }
+    }
+
+    pub fn execution_status(
+        &mut self,
+        request: ExecutionStatusRequest,
+    ) -> Result<ExecutionStatusEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::ExecutionStatus(request))? {
+            DaemonEventKind::ExecutionStatus(event) => Ok(event),
+            other => Err(unexpected("execution_status", &other)),
+        }
+    }
+
+    pub fn execution_read(
+        &mut self,
+        request: ExecutionReadRequest,
+    ) -> Result<ExecutionReadEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::ExecutionRead(request))? {
+            DaemonEventKind::ExecutionRead(event) => Ok(event),
+            other => Err(unexpected("execution_read", &other)),
+        }
+    }
+
+    pub fn execution_kill(
+        &mut self,
+        request: ExecutionKillRequest,
+    ) -> Result<ExecutionKillAcceptedEvent, ClientError> {
+        match self.single_response(DaemonRequestKind::ExecutionKill(request))? {
+            DaemonEventKind::ExecutionKillAccepted(event) => Ok(event),
+            other => Err(unexpected("execution_kill_accepted", &other)),
+        }
+    }
+
+    pub fn execution_attach(
+        &mut self,
+        request: ExecutionAttachRequest,
+    ) -> Result<ExecutionAttachment<'_, T>, ClientError> {
+        let execution_id = request.execution_id.clone();
+        let requested_writable = request.writable;
+        let request_id = self.send(DaemonRequestKind::ExecutionAttach(request))?;
+        let event = self.read_correlated_event(&request_id)?;
+        let started = match event.kind {
+            DaemonEventKind::ExecutionAttachmentStarted(started)
+                if started.attachment_id == request_id
+                    && started.status.execution_id == execution_id
+                    && started.writable == requested_writable =>
+            {
+                started
+            }
+            DaemonEventKind::ExecutionAttachmentStarted(_) => {
+                return Err(ClientError::TurnIdentityMismatch(
+                    "execution attachment admission identity does not match the request"
+                        .to_string(),
+                ));
+            }
+            DaemonEventKind::Error(error) => return Err(ClientError::Protocol(error)),
+            other => return Err(unexpected("execution_attachment_started", &other)),
+        };
+        let heartbeat_interval = match (
+            requested_writable,
+            started.lease_ttl_ms,
+            started.heartbeat_interval_ms,
+        ) {
+            (true, Some(ttl), Some(heartbeat)) if heartbeat > 0 && heartbeat < ttl => {
+                Some(Duration::from_millis(heartbeat))
+            }
+            (false, None, None) => None,
+            _ => {
+                return Err(ClientError::TurnIdentityMismatch(
+                    "execution attachment lease timing does not match its access mode".to_string(),
+                ));
+            }
+        };
+        let last_sequence = started.next_sequence;
+        Ok(ExecutionAttachment {
+            client: self,
+            attachment_id: request_id,
+            execution_id,
+            started,
+            last_sequence,
+            buffered: std::collections::VecDeque::new(),
+            pending_error: None,
+            finished: false,
+            heartbeat_interval,
+            next_lease_renewal: heartbeat_interval.map(|interval| Instant::now() + interval),
+        })
+    }
+
     pub fn clear_session(
         &mut self,
         request: SessionClearRequest,
@@ -409,6 +559,17 @@ where
         &mut self,
         request_id: &RequestId,
     ) -> Result<DaemonEvent, ClientError> {
+        let event = self.read_event()?;
+        if event.request_id.as_ref() != Some(request_id) {
+            return Err(ClientError::RequestMismatch {
+                expected: request_id.clone(),
+                actual: event.request_id,
+            });
+        }
+        Ok(event)
+    }
+
+    fn read_event(&mut self) -> Result<DaemonEvent, ClientError> {
         let line = self.transport.read_line()?;
         let event: DaemonEvent = serde_json::from_str(&line)?;
         if event.schema != agl_protocol::EVENT_SCHEMA {
@@ -417,13 +578,309 @@ where
                 actual: event.schema,
             });
         }
-        if event.request_id.as_ref() != Some(request_id) {
+        Ok(event)
+    }
+}
+
+pub struct ExecutionAttachment<'a, T>
+where
+    T: DaemonTransport,
+{
+    client: &'a mut AgentLibreClient<T>,
+    attachment_id: RequestId,
+    execution_id: agl_ids::ExecutionId,
+    started: ExecutionAttachmentStartedEvent,
+    last_sequence: u64,
+    buffered: std::collections::VecDeque<ExecutionAttachmentEvent>,
+    pending_error: Option<ProtocolError>,
+    finished: bool,
+    heartbeat_interval: Option<Duration>,
+    next_lease_renewal: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionAttachmentEvent {
+    Output(ExecutionOutputEvent),
+    Finished(ExecutionAttachmentFinishedEvent),
+}
+
+impl<T> ExecutionAttachment<'_, T>
+where
+    T: DaemonTransport,
+{
+    pub fn attachment_id(&self) -> &RequestId {
+        &self.attachment_id
+    }
+
+    pub fn started(&self) -> &ExecutionAttachmentStartedEvent {
+        &self.started
+    }
+
+    pub fn input(
+        &mut self,
+        bytes: ProcessBytes,
+        eof: bool,
+    ) -> Result<ExecutionInputAcceptedEvent, ClientError> {
+        self.ensure_open()?;
+        self.renew_if_due()?;
+        let request_id =
+            self.client
+                .send(DaemonRequestKind::ExecutionInput(ExecutionInputRequest {
+                    attachment_id: self.attachment_id.clone(),
+                    bytes,
+                    eof,
+                }))?;
+        match self.read_control_event(&request_id)? {
+            DaemonEventKind::ExecutionInputAccepted(event)
+                if event.attachment_id == self.attachment_id && event.eof == eof =>
+            {
+                Ok(event)
+            }
+            DaemonEventKind::ExecutionInputAccepted(_) => Err(ClientError::TurnIdentityMismatch(
+                "execution input admission does not match the attachment".to_string(),
+            )),
+            other => Err(unexpected("execution_input_accepted", &other)),
+        }
+    }
+
+    pub fn resize(
+        &mut self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<ExecutionResizeAcceptedEvent, ClientError> {
+        self.ensure_open()?;
+        self.renew_if_due()?;
+        let request_id =
+            self.client
+                .send(DaemonRequestKind::ExecutionResize(ExecutionResizeRequest {
+                    attachment_id: self.attachment_id.clone(),
+                    columns,
+                    rows,
+                }))?;
+        match self.read_control_event(&request_id)? {
+            DaemonEventKind::ExecutionResizeAccepted(event)
+                if event.attachment_id == self.attachment_id
+                    && event.columns == columns
+                    && event.rows == rows =>
+            {
+                Ok(event)
+            }
+            DaemonEventKind::ExecutionResizeAccepted(_) => Err(ClientError::TurnIdentityMismatch(
+                "execution resize admission does not match the attachment".to_string(),
+            )),
+            other => Err(unexpected("execution_resize_accepted", &other)),
+        }
+    }
+
+    pub fn detach(&mut self) -> Result<ExecutionDetachAcceptedEvent, ClientError> {
+        self.ensure_open()?;
+        let request_id =
+            self.client
+                .send(DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
+                    attachment_id: self.attachment_id.clone(),
+                }))?;
+        match self.read_control_event(&request_id)? {
+            DaemonEventKind::ExecutionDetachAccepted(event)
+                if event.attachment_id == self.attachment_id =>
+            {
+                Ok(event)
+            }
+            DaemonEventKind::ExecutionDetachAccepted(_) => Err(ClientError::TurnIdentityMismatch(
+                "execution detach admission does not match the attachment".to_string(),
+            )),
+            other => Err(unexpected("execution_detach_accepted", &other)),
+        }
+    }
+
+    pub fn renew_lease(&mut self) -> Result<ExecutionLeaseRenewedEvent, ClientError> {
+        self.ensure_open()?;
+        let heartbeat_interval = self.heartbeat_interval.ok_or_else(|| {
+            ClientError::TurnIdentityMismatch(
+                "read-only execution attachment has no renewable input lease".to_string(),
+            )
+        })?;
+        let request_id = self.client.send(DaemonRequestKind::ExecutionLeaseRenew(
+            ExecutionLeaseRenewRequest {
+                attachment_id: self.attachment_id.clone(),
+            },
+        ))?;
+        match self.read_control_event(&request_id)? {
+            DaemonEventKind::ExecutionLeaseRenewed(event)
+                if event.attachment_id == self.attachment_id && event.lease_ttl_ms > 0 =>
+            {
+                self.next_lease_renewal = Some(Instant::now() + heartbeat_interval);
+                Ok(event)
+            }
+            DaemonEventKind::ExecutionLeaseRenewed(_) => Err(ClientError::TurnIdentityMismatch(
+                "execution lease renewal does not match the attachment".to_string(),
+            )),
+            other => Err(unexpected("execution_lease_renewed", &other)),
+        }
+    }
+
+    pub fn next_event(&mut self) -> Result<Option<ExecutionAttachmentEvent>, ClientError> {
+        self.renew_if_due()?;
+        if let Some(error) = self.pending_error.take() {
+            return Err(ClientError::Protocol(error));
+        }
+        if let Some(event) = self.buffered.pop_front() {
+            return Ok(Some(event));
+        }
+        if self.finished {
+            return Ok(None);
+        }
+        loop {
+            let event = self.read_attachment_event()?;
+            if event.request_id.as_ref() != Some(&self.attachment_id) {
+                return Err(ClientError::RequestMismatch {
+                    expected: self.attachment_id.clone(),
+                    actual: event.request_id,
+                });
+            }
+            self.ingest_stream_event(event.kind)?;
+            if let Some(error) = self.pending_error.take() {
+                return Err(ClientError::Protocol(error));
+            }
+            if let Some(event) = self.buffered.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.finished {
+                return Ok(None);
+            }
+        }
+    }
+
+    pub fn drain_until_finished(
+        &mut self,
+    ) -> Result<(Vec<ExecutionOutputEvent>, ExecutionAttachmentFinishedEvent), ClientError> {
+        let mut output = Vec::new();
+        loop {
+            match self.next_event()? {
+                Some(ExecutionAttachmentEvent::Output(event)) => output.push(event),
+                Some(ExecutionAttachmentEvent::Finished(event)) => return Ok((output, event)),
+                None => {
+                    return Err(ClientError::UnexpectedEvent {
+                        expected: "execution_attachment_finished",
+                        actual: "end_of_attachment".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn ensure_open(&self) -> Result<(), ClientError> {
+        if self.finished {
+            Err(ClientError::UnexpectedEvent {
+                expected: "open execution attachment",
+                actual: "finished execution attachment".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn renew_if_due(&mut self) -> Result<(), ClientError> {
+        if self
+            .next_lease_renewal
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.renew_lease()?;
+        }
+        Ok(())
+    }
+
+    fn read_control_event(
+        &mut self,
+        request_id: &RequestId,
+    ) -> Result<DaemonEventKind, ClientError> {
+        loop {
+            let event = self.read_attachment_event()?;
+            if event.request_id.as_ref() == Some(request_id) {
+                return match event.kind {
+                    DaemonEventKind::Error(error) => Err(ClientError::Protocol(error)),
+                    kind => Ok(kind),
+                };
+            }
+            if event.request_id.as_ref() == Some(&self.attachment_id) {
+                self.ingest_stream_event(event.kind)?;
+                continue;
+            }
             return Err(ClientError::RequestMismatch {
                 expected: request_id.clone(),
                 actual: event.request_id,
             });
         }
-        Ok(event)
+    }
+
+    fn ingest_stream_event(&mut self, kind: DaemonEventKind) -> Result<(), ClientError> {
+        match kind {
+            DaemonEventKind::ExecutionOutput(event)
+                if event.attachment_id == self.attachment_id
+                    && event.execution_id == self.execution_id
+                    && event.chunk.sequence > self.last_sequence
+                    && !self.finished =>
+            {
+                self.last_sequence = event.chunk.sequence;
+                self.buffered
+                    .push_back(ExecutionAttachmentEvent::Output(event));
+                Ok(())
+            }
+            DaemonEventKind::ExecutionAttachmentFinished(event)
+                if event.attachment_id == self.attachment_id
+                    && event.execution_id == self.execution_id
+                    && event.last_delivered_sequence >= self.last_sequence
+                    && !self.finished =>
+            {
+                self.last_sequence = event.last_delivered_sequence;
+                self.finished = true;
+                self.buffered
+                    .push_back(ExecutionAttachmentEvent::Finished(event));
+                Ok(())
+            }
+            DaemonEventKind::Error(error) if !self.finished => {
+                self.finished = true;
+                self.pending_error = Some(error);
+                Ok(())
+            }
+            other => Err(ClientError::TurnIdentityMismatch(format!(
+                "invalid execution attachment event {} for attachment {}",
+                event_name(&other),
+                self.attachment_id
+            ))),
+        }
+    }
+
+    fn read_attachment_event(&mut self) -> Result<DaemonEvent, ClientError> {
+        while let Some(deadline) = self.next_lease_renewal {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            if self.client.transport.wait_readable(timeout)? {
+                break;
+            }
+            self.renew_if_due()?;
+        }
+        self.client.read_event().map_err(|error| match error {
+            ClientError::Io(_) | ClientError::EmptyResponse => {
+                ClientError::AttachmentDisconnected {
+                    last_delivered_sequence: self.last_sequence,
+                    reason: error.to_string(),
+                }
+            }
+            error => error,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl ExecutionAttachment<'_, UnixTransport> {
+    pub fn wait_for_event(&mut self, timeout: Duration) -> Result<bool, ClientError> {
+        if !self.buffered.is_empty() || self.pending_error.is_some() || self.finished {
+            return Ok(true);
+        }
+        self.renew_if_due()?;
+        let timeout = self.next_lease_renewal.map_or(timeout, |deadline| {
+            timeout.min(deadline.saturating_duration_since(Instant::now()))
+        });
+        self.client.transport.wait_readable(timeout)
     }
 }
 
@@ -488,6 +945,17 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::RunSubscriptionStarted(_) => "run_subscription_started",
         DaemonEventKind::RunEvent(_) => "run_event",
         DaemonEventKind::RunSubscriptionFinished(_) => "run_subscription_finished",
+        DaemonEventKind::ExecutionList(_) => "execution_list",
+        DaemonEventKind::ExecutionStatus(_) => "execution_status",
+        DaemonEventKind::ExecutionRead(_) => "execution_read",
+        DaemonEventKind::ExecutionAttachmentStarted(_) => "execution_attachment_started",
+        DaemonEventKind::ExecutionLeaseRenewed(_) => "execution_lease_renewed",
+        DaemonEventKind::ExecutionOutput(_) => "execution_output",
+        DaemonEventKind::ExecutionInputAccepted(_) => "execution_input_accepted",
+        DaemonEventKind::ExecutionResizeAccepted(_) => "execution_resize_accepted",
+        DaemonEventKind::ExecutionDetachAccepted(_) => "execution_detach_accepted",
+        DaemonEventKind::ExecutionKillAccepted(_) => "execution_kill_accepted",
+        DaemonEventKind::ExecutionAttachmentFinished(_) => "execution_attachment_finished",
         DaemonEventKind::Error(_) => "error",
     }
 }
@@ -548,6 +1016,114 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct AttachmentTransport {
+        writes: Vec<String>,
+        reads: VecDeque<String>,
+        attachment_id: Option<RequestId>,
+        execution_id: Option<agl_ids::ExecutionId>,
+    }
+
+    impl AttachmentTransport {
+        fn push(&mut self, request_id: RequestId, kind: DaemonEventKind) {
+            self.reads.push_back(
+                serde_json::to_string(&DaemonEvent::new(Some(request_id), kind)).unwrap(),
+            );
+        }
+    }
+
+    impl DaemonTransport for AttachmentTransport {
+        fn write_line(&mut self, line: &str) -> Result<(), ClientError> {
+            self.writes.push(line.to_string());
+            let request: DaemonRequest = serde_json::from_str(line)?;
+            match request.kind {
+                DaemonRequestKind::ExecutionAttach(attach) => {
+                    self.attachment_id = Some(request.request_id.clone());
+                    self.execution_id = Some(attach.execution_id.clone());
+                    self.push(
+                        request.request_id.clone(),
+                        DaemonEventKind::ExecutionAttachmentStarted(
+                            agl_protocol::ExecutionAttachmentStartedEvent {
+                                attachment_id: request.request_id,
+                                status: execution_status(attach.execution_id),
+                                writable: attach.writable,
+                                next_sequence: attach.after_sequence,
+                                lease_ttl_ms: attach.writable.then_some(30_000),
+                                heartbeat_interval_ms: attach.writable.then_some(10_000),
+                            },
+                        ),
+                    );
+                }
+                DaemonRequestKind::ExecutionLeaseRenew(renew) => {
+                    self.push(
+                        request.request_id,
+                        DaemonEventKind::ExecutionLeaseRenewed(
+                            agl_protocol::ExecutionLeaseRenewedEvent {
+                                attachment_id: renew.attachment_id,
+                                lease_ttl_ms: 30_000,
+                            },
+                        ),
+                    );
+                }
+                DaemonRequestKind::ExecutionInput(input) => {
+                    let attachment_id = self.attachment_id.clone().unwrap();
+                    let execution_id = self.execution_id.clone().unwrap();
+                    self.push(
+                        attachment_id,
+                        DaemonEventKind::ExecutionOutput(agl_protocol::ExecutionOutputEvent {
+                            attachment_id: input.attachment_id.clone(),
+                            execution_id,
+                            chunk: agl_protocol::ExecutionOutputChunk {
+                                sequence: 1,
+                                channel: agl_protocol::ExecutionChannel::Terminal,
+                                bytes: agl_protocol::ProcessBytes::from_bytes(b"echo\n"),
+                            },
+                            state: agl_protocol::ExecutionState::Running,
+                        }),
+                    );
+                    self.push(
+                        request.request_id,
+                        DaemonEventKind::ExecutionInputAccepted(
+                            agl_protocol::ExecutionInputAcceptedEvent {
+                                attachment_id: input.attachment_id,
+                                eof: input.eof,
+                            },
+                        ),
+                    );
+                }
+                DaemonRequestKind::ExecutionDetach(detach) => {
+                    let attachment_id = self.attachment_id.clone().unwrap();
+                    self.push(
+                        attachment_id,
+                        DaemonEventKind::ExecutionAttachmentFinished(
+                            agl_protocol::ExecutionAttachmentFinishedEvent {
+                                attachment_id: detach.attachment_id.clone(),
+                                execution_id: self.execution_id.clone().unwrap(),
+                                state: agl_protocol::ExecutionState::Running,
+                                last_delivered_sequence: 1,
+                                reason: agl_protocol::ExecutionAttachmentFinishReason::Detached,
+                            },
+                        ),
+                    );
+                    self.push(
+                        request.request_id,
+                        DaemonEventKind::ExecutionDetachAccepted(
+                            agl_protocol::ExecutionDetachAcceptedEvent {
+                                attachment_id: detach.attachment_id,
+                            },
+                        ),
+                    );
+                }
+                other => panic!("unexpected attachment test request: {other:?}"),
+            }
+            Ok(())
+        }
+
+        fn read_line(&mut self) -> Result<String, ClientError> {
+            self.reads.pop_front().ok_or(ClientError::EmptyResponse)
+        }
+    }
+
     #[test]
     fn hello_writes_current_strict_request() {
         let transport = ScriptedTransport::with_events(vec![DaemonEvent::new(
@@ -569,6 +1145,60 @@ mod tests {
         let request: DaemonRequest = serde_json::from_str(&client.transport.writes[0]).unwrap();
         assert_eq!(request.schema, REQUEST_SCHEMA);
         assert_eq!(EVENT_SCHEMA, agl_protocol::EVENT_SCHEMA);
+    }
+
+    #[test]
+    fn attachment_multiplexes_stream_events_around_control_acknowledgements() {
+        let mut client = AgentLibreClient::new(AttachmentTransport::default());
+        {
+            let mut attachment = client
+                .execution_attach(ExecutionAttachRequest {
+                    execution_id: execution_id(),
+                    after_sequence: 0,
+                    writable: true,
+                })
+                .unwrap();
+            assert_eq!(
+                attachment.attachment_id(),
+                &attachment.started().attachment_id
+            );
+            let renewal = attachment.renew_lease().unwrap();
+            assert_eq!(renewal.attachment_id, *attachment.attachment_id());
+            assert_eq!(renewal.lease_ttl_ms, 30_000);
+
+            let input = attachment
+                .input(agl_protocol::ProcessBytes::from_bytes(b"hello\n"), false)
+                .unwrap();
+            assert_eq!(input.attachment_id, *attachment.attachment_id());
+            assert!(matches!(
+                attachment.next_event().unwrap(),
+                Some(ExecutionAttachmentEvent::Output(ref event))
+                    if event.chunk.bytes.decode(16).unwrap() == b"echo\n"
+            ));
+
+            let detached = attachment.detach().unwrap();
+            assert_eq!(detached.attachment_id, *attachment.attachment_id());
+            assert!(matches!(
+                attachment.next_event().unwrap(),
+                Some(ExecutionAttachmentEvent::Finished(ref event))
+                    if event.reason
+                        == agl_protocol::ExecutionAttachmentFinishReason::Detached
+            ));
+            assert_eq!(attachment.next_event().unwrap(), None);
+        }
+        let requests = client
+            .transport
+            .writes
+            .iter()
+            .map(|line| serde_json::from_str::<DaemonRequest>(line).unwrap().kind)
+            .collect::<Vec<_>>();
+        assert!(matches!(requests[0], DaemonRequestKind::ExecutionAttach(_)));
+        assert!(matches!(
+            requests[1],
+            DaemonRequestKind::ExecutionLeaseRenew(_)
+        ));
+        assert!(matches!(requests[2], DaemonRequestKind::ExecutionInput(_)));
+        assert!(matches!(requests[3], DaemonRequestKind::ExecutionDetach(_)));
     }
 
     #[test]
@@ -775,6 +1405,58 @@ mod tests {
             content: agl_content::Content::text("test").unwrap(),
             idempotency_key: Some("key".to_string()),
             budget: RunBudgetRequest::default(),
+        }
+    }
+
+    #[test]
+    fn attachment_eof_reports_the_last_resume_cursor() {
+        let mut client = AgentLibreClient::new(AttachmentTransport::default());
+        let mut attachment = client
+            .execution_attach(ExecutionAttachRequest {
+                execution_id: execution_id(),
+                after_sequence: 7,
+                writable: false,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            attachment.next_event().unwrap_err(),
+            ClientError::AttachmentDisconnected {
+                last_delivered_sequence: 7,
+                ..
+            }
+        ));
+    }
+
+    fn execution_id() -> agl_ids::ExecutionId {
+        agl_ids::ExecutionId::generate()
+    }
+
+    fn execution_status(execution_id: agl_ids::ExecutionId) -> agl_protocol::ExecutionStatus {
+        agl_protocol::ExecutionStatus {
+            execution_id,
+            owner: agl_protocol::ExecutionOwner::Run {
+                run_id: run_id(),
+                root_run_id: run_id(),
+            },
+            state: agl_protocol::ExecutionState::Running,
+            profile: agl_protocol::ExecutionProfile::Workspace,
+            io: agl_protocol::ExecutionIo::Pty,
+            cwd: std::path::PathBuf::from("/workspace"),
+            terminal_size: Some(agl_protocol::TerminalSize {
+                columns: 80,
+                rows: 24,
+            }),
+            exit: None,
+            first_retained_sequence: None,
+            last_sequence: 0,
+            retained_bytes: 0,
+            discarded_output_bytes: 0,
+            output_truncated: false,
+            output_expired: false,
+            started_at_unix_ms: Some(1),
+            finished_at_unix_ms: None,
+            error_code: None,
         }
     }
 

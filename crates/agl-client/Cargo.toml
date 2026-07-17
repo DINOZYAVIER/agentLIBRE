@@ -10,4 +10,5 @@ agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 agl-protocol.workspace = true
+libc.workspace = true
 serde_json.workspace = true

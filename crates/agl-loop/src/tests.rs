@@ -53,7 +53,7 @@ impl Script {
                 result: HookBatchResult {
                     event,
                     results: vec![HookResult {
-                        hook_id: hook_id("guard.test"),
+                        hook_id: hook_id("guard:test"),
                         status,
                         messages: if status == HookStatus::Repair {
                             vec![HookMessage {
@@ -353,7 +353,7 @@ fn malformed_tool_json_repair_and_stop_paths_are_pure() {
 #[test]
 fn hook_repair_reissues_model_and_hook_failure_is_typed() {
     let artifact_hook = TurnHookBatch::new(agl_capabilities::HookEvent::ArtifactWrite)
-        .with_required_hook(hook_id("guard.test"));
+        .with_required_hook(hook_id("guard:test"));
     let repaired = run_script(
         input()
             .with_hook_batch(artifact_hook.clone())

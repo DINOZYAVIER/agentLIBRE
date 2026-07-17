@@ -9,6 +9,7 @@ repository.workspace = true
 agl-content.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
+agl-process.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

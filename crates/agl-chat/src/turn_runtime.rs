@@ -1,6 +1,7 @@
-use std::collections::BTreeSet;
-use std::path::Path;
-use std::time::Instant;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use agl_capabilities::{
     ActionInvocation, CapabilityId, DispatchDenial, DispatchDenialCode, HookInput,
@@ -22,8 +23,119 @@ use anyhow::{Context, Result, ensure};
 use crate::session::{InferenceExecutionControl, InferenceSession};
 use crate::tools::{ChatToolRuntimeConfig, chat_tool_runtime};
 
+struct CapabilityCancellation(InferenceCancellation);
+
+impl agl_capabilities::CancellationSignal for CapabilityCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+struct ChatProcessExecutionContext {
+    state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    store_root: PathBuf,
+    sessions_root: PathBuf,
+    scope_session_id: Option<SessionId>,
+    persist_session_context: bool,
+}
+
+impl ChatProcessExecutionContext {
+    fn owner_for_scope(&self, scope: &ExecutionScope) -> Result<agl_process::ExecutionOwner> {
+        let store = agl_store::AglStore::open_current_read_only_at(&self.store_root)
+            .context("failed to open execution owner store")?;
+        let run = store
+            .run(scope.run_id())?
+            .with_context(|| format!("execution owner run {} does not exist", scope.run_id()))?;
+        match &self.scope_session_id {
+            Some(session_id) => {
+                ensure!(
+                    scope.session_id() == Some(session_id)
+                        && run.session_id.as_ref() == Some(session_id),
+                    "process invocation session does not match its owning chat session"
+                );
+                Ok(agl_process::ExecutionOwner::Session {
+                    session_id: session_id.clone(),
+                    root_run_id: run.root_run_id,
+                })
+            }
+            None => {
+                ensure!(
+                    scope.session_id().is_none() && run.session_id.is_none(),
+                    "run-owned process invocation unexpectedly carries session authority"
+                );
+                Ok(agl_process::ExecutionOwner::Run {
+                    run_id: scope.run_id().clone(),
+                    root_run_id: run.root_run_id,
+                })
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Result<agl_process::ExecutionContextSnapshot> {
+        self.state
+            .lock()
+            .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))
+            .map(|snapshot| snapshot.clone())
+    }
+}
+
+impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
+    fn load(&self, scope: &ExecutionScope) -> Result<agl_tools::ProcessExecutionAdmission> {
+        Ok(agl_tools::ProcessExecutionAdmission {
+            snapshot: self.snapshot()?,
+            owner: self.owner_for_scope(scope)?,
+        })
+    }
+
+    fn compare_and_set_working_directory(
+        &self,
+        scope: &ExecutionScope,
+        expected_revision: u64,
+        next: agl_process::ExecutionContextSnapshot,
+    ) -> Result<agl_tools::ProcessExecutionAdmission> {
+        let owner = self.owner_for_scope(scope)?;
+        let current = self.snapshot()?;
+        ensure!(
+            current.revision == expected_revision,
+            "execution context revision changed from expected {expected_revision} to {}",
+            current.revision
+        );
+        let persisted = if self.persist_session_context {
+            let session_id = self
+                .scope_session_id
+                .as_ref()
+                .context("session execution persistence lacks a session identity")?;
+            agl_session::ChatSessionStore::compare_and_set_execution_context_at(
+                &self.sessions_root,
+                session_id,
+                expected_revision,
+                next,
+            )?
+        } else {
+            let store = agl_store::AglStore::open_current_at(&self.store_root)
+                .context("failed to open durable run execution context")?;
+            store.compare_and_set_run_execution_context(scope.run_id(), expected_revision, &next)?
+        };
+        *self
+            .state
+            .lock()
+            .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))? =
+            persisted.clone();
+        Ok(agl_tools::ProcessExecutionAdmission {
+            snapshot: persisted,
+            owner,
+        })
+    }
+}
+
+static PROCESS_HANDLES: OnceLock<Mutex<BTreeMap<PathBuf, agl_process::ProcessHandle>>> =
+    OnceLock::new();
+
 pub struct ChatTurnRuntime {
     session: InferenceSession,
+    execution_context: agl_process::ExecutionContextSnapshot,
+    execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    process_tools: agl_tools::ProcessTools,
     active_effective_capabilities: Option<agl_capabilities::EffectiveCapabilitySet>,
     event_sink: Option<RuntimeEventWriter>,
     event_scope: Option<EventScope>,
@@ -39,12 +151,44 @@ pub struct ChatTurnRuntime {
 }
 
 impl ChatTurnRuntime {
-    pub fn new(session: InferenceSession, workspace_root: impl AsRef<Path>) -> Result<Self> {
+    pub fn new(
+        session: InferenceSession,
+        runtime: &agl_runtime::AgentLibreRuntimeConfig,
+        workspace_root: impl AsRef<Path>,
+        execution_context: agl_process::ExecutionContextSnapshot,
+        scope_session_id: Option<SessionId>,
+        persist_session_context: bool,
+    ) -> Result<Self> {
+        execution_context
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        ensure!(
+            execution_context.workspace_root == workspace_root.as_ref(),
+            "execution context workspace does not match the chat workspace"
+        );
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
-        let tool_runtime = build_chat_tool_runtime(&session, &core_tools, workspace_root.as_ref())?;
+        let execution_context_state = Arc::new(Mutex::new(execution_context.clone()));
+        let process_context = Arc::new(ChatProcessExecutionContext {
+            state: Arc::clone(&execution_context_state),
+            store_root: runtime.paths.store_root(),
+            sessions_root: runtime.paths.sessions_root(),
+            scope_session_id,
+            persist_session_context,
+        });
+        let process_tools = build_process_tools(runtime, process_context)?;
+        let tool_runtime = build_chat_tool_runtime(
+            &session,
+            &core_tools,
+            workspace_root.as_ref(),
+            &process_tools,
+            &execution_context_state,
+        )?;
         Ok(Self {
             session,
+            execution_context,
+            execution_context_state,
+            process_tools,
             active_effective_capabilities: None,
             event_sink: None,
             event_scope: None,
@@ -66,6 +210,50 @@ impl ChatTurnRuntime {
 
     pub(crate) fn session_mut(&mut self) -> &mut InferenceSession {
         &mut self.session
+    }
+
+    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+        &self.execution_context
+    }
+
+    pub fn terminate_process_owner(&self, owner: &agl_process::ExecutionOwner) -> Result<usize> {
+        self.process_tools
+            .process_handle()
+            .terminate_owner(owner)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn reconcile_process_grants(&self) -> Result<usize> {
+        let store = agl_store::AglStore::open_current_at(self.session.store_root())?;
+        let live_grant_ids = store.live_process_permission_grant_ids()?;
+        self.process_tools
+            .process_handle()
+            .terminate_inactive_grants(live_grant_ids)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    pub fn install_execution_context(
+        &mut self,
+        execution_context: agl_process::ExecutionContextSnapshot,
+    ) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot replace execution context during an active turn"
+        );
+        execution_context
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        ensure!(
+            execution_context.workspace_root == self.workspace_root(),
+            "durable execution context workspace does not match the chat workspace"
+        );
+        *self
+            .execution_context_state
+            .lock()
+            .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))? =
+            execution_context.clone();
+        self.execution_context = execution_context;
+        Ok(())
     }
 
     pub fn clear_context(&mut self) -> Result<()> {
@@ -140,6 +328,7 @@ impl ChatTurnRuntime {
             "cannot refresh runtime context during an active turn"
         );
         self.session.refresh_runtime_context(Some(run_id))?;
+        self.reconcile_process_grants()?;
         self.session
             .freeze_delegation_authority(persisted_delegation_authority);
         self.rebuild_tool_runtime()?;
@@ -279,10 +468,16 @@ impl ChatTurnRuntime {
         );
         let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
-        self.session
-            .set_workspace_root_and_refresh(workspace_root.as_ref())?;
-        let tool_runtime =
-            build_chat_tool_runtime(&self.session, &core_tools, workspace_root.as_ref())?;
+        let mut session = self.session.clone();
+        session.set_workspace_root_and_refresh(workspace_root.as_ref())?;
+        let tool_runtime = build_chat_tool_runtime(
+            &session,
+            &core_tools,
+            workspace_root.as_ref(),
+            &self.process_tools,
+            &self.execution_context_state,
+        )?;
+        self.session = session;
         self.core_tools = core_tools;
         self.tool_runtime = tool_runtime;
         Ok(())
@@ -307,8 +502,13 @@ impl ChatTurnRuntime {
     }
 
     fn rebuild_tool_runtime(&mut self) -> Result<()> {
-        self.tool_runtime =
-            build_chat_tool_runtime(&self.session, &self.core_tools, self.core_tools.root())?;
+        self.tool_runtime = build_chat_tool_runtime(
+            &self.session,
+            &self.core_tools,
+            self.core_tools.root(),
+            &self.process_tools,
+            &self.execution_context_state,
+        )?;
         Ok(())
     }
 
@@ -454,6 +654,8 @@ impl ChatTurnRuntime {
         &mut self,
         request: ToolDispatchRequest,
         step_id: Option<&StepId>,
+        cancellation: InferenceCancellation,
+        deadline: Option<std::time::Instant>,
     ) -> Result<ToolDispatchResponse> {
         let active_scope = self
             .event_scope
@@ -519,11 +721,23 @@ impl ChatTurnRuntime {
         )?;
         let output = self
             .tool_runtime
-            .dispatch(invocation, &effective)
+            .dispatch(
+                invocation,
+                &effective,
+                agl_capabilities::ActionDispatchControl::new(
+                    std::sync::Arc::new(CapabilityCancellation(cancellation)),
+                    deadline,
+                ),
+            )
             .map_err(|error| {
                 anyhow::Error::new(error)
                     .context(format!("capability `{}` failed", request.capability_id))
             })?;
+        self.execution_context = self
+            .execution_context_state
+            .lock()
+            .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))?
+            .clone();
         Ok(ToolDispatchResponse { result: output })
     }
 }
@@ -608,10 +822,86 @@ fn permission_runtime_status(
     }
 }
 
+fn build_process_tools(
+    runtime: &agl_runtime::AgentLibreRuntimeConfig,
+    context: Arc<dyn agl_tools::ProcessExecutionContext>,
+) -> Result<agl_tools::ProcessTools> {
+    let process = shared_process_handle(runtime)?;
+    agl_tools::ProcessTools::new(
+        process,
+        context,
+        agl_tools::ProcessToolRuntimeConfig {
+            base_environment: runtime.execution.admitted_environment()?,
+            maximum_environment_bytes: runtime.execution.environment.maximum_bytes,
+            runtime_read_only_roots: runtime.execution.runtime_read_only_roots.clone(),
+            default_foreground_timeout: Duration::from_millis(
+                runtime.execution.default_foreground_timeout_ms,
+            ),
+            maximum_foreground_timeout: Duration::from_millis(
+                runtime.execution.maximum_foreground_timeout_ms,
+            ),
+            max_input_bytes: runtime.execution.max_input_bytes,
+            max_result_bytes: runtime.execution.max_result_bytes,
+            max_spool_bytes: runtime.execution.max_spool_bytes,
+            default_terminal_size: agl_process::TerminalSize {
+                columns: runtime.execution.default_terminal_columns,
+                rows: runtime.execution.default_terminal_rows,
+            },
+        },
+    )
+}
+
+pub fn shared_process_handle(
+    runtime: &agl_runtime::AgentLibreRuntimeConfig,
+) -> Result<agl_process::ProcessHandle> {
+    let key = runtime.paths.store_root();
+    let handles = PROCESS_HANDLES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut handles = handles
+        .lock()
+        .map_err(|error| anyhow::anyhow!("process runtime registry is poisoned: {error}"))?;
+    if let Some(handle) = handles.get(&key) {
+        return Ok(handle.clone());
+    }
+
+    let options = runtime
+        .execution
+        .supervisor_options(&runtime.paths, process_launcher_path()?)?;
+    let repository = Arc::new(agl_store::AglExecutionRepository::open_at(
+        &key,
+        options.finished_retention,
+    )?);
+    let spool = Arc::new(
+        agl_process::FileOutputSpool::new(options.data_root.clone())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    );
+    let supervisor = agl_process::ProcessSupervisor::start(options, repository, spool)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let handle = supervisor.handle();
+    handles.insert(key, handle.clone());
+    Ok(handle)
+}
+
+fn process_launcher_path() -> Result<PathBuf> {
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    let parent = executable
+        .parent()
+        .context("current executable has no parent directory")?;
+    let directory = if parent.file_name().is_some_and(|name| name == "deps") {
+        parent
+            .parent()
+            .context("test executable directory has no target parent")?
+    } else {
+        parent
+    };
+    Ok(directory.join("agl-process-launcher"))
+}
+
 fn build_chat_tool_runtime(
     session: &InferenceSession,
     core_tools: &agl_tools::CoreTools,
     workspace_root: &Path,
+    process_tools: &agl_tools::ProcessTools,
+    execution_context_state: &Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
 ) -> Result<ToolRuntime> {
     let screen_id = agl_capabilities::CapabilityId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
     chat_tool_runtime(ChatToolRuntimeConfig {
@@ -620,11 +910,15 @@ fn build_chat_tool_runtime(
         trust_store_path: session.trust_store_path(),
         workspace_root,
         permission_status: permission_runtime_status(session),
+        process_tools: Some(process_tools.clone()),
         screen_admitted_run: session
             .permission_grants()
             .sensitive_input_run(&screen_id, agl_capabilities::SensitiveInput::ScreenCapture)
             .cloned(),
-        delegation_handler: crate::delegation::DelegationHandler::from_session(session),
+        delegation_handler: crate::delegation::DelegationHandler::from_session(
+            session,
+            Arc::clone(execution_context_state),
+        ),
     })
 }
 

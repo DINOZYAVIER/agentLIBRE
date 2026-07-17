@@ -1,4 +1,6 @@
-use agl_capabilities::{CapabilityId, HookId, SkillId, StateEffect};
+use std::collections::{BTreeMap, BTreeSet};
+
+use agl_capabilities::{CapabilityExclusionReason, CapabilityId, HookId, SkillId, StateEffect};
 use agl_tools::ToolCatalog;
 use serde::Serialize;
 
@@ -18,6 +20,78 @@ pub struct SkillContextBlock {
     pub evidence: SkillContextEvidence,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct SkillToolRoutingView {
+    routes: BTreeMap<SkillId, SkillToolRouting>,
+}
+
+impl SkillToolRoutingView {
+    pub fn new(
+        routes: impl IntoIterator<Item = (SkillId, SkillToolRouting)>,
+    ) -> Result<Self, SkillContextError> {
+        let mut indexed = BTreeMap::new();
+        for (skill_id, routing) in routes {
+            if indexed.insert(skill_id.clone(), routing).is_some() {
+                return Err(SkillContextError::InvalidRouting {
+                    skill_id: skill_id.as_str().to_string(),
+                    message: "duplicate skill routing entry",
+                });
+            }
+        }
+        Ok(Self { routes: indexed })
+    }
+
+    pub fn route(&self, skill_id: &SkillId) -> Option<&SkillToolRouting> {
+        self.routes.get(skill_id)
+    }
+
+    pub fn routes(&self) -> impl ExactSizeIterator<Item = (&SkillId, &SkillToolRouting)> {
+        self.routes.iter()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct SkillToolRouting {
+    callable_tools: BTreeSet<CapabilityId>,
+    requestable_tools: BTreeSet<CapabilityId>,
+    unavailable_tools: BTreeMap<CapabilityId, CapabilityExclusionReason>,
+}
+
+impl SkillToolRouting {
+    pub fn new(
+        callable_tools: impl IntoIterator<Item = CapabilityId>,
+        requestable_tools: impl IntoIterator<Item = CapabilityId>,
+        unavailable_tools: impl IntoIterator<Item = (CapabilityId, CapabilityExclusionReason)>,
+    ) -> Self {
+        Self {
+            callable_tools: callable_tools.into_iter().collect(),
+            requestable_tools: requestable_tools.into_iter().collect(),
+            unavailable_tools: unavailable_tools.into_iter().collect(),
+        }
+    }
+
+    pub fn callable_tools(&self) -> &BTreeSet<CapabilityId> {
+        &self.callable_tools
+    }
+
+    pub fn requestable_tools(&self) -> &BTreeSet<CapabilityId> {
+        &self.requestable_tools
+    }
+
+    pub fn unavailable_tools(&self) -> &BTreeMap<CapabilityId, CapabilityExclusionReason> {
+        &self.unavailable_tools
+    }
+
+    pub fn declared_tools(&self) -> BTreeSet<CapabilityId> {
+        self.callable_tools
+            .iter()
+            .chain(&self.requestable_tools)
+            .chain(self.unavailable_tools.keys())
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SkillContextEvidence {
     pub skill_id: String,
@@ -26,9 +100,12 @@ pub struct SkillContextEvidence {
     pub manifest_sha256: String,
     pub tree_sha256: String,
     pub required_hooks: Vec<String>,
-    pub allowed_tools: Vec<String>,
+    pub manifest_allowed_tools: Vec<String>,
+    pub manifest_requestable_tools: Vec<String>,
+    pub manifest_denied_tools: Vec<String>,
+    pub callable_tools: Vec<String>,
     pub requestable_tools: Vec<String>,
-    pub denied_tools: Vec<String>,
+    pub unavailable_tools: Vec<SkillUnavailableToolEvidence>,
     pub permission_request_templates: Vec<SkillPermissionRequestTemplateEvidence>,
     pub memory_read_scopes: Vec<String>,
     pub notes_read: bool,
@@ -38,6 +115,12 @@ pub struct SkillContextEvidence {
     pub budget_bytes: usize,
     pub context_bytes: usize,
     pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SkillUnavailableToolEvidence {
+    pub tool_id: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -60,12 +143,19 @@ pub struct SkillContextReferenceEvidence {
 #[derive(Debug, Eq, PartialEq)]
 pub enum SkillContextError {
     Registry(SkillRegistryError),
+    InvalidRouting {
+        skill_id: String,
+        message: &'static str,
+    },
 }
 
 impl std::fmt::Display for SkillContextError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Registry(err) => write!(f, "{err}"),
+            Self::InvalidRouting { skill_id, message } => {
+                write!(f, "invalid tool routing for skill `{skill_id}`: {message}")
+            }
         }
     }
 }
@@ -82,13 +172,30 @@ pub fn build_verified_context_bundle(
     registry: &SkillRegistry,
     tool_catalog: &ToolCatalog,
     selections: &[SkillId],
+    routing: &SkillToolRoutingView,
 ) -> Result<SkillContextBundle, SkillContextError> {
+    let selected = selections.iter().cloned().collect::<BTreeSet<_>>();
+    let routed = routing
+        .routes()
+        .map(|(skill_id, _)| skill_id.clone())
+        .collect::<BTreeSet<_>>();
+    if selected != routed {
+        return Err(SkillContextError::InvalidRouting {
+            skill_id: "<selection>".to_string(),
+            message: "routing skill IDs do not match selected skill IDs",
+        });
+    }
     let mut blocks = Vec::with_capacity(selections.len());
     for skill_id in selections {
         registry.verify_required_hooks(skill_id, tool_catalog)?;
-        registry.verify_allowed_tools(skill_id, tool_catalog)?;
         let skill = registry.resolve_for_context_injection(skill_id)?;
-        blocks.push(build_context_block(skill));
+        let route = routing
+            .route(skill_id)
+            .ok_or_else(|| SkillContextError::InvalidRouting {
+                skill_id: skill_id.as_str().to_string(),
+                message: "selected skill has no routing entry",
+            })?;
+        blocks.push(build_context_block(skill, route)?);
     }
 
     Ok(SkillContextBundle {
@@ -101,8 +208,12 @@ pub fn build_verified_context_bundle(
     })
 }
 
-fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
+fn build_context_block(
+    skill: &crate::RegisteredSkill,
+    routing: &SkillToolRouting,
+) -> Result<SkillContextBlock, SkillContextError> {
     let harness = &skill.harness;
+    validate_routing(harness, routing)?;
     let mut content = String::new();
     content.push_str("<agentlibre_skill_context>\n");
     content.push_str(&format!("skill_id: {}\n", harness.id));
@@ -110,17 +221,27 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
     content.push_str(&format!("pack: {}\n", harness.pack));
     content.push_str("\n## Tool Routing\n\n");
     content.push_str("directly_callable_tools: ");
-    content.push_str(&render_tools(&harness.allowed_tools));
+    content.push_str(&render_tools(routing.callable_tools.iter()));
     content.push('\n');
     content.push_str("requestable_tools: ");
-    content.push_str(&render_tools(&harness.requestable_tools));
+    content.push_str(&render_tools(routing.requestable_tools.iter()));
     content.push('\n');
     content.push_str("unavailable_tools: ");
-    content.push_str(&render_tools(&harness.denied_tools));
+    content.push_str(&render_unavailable_tools(&routing.unavailable_tools));
     content.push('\n');
-    if !harness.permission_request_templates.is_empty() {
+    let request_templates = harness
+        .permission_request_templates
+        .iter()
+        .filter(|template| {
+            template
+                .tools
+                .iter()
+                .all(|tool| routing.requestable_tools.contains(tool))
+        })
+        .collect::<Vec<_>>();
+    if !request_templates.is_empty() {
         content.push_str("permission_request_templates:\n");
-        for template in &harness.permission_request_templates {
+        for template in &request_templates {
             content.push_str(&format!(
                 "- id: {}; tools: {}; max_operation_kind: {}; default_duration: {}; reason_template: {}\n",
                 template.id,
@@ -167,27 +288,46 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
             .map(HookId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
-        allowed_tools: harness
+        manifest_allowed_tools: harness
             .allowed_tools
             .iter()
             .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
-        requestable_tools: harness
+        manifest_requestable_tools: harness
             .requestable_tools
             .iter()
             .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
-        denied_tools: harness
+        manifest_denied_tools: harness
             .denied_tools
             .iter()
             .map(CapabilityId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
-        permission_request_templates: harness
-            .permission_request_templates
+        callable_tools: routing
+            .callable_tools
             .iter()
+            .map(CapabilityId::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
+        requestable_tools: routing
+            .requestable_tools
+            .iter()
+            .map(CapabilityId::as_str)
+            .map(ToOwned::to_owned)
+            .collect(),
+        unavailable_tools: routing
+            .unavailable_tools
+            .iter()
+            .map(|(tool_id, reason)| SkillUnavailableToolEvidence {
+                tool_id: tool_id.as_str().to_string(),
+                reason: reason.code().to_string(),
+            })
+            .collect(),
+        permission_request_templates: request_templates
+            .into_iter()
             .map(|template| SkillPermissionRequestTemplateEvidence {
                 id: template.id.clone(),
                 tools: template
@@ -232,16 +372,98 @@ fn build_context_block(skill: &crate::RegisteredSkill) -> SkillContextBlock {
         truncated,
     };
 
-    SkillContextBlock { content, evidence }
+    Ok(SkillContextBlock { content, evidence })
 }
 
-fn render_tools(tools: &[CapabilityId]) -> String {
+fn validate_routing(
+    harness: &crate::SkillHarness,
+    routing: &SkillToolRouting,
+) -> Result<(), SkillContextError> {
+    let declared_allowed = harness
+        .allowed_tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let declared_requestable = harness
+        .requestable_tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let declared_denied = harness
+        .denied_tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let declared = declared_allowed
+        .union(&declared_requestable)
+        .cloned()
+        .chain(declared_denied.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let invalid = |message| SkillContextError::InvalidRouting {
+        skill_id: harness.id.as_str().to_string(),
+        message,
+    };
+    if routing.declared_tools() != declared {
+        return Err(invalid(
+            "routing does not partition every declared tool exactly once",
+        ));
+    }
+    if !routing
+        .callable_tools
+        .is_disjoint(&routing.requestable_tools)
+        || routing
+            .callable_tools
+            .iter()
+            .any(|tool| routing.unavailable_tools.contains_key(tool))
+        || routing
+            .requestable_tools
+            .iter()
+            .any(|tool| routing.unavailable_tools.contains_key(tool))
+    {
+        return Err(invalid(
+            "callable, requestable, and unavailable sets overlap",
+        ));
+    }
+    let callable_candidates = declared_allowed
+        .union(&declared_requestable)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !routing.callable_tools.is_subset(&callable_candidates) {
+        return Err(invalid("callable set contains a denied or undeclared tool"));
+    }
+    if !routing.requestable_tools.is_subset(&declared_requestable) {
+        return Err(invalid(
+            "requestable set contains a tool not declared requestable",
+        ));
+    }
+    if !declared_denied
+        .iter()
+        .all(|tool| routing.unavailable_tools.contains_key(tool))
+    {
+        return Err(invalid("a manifest-denied tool is not unavailable"));
+    }
+    Ok(())
+}
+
+fn render_tools<'a>(tools: impl IntoIterator<Item = &'a CapabilityId>) -> String {
+    let tools = tools
+        .into_iter()
+        .map(CapabilityId::as_str)
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        "[]".to_string()
+    } else {
+        tools.join(", ")
+    }
+}
+
+fn render_unavailable_tools(tools: &BTreeMap<CapabilityId, CapabilityExclusionReason>) -> String {
     if tools.is_empty() {
         "[]".to_string()
     } else {
         tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(|(tool, reason)| format!("{} [{}]", tool.as_str(), reason.code()))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -278,12 +500,18 @@ mod tests {
         agl_tools::fs::register(&mut tool_catalog).unwrap();
         agl_tools::repo::register(&mut tool_catalog).unwrap();
 
-        let bundle = build_verified_context_bundle(
-            &registry,
-            &tool_catalog,
-            &[SkillId::new("repo-status").unwrap()],
-        )
+        let skill_id = SkillId::new("repo-status").unwrap();
+        let routing = SkillToolRoutingView::new([(
+            skill_id.clone(),
+            SkillToolRouting::new(
+                tool_ids(["fs.list", "fs.read", "fs.search", "repo.status"]),
+                [],
+                [],
+            ),
+        )])
         .unwrap();
+        let bundle =
+            build_verified_context_bundle(&registry, &tool_catalog, &[skill_id], &routing).unwrap();
 
         assert!(bundle.content.contains("Use this skill"));
         assert!(bundle.content.contains("repository state picture"));
@@ -292,10 +520,10 @@ mod tests {
         assert_eq!(bundle.evidence[0].source, "core");
         assert_eq!(
             bundle.evidence[0].required_hooks,
-            vec!["repo_path.validate", "verification.validate"]
+            vec!["core:repo_path.validate", "core:verification.validate"]
         );
         assert_eq!(
-            bundle.evidence[0].allowed_tools,
+            bundle.evidence[0].callable_tools,
             vec!["fs.list", "fs.read", "fs.search", "repo.status"]
         );
         assert!(
@@ -310,7 +538,7 @@ mod tests {
                 .contains("Requestable tools are not callable unless they also appear")
         );
         assert!(bundle.evidence[0].requestable_tools.is_empty());
-        assert!(bundle.evidence[0].denied_tools.is_empty());
+        assert!(bundle.evidence[0].unavailable_tools.is_empty());
         assert!(bundle.evidence[0].permission_request_templates.is_empty());
         assert!(bundle.evidence[0].included_references.is_empty());
         assert!(!format!("{:?}", bundle.evidence).contains("repository state picture"));
@@ -326,12 +554,27 @@ mod tests {
         agl_tools::matrix::register(&mut tool_catalog).unwrap();
         agl_tools::permissions::register(&mut tool_catalog).unwrap();
 
-        let bundle = build_verified_context_bundle(
-            &registry,
-            &tool_catalog,
-            &[SkillId::new("requestable-test").unwrap()],
-        )
+        let skill_id = SkillId::new("requestable-test").unwrap();
+        let routing = SkillToolRoutingView::new([(
+            skill_id.clone(),
+            SkillToolRouting::new(
+                tool_ids([
+                    "cron.preflight",
+                    "fs.read",
+                    "fs.search",
+                    "permissions.request",
+                    "permissions.status",
+                ]),
+                tool_ids(["cron.add", "matrix.outbox.enqueue"]),
+                [(
+                    CapabilityId::new("matrix.outbox.deliver").unwrap(),
+                    CapabilityExclusionReason::SkillDenied,
+                )],
+            ),
+        )])
         .unwrap();
+        let bundle =
+            build_verified_context_bundle(&registry, &tool_catalog, &[skill_id], &routing).unwrap();
 
         assert!(
             bundle
@@ -346,11 +589,11 @@ mod tests {
         assert!(
             bundle
                 .content
-                .contains("unavailable_tools: matrix.outbox.deliver")
+                .contains("unavailable_tools: matrix.outbox.deliver [skill_denied]")
         );
         assert!(bundle.content.contains("id: schedule-matrix-cron"));
         assert_eq!(
-            bundle.evidence[0].allowed_tools,
+            bundle.evidence[0].callable_tools,
             vec![
                 "cron.preflight",
                 "fs.read",
@@ -364,8 +607,11 @@ mod tests {
             vec!["cron.add", "matrix.outbox.enqueue"]
         );
         assert_eq!(
-            bundle.evidence[0].denied_tools,
-            vec!["matrix.outbox.deliver"]
+            bundle.evidence[0].unavailable_tools,
+            vec![SkillUnavailableToolEvidence {
+                tool_id: "matrix.outbox.deliver".to_string(),
+                reason: "skill_denied".to_string(),
+            }]
         );
         assert_eq!(
             bundle.evidence[0].permission_request_templates[0].tools,
@@ -383,7 +629,7 @@ mod tests {
                 version: 1,
                 source: SkillSource::Core,
                 pack: "test".to_string(),
-                required_hooks: vec![HookId::new("repo_path.validate").unwrap()],
+                required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
                 allowed_tools: tool_ids([
                     "cron.preflight",
                     "fs.read",

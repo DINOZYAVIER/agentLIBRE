@@ -5,7 +5,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 128
 references:

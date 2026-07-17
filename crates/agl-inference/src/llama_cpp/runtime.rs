@@ -10,6 +10,7 @@ use agl_config::{KvCacheType, MtpRuntimeConfig, ResolvedInferenceConfig};
 use agl_content::Content;
 use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
+use serde::{Deserialize, Serialize};
 
 use super::context_slot::LlamaCppContextSlot;
 use super::ffi;
@@ -18,9 +19,17 @@ use super::model::LlamaCppModel;
 
 static LLAMA_BACKEND: OnceLock<()> = OnceLock::new();
 static LLAMA_LOGS: Mutex<NativeLogState> = Mutex::new(NativeLogState { active: None });
+const MAX_NATIVE_LOG_BYTES: usize = 4 * 1024 * 1024;
+const NATIVE_LOG_TRUNCATION_MARKER: &str = "\n[agentlibre native log truncated]\n";
 
 struct NativeLogState {
-    active: Option<String>,
+    active: Option<NativeLogBuffer>,
+}
+
+#[derive(Default)]
+struct NativeLogBuffer {
+    content: String,
+    truncated: bool,
 }
 
 pub(crate) struct NativeLogCapture {
@@ -34,6 +43,71 @@ impl LlamaCppModelRuntime {
     pub fn new() -> Self {
         Self
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlamaCppDeviceKind {
+    Cpu,
+    DiscreteGpu,
+    IntegratedGpu,
+    Accelerator,
+    Metadata,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlamaCppDeviceInfo {
+    pub name: String,
+    pub description: String,
+    pub kind: LlamaCppDeviceKind,
+    pub free_memory_bytes: u64,
+    pub total_memory_bytes: u64,
+    pub usable: bool,
+    pub supports_gpu_offload: bool,
+}
+
+pub fn llama_cpp_device_inventory() -> Vec<LlamaCppDeviceInfo> {
+    init_llama_backend();
+    let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
+    let count = unsafe { ffi::ggml_backend_dev_count() };
+    let mut devices = Vec::with_capacity(count);
+    for index in 0..count {
+        let device = unsafe { ffi::ggml_backend_dev_get(index) };
+        if device.is_null() {
+            continue;
+        }
+        let name = cstr_to_string(unsafe { ffi::ggml_backend_dev_name(device) })
+            .unwrap_or_else(|| format!("device-{index}"));
+        let description = cstr_to_string(unsafe { ffi::ggml_backend_dev_description(device) })
+            .unwrap_or_else(|| "unknown llama.cpp device".to_string());
+        let mut free = 0_usize;
+        let mut total = 0_usize;
+        unsafe { ffi::ggml_backend_dev_memory(device, &mut free, &mut total) };
+        let kind = match unsafe { ffi::ggml_backend_dev_type(device) } {
+            ffi::GGML_BACKEND_DEVICE_TYPE_CPU => LlamaCppDeviceKind::Cpu,
+            ffi::GGML_BACKEND_DEVICE_TYPE_GPU => LlamaCppDeviceKind::DiscreteGpu,
+            ffi::GGML_BACKEND_DEVICE_TYPE_IGPU => LlamaCppDeviceKind::IntegratedGpu,
+            ffi::GGML_BACKEND_DEVICE_TYPE_ACCEL => LlamaCppDeviceKind::Accelerator,
+            ffi::GGML_BACKEND_DEVICE_TYPE_META => LlamaCppDeviceKind::Metadata,
+            _ => LlamaCppDeviceKind::Unknown,
+        };
+        let gpu = matches!(
+            kind,
+            LlamaCppDeviceKind::DiscreteGpu | LlamaCppDeviceKind::IntegratedGpu
+        );
+        devices.push(LlamaCppDeviceInfo {
+            name,
+            description,
+            kind,
+            free_memory_bytes: u64::try_from(free).unwrap_or(u64::MAX),
+            total_memory_bytes: u64::try_from(total).unwrap_or(u64::MAX),
+            usable: kind != LlamaCppDeviceKind::Unknown,
+            supports_gpu_offload: gpu && supports_gpu_offload,
+        });
+    }
+    devices
 }
 
 impl ModelRuntime for LlamaCppModelRuntime {
@@ -255,6 +329,7 @@ pub(crate) fn init_llama_backend() {
         let lib_dir = CString::new(ffi::library_dir()).expect("valid llama.cpp lib dir");
         unsafe {
             ffi::llama_log_set(Some(llama_log_callback), ptr::null_mut());
+            ffi::mtmd_log_set(Some(llama_log_callback), ptr::null_mut());
             ffi::ggml_backend_load_all_from_path(lib_dir.as_ptr());
             ffi::llama_backend_init();
         }
@@ -270,7 +345,35 @@ unsafe extern "C" fn llama_log_callback(
         && let Ok(mut state) = LLAMA_LOGS.lock()
         && let Some(logs) = state.active.as_mut()
     {
-        logs.push_str(&text);
+        logs.push(&text);
+    }
+}
+
+impl NativeLogBuffer {
+    fn push(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        let payload_cap = MAX_NATIVE_LOG_BYTES.saturating_sub(NATIVE_LOG_TRUNCATION_MARKER.len());
+        let remaining = payload_cap.saturating_sub(self.content.len());
+        if text.len() <= remaining {
+            self.content.push_str(text);
+            return;
+        }
+
+        let mut keep = remaining.min(text.len());
+        while keep > 0 && !text.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        self.content.push_str(&text[..keep]);
+        self.truncated = true;
+    }
+
+    fn finish(mut self) -> String {
+        if self.truncated {
+            self.content.push_str(NATIVE_LOG_TRUNCATION_MARKER);
+        }
+        self.content
     }
 }
 
@@ -283,7 +386,7 @@ impl NativeLogCapture {
             state.active.is_none(),
             "llama.cpp native operation already has an active log capture"
         );
-        state.active = Some(String::new());
+        state.active = Some(NativeLogBuffer::default());
         Ok(Self { active: true })
     }
 
@@ -293,6 +396,7 @@ impl NativeLogCapture {
             .lock()
             .ok()
             .and_then(|mut state| state.active.take())
+            .map(NativeLogBuffer::finish)
             .unwrap_or_default()
     }
 }
@@ -672,6 +776,20 @@ load_tensors: offloaded 34/34 layers to GPU
         assert_eq!(operation.value, 7);
         assert!(operation.log.contains("logical operation\n"));
         assert!(operation.log.contains("llama_cpp_log:\nnative operation\n"));
+    }
+
+    #[test]
+    fn native_log_capture_is_bounded_and_marks_truncation() {
+        let _guard = native_log_test_guard();
+        let capture = NativeLogCapture::begin().unwrap();
+        let oversized = "ж".repeat(MAX_NATIVE_LOG_BYTES);
+        let message = CString::new(oversized).unwrap();
+        unsafe { llama_log_callback(0, message.as_ptr(), ptr::null_mut()) };
+
+        let captured = capture.finish();
+        assert!(captured.len() <= MAX_NATIVE_LOG_BYTES);
+        assert!(captured.ends_with(NATIVE_LOG_TRUNCATION_MARKER));
+        assert!(captured.is_char_boundary(captured.len()));
     }
 
     #[test]

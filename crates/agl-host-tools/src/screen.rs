@@ -8,8 +8,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use agl_capabilities::{
-    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
-    CapabilityId, OperationKind, ProviderDeclaration, ProviderId, SensitiveInput, StateEffect,
+    ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionInvocation,
+    ActionResult, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, SensitiveInput,
+    StateEffect,
 };
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
@@ -183,7 +184,8 @@ impl ScreenTools {
 }
 
 impl ActionHandler for ScreenTools {
-    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         self.capture(&invocation)
             .map_err(|error| Box::new(error) as ActionHandlerError)
     }
@@ -551,11 +553,31 @@ mod tests {
                 input: json!({}),
                 checkpoint: None,
                 effective_policy_hash: None,
+                execution_context: test_execution_context(),
                 budget: RunBudget::default(),
                 not_before_ms: None,
             })
             .unwrap();
         run_id
+    }
+
+    fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
+        let workspace = std::env::temp_dir().canonicalize().unwrap();
+        agl_process::ExecutionContextSnapshot {
+            workspace_root: workspace.clone(),
+            working_directory: workspace,
+            private_execution_roots: Vec::new(),
+            shell: agl_process::ShellProfileSnapshot {
+                program: PathBuf::from("/bin/sh"),
+                command_args: vec!["-c".to_owned()],
+                login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+                environment_names: vec!["PATH".to_owned()],
+                executable_digest: "sha256:test-shell".to_owned(),
+                config_digest: "sha256:test-config".to_owned(),
+            },
+            revision: 1,
+            profile_metadata: "workspace".to_owned(),
+        }
     }
 
     fn invocation(run_id: &RunId) -> ActionInvocation {

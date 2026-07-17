@@ -8,11 +8,12 @@ mod policy;
 mod schema;
 
 pub use action::{
-    ActionHandler, ActionHandlerError, ActionInvocation, ActionResult, render_canonical_json,
+    ActionDispatchContext, ActionDispatchControl, ActionHandler, ActionHandlerError,
+    ActionInvocation, ActionResult, CancellationSignal, render_canonical_json,
 };
 pub use declaration::{
-    ActionDeclaration, ActionDelivery, ActionVisibility, DeclarationError, HookDeclaration,
-    OperationKind, ProviderDeclaration, ProviderSource, ProviderTrust, SensitiveInput, StateEffect,
+    ActionDeclaration, ActionDelivery, DeclarationError, HookDeclaration, OperationKind,
+    ProviderDeclaration, ProviderSource, ProviderTrust, SensitiveInput, StateEffect,
 };
 pub use delegation::{
     AGENT_DELEGATE_CAPABILITY_ID, AGENT_DELEGATE_PROVIDER_ID, DelegateActionArgs,
@@ -24,9 +25,10 @@ pub use hook::{
 };
 pub use ids::{CapabilityId, HookId, IdentifierError, IdentifierKind, ProviderId, SkillId};
 pub use policy::{
-    CapabilityExclusion, CapabilityExclusionReason, CapabilityGrant, CapabilityPolicyInput,
-    DispatchDenial, DispatchDenialCode, EffectiveCapability, EffectiveCapabilitySet,
-    FunctionToolPolicy, PolicyResolutionError, SkillCapabilityPolicy, ToolAccessMode,
+    CapabilityExclusion, CapabilityExclusionReason, CapabilityGrant, CapabilityGrantProvenance,
+    CapabilityPolicyInput, DispatchDenial, DispatchDenialCode, EffectiveCapability,
+    EffectiveCapabilitySet, FunctionToolPolicy, PolicyResolutionError, SkillCapabilityPolicy,
+    ToolAccessMode,
 };
 pub use schema::{
     ActionSchema, ArgumentValidationError, ArgumentViolation, SchemaValidationError,

@@ -617,11 +617,6 @@ fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestErro
     if raw.context_budget_tokens == 0 {
         return Err(SkillManifestError::ContextBudgetZero);
     }
-    if raw.required_hooks.is_empty() {
-        return Err(SkillManifestError::EmptyList {
-            field: "required_hooks",
-        });
-    }
     if raw.guarantees.is_empty() {
         return Err(SkillManifestError::EmptyList {
             field: "guarantees",
@@ -979,7 +974,7 @@ mod tests {
                 .iter()
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
-            vec!["repo_path.validate", "verification.validate"]
+            vec!["core:repo_path.validate", "core:verification.validate"]
         );
         assert_eq!(
             skill
@@ -1011,9 +1006,9 @@ mod tests {
                 .map(|hook| hook.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "repo_path.validate",
-                "secret_scan.validate",
-                "skill_manifest.validate"
+                "core:repo_path.validate",
+                "core:secret_scan.validate",
+                "core:skill_manifest.validate"
             ]
         );
         assert_eq!(
@@ -1026,6 +1021,20 @@ mod tests {
         );
         assert!(skill.references.is_empty());
         assert!(skill.body.contains("runtime skills"));
+    }
+
+    #[test]
+    fn parses_builtin_process_skill_without_required_hooks() {
+        let skill = SkillHarness::parse_builtin(builtin_skill("process").unwrap()).unwrap();
+
+        assert_eq!(skill.id.as_str(), "process");
+        assert!(skill.required_hooks.is_empty());
+        assert!(
+            skill
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.as_str() == "process.exec")
+        );
     }
 
     #[test]
@@ -1046,7 +1055,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 context_budget_tokens: 128
 references:
@@ -1089,7 +1098,10 @@ Body.
         .unwrap_err();
 
         assert!(matches!(err, SkillManifestError::InvalidYaml { .. }));
-        assert!(err.to_string().contains("hook ID must use lowercase"));
+        assert!(
+            err.to_string()
+                .contains("hook ID must be provider-qualified")
+        );
     }
 
     #[test]
@@ -1102,7 +1114,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 context_budget_tokens: 128
 references:
@@ -1136,7 +1148,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 permissions:
   memory:
@@ -1172,7 +1184,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools:
   - fs.read
 requestable_tools:
@@ -1249,7 +1261,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools:
   - fs.read
 requestable_tools:
@@ -1285,7 +1297,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 requestable_tools:
   - cron.add
@@ -1325,7 +1337,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 permissions:
   memory:
@@ -1362,7 +1374,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 context_budget_tokens: 128
 references:
@@ -1410,7 +1422,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - task_spec.validate
+  - core:task_spec.validate
 allowed_tools: []
 context_budget_tokens: 128
 references:
@@ -1469,7 +1481,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 256
 references:
@@ -1511,7 +1523,7 @@ version: 1
 source: core
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 256
 references:
@@ -1547,7 +1559,7 @@ version: 1
 source: workspace
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 256
 references:

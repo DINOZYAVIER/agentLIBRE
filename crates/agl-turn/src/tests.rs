@@ -60,12 +60,12 @@ fn hook_id(value: &str) -> HookId {
 
 fn response_guard_batch() -> TurnHookBatch {
     TurnHookBatch::new(HookEvent::ModelResponse)
-        .with_required_hook(hook_id("guard.response_required"))
-        .with_optional_hook(hook_id("guard.response_optional"))
+        .with_required_hook(hook_id("guard:response_required"))
+        .with_optional_hook(hook_id("guard:response_optional"))
 }
 
 fn artifact_guard_batch() -> TurnHookBatch {
-    TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id("guard.artifact"))
+    TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id("guard:artifact"))
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn initializes_turn_state_with_context_and_request_index() {
 #[test]
 fn initializes_turn_state_with_hook_batches() {
     let hook_batch =
-        TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard.answer"));
+        TurnHookBatch::new(HookEvent::TurnFinish).with_required_hook(hook_id("guard:answer"));
     let state = TurnState::new(test_input("new").with_hook_batch(hook_batch.clone()));
 
     assert_eq!(state.input.hook_batches, [hook_batch]);
@@ -147,7 +147,7 @@ fn hook_batch_summary_serializes_without_hook_message_content() {
         HookBatchResult {
             event: HookEvent::ModelResponse,
             results: vec![HookResult {
-                hook_id: hook_id("guard.response_required"),
+                hook_id: hook_id("guard:response_required"),
                 status: HookStatus::Warn,
                 messages: vec![HookMessage {
                     code: "response.too_long".to_string(),
@@ -162,7 +162,7 @@ fn hook_batch_summary_serializes_without_hook_message_content() {
     let json = serde_json::to_string(&summary).unwrap();
 
     assert!(json.contains(r#""event":"model.response""#), "{json}");
-    assert!(json.contains("guard.response_required"), "{json}");
+    assert!(json.contains("guard:response_required"), "{json}");
     assert!(json.contains("response.too_long"), "{json}");
     assert!(json.contains(r#""outcome":"warn""#), "{json}");
     assert!(!json.contains("secret response text"), "{json}");
@@ -480,12 +480,12 @@ fn turn_machine_accepts_hook_batch_before_model_response_parse() {
             event: HookEvent::ModelResponse,
             results: vec![
                 HookResult {
-                    hook_id: hook_id("guard.response_required"),
+                    hook_id: hook_id("guard:response_required"),
                     status: HookStatus::Pass,
                     messages: Vec::new(),
                 },
                 HookResult {
-                    hook_id: hook_id("guard.response_optional"),
+                    hook_id: hook_id("guard:response_optional"),
                     status: HookStatus::Warn,
                     messages: vec![HookMessage {
                         code: "style.warning".to_string(),
@@ -558,7 +558,7 @@ fn turn_machine_accepts_artifact_write_hook_before_finish() {
         HookBatchResult {
             event: HookEvent::ArtifactWrite,
             results: vec![HookResult {
-                hook_id: hook_id("guard.artifact"),
+                hook_id: hook_id("guard:artifact"),
                 status: HookStatus::Pass,
                 messages: Vec::new(),
             }],
@@ -642,7 +642,7 @@ fn turn_machine_accepts_failed_required_hook_terminal_path() {
         HookBatchResult {
             event: HookEvent::ModelResponse,
             results: vec![HookResult {
-                hook_id: hook_id("guard.response_required"),
+                hook_id: hook_id("guard:response_required"),
                 status: HookStatus::Fail,
                 messages: vec![HookMessage {
                     code: "response.blocked".to_string(),

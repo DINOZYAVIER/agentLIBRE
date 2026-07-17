@@ -21,7 +21,6 @@ pkgs.mkShell {
   packages = with pkgs; [
     bashInteractive
     binutils
-    cargo
     cmake
     curl
     gcc
@@ -30,9 +29,7 @@ pkgs.mkShell {
     ninja
     pkg-config
     python3
-    rustc
-    rustfmt
-    clippy
+    rustup
     shaderc
     spirv-headers
     spirv-tools
@@ -43,11 +40,12 @@ pkgs.mkShell {
 
   AGL_LLAMA_CPP_VULKAN_INCLUDE_DIR = "${pkgs.vulkan-headers}/include";
   AGL_LLAMA_CPP_VULKAN_LIBRARY = "${pkgs.vulkan-loader}/lib/libvulkan.so";
-  AGL_LLAMA_CPP_VULKAN_GLSLC = "${pkgs.shaderc}/bin/glslc";
+  AGL_LLAMA_CPP_VULKAN_GLSLC = "${pkgs.shaderc.bin}/bin/glslc";
   AGL_LLAMA_CPP_VULKAN_GLSLANG_VALIDATOR = "${pkgs.glslang}/bin/glslangValidator";
 
   shellHook = ''
     export AGL_NIX_VULKAN_SHELL=1
+    export RUSTUP_TOOLCHAIN="''${RUSTUP_TOOLCHAIN:-stable}"
     export CMAKE_PREFIX_PATH="${pkgs.spirv-headers}:${pkgs.spirv-tools}''${CMAKE_PREFIX_PATH:+:''${CMAKE_PREFIX_PATH}}"
     export LD_LIBRARY_PATH="${runtimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 

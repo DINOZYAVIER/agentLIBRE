@@ -33,19 +33,43 @@ impl ToolAccessMode {
         }
     }
 
-    pub fn operation_ceiling(self) -> OperationKind {
-        match self {
-            Self::ReadOnly => OperationKind::Read,
-            Self::Write => OperationKind::Write,
-            Self::Execute => OperationKind::Execute,
-            Self::Approve => OperationKind::Approve,
-            Self::Admin => OperationKind::Admin,
-        }
-    }
-
     pub fn permits(self, declaration: &ActionDeclaration) -> bool {
-        declaration.visibility.visible_in_read_only
-            || self.operation_ceiling().permits(declaration.operation_kind)
+        match self {
+            Self::ReadOnly => match declaration.operation_kind {
+                OperationKind::Read | OperationKind::Request => true,
+                OperationKind::Write
+                | OperationKind::Execute
+                | OperationKind::Approve
+                | OperationKind::Admin => false,
+            },
+            Self::Write => match declaration.operation_kind {
+                OperationKind::Read | OperationKind::Request | OperationKind::Write => true,
+                OperationKind::Execute | OperationKind::Approve | OperationKind::Admin => false,
+            },
+            Self::Execute => match declaration.operation_kind {
+                OperationKind::Read
+                | OperationKind::Request
+                | OperationKind::Write
+                | OperationKind::Execute => true,
+                OperationKind::Approve | OperationKind::Admin => false,
+            },
+            Self::Approve => match declaration.operation_kind {
+                OperationKind::Read
+                | OperationKind::Request
+                | OperationKind::Write
+                | OperationKind::Execute
+                | OperationKind::Approve => true,
+                OperationKind::Admin => false,
+            },
+            Self::Admin => match declaration.operation_kind {
+                OperationKind::Read
+                | OperationKind::Request
+                | OperationKind::Write
+                | OperationKind::Execute
+                | OperationKind::Approve
+                | OperationKind::Admin => true,
+            },
+        }
     }
 }
 
@@ -73,6 +97,7 @@ impl FunctionToolPolicy {
 pub struct SkillCapabilityPolicy {
     pub skill_id: SkillId,
     pub allow: BTreeSet<CapabilityId>,
+    pub requestable: BTreeSet<CapabilityId>,
     pub deny: BTreeSet<CapabilityId>,
 }
 
@@ -81,8 +106,14 @@ impl SkillCapabilityPolicy {
         Self {
             skill_id,
             allow: allow.into_iter().collect(),
+            requestable: BTreeSet::new(),
             deny: BTreeSet::new(),
         }
+    }
+
+    pub fn with_requestable(mut self, requestable: impl IntoIterator<Item = CapabilityId>) -> Self {
+        self.requestable = requestable.into_iter().collect();
+        self
     }
 
     pub fn with_denied(mut self, deny: impl IntoIterator<Item = CapabilityId>) -> Self {
@@ -93,11 +124,38 @@ impl SkillCapabilityPolicy {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CapabilityGrantProvenance {
+    pub grant_id: String,
+    pub duration: String,
+    pub admitted_scope: String,
+    pub scope_digest: String,
+}
+
+impl CapabilityGrantProvenance {
+    pub fn new(
+        grant_id: impl Into<String>,
+        duration: impl Into<String>,
+        admitted_scope: impl Into<String>,
+        scope_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            grant_id: grant_id.into(),
+            duration: duration.into(),
+            admitted_scope: admitted_scope.into(),
+            scope_digest: scope_digest.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityGrant {
     pub capability_id: CapabilityId,
     pub max_operation_kind: OperationKind,
     pub state_effects: BTreeSet<StateEffect>,
     pub sensitive_inputs: BTreeSet<SensitiveInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<CapabilityGrantProvenance>,
 }
 
 impl CapabilityGrant {
@@ -107,6 +165,7 @@ impl CapabilityGrant {
             max_operation_kind,
             state_effects: BTreeSet::new(),
             sensitive_inputs: BTreeSet::new(),
+            provenance: None,
         }
     }
 
@@ -123,6 +182,11 @@ impl CapabilityGrant {
         sensitive_inputs: impl IntoIterator<Item = SensitiveInput>,
     ) -> Self {
         self.sensitive_inputs = sensitive_inputs.into_iter().collect();
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: CapabilityGrantProvenance) -> Self {
+        self.provenance = Some(provenance);
         self
     }
 
@@ -253,6 +317,16 @@ impl CapabilityExclusionReason {
             Self::ParentAuthorityDenied => "parent_authority_denied",
         }
     }
+
+    pub fn is_grant_resolvable(self) -> bool {
+        matches!(
+            self,
+            Self::NotRouted
+                | Self::GrantOperationDenied
+                | Self::GrantStateEffectDenied
+                | Self::GrantSensitiveInputDenied
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -269,6 +343,9 @@ pub struct EffectiveCapability {
     provider_digest: DeclarationDigest,
     declaration_digest: DeclarationDigest,
     declaration: ActionDeclaration,
+    authorized_state_effects: BTreeSet<StateEffect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_provenance: Option<CapabilityGrantProvenance>,
 }
 
 impl EffectiveCapability {
@@ -291,12 +368,21 @@ impl EffectiveCapability {
     pub fn declaration(&self) -> &ActionDeclaration {
         &self.declaration
     }
+
+    pub fn authorized_state_effects(&self) -> &BTreeSet<StateEffect> {
+        &self.authorized_state_effects
+    }
+
+    pub fn grant_provenance(&self) -> Option<&CapabilityGrantProvenance> {
+        self.grant_provenance.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EffectiveCapabilitySet {
     policy_hash: PolicyHash,
     catalog_digest: DeclarationDigest,
+    tool_mode: ToolAccessMode,
     capabilities: BTreeMap<CapabilityId, EffectiveCapability>,
     exclusions: BTreeMap<CapabilityId, CapabilityExclusion>,
 }
@@ -326,6 +412,9 @@ impl EffectiveCapabilitySet {
         if let Some(policy) = &input.function_policy {
             all_ids.extend(policy.allow.iter().cloned());
             all_ids.extend(policy.deny.iter().cloned());
+        }
+        for skill in &input.selected_skills {
+            all_ids.extend(skill.requestable.iter().cloned());
         }
         all_ids.extend(skill_denied.iter().cloned());
 
@@ -367,8 +456,17 @@ impl EffectiveCapabilitySet {
                     .iter()
                     .find(|grant| grant.permits(declaration).is_ok())
             });
-            let mut reason = if !declaration.sensitive_inputs.is_empty() && eligible_grant.is_none()
+            let mut reason = if !provider.trust.permits_execution() {
+                CapabilityExclusionReason::ProviderUntrusted
+            } else if !input.tool_mode.permits(declaration) {
+                CapabilityExclusionReason::ToolModeDenied
+            } else if input
+                .function_policy
+                .as_ref()
+                .is_some_and(|policy| !policy.allow.contains(&capability_id))
             {
+                CapabilityExclusionReason::FunctionAllowDenied
+            } else if !declaration.sensitive_inputs.is_empty() && eligible_grant.is_none() {
                 grants.get(&capability_id).map_or(
                     CapabilityExclusionReason::GrantSensitiveInputDenied,
                     |candidates| {
@@ -390,17 +488,16 @@ impl EffectiveCapabilitySet {
                             .unwrap_or(CapabilityExclusionReason::NotRouted)
                     },
                 )
-            } else if !provider.trust.permits_execution() {
-                CapabilityExclusionReason::ProviderUntrusted
-            } else if !input.tool_mode.permits(declaration) {
-                CapabilityExclusionReason::ToolModeDenied
-            } else if input
-                .function_policy
-                .as_ref()
-                .is_some_and(|policy| !policy.allow.contains(&capability_id))
-            {
-                CapabilityExclusionReason::FunctionAllowDenied
             } else {
+                let mut authorized_state_effects = declaration.state_effects.clone();
+                if let Some(grant) = eligible_grant {
+                    authorized_state_effects.extend(
+                        grant
+                            .state_effects
+                            .intersection(&declaration.conditional_state_effects)
+                            .copied(),
+                    );
+                }
                 capabilities.insert(
                     capability_id.clone(),
                     EffectiveCapability {
@@ -409,6 +506,8 @@ impl EffectiveCapabilitySet {
                         provider_digest: provider.digest(),
                         declaration_digest: declaration.digest(),
                         declaration: declaration.clone(),
+                        authorized_state_effects,
+                        grant_provenance: eligible_grant.and_then(|grant| grant.provenance.clone()),
                     },
                 );
                 continue;
@@ -474,6 +573,7 @@ impl EffectiveCapabilitySet {
         #[derive(Serialize)]
         struct SkillHashMaterial<'a> {
             allow: &'a BTreeSet<CapabilityId>,
+            requestable: &'a BTreeSet<CapabilityId>,
             deny: &'a BTreeSet<CapabilityId>,
         }
         let providers = input
@@ -504,6 +604,7 @@ impl EffectiveCapabilitySet {
                     &skill.skill_id,
                     SkillHashMaterial {
                         allow: &skill.allow,
+                        requestable: &skill.requestable,
                         deny: &skill.deny,
                     },
                 )
@@ -532,6 +633,7 @@ impl EffectiveCapabilitySet {
         Ok(Self {
             policy_hash,
             catalog_digest,
+            tool_mode: input.tool_mode,
             capabilities,
             exclusions,
         })
@@ -543,6 +645,10 @@ impl EffectiveCapabilitySet {
 
     pub fn catalog_digest(&self) -> &DeclarationDigest {
         &self.catalog_digest
+    }
+
+    pub fn tool_mode(&self) -> ToolAccessMode {
+        self.tool_mode
     }
 
     pub fn capabilities(&self) -> impl ExactSizeIterator<Item = &EffectiveCapability> {
@@ -605,6 +711,9 @@ impl EffectiveCapabilitySet {
         }
         if declaration.operation_kind != effective.declaration.operation_kind {
             return Err(deny(DispatchDenialCode::OperationChanged));
+        }
+        if !self.tool_mode.permits(declaration) {
+            return Err(deny(DispatchDenialCode::ToolModeDenied));
         }
         if current_provider.digest() != effective.provider_digest {
             return Err(deny(DispatchDenialCode::ProviderChanged));
@@ -713,7 +822,10 @@ pub enum DispatchDenialCode {
     CapabilityUnavailable,
     StaleDeclaration,
     OperationChanged,
+    ToolModeDenied,
     InvalidArguments,
+    ConditionalEffectUndeclared,
+    ConditionalEffectDenied,
 }
 
 impl DispatchDenialCode {
@@ -729,7 +841,10 @@ impl DispatchDenialCode {
             Self::CapabilityUnavailable => "capability_unavailable",
             Self::StaleDeclaration => "stale_declaration",
             Self::OperationChanged => "operation_changed",
+            Self::ToolModeDenied => "tool_mode_denied",
             Self::InvalidArguments => "invalid_arguments",
+            Self::ConditionalEffectUndeclared => "conditional_effect_undeclared",
+            Self::ConditionalEffectDenied => "conditional_effect_denied",
         }
     }
 }

@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -213,6 +214,7 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
     assert_eq!(ModelManagerOptions::default().max_loaded_models, 1);
     assert_eq!(ModelManagerOptions::default().max_contexts_per_model, 2);
     assert_eq!(ModelManagerOptions::default().queue_capacity, 32);
+    assert!(ModelManagerOptions::default().model_lease_root.is_none());
     assert!(
         ModelManagerOptions {
             queue_capacity: 0,
@@ -248,6 +250,43 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
         ModelKey::from_config(&second).unwrap()
     );
     assert!(ContextKey::for_conversation(&first, " ").is_err());
+}
+
+#[test]
+fn loaded_model_holds_a_path_lease_until_shutdown() {
+    let root = temp_root("model-lease");
+    let lease_root = root.join("leases");
+    let control = Arc::new(FakeControl::default());
+    let options = ModelManagerOptions::default().with_model_lease_root(&lease_root);
+    let mut manager = manager(options, control);
+    let model = config("leased.gguf");
+    manager
+        .handle()
+        .generate(job(&root, &model, "lease", 1))
+        .unwrap();
+
+    let leases = std::fs::read_dir(&lease_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(leases.len(), 1);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&leases[0]).unwrap()).unwrap();
+    assert_eq!(record["version"], 1);
+    assert_eq!(record["paths"][0], "/models/leased.gguf");
+    let competing = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&leases[0])
+        .unwrap();
+    assert!(matches!(
+        competing.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+
+    manager.shutdown().unwrap();
+    assert!(!leases[0].exists());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -303,6 +342,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
             input: serde_json::json!({}),
             checkpoint: None,
             effective_policy_hash: None,
+            execution_context: test_execution_context(),
             budget: agl_store::RunBudget::default(),
             not_before_ms: None,
         })
@@ -371,6 +411,25 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
     );
     manager.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    agl_process::ExecutionContextSnapshot {
+        workspace_root: workspace.clone(),
+        working_directory: workspace,
+        private_execution_roots: Vec::new(),
+        shell: agl_process::ShellProfileSnapshot {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+            environment_names: vec!["PATH".to_owned()],
+            executable_digest: "sha256:test-shell".to_owned(),
+            config_digest: "sha256:test-config".to_owned(),
+        },
+        revision: 1,
+        profile_metadata: "workspace".to_owned(),
+    }
 }
 
 #[test]
@@ -490,9 +549,17 @@ fn bounded_fifo_queue_rejects_overflow_and_skips_cancelled_jobs() {
         second.join().unwrap().unwrap_err(),
         ModelManagerError::Cancelled
     );
+    wait_for_queue_depth(&handle, 1);
+
+    let replacement_handle = handle.clone();
+    let replacement_job = job(&root, &config, "d", 4);
+    let replacement = thread::spawn(move || replacement_handle.generate(replacement_job));
+    wait_for_queue_depth(&handle, 2);
+
     control.set_blocked(false);
     first.join().unwrap().unwrap();
     third.join().unwrap().unwrap();
+    replacement.join().unwrap().unwrap();
     wait_until_idle(&handle);
 
     let generated: Vec<_> = control
@@ -505,6 +572,7 @@ fn bounded_fifo_queue_rejects_overflow_and_skips_cancelled_jobs() {
         vec![
             format!("generate:{}", attempt_id(1)),
             format!("generate:{}", attempt_id(3)),
+            format!("generate:{}", attempt_id(4)),
         ]
     );
     assert_eq!(handle.status().unwrap().cancellations, 1);
@@ -536,6 +604,12 @@ fn active_cancellation_and_queued_deadline_are_typed() {
         deadline.join().unwrap().unwrap_err(),
         ModelManagerError::DeadlineExceeded
     );
+    wait_for_queue_depth(&handle, 0);
+
+    let replacement_handle = handle.clone();
+    let replacement_job = job(&root, &config, "replacement", 3);
+    let replacement = thread::spawn(move || replacement_handle.generate(replacement_job));
+    wait_for_queue_depth(&handle, 1);
 
     cancellation.cancel();
     assert_eq!(
@@ -543,6 +617,7 @@ fn active_cancellation_and_queued_deadline_are_typed() {
         ModelManagerError::Cancelled
     );
     control.set_blocked(false);
+    replacement.join().unwrap().unwrap();
     wait_until_idle(&handle);
     let operations = control.operations();
     assert!(
@@ -550,10 +625,72 @@ fn active_cancellation_and_queued_deadline_are_typed() {
             .iter()
             .any(|operation| operation == &format!("generate:{}", attempt_id(2)))
     );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation == &format!("generate:{}", attempt_id(3)))
+    );
     let status = handle.status().unwrap();
     assert_eq!(status.cancellations, 1);
     assert_eq!(status.deadline_exceeded, 1);
     manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shutdown_closes_full_queue_out_of_band_and_releases_all_waiters() {
+    let root = temp_root("shutdown-full");
+    let control = Arc::new(FakeControl::default());
+    control.set_blocked(true);
+    let options = ModelManagerOptions {
+        queue_capacity: 2,
+        ..ModelManagerOptions::default()
+    };
+    let mut manager = manager(options, Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("shutdown.gguf");
+
+    let active_handle = handle.clone();
+    let active_job = job(&root, &config, "active", 1);
+    let active = thread::spawn(move || active_handle.generate(active_job));
+    control.wait_for_started(1);
+
+    let first_pending_handle = handle.clone();
+    let first_pending_job = job(&root, &config, "pending-a", 2);
+    let first_pending = thread::spawn(move || first_pending_handle.generate(first_pending_job));
+    let second_pending_handle = handle.clone();
+    let second_pending_job = job(&root, &config, "pending-b", 3);
+    let second_pending = thread::spawn(move || second_pending_handle.generate(second_pending_job));
+    wait_for_queue_depth(&handle, 2);
+
+    let shutdown_handle = handle.clone();
+    let shutdown = thread::spawn(move || shutdown_handle.shutdown());
+
+    assert_eq!(
+        first_pending.join().unwrap().unwrap_err(),
+        ModelManagerError::Cancelled
+    );
+    assert_eq!(
+        second_pending.join().unwrap().unwrap_err(),
+        ModelManagerError::Cancelled
+    );
+    assert_eq!(
+        active.join().unwrap().unwrap_err(),
+        ModelManagerError::Cancelled
+    );
+    shutdown.join().unwrap().unwrap();
+    assert_eq!(
+        handle.status().unwrap_err(),
+        ModelManagerError::ManagerUnavailable
+    );
+    manager.shutdown().unwrap();
+
+    let generated = control
+        .operations()
+        .into_iter()
+        .filter(|operation| operation.starts_with("generate:"))
+        .collect::<Vec<_>>();
+    assert_eq!(generated, [format!("generate:{}", attempt_id(1))]);
     let _ = std::fs::remove_dir_all(root);
 }
 

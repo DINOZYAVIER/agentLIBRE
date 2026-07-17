@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use agl_capabilities::{
-    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult,
     CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
 use agl_repo::{
@@ -161,7 +161,8 @@ impl RepoTools {
 }
 
 impl ActionHandler for RepoTools {
-    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
             .map(ActionResult::new)
             .map_err(Into::into)

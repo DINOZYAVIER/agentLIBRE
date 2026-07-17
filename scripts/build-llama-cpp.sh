@@ -21,8 +21,26 @@ vulkan_glslang_validator="${AGL_LLAMA_CPP_VULKAN_GLSLANG_VALIDATOR:-$(command -v
 spirv_include_dir="${AGL_LLAMA_CPP_SPIRV_INCLUDE_DIR:-}"
 cmake_prefixes=()
 
+if [[ -n "$vulkan_include_dir" && ! -f "$vulkan_include_dir/vulkan/vulkan.h" ]]; then
+  vulkan_include_dir=""
+fi
+if [[ -n "$vulkan_library" && ! -f "$vulkan_library" ]]; then
+  vulkan_library=""
+fi
+if [[ -z "$vulkan_glslc" || ! -x "$vulkan_glslc" ]]; then
+  vulkan_glslc="$(command -v glslc || true)"
+fi
+if [[ -z "$vulkan_glslang_validator" || ! -x "$vulkan_glslang_validator" ]]; then
+  vulkan_glslang_validator="$(command -v glslangValidator || true)"
+fi
+
 if [[ -z "$vulkan_include_dir" ]]; then
-  for candidate in /run/current-system/sw/include /nix/store/*-vulkan-headers-*/include; do
+  for candidate in \
+    /run/current-system/sw/include \
+    /usr/local/include \
+    /usr/include \
+    /nix/store/*-vulkan-headers-*/include
+  do
     if [[ -f "$candidate/vulkan/vulkan.h" ]]; then
       vulkan_include_dir="$candidate"
       break
@@ -31,12 +49,35 @@ if [[ -z "$vulkan_include_dir" ]]; then
 fi
 
 if [[ -z "$vulkan_library" ]]; then
-  for candidate in /run/current-system/sw/lib/libvulkan.so /nix/store/*-vulkan-loader-*/lib/libvulkan.so; do
+  for candidate in \
+    /run/current-system/sw/lib/libvulkan.so \
+    /usr/local/lib/libvulkan.so \
+    /usr/local/lib64/libvulkan.so \
+    /usr/lib/libvulkan.so \
+    /usr/lib64/libvulkan.so \
+    /usr/lib/*/libvulkan.so \
+    /nix/store/*-vulkan-loader-*/lib/libvulkan.so
+  do
     if [[ -f "$candidate" ]]; then
       vulkan_library="$candidate"
       break
     fi
   done
+fi
+
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan; then
+  if [[ -z "$vulkan_include_dir" ]]; then
+    candidate="$(pkg-config --variable=includedir vulkan)"
+    if [[ -f "$candidate/vulkan/vulkan.h" ]]; then
+      vulkan_include_dir="$candidate"
+    fi
+  fi
+  if [[ -z "$vulkan_library" ]]; then
+    candidate="$(pkg-config --variable=libdir vulkan)/libvulkan.so"
+    if [[ -f "$candidate" ]]; then
+      vulkan_library="$candidate"
+    fi
+  fi
 fi
 
 for candidate in /nix/store/*-spirv-headers-*/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake; do
@@ -67,10 +108,19 @@ if [[ -n "$spirv_include_dir" ]]; then
   export CXXFLAGS="$cxx_flags"
 fi
 
+vulkan_enabled=OFF
+if [[ -n "$vulkan_include_dir" && -n "$vulkan_library" && \
+      ( -n "$vulkan_glslc" || -n "$vulkan_glslang_validator" ) ]]; then
+  vulkan_enabled=ON
+fi
+
 cmake_args=(
   -S "$source_dir"
   -B "$build_dir"
-  -DGGML_VULKAN=ON \
+  -DGGML_BACKEND_DL=ON \
+  -DGGML_CPU_ALL_VARIANTS=ON \
+  -DGGML_NATIVE=OFF \
+  -DGGML_VULKAN="$vulkan_enabled" \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_TOOLS=ON \
@@ -78,6 +128,27 @@ cmake_args=(
   -DLLAMA_BUILD_APP=OFF \
   -DMTMD_VIDEO=OFF
 )
+
+printf 'llama.cpp dynamic backends: CPU=ON Vulkan=%s\n' "$vulkan_enabled"
+
+# The old statically linked backend build used these same output names. Remove
+# them before configuring dynamic modules so a disabled backend cannot survive
+# as a stale load candidate in an incremental build directory.
+shopt -s nullglob
+stale_backend_libraries=(
+  "$build_dir"/bin/libggml-cpu.so*
+  "$build_dir"/bin/libggml-vulkan.so*
+)
+shopt -u nullglob
+if [[ ${#stale_backend_libraries[@]} -gt 0 ]]; then
+  cmake -E rm -f "${stale_backend_libraries[@]}"
+fi
+if [[ "$vulkan_enabled" == "ON" ]]; then
+  # llama.cpp configures its shader generator as a nested ExternalProject. Its
+  # cache can otherwise retain extension flags after a compiler/toolchain
+  # change and produce a loadable-looking module with unresolved shader data.
+  cmake -E rm -rf "$build_dir/ggml/src/ggml-vulkan"
+fi
 
 if [[ -n "$vulkan_include_dir" ]]; then
   cmake_args+=("-DVulkan_INCLUDE_DIR=$vulkan_include_dir")
@@ -97,6 +168,28 @@ fi
 
 cmake "${cmake_args[@]}"
 
-cmake --build "$build_dir" --target llama llama-common mtmd --parallel "$jobs"
+cmake --build "$build_dir" --target llama llama-common mtmd llama-completion --parallel "$jobs"
+
+if [[ "$vulkan_enabled" == "ON" ]]; then
+  vulkan_module="$build_dir/bin/libggml-vulkan.so"
+  [[ -f "$vulkan_module" ]] || {
+    echo "Vulkan backend build did not produce $vulkan_module" >&2
+    exit 1
+  }
+  command -v ldd >/dev/null 2>&1 || {
+    echo "ldd is required to validate the Vulkan backend" >&2
+    exit 1
+  }
+  relocation_report="$(ldd -r "$vulkan_module" 2>&1)"
+  if [[ "$relocation_report" == *"undefined symbol:"* ]]; then
+    echo "Vulkan backend contains unresolved symbols:" >&2
+    while IFS= read -r line; do
+      if [[ "$line" == *"undefined symbol:"* ]]; then
+        printf '%s\n' "$line" >&2
+      fi
+    done <<<"$relocation_report"
+    exit 1
+  fi
+fi
 
 printf '%s\n' "$build_dir/bin"

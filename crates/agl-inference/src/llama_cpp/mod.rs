@@ -5,4 +5,9 @@ mod runtime;
 
 pub(crate) use agl_llama_cpp_sys as ffi;
 
-pub use runtime::LlamaCppModelRuntime;
+#[cfg(test)]
+pub(crate) use generation::NativeAbortTestProbe;
+
+pub use runtime::{
+    LlamaCppDeviceInfo, LlamaCppDeviceKind, LlamaCppModelRuntime, llama_cpp_device_inventory,
+};

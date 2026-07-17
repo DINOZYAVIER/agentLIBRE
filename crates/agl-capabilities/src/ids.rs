@@ -40,12 +40,20 @@ impl IdentifierError {
 
 impl Display for IdentifierError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} ID must use lowercase ASCII letters, digits, hyphens, underscores, dots, or one namespace colon: {}",
-            self.kind.as_str(),
-            self.value
-        )
+        if self.kind == IdentifierKind::Hook {
+            write!(
+                formatter,
+                "hook ID must be provider-qualified as `<provider>:<hook>` using lowercase ASCII letters, digits, hyphens, underscores, and dots: {}",
+                self.value
+            )
+        } else {
+            write!(
+                formatter,
+                "{} ID must use lowercase ASCII letters, digits, hyphens, underscores, dots, or one namespace colon: {}",
+                self.kind.as_str(),
+                self.value
+            )
+        }
     }
 }
 
@@ -71,15 +79,27 @@ fn validate_identifier(kind: IdentifierKind, value: &str) -> Result<(), Identifi
     }
 }
 
+fn validate_hook_identifier(kind: IdentifierKind, value: &str) -> Result<(), IdentifierError> {
+    validate_identifier(kind, value)?;
+    if value.matches(':').count() == 1 {
+        Ok(())
+    } else {
+        Err(IdentifierError {
+            kind,
+            value: value.to_owned(),
+        })
+    }
+}
+
 macro_rules! identifier_type {
-    ($name:ident, $kind:expr) => {
+    ($name:ident, $kind:expr, $validator:ident) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(String);
 
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
                 let value = value.into();
-                validate_identifier($kind, &value)?;
+                $validator($kind, &value)?;
                 Ok(Self(value))
             }
 
@@ -123,7 +143,27 @@ macro_rules! identifier_type {
     };
 }
 
-identifier_type!(CapabilityId, IdentifierKind::Capability);
-identifier_type!(ProviderId, IdentifierKind::Provider);
-identifier_type!(HookId, IdentifierKind::Hook);
-identifier_type!(SkillId, IdentifierKind::Skill);
+identifier_type!(
+    CapabilityId,
+    IdentifierKind::Capability,
+    validate_identifier
+);
+identifier_type!(ProviderId, IdentifierKind::Provider, validate_identifier);
+identifier_type!(HookId, IdentifierKind::Hook, validate_hook_identifier);
+identifier_type!(SkillId, IdentifierKind::Skill, validate_identifier);
+
+impl HookId {
+    pub fn provider_namespace(&self) -> &str {
+        self.0
+            .split_once(':')
+            .expect("validated hook IDs are provider-qualified")
+            .0
+    }
+
+    pub fn local_name(&self) -> &str {
+        self.0
+            .split_once(':')
+            .expect("validated hook IDs are provider-qualified")
+            .1
+    }
+}

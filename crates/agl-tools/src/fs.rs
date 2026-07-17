@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_action_args as parse_args};
 use agl_capabilities::{
-    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
+    ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult,
     CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
 use agl_repo::{ArtifactAccess, ArtifactPathHandleRequest};
@@ -343,8 +343,9 @@ impl CoreTools {
 impl ActionHandler for CoreTools {
     fn dispatch(
         &self,
-        invocation: ActionInvocation,
+        context: ActionDispatchContext,
     ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
         Ok(ActionResult::new(data))
     }

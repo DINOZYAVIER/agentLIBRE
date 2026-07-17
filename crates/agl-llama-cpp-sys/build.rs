@@ -2,14 +2,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const REQUIRED_LIBRARIES: [&str; 7] = [
+const REQUIRED_LIBRARIES: [&str; 5] = [
     "libllama-common.so",
     "libmtmd.so",
     "libllama.so",
     "libggml.so",
     "libggml-base.so",
-    "libggml-cpu.so",
-    "libggml-vulkan.so",
 ];
 
 fn main() {
@@ -81,23 +79,27 @@ fn main() {
     );
     println!("cargo:metadata=library_dir={}", lib_dir.display());
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    for library in [
-        "llama-common",
-        "mtmd",
-        "llama",
-        "ggml",
-        "ggml-base",
-        "ggml-cpu",
-        "ggml-vulkan",
-    ] {
+    for library in ["llama-common", "mtmd", "llama", "ggml", "ggml-base"] {
         println!("cargo:rustc-link-lib=dylib={library}");
     }
 }
 
-fn missing_required_library(lib_dir: &Path) -> Option<&'static str> {
-    REQUIRED_LIBRARIES
+fn missing_required_library(lib_dir: &Path) -> Option<String> {
+    if let Some(library) = REQUIRED_LIBRARIES
         .into_iter()
         .find(|library| !lib_dir.join(library).is_file())
+    {
+        return Some(library.to_string());
+    }
+    let has_cpu_backend = std::fs::read_dir(lib_dir).ok().is_some_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("libggml-cpu-") && name.ends_with(".so"))
+        })
+    });
+    (!has_cpu_backend).then(|| "libggml-cpu-*.so".to_string())
 }
 
 fn env_flag(name: &str) -> bool {

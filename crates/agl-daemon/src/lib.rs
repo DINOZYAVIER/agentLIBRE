@@ -13,4 +13,7 @@ pub use scheduler::{
     NoopCronNotifier, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 pub use server::DaemonServer;
+#[cfg(unix)]
+#[doc(hidden)]
+pub use server::serve_connection;
 pub use state::{DaemonState, SharedDaemonState};

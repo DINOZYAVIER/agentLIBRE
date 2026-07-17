@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use agl_capabilities::{
-    ActionDeclaration, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
-    ActionVisibility, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
+    ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult,
+    CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
 use agl_store::{AglStore, PermissionGrantDraft, PermissionRequestDraft, PermissionRequestRecord};
 use anyhow::{Context, Result, bail};
@@ -18,10 +18,11 @@ pub const PERMISSIONS_REQUEST_TOOL_ID: &str = "permissions.request";
 pub const PERMISSIONS_GRANT_TOOL_ID: &str = "permissions.grant";
 pub const PERMISSIONS_REVOKE_TOOL_ID: &str = "permissions.revoke";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PermissionTools {
     store_root: PathBuf,
     runtime_status: PermissionRuntimeStatus,
+    process_handle: Option<agl_process::ProcessHandle>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,11 +51,17 @@ impl PermissionTools {
         Self {
             store_root: store_root.as_ref().to_path_buf(),
             runtime_status: PermissionRuntimeStatus::default(),
+            process_handle: None,
         }
     }
 
     pub fn with_runtime_status(mut self, runtime_status: PermissionRuntimeStatus) -> Self {
         self.runtime_status = runtime_status;
+        self
+    }
+
+    pub fn with_process_handle(mut self, process_handle: agl_process::ProcessHandle) -> Self {
+        self.process_handle = Some(process_handle);
         self
     }
 
@@ -80,6 +87,7 @@ impl PermissionTools {
                     "request_id": request.id,
                     "tools": request.requested_tools,
                     "max_operation_kind": request.max_operation_kind,
+                    "state_effects": request.state_effects,
                     "sensitive_inputs": request.sensitive_inputs,
                     "duration": request.duration,
                     "status": request.status.as_str(),
@@ -93,6 +101,7 @@ impl PermissionTools {
                     "grant_id": grant.id,
                     "tool_id": grant.tool_id,
                     "max_operation_kind": grant.max_operation_kind,
+                    "state_effects": grant.state_effects,
                     "sensitive_inputs": grant.sensitive_inputs,
                     "duration": grant.duration,
                     "status": grant.status.as_str(),
@@ -110,6 +119,11 @@ impl PermissionTools {
             "pending_request_count": pending_requests.len(),
             "active_grant_count": active_grants.len(),
             "default_duration": "one_turn",
+            "supported_durations": ["one_turn", "session"],
+            "elevated_effect_warnings": {
+                "host_process_execution": "unrestricted daemon-user filesystem and network access",
+                "shell_login_startup": "execution of user-controlled shell startup files"
+            },
             "pending_requests": pending_requests,
             "active_grants": active_grants,
         }))
@@ -123,7 +137,7 @@ impl PermissionTools {
             .unwrap_or(OperationKindArg::Write)
             .as_str()
             .to_string();
-        let duration = args.duration.unwrap_or_else(|| "one_turn".to_string());
+        let duration = args.duration.unwrap_or_default().as_str().to_string();
         let requester_ref = args
             .requester_ref
             .unwrap_or_else(|| "tool:permissions.request".to_string());
@@ -167,7 +181,7 @@ impl PermissionTools {
                         state_effects: args.state_effects.unwrap_or_default(),
                         sensitive_inputs: args.sensitive_inputs.unwrap_or_default(),
                         scope: args.scope.unwrap_or_else(|| serde_json::json!({})),
-                        duration: args.duration.unwrap_or_else(|| "one_turn".to_string()),
+                        duration: args.duration.unwrap_or_default().as_str().to_string(),
                         granted_by_ref: args
                             .granted_by_ref
                             .unwrap_or_else(|| "tool:permissions.grant".to_string()),
@@ -198,6 +212,13 @@ impl PermissionTools {
 
     fn revoke(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
+        let terminated_executions = self
+            .process_handle
+            .as_ref()
+            .map(|process| process.terminate_grant(&args.grant_id))
+            .transpose()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .unwrap_or_default();
         let store = self.open_store_writable()?;
         let grant = store.revoke_permission_grant(&args.grant_id, args.revoke_ref.as_deref())?;
         Ok(json!({
@@ -205,6 +226,7 @@ impl PermissionTools {
             "grant_id": grant.id,
             "tool_id": grant.tool_id,
             "status": grant.status.as_str(),
+            "terminated_executions": terminated_executions,
         }))
     }
 
@@ -230,8 +252,9 @@ impl PermissionTools {
 impl ActionHandler for PermissionTools {
     fn dispatch(
         &self,
-        invocation: ActionInvocation,
+        context: ActionDispatchContext,
     ) -> std::result::Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
         Ok(ActionResult::new(data))
     }
@@ -249,14 +272,12 @@ pub fn declaration() -> ProviderDeclaration {
         "Show pending permission requests and active grants.",
         OperationKind::Read,
         &[],
-        true,
     ))
     .with_action(action::<RequestArgs>(
         PERMISSIONS_REQUEST_TOOL_ID,
         "Create a pending permission request for exact tool IDs; this does not grant access.",
-        OperationKind::Approve,
+        OperationKind::Request,
         &[StateEffect::StorePermissionRequests],
-        true,
     ))
     .with_action(action::<GrantArgs>(
         PERMISSIONS_GRANT_TOOL_ID,
@@ -266,14 +287,12 @@ pub fn declaration() -> ProviderDeclaration {
             StateEffect::StorePermissionGrants,
             StateEffect::StorePermissionRequests,
         ],
-        false,
     ))
     .with_action(action::<RevokeArgs>(
         PERMISSIONS_REVOKE_TOOL_ID,
         "Revoke an active permission grant.",
         OperationKind::Approve,
         &[StateEffect::StorePermissionGrants],
-        false,
     ))
 }
 
@@ -286,7 +305,6 @@ fn action<T: JsonSchema>(
     description: &str,
     operation_kind: OperationKind,
     state_effects: &[StateEffect],
-    visible_in_read_only: bool,
 ) -> ActionDeclaration {
     ActionDeclaration::from_schema::<T>(
         CapabilityId::new(id).expect("builtin permission tool id is valid"),
@@ -295,9 +313,6 @@ fn action<T: JsonSchema>(
     )
     .expect("builtin permission tool declaration schema is valid")
     .with_state_effects(state_effects.iter().copied())
-    .with_visibility(ActionVisibility {
-        visible_in_read_only,
-    })
 }
 
 fn validate_requested_tools(tools: Vec<String>) -> Result<Vec<String>> {
@@ -336,16 +351,35 @@ fn render_permission_request_result(request: &PermissionRequestRecord) -> Value 
 #[serde(rename_all = "snake_case")]
 enum OperationKindArg {
     Read,
+    Request,
     Write,
     Execute,
     Approve,
     Admin,
 }
 
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PermissionDurationArg {
+    #[default]
+    OneTurn,
+    Session,
+}
+
+impl PermissionDurationArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::OneTurn => "one_turn",
+            Self::Session => "session",
+        }
+    }
+}
+
 impl OperationKindArg {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Request => "request",
             Self::Write => "write",
             Self::Execute => "execute",
             Self::Approve => "approve",
@@ -367,7 +401,7 @@ struct RequestArgs {
     state_effects: Option<Vec<String>>,
     sensitive_inputs: Option<Vec<String>>,
     scope: Option<Value>,
-    duration: Option<String>,
+    duration: Option<PermissionDurationArg>,
     requester_ref: Option<String>,
 }
 
@@ -394,7 +428,7 @@ struct GrantDirectArgs {
     state_effects: Option<Vec<String>>,
     sensitive_inputs: Option<Vec<String>>,
     scope: Option<Value>,
-    duration: Option<String>,
+    duration: Option<PermissionDurationArg>,
     granted_by_ref: Option<String>,
 }
 
@@ -499,7 +533,11 @@ mod tests {
             .action(&CapabilityId::new(PERMISSIONS_REQUEST_TOOL_ID).unwrap())
             .unwrap();
         assert_eq!(request.input_schema["additionalProperties"], false);
-        assert!(request.visibility.visible_in_read_only);
+        assert_eq!(request.operation_kind, OperationKind::Request);
+        assert_eq!(
+            request.state_effects,
+            [StateEffect::StorePermissionRequests].into_iter().collect()
+        );
         let schema = request.compile_schema().unwrap();
         assert!(
             schema

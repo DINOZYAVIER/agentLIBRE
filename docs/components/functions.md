@@ -25,7 +25,7 @@ default function policy, and reports packaged builtin functions:
 
 ```toml
 [functions]
-default = "gemma4-12b"
+default = "gemma4-e4b"
 ```
 
 Use `agl function init` only when creating a custom workspace or global
@@ -127,7 +127,7 @@ version = 1
 profile = "repo-workflow"
 
 [functions]
-default = "gemma4-12b"
+default = "gemma4-e4b"
 ```
 
 The `[functions]` table is the canonical manifest shape. Do not add a
@@ -155,7 +155,7 @@ context. The default selection order is:
 1. `--function <id-or-path>` on the command line.
 2. `[functions].default` from the nearest `.agl/workspace.toml`.
 3. A global user default function, if a later config spec adds one.
-4. The packaged builtin default `gemma4-12b` only when no workspace manifest is
+4. The packaged builtin default `gemma4-e4b` only when no workspace manifest is
    active.
 
 An initialized workspace must carry `[functions].default`. If
@@ -371,6 +371,7 @@ It does not disable the function's skills, subagents, or system prompt context.
 
 Current builtin model functions:
 
+- `gemma4-e4b`: conservative default Gemma4 E4B QAT Q4 config with projector.
 - `gemma4-12b`: packaged Gemma4 12B QAT config.
 - `gemma4-26b`: packaged Gemma4 26B-A4B QAT config.
 - `gemma4-31b`: packaged Gemma4 31B QAT config.
@@ -452,13 +453,17 @@ agl init
 
 Required `agl init` behavior:
 
-- Ensure `.agl/functions/` exists.
-- Write or update `.agl/workspace.toml` with `[functions] default =
-  "gemma4-12b"`.
-- Preserve existing non-function workspace manifest content.
-- In `--dry-run`, report the manifest update without writing it.
-- Print a next step that uses the default path, for example
-  `agl run --prompt "Reply with init-ok"`.
+- Select the conservative pinned `gemma4-e4b` package unless another catalog
+  package is explicit or recorded by an unfinished checkpoint.
+- Acquire and validate the main model and required projector through the
+  standard Hugging Face cache.
+- Stage bindings and a temporary workspace default while setup is incomplete.
+- Run the declared function doctor prompt through the normal session and model
+  manager.
+- Commit explicit bindings and `[functions] default = "gemma4-e4b"` only after
+  smoke succeeds; preserve the previous working default on failure.
+- Resume the same confirmed intent after interruption and print `agl chat` only
+  for a complete ready state.
 
 Low-level direct inference is explicit:
 
@@ -569,7 +574,7 @@ fail malformed front matter and unsafe paths.
 - Default selection tests for `--function`, `[functions].default`, missing
   default, invalid default id, and builtin fallback outside a workspace.
 - CLI tests for `function list`, `show`, `status`, and `init`.
-- CLI tests proving `agl init` writes `[functions] default = "gemma4-12b"` and
+- CLI tests proving `agl init` writes `[functions] default = "gemma4-e4b"` and
   dry-run reports the same planned change.
 - Snapshot or golden tests for rendered function context.
 - Chat tests proving `/reload` refreshes function context without recreating
@@ -586,7 +591,7 @@ fail malformed front matter and unsafe paths.
 2. Add `agl-functions` with parser, schema, registry, validator, renderer, and
    fixtures.
 3. Add `agl function list/show/status/init` and JSON output.
-4. Extend `.agl/workspace.toml` with `[functions] default = "gemma4-12b"` from
+4. Extend `.agl/workspace.toml` with `[functions] default = "gemma4-e4b"` from
    `agl init`.
 5. Make `agl run`, `agl chat`, and `agl serve` resolve the default function
    when `--function` is omitted.

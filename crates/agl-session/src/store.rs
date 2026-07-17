@@ -20,6 +20,7 @@ pub struct SessionMetadata {
     pub updated_at_unix_ms: u128,
     pub local_inference_config_path: PathBuf,
     pub backend: String,
+    pub execution_context: agl_process::ExecutionContextSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -60,6 +61,7 @@ pub enum ChatSessionEvent {
 #[derive(Clone, Debug)]
 pub struct ChatSessionStore {
     machine: ChatSessionMachine,
+    metadata: SessionMetadata,
     session_dir: PathBuf,
     transcript_jsonl: PathBuf,
     run_sequences: BTreeMap<RunId, u64>,
@@ -80,7 +82,11 @@ impl ChatSessionStore {
         session_id: SessionId,
         local_inference_config_path: impl Into<PathBuf>,
         backend: impl Into<String>,
+        execution_context: agl_process::ExecutionContextSnapshot,
     ) -> Result<Self> {
+        execution_context
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let sessions_root = sessions_root.as_ref();
         std::fs::create_dir_all(sessions_root).with_context(|| {
             format!(
@@ -98,11 +104,13 @@ impl ChatSessionStore {
             updated_at_unix_ms: unix_millis(),
             local_inference_config_path: local_inference_config_path.into(),
             backend: backend.into(),
+            execution_context,
         };
         write_new_json(&session_dir.join("session.json"), &metadata)?;
 
         let mut store = Self {
             machine: ChatSessionMachine::new(session_id),
+            metadata,
             session_dir,
             transcript_jsonl,
             run_sequences: BTreeMap::new(),
@@ -133,9 +141,14 @@ impl ChatSessionStore {
             metadata.session_id,
             session_id
         );
+        metadata
+            .execution_context
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         let mut store = Self {
             machine: ChatSessionMachine::new(session_id),
+            metadata,
             transcript_jsonl: session_dir.join("transcript.jsonl"),
             session_dir,
             run_sequences: BTreeMap::new(),
@@ -153,6 +166,143 @@ impl ChatSessionStore {
 
     pub fn session_dir(&self) -> &Path {
         &self.session_dir
+    }
+
+    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+        &self.metadata.execution_context
+    }
+
+    pub fn compare_and_set_execution_context(
+        &mut self,
+        expected_revision: u64,
+        next: agl_process::ExecutionContextSnapshot,
+    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+        next.validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let current = &self.metadata.execution_context;
+        ensure!(
+            current.revision == expected_revision,
+            "session execution context revision changed from expected {expected_revision} to {}",
+            current.revision
+        );
+        ensure!(
+            next.revision
+                == expected_revision
+                    .checked_add(1)
+                    .context("execution context revision overflow")?,
+            "next session execution context revision is not consecutive"
+        );
+        ensure!(
+            next.workspace_root == current.workspace_root
+                && next.private_execution_roots == current.private_execution_roots
+                && next.shell == current.shell,
+            "session workspace, private roots, and shell admission are immutable during cwd update"
+        );
+        let mut metadata = self.metadata.clone();
+        metadata.updated_at_unix_ms = unix_millis();
+        metadata.execution_context = next;
+        replace_json(&self.session_dir.join("session.json"), &metadata)?;
+        self.metadata = metadata;
+        Ok(&self.metadata.execution_context)
+    }
+
+    pub fn compare_and_set_execution_context_at(
+        sessions_root: impl AsRef<Path>,
+        session_id: &SessionId,
+        expected_revision: u64,
+        next: agl_process::ExecutionContextSnapshot,
+    ) -> Result<agl_process::ExecutionContextSnapshot> {
+        next.validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let metadata_path = sessions_root
+            .as_ref()
+            .join(session_id.as_str())
+            .join("session.json");
+        let bytes = std::fs::read(&metadata_path)
+            .with_context(|| format!("failed to read {}", metadata_path.display()))?;
+        let mut metadata: SessionMetadata = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
+        ensure!(
+            &metadata.session_id == session_id,
+            "chat session metadata ID {} does not match requested session {}",
+            metadata.session_id,
+            session_id
+        );
+        let current = &metadata.execution_context;
+        ensure!(
+            current.revision == expected_revision,
+            "session execution context revision changed from expected {expected_revision} to {}",
+            current.revision
+        );
+        ensure!(
+            next.revision
+                == expected_revision
+                    .checked_add(1)
+                    .context("execution context revision overflow")?,
+            "next session execution context revision is not consecutive"
+        );
+        ensure!(
+            next.workspace_root == current.workspace_root
+                && next.private_execution_roots == current.private_execution_roots
+                && next.shell == current.shell,
+            "session workspace, private roots, and shell admission are immutable during cwd update"
+        );
+        metadata.updated_at_unix_ms = unix_millis();
+        metadata.execution_context = next;
+        replace_json(&metadata_path, &metadata)?;
+        Ok(metadata.execution_context)
+    }
+
+    pub fn reload_execution_context(&mut self) -> Result<&agl_process::ExecutionContextSnapshot> {
+        let metadata_path = self.session_dir.join("session.json");
+        let bytes = std::fs::read(&metadata_path)
+            .with_context(|| format!("failed to read {}", metadata_path.display()))?;
+        let metadata: SessionMetadata = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
+        ensure!(
+            metadata.session_id == *self.session_id(),
+            "chat session metadata ID changed while reloading execution context"
+        );
+        metadata
+            .execution_context
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.metadata = metadata;
+        Ok(&self.metadata.execution_context)
+    }
+
+    pub fn reset_workspace_execution_context(
+        &mut self,
+        expected_revision: u64,
+        next: agl_process::ExecutionContextSnapshot,
+    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+        next.validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let current = &self.metadata.execution_context;
+        ensure!(
+            current.revision == expected_revision,
+            "session execution context revision changed from expected {expected_revision} to {}",
+            current.revision
+        );
+        ensure!(
+            next.revision
+                == expected_revision
+                    .checked_add(1)
+                    .context("execution context revision overflow")?,
+            "next session execution context revision is not consecutive"
+        );
+        ensure!(
+            next.working_directory == next.workspace_root
+                && next.private_execution_roots.is_empty()
+                && next.shell == current.shell,
+            "workspace reset must select its root, clear private roots, and retain shell admission"
+        );
+        let mut metadata = self.metadata.clone();
+        metadata.updated_at_unix_ms = unix_millis();
+        metadata.execution_context = next;
+        replace_json(&self.session_dir.join("session.json"), &metadata)?;
+        self.metadata = metadata;
+        Ok(&self.metadata.execution_context)
     }
 
     pub fn transcript_jsonl(&self) -> &Path {
@@ -562,6 +712,39 @@ where
         .with_context(|| format!("failed to create {}", path.display()))?;
     file.write_all(&bytes)
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn replace_json<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize + ?Sized,
+{
+    let bytes = serde_json::to_vec_pretty(value)
+        .with_context(|| format!("failed to serialize JSON {}", path.display()))?;
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("failed to create {}", temporary.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("failed to write {}", temporary.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", temporary.display()))?;
+    std::fs::rename(&temporary, path).with_context(|| {
+        format!(
+            "failed to atomically replace {} from {}",
+            path.display(),
+            temporary.display()
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        let directory = std::fs::File::open(parent)
+            .with_context(|| format!("failed to open {} for sync", parent.display()))?;
+        directory
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 fn unix_millis() -> u128 {

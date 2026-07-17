@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agl_capabilities::{ActionHandler, ActionHandlerError, ActionInvocation, ActionResult};
+use agl_capabilities::{ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult};
 use agl_cron::{
     CronJob, CronJobDraft, CronJobUpdate, CronRepository, CronRun, CronRunAdmission, CronRunStatus,
     CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET, validate_job_draft,
@@ -278,7 +278,8 @@ impl CronTools {
 }
 
 impl ActionHandler for CronTools {
-    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError> {
+    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
+        let invocation = context.into_invocation();
         self.dispatch(invocation.capability_id.as_str(), invocation.arguments)
             .map(ActionResult::new)
             .map_err(Into::into)

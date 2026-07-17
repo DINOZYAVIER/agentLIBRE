@@ -144,7 +144,33 @@ fn assistant_envelope(
 }
 
 fn start_session(root: impl AsRef<std::path::Path>, session_id: SessionId) -> ChatSessionStore {
-    ChatSessionStore::start(root, session_id, TEST_CONFIG_PATH, TEST_BACKEND).unwrap()
+    ChatSessionStore::start(
+        root,
+        session_id,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+        execution_context(),
+    )
+    .unwrap()
+}
+
+fn execution_context() -> agl_process::ExecutionContextSnapshot {
+    let workspace = std::env::temp_dir().canonicalize().unwrap();
+    agl_process::ExecutionContextSnapshot {
+        workspace_root: workspace.clone(),
+        working_directory: workspace,
+        private_execution_roots: Vec::new(),
+        shell: agl_process::ShellProfileSnapshot {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+            environment_names: vec!["PATH".to_owned()],
+            executable_digest: "sha256:test-shell".to_owned(),
+            config_digest: "sha256:test-config".to_owned(),
+        },
+        revision: 1,
+        profile_metadata: "workspace".to_owned(),
+    }
 }
 
 fn start_test_session(root: impl AsRef<std::path::Path>) -> ChatSessionStore {
@@ -533,7 +559,14 @@ fn start_refuses_existing_session_but_allows_precreated_run_directory() {
     std::fs::create_dir_all(root.join(id.as_str()).join("runs").join(TEST_RUN_ID)).unwrap();
     let _store = start_session(&root, id.clone());
 
-    let err = ChatSessionStore::start(&root, id, TEST_CONFIG_PATH, TEST_BACKEND).unwrap_err();
+    let err = ChatSessionStore::start(
+        &root,
+        id,
+        TEST_CONFIG_PATH,
+        TEST_BACKEND,
+        execution_context(),
+    )
+    .unwrap_err();
     assert!(format!("{err:#}").contains("chat session already exists"));
 
     std::fs::remove_dir_all(root).unwrap();

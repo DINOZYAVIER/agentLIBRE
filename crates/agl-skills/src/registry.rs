@@ -321,14 +321,14 @@ mod tests {
                 .by_pack("agl")
                 .map(|skill| skill.harness.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["repo-status", "skill"]
+            vec!["process", "repo-status", "skill"]
         );
     }
 
     #[test]
     fn registry_indexes_required_hooks() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
-        let hook_id = HookId::new("skill_manifest.validate").unwrap();
+        let hook_id = HookId::new("core:skill_manifest.validate").unwrap();
 
         let skills = registry
             .requiring_hook(&hook_id)
@@ -427,9 +427,9 @@ mod tests {
             SkillRegistryError::MissingRequiredHooks {
                 id: "skill".to_string(),
                 hooks: vec![
-                    HookId::new("repo_path.validate").unwrap(),
-                    HookId::new("secret_scan.validate").unwrap(),
-                    HookId::new("skill_manifest.validate").unwrap(),
+                    HookId::new("core:repo_path.validate").unwrap(),
+                    HookId::new("core:secret_scan.validate").unwrap(),
+                    HookId::new("core:skill_manifest.validate").unwrap(),
                 ],
             }
         );
@@ -463,9 +463,9 @@ mod tests {
             SkillRegistryError::MissingRequiredHooks {
                 id: "skill".to_string(),
                 hooks: vec![
-                    HookId::new("repo_path.validate").unwrap(),
-                    HookId::new("secret_scan.validate").unwrap(),
-                    HookId::new("skill_manifest.validate").unwrap(),
+                    HookId::new("core:repo_path.validate").unwrap(),
+                    HookId::new("core:secret_scan.validate").unwrap(),
+                    HookId::new("core:skill_manifest.validate").unwrap(),
                 ],
             }
         );
@@ -494,20 +494,20 @@ mod tests {
     }
 
     fn core_guard_declaration() -> ProviderDeclaration {
-        ProviderDeclaration::builtin(ProviderId::new("core-guards").unwrap(), "Core Guards", "1")
+        ProviderDeclaration::builtin(ProviderId::new("core").unwrap(), "Core Guards", "1")
             .unwrap()
             .with_hook(HookDeclaration {
-                id: HookId::new("repo_path.validate").unwrap(),
+                id: HookId::new("core:repo_path.validate").unwrap(),
                 event: HookEvent::ArtifactWrite,
                 required: true,
             })
             .with_hook(HookDeclaration {
-                id: HookId::new("secret_scan.validate").unwrap(),
+                id: HookId::new("core:secret_scan.validate").unwrap(),
                 event: HookEvent::ArtifactWrite,
                 required: true,
             })
             .with_hook(HookDeclaration {
-                id: HookId::new("skill_manifest.validate").unwrap(),
+                id: HookId::new("core:skill_manifest.validate").unwrap(),
                 event: HookEvent::ArtifactWrite,
                 required: true,
             })

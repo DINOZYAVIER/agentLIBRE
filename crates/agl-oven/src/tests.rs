@@ -309,14 +309,51 @@ fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
 }
 
 #[test]
-fn rejects_gemma_function_call_nested_arguments_explicitly() {
+fn renders_nested_gemma_function_call_arguments() {
     let request = ModelRequest {
         run_id: run_id(),
         turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
-            name: "read_file".to_string(),
-            arguments: json!({"path": {"nested": "README.MD"}}),
+            name: "process.exec".to_string(),
+            arguments: json!({
+                "program": "/usr/bin/printf",
+                "args": ["PTY_LIVE_OK"],
+                "options": {
+                    "env": {"MODE": "live"},
+                    "stdin": null,
+                },
+                "terminal_size": [120, 40],
+            }),
+        }],
+        visible_tools: Vec::new(),
+    };
+    let config = ModelConfig {
+        dialect: ModelDialect::Gemma4,
+        tool_call_format: ToolCallFormat::GemmaFunctionCall,
+    };
+
+    let rendered = render_model_request(&request, &config).unwrap();
+
+    assert_eq!(
+        rendered_text(&rendered.messages[0]),
+        r#"<|tool_call>call:process.exec{args:[<|"|>PTY_LIVE_OK<|"|>],options:{env:{MODE:<|"|>live<|"|>},stdin:null},program:<|"|>/usr/bin/printf<|"|>,terminal_size:[120,40]}<tool_call|>"#
+    );
+}
+
+#[test]
+fn rejects_gemma_function_call_arguments_beyond_the_nesting_limit() {
+    let mut nested = json!(0);
+    for _ in 0..33 {
+        nested = json!([nested]);
+    }
+    let request = ModelRequest {
+        run_id: run_id(),
+        turn_id: turn_id(),
+        request_index: 1,
+        messages: vec![TurnMessage::AssistantToolCall {
+            name: "test.deep".to_string(),
+            arguments: json!({"value": nested}),
         }],
         visible_tools: Vec::new(),
     };
@@ -327,9 +364,5 @@ fn rejects_gemma_function_call_nested_arguments_explicitly() {
 
     let error = render_model_request(&request, &config).unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("Gemma function calls support scalar argument values only")
-    );
+    assert!(error.to_string().contains("argument nesting exceeds 32"));
 }

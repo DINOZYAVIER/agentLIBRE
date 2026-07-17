@@ -16,3 +16,9 @@ function inference config and model are loaded when the chat session starts;
 start a new chat or run command after changing --config, function model.config,
 function model.profile, or the profile TOML. Use agl inference chat for direct
 config debugging.
+
+Process controls use the chat's own supervisor: /pwd, /cd PATH, /cd --host
+PATH, /processes, /attach EXECUTION_ID [--read-only], and /kill EXECUTION_ID
+[--immediate]. Press Ctrl-] to detach from a PTY without killing it. A separate
+top-level agl process command controls daemon-owned executions and cannot claim
+this chat's process-local handles.

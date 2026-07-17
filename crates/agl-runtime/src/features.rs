@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP: usize = 1800;
+pub const DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP: usize = 512;
 
 /// Informational product-surface metadata; this is not an executable capability declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,27 +188,22 @@ pub fn render_runtime_feature_context(
     } else {
         options.char_cap
     };
-    let mut selected = features.iter().collect::<Vec<_>>();
-    let mut content = render_context(&selected, &options);
-    let mut truncated = false;
-
-    while content.chars().count() > cap && selected.len() > 5 {
-        truncated = true;
-        if let Some(index) = selected
-            .iter()
-            .rposition(|feature| !matches!(feature.id, "cron" | "filesystem_tools"))
-        {
-            selected.remove(index);
-            content = render_context(&selected, &options);
-        } else {
-            break;
-        }
-    }
-
-    let feature_ids = selected
+    let available_tools = options
+        .available_model_tools
         .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let feature_ids = features
+        .iter()
+        .filter(|feature| {
+            feature
+                .model_tools
+                .iter()
+                .any(|tool| available_tools.contains(tool))
+        })
         .map(|feature| feature.id.to_string())
-        .collect::<Vec<_>>();
+        .collect();
+    let content = render_context(&options);
     let rendered_chars = content.chars().count();
     RenderedRuntimeFeatureContext {
         content,
@@ -216,7 +212,7 @@ pub fn render_runtime_feature_context(
             tool_mode: options.tool_mode.to_string(),
             rendered_chars,
             budget_cap_chars: cap,
-            truncated,
+            truncated: rendered_chars > cap,
             registry_hash: runtime_feature_registry_hash(features),
         },
     }
@@ -243,51 +239,22 @@ pub fn runtime_feature_registry_hash(features: &[RuntimeFeature]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn render_context(
-    features: &[&RuntimeFeature],
-    options: &RuntimeFeatureRenderOptions<'_>,
-) -> String {
+fn render_context(options: &RuntimeFeatureRenderOptions<'_>) -> String {
     let mut content = String::new();
-    content.push_str("<agentlibre_runtime_features>\n");
+    content.push_str("<agentlibre_runtime>\n");
     content.push_str("version: agl ");
     content.push_str(options.version);
     content.push('\n');
-    if let Some(workspace_root) = options.workspace_root {
-        content.push_str("workspace: ");
-        content.push_str(&workspace_root.display().to_string());
-        content.push('\n');
+    if options.workspace_root.is_some() {
+        content.push_str("workspace: active\n");
     }
     content.push_str("tool_mode: ");
     content.push_str(options.tool_mode);
     content.push('\n');
-    content.push_str("model_tools: ");
-    if options.available_model_tools.is_empty() {
-        content.push_str("none");
-    } else {
-        content.push_str(&options.available_model_tools.join(", "));
-    }
-    content.push_str("\n\nInformational runtime features:\n");
-    for feature in features {
-        content.push_str("- ");
-        content.push_str(feature.id);
-        content.push_str(": ");
-        content.push_str(feature.summary);
-        if !feature.read_only_actions.is_empty() {
-            content.push_str("; read-only: ");
-            content.push_str(&feature.read_only_actions.join(", "));
-        }
-        if !feature.write_actions.is_empty() {
-            content.push_str("; write: ");
-            content.push_str(&feature.write_actions.join(", "));
-        }
-        content.push_str(".\n");
-    }
-    if options.tool_mode == "read-only" {
-        content.push_str("Read-only mode: do not offer to schedule, run, send, lock, trust, revoke, or write. If permissions.request is listed, request exact tools; otherwise explain the CLI/daemon path.\n");
-    }
-    content.push_str("Information only: runtime feature IDs describe available product surfaces; they are not executable capability IDs, tool names, or permissions.\n");
-    content.push_str("Invocation boundary: call only exact names listed in model_tools/tool_context. Do not call cron, matrix, skills, repo, store, memory, notes, permissions, or daemon unless that exact name appears there.\n");
-    content.push_str("</agentlibre_runtime_features>\n");
+    content.push_str(
+        "Only the tool schemas supplied for this turn are callable. Other product surfaces are not loaded.\n",
+    );
+    content.push_str("</agentlibre_runtime>\n");
     content
 }
 
@@ -333,37 +300,25 @@ mod tests {
             char_cap: DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP,
         });
 
-        assert!(rendered.content.contains("<agentlibre_runtime_features>"));
+        assert!(rendered.content.contains("<agentlibre_runtime>"));
         assert!(rendered.content.contains("version: agl 1.0.0-alpha.test"));
-        assert!(rendered.content.contains("workspace: /repo"));
+        assert!(rendered.content.contains("workspace: active"));
         assert!(rendered.content.contains("tool_mode: read-only"));
         assert!(
             rendered
                 .content
-                .contains("model_tools: fs.list, fs.read, fs.search")
+                .contains("Only the tool schemas supplied for this turn are callable")
         );
-        assert!(rendered.content.contains("- cron:"));
-        assert!(
-            rendered
-                .content
-                .contains("read-only: list, show, history, preflight")
+        assert!(!rendered.content.contains("model_tools:"));
+        assert!(!rendered.content.contains("cron"));
+        assert!(!rendered.content.contains("memory"));
+        assert_eq!(
+            rendered.evidence.feature_ids,
+            vec!["filesystem_tools".to_string()]
         );
-        assert!(rendered.content.contains("write: add, delete, run, tick"));
-        assert!(rendered.content.contains("Informational runtime features:"));
-        assert!(rendered.content.contains("Information only:"));
-        assert!(rendered.content.contains("not executable capability IDs"));
-        assert!(
-            rendered
-                .content
-                .contains("Do not call cron, matrix, skills")
-        );
-        assert!(
-            rendered
-                .content
-                .contains("Read-only mode: do not offer to schedule")
-        );
-        assert!(rendered.evidence.feature_ids.contains(&"cron".to_string()));
         assert_eq!(rendered.evidence.tool_mode, "read-only");
+        assert!(rendered.evidence.rendered_chars <= DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP);
+        assert!(!rendered.evidence.truncated);
         assert!(!rendered.evidence.registry_hash.is_empty());
     }
 }

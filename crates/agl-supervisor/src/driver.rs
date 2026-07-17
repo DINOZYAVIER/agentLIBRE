@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use agl_capabilities::CancellationSignal;
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{RunId, StepId};
 use agl_store::{DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
@@ -24,6 +25,12 @@ impl RunCancellation {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl CancellationSignal for RunCancellation {
+    fn is_cancelled(&self) -> bool {
+        RunCancellation::is_cancelled(self)
     }
 }
 

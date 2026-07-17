@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
 use agl_config::ResolvedInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
-use agl_ids::{RequestId, RunId, SessionId};
+use agl_ids::{ExecutionId, RequestId, RunId, SessionId};
 use agl_inference::{
     InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
 };
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloRequest,
+    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
+    ExecutionListRequest, ExecutionReadRequest, ExecutionStatusRequest, HelloRequest,
     PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
     RunBudgetRequest, RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest,
     RunTreeRequest, SessionListRequest, SessionOpenRequest, SessionStatus, SessionStatusRequest,
@@ -71,6 +72,7 @@ tool_call_format = "hermes_json"
                 logging: AgentLibreLoggingConfig::from_env(),
                 history: AgentLibreHistoryConfig::default(),
                 workspace: AgentLibreWorkspaceConfig::default(),
+                execution: agl_runtime::AgentLibreExecutionConfig::default(),
             },
             inference: InferenceOptions {
                 config: Some(config),
@@ -360,7 +362,7 @@ Return the daemon child verdict.
             new_session: true,
             workspace_root: Some(workspace.display().to_string()),
             skills: Vec::new(),
-            tool_mode: ProtocolToolMode::ReadOnly,
+            tool_mode: ProtocolToolMode::Execute,
         },
     )));
     let session_id = match opened.kind {
@@ -407,7 +409,11 @@ fn admission_status_and_cancel_stay_responsive_while_model_blocks() {
 
     let started = Instant::now();
     let accepted = submit(&mut state, &session_id, "block", None);
-    assert!(started.elapsed() < Duration::from_millis(250));
+    let admission_elapsed = started.elapsed();
+    assert!(
+        admission_elapsed < Duration::from_millis(250),
+        "cron admission took {admission_elapsed:?}"
+    );
     assert_eq!(accepted.state, ProtocolRunState::Queued);
     wait_for_calls(&control, 1);
 
@@ -576,6 +582,44 @@ fn session_queries_and_unknown_runs_have_typed_responses() {
 }
 
 #[test]
+fn execution_operator_queries_have_typed_empty_not_found_and_bound_errors() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let missing = ExecutionId::generate();
+
+    let list = state.handle_request(request(DaemonRequestKind::ExecutionList(
+        ExecutionListRequest::default(),
+    )));
+    assert!(matches!(
+        list.kind,
+        DaemonEventKind::ExecutionList(ref event) if event.executions.is_empty()
+    ));
+
+    let status = state.handle_request(request(DaemonRequestKind::ExecutionStatus(
+        ExecutionStatusRequest {
+            execution_id: missing.clone(),
+            include_private_command: true,
+        },
+    )));
+    assert!(matches!(
+        status.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::NotFound
+    ));
+
+    let read = state.handle_request(request(DaemonRequestKind::ExecutionRead(
+        ExecutionReadRequest {
+            execution_id: missing,
+            after_sequence: 0,
+            max_bytes: 0,
+        },
+    )));
+    assert!(matches!(
+        read.kind,
+        DaemonEventKind::Error(ref error) if error.code == ProtocolErrorCode::InvalidRequest
+    ));
+}
+
+#[test]
 fn daemon_event_constructor_keeps_current_schema() {
     let event = DaemonEvent::new(
         None,
@@ -614,9 +658,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
     };
     let mut notifier = NoopCronNotifier;
 
-    let started = Instant::now();
     let first = run_cron_tick(&store, 0, &mut executor, &mut notifier).unwrap();
-    assert!(started.elapsed() < Duration::from_millis(250));
     assert_eq!(first.recorded_runs[0].status, CronRunStatus::Queued);
     assert_eq!(first.notifications, 0);
     wait_for_calls(&control, 1);

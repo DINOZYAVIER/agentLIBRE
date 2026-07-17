@@ -71,6 +71,18 @@ impl AgentLibrePaths {
         self.data_dir.join("store")
     }
 
+    pub fn model_install_root(&self) -> PathBuf {
+        self.data_dir.join("models").join("installed")
+    }
+
+    pub fn setup_state_root(&self) -> PathBuf {
+        self.state_dir.join("setup")
+    }
+
+    pub fn model_lease_root(&self) -> PathBuf {
+        self.state_dir.join("models").join("leases")
+    }
+
     pub fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_root().join(session_id.as_str())
     }
@@ -147,6 +159,18 @@ mod tests {
         assert_eq!(
             paths.store_root(),
             PathBuf::from("/tmp/agl-home/data/store")
+        );
+        assert_eq!(
+            paths.model_install_root(),
+            PathBuf::from("/tmp/agl-home/data/models/installed")
+        );
+        assert_eq!(
+            paths.setup_state_root(),
+            PathBuf::from("/tmp/agl-home/state/setup")
+        );
+        assert_eq!(
+            paths.model_lease_root(),
+            PathBuf::from("/tmp/agl-home/state/models/leases")
         );
         assert_eq!(
             paths.app_log_path(),

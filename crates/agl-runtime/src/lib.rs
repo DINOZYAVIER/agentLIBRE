@@ -4,9 +4,10 @@ mod paths;
 mod tracing_setup;
 
 pub use config::{
-    AgentLibreHistoryConfig, AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibreRuntimeConfig,
-    AgentLibreStderrLogMode, AgentLibreWorkspaceConfig, DEFAULT_RUNTIME_CONFIG_TOML,
-    resolve_workspace_root_from, write_default_runtime_config,
+    AgentLibreExecutionConfig, AgentLibreExecutionEnvironmentConfig, AgentLibreHistoryConfig,
+    AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibreRuntimeConfig,
+    AgentLibreShellExecutionConfig, AgentLibreStderrLogMode, AgentLibreWorkspaceConfig,
+    DEFAULT_RUNTIME_CONFIG_TOML, resolve_workspace_root_from, write_default_runtime_config,
 };
 pub use features::{
     DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP, RenderedRuntimeFeatureContext, RuntimeFeature,

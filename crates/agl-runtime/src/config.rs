@@ -1,8 +1,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use agl_process::{
+    EnvironmentOverride, ExecutionContextSnapshot, ProcessSupervisorOptions, ShellProfileSnapshot,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::AgentLibrePaths;
 
@@ -18,6 +23,25 @@ enabled = true
 
 [workspace]
 # root = "/path/to/workspace"
+
+[execution]
+max_active = 8
+default_foreground_timeout_ms = 120000
+maximum_foreground_timeout_ms = 1800000
+termination_grace_ms = 2000
+max_input_bytes = 65536
+max_result_bytes = 65536
+max_spool_bytes = 67108864
+termination_output_headroom_bytes = 1048576
+finished_retention_seconds = 604800
+
+[execution.shell]
+program = "/bin/sh"
+command_args = ["-c"]
+login_command_args = ["-l", "-c"]
+
+[execution.environment]
+inherit = ["PATH", "LANG", "LC_*", "TERM", "COLORTERM", "TZ"]
 "#;
 
 pub fn write_default_runtime_config(path: impl AsRef<Path>, force: bool) -> Result<()> {
@@ -61,6 +85,7 @@ pub struct AgentLibreRuntimeConfig {
     pub logging: AgentLibreLoggingConfig,
     pub history: AgentLibreHistoryConfig,
     pub workspace: AgentLibreWorkspaceConfig,
+    pub execution: AgentLibreExecutionConfig,
 }
 
 impl AgentLibreRuntimeConfig {
@@ -76,6 +101,7 @@ impl AgentLibreRuntimeConfig {
             logging: AgentLibreLoggingConfig::from_file_and_env(file_config.logging),
             history: file_config.history.unwrap_or_default(),
             workspace,
+            execution: file_config.execution.unwrap_or_default().validate()?,
         })
     }
 
@@ -90,6 +116,332 @@ struct AgentLibreRuntimeConfigFile {
     logging: Option<AgentLibreLoggingConfigFile>,
     history: Option<AgentLibreHistoryConfig>,
     workspace: Option<AgentLibreWorkspaceConfig>,
+    execution: Option<AgentLibreExecutionConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLibreExecutionConfig {
+    pub max_active: usize,
+    pub command_capacity: usize,
+    pub default_foreground_timeout_ms: u64,
+    pub maximum_foreground_timeout_ms: u64,
+    pub termination_grace_ms: u64,
+    pub setup_timeout_ms: u64,
+    pub poll_interval_ms: u64,
+    pub max_input_bytes: usize,
+    pub max_result_bytes: usize,
+    pub max_spool_bytes: u64,
+    pub termination_output_headroom_bytes: u64,
+    pub finished_retention_seconds: u64,
+    pub default_terminal_columns: u16,
+    pub default_terminal_rows: u16,
+    pub runtime_read_only_roots: Vec<PathBuf>,
+    pub shell: AgentLibreShellExecutionConfig,
+    pub environment: AgentLibreExecutionEnvironmentConfig,
+}
+
+impl Default for AgentLibreExecutionConfig {
+    fn default() -> Self {
+        Self {
+            max_active: 8,
+            command_capacity: 64,
+            default_foreground_timeout_ms: 120_000,
+            maximum_foreground_timeout_ms: 1_800_000,
+            termination_grace_ms: 2_000,
+            setup_timeout_ms: 10_000,
+            poll_interval_ms: 10,
+            max_input_bytes: 65_536,
+            max_result_bytes: 65_536,
+            max_spool_bytes: 67_108_864,
+            termination_output_headroom_bytes: 1_048_576,
+            finished_retention_seconds: 604_800,
+            default_terminal_columns: 80,
+            default_terminal_rows: 24,
+            runtime_read_only_roots: Vec::new(),
+            shell: AgentLibreShellExecutionConfig::default(),
+            environment: AgentLibreExecutionEnvironmentConfig::default(),
+        }
+    }
+}
+
+impl AgentLibreExecutionConfig {
+    fn validate(mut self) -> Result<Self> {
+        if self.max_active == 0
+            || self.command_capacity == 0
+            || self.default_foreground_timeout_ms == 0
+            || self.maximum_foreground_timeout_ms < self.default_foreground_timeout_ms
+            || self.termination_grace_ms == 0
+            || self.setup_timeout_ms == 0
+            || self.poll_interval_ms == 0
+            || self.max_input_bytes == 0
+            || self.max_input_bytes > 65_536
+            || self.max_result_bytes == 0
+            || self.max_result_bytes > 65_536
+            || self.max_spool_bytes == 0
+            || self.termination_output_headroom_bytes == 0
+            || self.finished_retention_seconds == 0
+            || self.default_terminal_columns == 0
+            || self.default_terminal_rows == 0
+        {
+            bail!("execution limits, timeouts, retention, and terminal dimensions are invalid");
+        }
+        if self.termination_grace_ms >= self.maximum_foreground_timeout_ms {
+            bail!("execution termination grace must be below the maximum foreground timeout");
+        }
+        self.shell.validate()?;
+        self.environment.validate()?;
+        let mut canonical_roots = Vec::with_capacity(self.runtime_read_only_roots.len());
+        for root in &self.runtime_read_only_roots {
+            let canonical = root.canonicalize().with_context(|| {
+                format!(
+                    "failed to canonicalize execution runtime root {}",
+                    root.display()
+                )
+            })?;
+            if !canonical.is_dir() {
+                bail!(
+                    "execution runtime root is not a directory: {}",
+                    root.display()
+                );
+            }
+            canonical_roots.push(canonical);
+        }
+        canonical_roots.sort();
+        canonical_roots.dedup();
+        self.runtime_read_only_roots = canonical_roots;
+        Ok(self)
+    }
+
+    pub fn shell_snapshot(&self) -> Result<ShellProfileSnapshot> {
+        let program =
+            resolve_executable(&self.shell.program, &self.admitted_environment()?.values)?;
+        let metadata = std::fs::metadata(&program)
+            .with_context(|| format!("failed to inspect execution shell {}", program.display()))?;
+        if !metadata.is_file() || !is_executable(&metadata) {
+            bail!(
+                "configured execution shell is not a regular executable: {}",
+                program.display()
+            );
+        }
+        let executable = std::fs::read(&program)
+            .with_context(|| format!("failed to read execution shell {}", program.display()))?;
+        let config_json = serde_json::to_vec(&(
+            &program,
+            &self.shell.command_args,
+            &self.shell.login_command_args,
+            &self.environment.inherit,
+        ))?;
+        Ok(ShellProfileSnapshot {
+            program,
+            command_args: self.shell.command_args.clone(),
+            login_command_args: self.shell.login_command_args.clone(),
+            environment_names: self.admitted_environment()?.values.into_keys().collect(),
+            executable_digest: sha256_digest(&executable),
+            config_digest: sha256_digest(&config_json),
+        })
+    }
+
+    pub fn admitted_environment(&self) -> Result<EnvironmentOverride> {
+        let mut values = std::collections::BTreeMap::new();
+        let mut total_bytes = 0usize;
+        for (name, value) in std::env::vars() {
+            if self.environment.admits(&name) {
+                total_bytes = total_bytes
+                    .saturating_add(name.len())
+                    .saturating_add(value.len());
+                if total_bytes > self.environment.maximum_bytes {
+                    bail!("admitted execution environment exceeds its configured byte limit");
+                }
+                values.insert(name, value);
+            }
+        }
+        let environment = EnvironmentOverride { values };
+        environment
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(environment)
+    }
+
+    pub fn context_snapshot(&self, workspace_root: &Path) -> Result<ExecutionContextSnapshot> {
+        let workspace_root = workspace_root.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize workspace root {}",
+                workspace_root.display()
+            )
+        })?;
+        let snapshot = ExecutionContextSnapshot {
+            workspace_root: workspace_root.clone(),
+            working_directory: workspace_root,
+            private_execution_roots: Vec::new(),
+            shell: self.shell_snapshot()?,
+            revision: 1,
+            profile_metadata: "workspace".to_owned(),
+        };
+        snapshot
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(snapshot)
+    }
+
+    pub fn supervisor_options(
+        &self,
+        paths: &AgentLibrePaths,
+        launcher_path: PathBuf,
+    ) -> Result<ProcessSupervisorOptions> {
+        let options = ProcessSupervisorOptions {
+            launcher_path,
+            data_root: paths.data_dir.join("executions"),
+            state_root: paths.state_dir.join("executions"),
+            max_active: self.max_active,
+            command_capacity: self.command_capacity,
+            poll_interval: Duration::from_millis(self.poll_interval_ms),
+            setup_timeout: Duration::from_millis(self.setup_timeout_ms),
+            termination_grace: Duration::from_millis(self.termination_grace_ms),
+            max_input_bytes: self.max_input_bytes,
+            max_result_bytes: self.max_result_bytes,
+            max_spool_bytes: self.max_spool_bytes,
+            termination_output_headroom_bytes: self.termination_output_headroom_bytes,
+            finished_retention: Duration::from_secs(self.finished_retention_seconds),
+            runtime_read_only_roots: self.runtime_read_only_roots.clone(),
+        };
+        options
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(options)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLibreShellExecutionConfig {
+    pub program: PathBuf,
+    pub command_args: Vec<String>,
+    pub login_command_args: Option<Vec<String>>,
+}
+
+impl Default for AgentLibreShellExecutionConfig {
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from("/bin/sh"),
+            command_args: vec!["-c".to_owned()],
+            login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
+        }
+    }
+}
+
+impl AgentLibreShellExecutionConfig {
+    fn validate(&self) -> Result<()> {
+        if self.program.as_os_str().is_empty()
+            || self.command_args.iter().any(|value| value.contains('\0'))
+            || self
+                .login_command_args
+                .iter()
+                .flatten()
+                .any(|value| value.contains('\0'))
+        {
+            bail!("execution shell program and argument vectors are invalid");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLibreExecutionEnvironmentConfig {
+    pub inherit: Vec<String>,
+    pub maximum_bytes: usize,
+}
+
+impl Default for AgentLibreExecutionEnvironmentConfig {
+    fn default() -> Self {
+        Self {
+            inherit: vec![
+                "PATH".to_owned(),
+                "LANG".to_owned(),
+                "LC_*".to_owned(),
+                "TERM".to_owned(),
+                "COLORTERM".to_owned(),
+                "TZ".to_owned(),
+            ],
+            maximum_bytes: 65_536,
+        }
+    }
+}
+
+impl AgentLibreExecutionEnvironmentConfig {
+    fn validate(&self) -> Result<()> {
+        if self.maximum_bytes == 0 || self.maximum_bytes > 1_048_576 {
+            bail!("execution environment byte limit is invalid");
+        }
+        for pattern in &self.inherit {
+            let prefix = pattern.strip_suffix('*').unwrap_or(pattern);
+            if prefix.is_empty()
+                || prefix.contains(['=', '\0'])
+                || (pattern.contains('*') && !pattern.ends_with('*'))
+            {
+                bail!("execution environment allowlist pattern is invalid: {pattern:?}");
+            }
+        }
+        Ok(())
+    }
+
+    fn admits(&self, name: &str) -> bool {
+        self.inherit.iter().any(|pattern| {
+            pattern
+                .strip_suffix('*')
+                .map_or(name == pattern, |prefix| name.starts_with(prefix))
+        })
+    }
+}
+
+fn resolve_executable(
+    configured: &Path,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Result<PathBuf> {
+    if configured.is_absolute() {
+        return configured.canonicalize().with_context(|| {
+            format!("failed to resolve execution shell {}", configured.display())
+        });
+    }
+    let path = environment
+        .get("PATH")
+        .ok_or_else(|| anyhow::anyhow!("relative execution shell requires admitted PATH"))?;
+    for root in std::env::split_paths(path) {
+        let candidate = root.join(configured);
+        if candidate.is_file() {
+            return candidate.canonicalize().with_context(|| {
+                format!("failed to resolve execution shell {}", candidate.display())
+            });
+        }
+    }
+    bail!(
+        "configured execution shell was not found in admitted PATH: {}",
+        configured.display()
+    )
+}
+
+fn sha256_digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut rendered = String::with_capacity(71);
+    rendered.push_str("sha256:");
+    for byte in digest {
+        write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    rendered
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
 }
 
 impl AgentLibreRuntimeConfigFile {

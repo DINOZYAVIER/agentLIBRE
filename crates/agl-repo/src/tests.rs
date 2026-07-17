@@ -157,6 +157,30 @@ fn init_creates_minimal_manifest_without_implicit_artifacts() {
 }
 
 #[test]
+fn init_with_default_stages_a_fresh_workspace_without_overwriting_an_existing_default() {
+    let root = temp_root("init-staged-default");
+    init_repo_workspace_with_default(&root, &RepoInitOptions::default(), "setup-pending").unwrap();
+    assert_eq!(
+        read_manifest(&root.join(WORKSPACE_MANIFEST_PATH))
+            .unwrap()
+            .functions
+            .default,
+        "setup-pending"
+    );
+
+    init_repo_workspace_with_default(&root, &RepoInitOptions::default(), "replacement").unwrap();
+    assert_eq!(
+        read_manifest(&root.join(WORKSPACE_MANIFEST_PATH))
+            .unwrap()
+            .functions
+            .default,
+        "setup-pending"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn init_repairs_missing_workspace_default_function() {
     let root = temp_root("init-repair-default-function");
     fs::create_dir_all(root.join(".agl")).unwrap();
@@ -1270,6 +1294,12 @@ fn verify_task_specs_checks_only_planned_task_overviews() {
         "---\nstatus: implemented\n---\n\n# Historical task\n",
     )
     .unwrap();
+    fs::create_dir_all(root.join(".agl/tasks/AGL-003")).unwrap();
+    fs::write(
+        root.join(".agl/tasks/AGL-003/00_overview.md"),
+        "---\nstatus: backlog\n---\n\n# Unscheduled task\n",
+    )
+    .unwrap();
 
     let report = verify_task_specs(&root, &TaskSpecVerifyOptions { strict: false }).unwrap();
 
@@ -1290,7 +1320,7 @@ fn verify_task_specs_rejects_unsupported_task_status() {
     let content = fs::read_to_string(&path).unwrap();
     fs::write(
         &path,
-        content.replacen("status: planned", "status: backlog", 1),
+        content.replacen("status: planned", "status: paused", 1),
     )
     .unwrap();
 
@@ -1302,7 +1332,7 @@ fn verify_task_specs_rejects_unsupported_task_status() {
         report.files[0]
             .errors
             .iter()
-            .any(|error| error.contains("unsupported task spec status `backlog`"))
+            .any(|error| error.contains("unsupported task spec status `paused`"))
     );
 
     fs::remove_dir_all(root).unwrap();

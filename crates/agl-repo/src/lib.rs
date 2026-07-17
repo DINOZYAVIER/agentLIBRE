@@ -23,11 +23,22 @@ pub fn init_repo_workspace(
     start: impl AsRef<Path>,
     options: &RepoInitOptions,
 ) -> Result<RepoInitReport> {
+    init_repo_workspace_with_default(start, options, DEFAULT_FUNCTION)
+}
+
+pub fn init_repo_workspace_with_default(
+    start: impl AsRef<Path>,
+    options: &RepoInitOptions,
+    function_default: &str,
+) -> Result<RepoInitReport> {
+    if !is_valid_workspace_function_id(function_default) {
+        bail!("workspace default function has invalid id `{function_default}`");
+    }
     let workspace_root = resolve_repo_root(start)?;
     let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
     let mut changes = Vec::new();
 
-    let manifest = init_manifest(options)?;
+    let manifest = init_manifest(options, function_default)?;
 
     create_dir_change(
         &workspace_root,
@@ -36,7 +47,13 @@ pub fn init_repo_workspace(
         &mut changes,
     )?;
 
-    write_manifest_change(&manifest_path, &manifest, options, &mut changes)?;
+    write_manifest_change(
+        &manifest_path,
+        &manifest,
+        options,
+        function_default,
+        &mut changes,
+    )?;
 
     for artifact in manifest.artifacts.values() {
         if artifact.create.iter().any(|path| path == Path::new(".")) {
@@ -593,7 +610,7 @@ pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
     toml::to_string_pretty(&profile).context("failed to render workspace profile")
 }
 
-fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
+fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<WorkspaceManifest> {
     let manifest = if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;
         if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
@@ -617,6 +634,7 @@ fn init_manifest(options: &RepoInitOptions) -> Result<WorkspaceManifest> {
     };
 
     let mut manifest = manifest;
+    manifest.functions.default = function_default.to_string();
     apply_init_component_overrides(&mut manifest, options)?;
     Ok(manifest)
 }
@@ -799,11 +817,12 @@ fn write_manifest_change(
     manifest_path: &Path,
     manifest: &WorkspaceManifest,
     options: &RepoInitOptions,
+    function_default: &str,
     changes: &mut Vec<RepoInitChange>,
 ) -> Result<()> {
     let relative = PathBuf::from(WORKSPACE_MANIFEST_PATH);
     if manifest_path.exists() && !options.force {
-        if repair_manifest_function_default(manifest_path, options.dry_run)? {
+        if repair_manifest_function_default(manifest_path, options.dry_run, function_default)? {
             changes.push(RepoInitChange {
                 path: relative,
                 action: if options.dry_run {
@@ -852,7 +871,11 @@ fn write_manifest_change(
     Ok(())
 }
 
-fn repair_manifest_function_default(manifest_path: &Path, dry_run: bool) -> Result<bool> {
+fn repair_manifest_function_default(
+    manifest_path: &Path,
+    dry_run: bool,
+    function_default: &str,
+) -> Result<bool> {
     let content = fs::read_to_string(manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     let mut value: toml::Value = toml::from_str(&content)
@@ -880,7 +903,7 @@ fn repair_manifest_function_default(manifest_path: &Path, dry_run: bool) -> Resu
         .expect("functions table was just initialized")
         .insert(
             "default".to_string(),
-            toml::Value::String(DEFAULT_FUNCTION.to_string()),
+            toml::Value::String(function_default.to_string()),
         );
     let repaired =
         toml::to_string_pretty(&value).context("failed to render repaired workspace manifest")?;
@@ -929,6 +952,78 @@ pub fn read_workspace_default_function(workspace_root: impl AsRef<Path>) -> Resu
         );
     }
     Ok(Some(manifest.functions.default))
+}
+
+pub fn write_workspace_default_function(
+    workspace_root: impl AsRef<Path>,
+    function_id: &str,
+) -> Result<()> {
+    if !is_valid_workspace_function_id(function_id) {
+        bail!("workspace default function has invalid id `{function_id}`");
+    }
+    let manifest_path = workspace_root.as_ref().join(WORKSPACE_MANIFEST_PATH);
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut value: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let table = value.as_table_mut().with_context(|| {
+        format!(
+            "workspace manifest root must be a TOML table: {}",
+            manifest_path.display()
+        )
+    })?;
+    let functions = table
+        .entry("functions".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !functions.is_table() {
+        *functions = toml::Value::Table(toml::map::Map::new());
+    }
+    functions
+        .as_table_mut()
+        .expect("functions table was initialized above")
+        .insert(
+            "default".to_string(),
+            toml::Value::String(function_id.to_string()),
+        );
+    let rendered = toml::to_string_pretty(&value)
+        .context("failed to render workspace manifest with new default function")?;
+    atomic_replace(&manifest_path, rendered.as_bytes())
+        .with_context(|| format!("failed to update {}", manifest_path.display()))
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("workspace manifest filename must be UTF-8")?;
+    let temporary = parent.join(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 pub(crate) fn is_not_found(err: &anyhow::Error) -> bool {
@@ -1319,7 +1414,7 @@ fn task_spec_status(markdown: &str) -> std::result::Result<String, String> {
         .map_err(|err| format!("task spec YAML front matter is invalid: {err}"))?;
     if matches!(
         front_matter.status.as_str(),
-        "planned" | "implemented" | "done" | "superseded"
+        "backlog" | "planned" | "implemented" | "done" | "superseded"
     ) {
         Ok(front_matter.status)
     } else {

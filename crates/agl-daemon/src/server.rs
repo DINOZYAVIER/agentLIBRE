@@ -1,29 +1,39 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::InferenceClientHandle;
 use agl_cron::{CronJob, CronRepository, CronRunStatus};
 use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
+use agl_process::{
+    ExecutionCursor, ExecutionState, InputLease, ProcessErrorCode, TerminalSize,
+    WRITABLE_INPUT_LEASE_HEARTBEAT, WRITABLE_INPUT_LEASE_TTL,
+};
 use agl_protocol::{
-    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, ProtocolError,
+    DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
+    ExecutionAttachmentFinishReason, ExecutionAttachmentFinishedEvent,
+    ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionInputAcceptedEvent,
+    ExecutionLeaseRenewedEvent, ExecutionOutputEvent, ExecutionResizeAcceptedEvent, ProtocolError,
     ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
 use anyhow::{Context, Result, bail};
 
-use crate::state::protocol_run_state;
+use crate::state::{process_error, protocol_run_state};
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions,
     SharedDaemonState, render_cron_notification_body, run_cron_tick,
 };
 
 const CONNECTION_WRITER_CAPACITY: usize = 128;
+const EXECUTION_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+#[cfg(unix)]
+use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -49,9 +59,12 @@ impl DaemonServer {
             .context("failed to set daemon socket nonblocking")?;
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
-        let model_manager =
-            ModelManager::spawn(ModelManagerOptions::default(), LlamaCppModelRuntime::new())
-                .context("failed to start daemon model manager")?;
+        let model_manager = ModelManager::spawn(
+            ModelManagerOptions::default()
+                .with_model_lease_root(self.runtime.paths.model_lease_root()),
+            LlamaCppModelRuntime::new(),
+        )
+        .context("failed to start daemon model manager")?;
         let inference_client = InferenceClientHandle::from(model_manager.handle());
         tracing::info!(
             target: "agentlibre::daemon",
@@ -105,7 +118,7 @@ impl DaemonServer {
                     thread::Builder::new()
                         .name("agl-daemon-client".to_string())
                         .spawn(move || {
-                            if let Err(err) = handle_stream(stream, &state) {
+                            if let Err(err) = serve_connection(stream, &state) {
                                 tracing::warn!(target: "agentlibre::daemon", error = %err, "daemon client failed");
                             }
                         })
@@ -352,69 +365,618 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
 }
 
 #[cfg(unix)]
-fn handle_stream(stream: UnixStream, state: &SharedDaemonState) -> Result<()> {
+#[doc(hidden)]
+pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result<()> {
     let writer = stream
         .try_clone()
         .context("failed to clone daemon client stream")?;
-    let (event_sender, event_receiver) = mpsc::sync_channel(CONNECTION_WRITER_CAPACITY);
+    let disconnect = stream
+        .try_clone()
+        .context("failed to clone daemon client stream for disconnect fencing")?;
+    let (raw_event_sender, event_receiver) = mpsc::sync_channel(CONNECTION_WRITER_CAPACITY);
+    let event_sender = ConnectionEventSender {
+        events: raw_event_sender,
+        disconnect: Arc::new(disconnect),
+    };
     thread::Builder::new()
         .name("agl-daemon-writer".to_string())
         .spawn(move || run_connection_writer(writer, event_receiver))
         .context("failed to spawn daemon connection writer")?;
+    let attachments = ConnectionAttachments::default();
     let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let line = line.context("failed to read daemon request")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<DaemonRequest>(&line) {
-            Ok(DaemonRequest {
-                schema,
-                request_id,
-                kind: DaemonRequestKind::RunSubscribe(request),
-            }) => {
-                let _ = schema;
-                let state = state.clone();
-                let sender = event_sender.clone();
-                thread::Builder::new()
-                    .name(format!("agl-daemon-subscribe-{}", request.run_id))
-                    .spawn(move || {
-                        if let Err(error) =
-                            stream_run_subscription(&sender, &state, request_id, request)
-                        {
-                            tracing::debug!(
-                                target: "agentlibre::daemon",
-                                error = %error,
-                                "daemon run subscription ended"
-                            );
-                        }
-                    })
-                    .context("failed to spawn daemon subscription")?;
+    let result = (|| -> Result<()> {
+        for line in reader.lines() {
+            let line = line.context("failed to read daemon request")?;
+            if line.trim().is_empty() {
+                continue;
             }
-            Ok(request) => {
-                queue_event(&event_sender, state.handle_request(request))?;
-            }
-            Err(err) => {
-                queue_event(
+            match serde_json::from_str::<DaemonRequest>(&line) {
+                Ok(DaemonRequest {
+                    schema,
+                    request_id,
+                    kind: DaemonRequestKind::RunSubscribe(request),
+                }) => {
+                    let _ = schema;
+                    let state = state.clone();
+                    let sender = event_sender.clone();
+                    thread::Builder::new()
+                        .name(format!("agl-daemon-subscribe-{}", request.run_id))
+                        .spawn(move || {
+                            if let Err(error) =
+                                stream_run_subscription(&sender, &state, request_id, request)
+                            {
+                                tracing::debug!(
+                                    target: "agentlibre::daemon",
+                                    error = %error,
+                                    "daemon run subscription ended"
+                                );
+                            }
+                        })
+                        .context("failed to spawn daemon subscription")?;
+                }
+                Ok(DaemonRequest {
+                    schema,
+                    request_id,
+                    kind: DaemonRequestKind::ExecutionAttach(request),
+                }) => {
+                    let _ = schema;
+                    let state = state.clone();
+                    let sender = event_sender.clone();
+                    let attachments = attachments.clone();
+                    thread::Builder::new()
+                        .name(format!("agl-daemon-attach-{}", request.execution_id))
+                        .spawn(move || {
+                            if let Err(error) = stream_execution_attachment(
+                                &sender,
+                                &state,
+                                &attachments,
+                                request_id,
+                                request,
+                            ) {
+                                tracing::debug!(
+                                    target: "agentlibre::daemon",
+                                    error = %error,
+                                    "daemon execution attachment ended"
+                                );
+                            }
+                        })
+                        .context("failed to spawn daemon execution attachment")?;
+                }
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::ExecutionLeaseRenew(request),
+                    ..
+                }) => queue_event(
                     &event_sender,
-                    DaemonEvent::new(
-                        None,
-                        DaemonEventKind::Error(ProtocolError::new(
-                            ProtocolErrorCode::InvalidRequest,
-                            format!("invalid daemon request JSON: {err}"),
-                            false,
-                        )),
-                    ),
-                )?;
+                    execution_lease_renew_event(state, &attachments, request_id, request),
+                )?,
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::ExecutionInput(request),
+                    ..
+                }) => queue_event(
+                    &event_sender,
+                    execution_input_event(state, &attachments, request_id, request),
+                )?,
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::ExecutionResize(request),
+                    ..
+                }) => queue_event(
+                    &event_sender,
+                    execution_resize_event(state, &attachments, request_id, request),
+                )?,
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::ExecutionDetach(request),
+                    ..
+                }) => queue_event(
+                    &event_sender,
+                    execution_detach_event(state, &attachments, request_id, request),
+                )?,
+                Ok(request) => {
+                    queue_event(&event_sender, state.handle_request(request))?;
+                }
+                Err(err) => {
+                    queue_event(
+                        &event_sender,
+                        DaemonEvent::new(
+                            None,
+                            DaemonEventKind::Error(ProtocolError::new(
+                                ProtocolErrorCode::InvalidRequest,
+                                format!("invalid daemon request JSON: {err}"),
+                                false,
+                            )),
+                        ),
+                    )?;
+                }
             }
+        }
+        Ok(())
+    })();
+    attachments.release_all(state);
+    result
+}
+
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct ConnectionAttachments {
+    inner: Arc<Mutex<BTreeMap<agl_ids::RequestId, ConnectionAttachment>>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct ConnectionAttachment {
+    execution_id: agl_ids::ExecutionId,
+    lease: InputLease,
+    cursor: u64,
+}
+
+#[cfg(unix)]
+impl ConnectionAttachments {
+    fn get(
+        &self,
+        attachment_id: &agl_ids::RequestId,
+    ) -> std::result::Result<ConnectionAttachment, ProtocolError> {
+        self.inner
+            .lock()
+            .map_err(attachment_lock_error)?
+            .get(attachment_id)
+            .cloned()
+            .ok_or_else(|| attachment_not_found(attachment_id))
+    }
+
+    fn insert(
+        &self,
+        attachment_id: agl_ids::RequestId,
+        attachment: ConnectionAttachment,
+    ) -> std::result::Result<(), ProtocolError> {
+        let replaced = self
+            .inner
+            .lock()
+            .map_err(attachment_lock_error)?
+            .insert(attachment_id, attachment);
+        if replaced.is_some() {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::InvalidRequest,
+                "duplicate execution attachment request ID",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    fn remove(
+        &self,
+        attachment_id: &agl_ids::RequestId,
+    ) -> std::result::Result<Option<ConnectionAttachment>, ProtocolError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(attachment_lock_error)?
+            .remove(attachment_id))
+    }
+
+    fn release_all(&self, state: &SharedDaemonState) {
+        let attachments = match self.inner.lock() {
+            Ok(mut attachments) => std::mem::take(&mut *attachments),
+            Err(_) => return,
+        };
+        let Ok(process) = state.process_handle() else {
+            return;
+        };
+        for attachment in attachments.into_values() {
+            let _ = process.operator_detach(&attachment.execution_id, attachment.lease);
         }
     }
-    Ok(())
+}
+
+#[cfg(unix)]
+fn stream_execution_attachment(
+    sender: &ConnectionEventSender,
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    attachment_id: agl_ids::RequestId,
+    request: agl_protocol::ExecutionAttachRequest,
+) -> Result<()> {
+    let process = state.process_handle()?;
+    let maximum_bytes = state.process_read_limit()?;
+    let lease = match process.operator_attach(
+        &request.execution_id,
+        attachment_id.clone(),
+        request.writable,
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            return queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(attachment_id),
+                    DaemonEventKind::Error(process_error(error)),
+                ),
+            );
+        }
+    };
+    let status = match process.operator_status(&request.execution_id) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = process.operator_detach(&request.execution_id, lease);
+            return queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(attachment_id),
+                    DaemonEventKind::Error(process_error(error)),
+                ),
+            );
+        }
+    };
+    let attachment = ConnectionAttachment {
+        execution_id: request.execution_id.clone(),
+        lease: lease.clone(),
+        cursor: request.after_sequence,
+    };
+    if let Err(error) = attachments.insert(attachment_id.clone(), attachment) {
+        let _ = process.operator_detach(&request.execution_id, lease);
+        return queue_event(
+            sender,
+            DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+        );
+    }
+    if let Err(error) = queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(attachment_id.clone()),
+            DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
+                attachment_id: attachment_id.clone(),
+                status,
+                writable: request.writable,
+                next_sequence: request.after_sequence,
+                lease_ttl_ms: request
+                    .writable
+                    .then_some(WRITABLE_INPUT_LEASE_TTL.as_millis() as u64),
+                heartbeat_interval_ms: request
+                    .writable
+                    .then_some(WRITABLE_INPUT_LEASE_HEARTBEAT.as_millis() as u64),
+            }),
+        ),
+    ) {
+        release_attachment(attachments, &process, &attachment_id);
+        return Err(error);
+    }
+
+    let mut last_cursor = request.after_sequence;
+    loop {
+        let attachment = match attachments.get(&attachment_id) {
+            Ok(attachment) => attachment,
+            Err(error) if error.code == ProtocolErrorCode::NotFound => {
+                let state = process
+                    .operator_status(&request.execution_id)
+                    .map_or(ExecutionState::OutcomeUnknown, |status| status.state);
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(
+                        Some(attachment_id.clone()),
+                        DaemonEventKind::ExecutionAttachmentFinished(
+                            ExecutionAttachmentFinishedEvent {
+                                attachment_id,
+                                execution_id: request.execution_id,
+                                state,
+                                last_delivered_sequence: last_cursor,
+                                reason: ExecutionAttachmentFinishReason::Detached,
+                            },
+                        ),
+                    ),
+                );
+            }
+            Err(error) => {
+                release_attachment(attachments, &process, &attachment_id);
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+                );
+            }
+        };
+        if attachment.lease.writable {
+            match process
+                .operator_input_lease_active(&attachment.execution_id, attachment.lease.clone())
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = attachments.remove(&attachment_id);
+                    let state = process
+                        .operator_status(&request.execution_id)
+                        .map_or(ExecutionState::OutcomeUnknown, |status| status.state);
+                    return queue_event(
+                        sender,
+                        DaemonEvent::new(
+                            Some(attachment_id.clone()),
+                            DaemonEventKind::ExecutionAttachmentFinished(
+                                ExecutionAttachmentFinishedEvent {
+                                    attachment_id,
+                                    execution_id: request.execution_id,
+                                    state,
+                                    last_delivered_sequence: last_cursor,
+                                    reason: ExecutionAttachmentFinishReason::InputLeaseExpired,
+                                },
+                            ),
+                        ),
+                    );
+                }
+                Err(error) if error.code() == ProcessErrorCode::ExecutionNotLive => {}
+                Err(error) => {
+                    release_attachment(attachments, &process, &attachment_id);
+                    return queue_event(
+                        sender,
+                        DaemonEvent::new(
+                            Some(attachment_id),
+                            DaemonEventKind::Error(process_error(error)),
+                        ),
+                    );
+                }
+            }
+        }
+        let output = match process.operator_read(
+            &attachment.execution_id,
+            ExecutionCursor {
+                after_sequence: attachment.cursor,
+            },
+            maximum_bytes,
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                release_attachment(attachments, &process, &attachment_id);
+                let mut error = process_error(error);
+                error.safe_metadata.insert(
+                    "last_delivered_sequence".to_string(),
+                    attachment.cursor.to_string(),
+                );
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+                );
+            }
+        };
+
+        let mut detached = false;
+        for chunk in &output.chunks {
+            let mut active = attachments
+                .inner
+                .lock()
+                .map_err(|error| anyhow::anyhow!(attachment_lock_error(error).message))?;
+            let Some(active_attachment) = active.get_mut(&attachment_id) else {
+                detached = true;
+                break;
+            };
+            if let Err(error) = queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(attachment_id.clone()),
+                    DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                        attachment_id: attachment_id.clone(),
+                        execution_id: request.execution_id.clone(),
+                        chunk: chunk.clone(),
+                        state: output.state,
+                    }),
+                ),
+            ) {
+                drop(active);
+                release_attachment(attachments, &process, &attachment_id);
+                return Err(error);
+            }
+            active_attachment.cursor = chunk.sequence;
+            last_cursor = chunk.sequence;
+        }
+        if detached {
+            continue;
+        }
+
+        let cursor = {
+            let mut active = attachments
+                .inner
+                .lock()
+                .map_err(|error| anyhow::anyhow!(attachment_lock_error(error).message))?;
+            let Some(active_attachment) = active.get_mut(&attachment_id) else {
+                continue;
+            };
+            active_attachment.cursor = output.next_sequence;
+            active_attachment.cursor
+        };
+        last_cursor = cursor;
+        if output.state.is_terminal() && output.chunks.is_empty() {
+            release_attachment(attachments, &process, &attachment_id);
+            return queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(attachment_id.clone()),
+                    DaemonEventKind::ExecutionAttachmentFinished(
+                        ExecutionAttachmentFinishedEvent {
+                            attachment_id,
+                            execution_id: request.execution_id,
+                            state: output.state,
+                            last_delivered_sequence: cursor,
+                            reason: ExecutionAttachmentFinishReason::TargetTerminal,
+                        },
+                    ),
+                ),
+            );
+        }
+        if output.chunks.is_empty() {
+            thread::sleep(EXECUTION_ATTACH_POLL_INTERVAL);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn execution_lease_renew_event(
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::ExecutionLeaseRenewRequest,
+) -> DaemonEvent {
+    let result = (|| -> std::result::Result<DaemonEventKind, ProtocolError> {
+        let attachment = attachments.get(&request.attachment_id)?;
+        state
+            .process_handle()
+            .map_err(daemon_runtime_error)?
+            .operator_renew_input_lease(&attachment.execution_id, attachment.lease)
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionLeaseRenewed(
+            ExecutionLeaseRenewedEvent {
+                attachment_id: request.attachment_id,
+                lease_ttl_ms: WRITABLE_INPUT_LEASE_TTL.as_millis() as u64,
+            },
+        ))
+    })();
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(DaemonEventKind::Error),
+    )
+}
+
+#[cfg(unix)]
+fn execution_input_event(
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::ExecutionInputRequest,
+) -> DaemonEvent {
+    let result = (|| -> std::result::Result<DaemonEventKind, ProtocolError> {
+        let attachment = attachments.get(&request.attachment_id)?;
+        request
+            .bytes
+            .decode(state.process_input_limit().map_err(daemon_runtime_error)?)
+            .map_err(process_error)?;
+        state
+            .process_handle()
+            .map_err(daemon_runtime_error)?
+            .operator_write(
+                &attachment.execution_id,
+                attachment.lease,
+                request.bytes,
+                request.eof,
+            )
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionInputAccepted(
+            ExecutionInputAcceptedEvent {
+                attachment_id: request.attachment_id,
+                eof: request.eof,
+            },
+        ))
+    })();
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(DaemonEventKind::Error),
+    )
+}
+
+#[cfg(unix)]
+fn execution_resize_event(
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::ExecutionResizeRequest,
+) -> DaemonEvent {
+    let result = (|| -> std::result::Result<DaemonEventKind, ProtocolError> {
+        let attachment = attachments.get(&request.attachment_id)?;
+        let terminal_size = TerminalSize {
+            columns: request.columns,
+            rows: request.rows,
+        }
+        .validate()
+        .map_err(process_error)?;
+        state
+            .process_handle()
+            .map_err(daemon_runtime_error)?
+            .operator_resize(&attachment.execution_id, terminal_size)
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionResizeAccepted(
+            ExecutionResizeAcceptedEvent {
+                attachment_id: request.attachment_id,
+                columns: request.columns,
+                rows: request.rows,
+            },
+        ))
+    })();
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(DaemonEventKind::Error),
+    )
+}
+
+#[cfg(unix)]
+fn execution_detach_event(
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::ExecutionDetachRequest,
+) -> DaemonEvent {
+    let result = (|| -> std::result::Result<DaemonEventKind, ProtocolError> {
+        let process = state.process_handle().map_err(daemon_runtime_error)?;
+        let mut active = attachments.inner.lock().map_err(attachment_lock_error)?;
+        let attachment = active
+            .get(&request.attachment_id)
+            .cloned()
+            .ok_or_else(|| attachment_not_found(&request.attachment_id))?;
+        match process.operator_detach(&attachment.execution_id, attachment.lease) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ProcessErrorCode::ExecutionNotLive | ProcessErrorCode::InputLeaseExpired
+                ) => {}
+            Err(error) => return Err(process_error(error)),
+        }
+        active.remove(&request.attachment_id);
+        Ok(DaemonEventKind::ExecutionDetachAccepted(
+            ExecutionDetachAcceptedEvent {
+                attachment_id: request.attachment_id,
+            },
+        ))
+    })();
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(DaemonEventKind::Error),
+    )
+}
+
+#[cfg(unix)]
+fn release_attachment(
+    attachments: &ConnectionAttachments,
+    process: &agl_process::ProcessHandle,
+    attachment_id: &agl_ids::RequestId,
+) {
+    let Ok(Some(attachment)) = attachments.remove(attachment_id) else {
+        return;
+    };
+    let _ = process.operator_detach(&attachment.execution_id, attachment.lease);
+}
+
+#[cfg(unix)]
+fn attachment_not_found(attachment_id: &agl_ids::RequestId) -> ProtocolError {
+    ProtocolError::new(
+        ProtocolErrorCode::NotFound,
+        format!("execution attachment {attachment_id} not found on this connection"),
+        false,
+    )
+}
+
+#[cfg(unix)]
+fn attachment_lock_error<T>(error: std::sync::PoisonError<T>) -> ProtocolError {
+    ProtocolError::new(
+        ProtocolErrorCode::RuntimeFailure,
+        format!("execution attachment registry is poisoned: {error}"),
+        false,
+    )
+}
+
+#[cfg(unix)]
+fn daemon_runtime_error(error: anyhow::Error) -> ProtocolError {
+    ProtocolError::new(ProtocolErrorCode::RuntimeFailure, error.to_string(), false)
 }
 
 #[cfg(unix)]
 fn stream_run_subscription(
-    sender: &mpsc::SyncSender<DaemonEvent>,
+    sender: &ConnectionEventSender,
     state: &SharedDaemonState,
     request_id: agl_ids::RequestId,
     request: agl_protocol::RunSubscribeRequest,
@@ -501,11 +1063,28 @@ fn stream_run_subscription(
 }
 
 #[cfg(unix)]
-fn queue_event(sender: &mpsc::SyncSender<DaemonEvent>, event: DaemonEvent) -> Result<()> {
-    sender.try_send(event).map_err(|error| match error {
-        mpsc::TrySendError::Full(_) => anyhow::anyhow!("daemon connection writer queue is full"),
-        mpsc::TrySendError::Disconnected(_) => {
-            anyhow::anyhow!("daemon connection writer is disconnected")
+#[derive(Clone)]
+struct ConnectionEventSender {
+    events: mpsc::SyncSender<DaemonEvent>,
+    disconnect: Arc<UnixStream>,
+}
+
+#[cfg(unix)]
+fn queue_event(sender: &ConnectionEventSender, event: DaemonEvent) -> Result<()> {
+    sender.events.try_send(event).map_err(|error| {
+        // A full bounded queue means the peer is no longer consuming events at
+        // the rate required by the live protocol. Close every clone of this
+        // socket so the client observes EOF and can resume from its last
+        // delivered durable cursor instead of waiting forever on an attachment
+        // whose producer has already stopped.
+        let _ = sender.disconnect.shutdown(Shutdown::Both);
+        match error {
+            mpsc::TrySendError::Full(_) => {
+                anyhow::anyhow!("daemon connection writer queue is full; slow peer disconnected")
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                anyhow::anyhow!("daemon connection writer is disconnected")
+            }
         }
     })
 }
@@ -535,3 +1114,37 @@ fn write_event(writer: &mut impl Write, event: &DaemonEvent) -> Result<()> {
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(all(test, unix))]
+mod connection_writer_tests {
+    use std::io::Read as _;
+
+    use super::*;
+
+    fn test_event() -> DaemonEvent {
+        DaemonEvent::new(
+            None,
+            DaemonEventKind::SessionList(agl_protocol::SessionListEvent {
+                sessions: Vec::new(),
+            }),
+        )
+    }
+
+    #[test]
+    fn full_bounded_writer_queue_disconnects_slow_peer() {
+        let (disconnect, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let (events, _receiver) = mpsc::sync_channel(1);
+        let sender = ConnectionEventSender {
+            events,
+            disconnect: Arc::new(disconnect),
+        };
+
+        queue_event(&sender, test_event()).unwrap();
+        let error = queue_event(&sender, test_event()).unwrap_err();
+
+        assert!(error.to_string().contains("slow peer disconnected"));
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    }
+}

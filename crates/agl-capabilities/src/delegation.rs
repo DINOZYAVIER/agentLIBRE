@@ -2,8 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActionDeclaration, ActionVisibility, CapabilityId, OperationKind, ProviderDeclaration,
-    ProviderId, StateEffect,
+    ActionDeclaration, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
 
 pub const AGENT_DELEGATE_CAPABILITY_ID: &str = "agent.delegate";
@@ -49,9 +48,6 @@ pub fn delegation_provider() -> ProviderDeclaration {
         )
         .expect("builtin delegation action declaration is valid")
         .with_state_effects([StateEffect::SpawnSubagent])
-        .with_run_step_idempotency()
-        .with_visibility(ActionVisibility {
-            visible_in_read_only: true,
-        }),
+        .with_run_step_idempotency(),
     )
 }

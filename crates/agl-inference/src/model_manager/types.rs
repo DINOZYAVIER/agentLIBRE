@@ -33,6 +33,7 @@ pub struct ModelManagerOptions {
     pub max_contexts_per_model: usize,
     pub queue_capacity: usize,
     pub idle_context_retention: Duration,
+    pub model_lease_root: Option<PathBuf>,
 }
 
 impl Default for ModelManagerOptions {
@@ -42,11 +43,17 @@ impl Default for ModelManagerOptions {
             max_contexts_per_model: DEFAULT_MAX_CONTEXTS_PER_MODEL,
             queue_capacity: DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY,
             idle_context_retention: DEFAULT_IDLE_CONTEXT_RETENTION,
+            model_lease_root: None,
         }
     }
 }
 
 impl ModelManagerOptions {
+    pub fn with_model_lease_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.model_lease_root = Some(path.into());
+        self
+    }
+
     pub fn validate(&self) -> Result<(), ModelManagerError> {
         validate_bounded(
             "max_loaded_models",
@@ -67,6 +74,15 @@ impl ModelManagerOptions {
                     "idle_context_retention must be between 1ns and {}s",
                     MAX_IDLE_CONTEXT_RETENTION.as_secs()
                 ),
+            });
+        }
+        if self
+            .model_lease_root
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ModelManagerError::InvalidOptions {
+                message: "model_lease_root cannot be empty".to_string(),
             });
         }
         Ok(())

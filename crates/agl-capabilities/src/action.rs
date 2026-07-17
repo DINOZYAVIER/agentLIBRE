@@ -1,12 +1,16 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agl_content::Content;
 use agl_ids::{ExecutionScope, RequestId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{CapabilityId, DeclarationDigest, PolicyHash, ProviderId};
+use crate::{
+    CapabilityId, DeclarationDigest, EffectiveCapability, PolicyHash, ProviderId, StateEffect,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,8 +85,114 @@ impl ActionResult {
 
 pub type ActionHandlerError = Box<dyn Error + Send + Sync + 'static>;
 
+pub trait CancellationSignal: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
+#[derive(Debug)]
+struct NeverCancelled;
+
+impl CancellationSignal for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone)]
+pub struct ActionDispatchControl {
+    cancellation: Arc<dyn CancellationSignal>,
+    deadline: Option<Instant>,
+}
+
+impl ActionDispatchControl {
+    pub fn new(cancellation: Arc<dyn CancellationSignal>, deadline: Option<Instant>) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+
+    pub fn uncancellable() -> Self {
+        Self::new(Arc::new(NeverCancelled), None)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+}
+
+impl fmt::Debug for ActionDispatchControl {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActionDispatchControl")
+            .field("cancelled", &self.is_cancelled())
+            .field("deadline", &self.deadline)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionDispatchContext {
+    invocation: ActionInvocation,
+    effective_capability: EffectiveCapability,
+    control: ActionDispatchControl,
+    authorized_conditional_effects: std::collections::BTreeSet<StateEffect>,
+}
+
+impl ActionDispatchContext {
+    pub fn new(
+        invocation: ActionInvocation,
+        effective_capability: EffectiveCapability,
+        control: ActionDispatchControl,
+        authorized_conditional_effects: impl IntoIterator<Item = StateEffect>,
+    ) -> Self {
+        Self {
+            invocation,
+            effective_capability,
+            control,
+            authorized_conditional_effects: authorized_conditional_effects.into_iter().collect(),
+        }
+    }
+
+    pub fn invocation(&self) -> &ActionInvocation {
+        &self.invocation
+    }
+
+    pub fn effective_capability(&self) -> &EffectiveCapability {
+        &self.effective_capability
+    }
+
+    pub fn control(&self) -> &ActionDispatchControl {
+        &self.control
+    }
+
+    pub fn authorized_conditional_effects(&self) -> &std::collections::BTreeSet<StateEffect> {
+        &self.authorized_conditional_effects
+    }
+
+    pub fn into_invocation(self) -> ActionInvocation {
+        self.invocation
+    }
+}
+
 pub trait ActionHandler: Send + Sync {
-    fn dispatch(&self, invocation: ActionInvocation) -> Result<ActionResult, ActionHandlerError>;
+    fn preflight(
+        &self,
+        _invocation: &ActionInvocation,
+    ) -> Result<std::collections::BTreeSet<StateEffect>, ActionHandlerError> {
+        Ok(std::collections::BTreeSet::new())
+    }
+
+    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError>;
 }
 
 pub fn render_canonical_json(value: &Value) -> String {

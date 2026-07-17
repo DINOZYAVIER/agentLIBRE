@@ -122,7 +122,7 @@ Review.
     let context = render_function_context(&loaded);
 
     assert!(context.contains("id: coding"));
-    assert!(context.contains("Function system prompt"));
+    assert!(context.contains("Instructions:"));
     assert!(context.contains("Code."));
     assert!(context.contains("Available subagents"));
     assert!(context.contains("Reviews a delegated task."));

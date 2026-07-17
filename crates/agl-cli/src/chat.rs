@@ -3,6 +3,12 @@ Commands:
   /help
   /session
   /workspace [PATH]
+  /pwd
+  /cd PATH
+  /cd --host PATH
+  /processes
+  /attach EXECUTION_ID [--read-only]
+  /kill EXECUTION_ID [--immediate]
   /reload
   /clear
   /exit
@@ -24,6 +30,20 @@ pub(crate) enum ParsedChatInput<'a> {
     Message(&'a str),
     Command(ChatCommand),
     Workspace(Option<&'a str>),
+    Pwd,
+    Cd {
+        path: &'a str,
+        host: bool,
+    },
+    Processes,
+    Attach {
+        execution_id: &'a str,
+        read_only: bool,
+    },
+    Kill {
+        execution_id: &'a str,
+        immediate: bool,
+    },
     UnknownCommand(&'a str),
 }
 
@@ -44,6 +64,47 @@ pub(crate) fn parse_chat_input(input: &str) -> ParsedChatInput<'_> {
                 ParsedChatInput::Workspace(None)
             } else {
                 ParsedChatInput::Workspace(Some(path))
+            }
+        }
+        "/pwd" => ParsedChatInput::Pwd,
+        "/processes" => ParsedChatInput::Processes,
+        command if command.starts_with("/cd ") => {
+            let arguments = command["/cd ".len()..].trim();
+            let (host, path) = arguments
+                .strip_prefix("--host ")
+                .map_or((false, arguments), |path| (true, path.trim()));
+            if path.is_empty() {
+                ParsedChatInput::UnknownCommand(command)
+            } else {
+                ParsedChatInput::Cd { path, host }
+            }
+        }
+        command if command.starts_with("/attach ") => {
+            let mut arguments = command["/attach ".len()..].split_whitespace();
+            match (arguments.next(), arguments.next(), arguments.next()) {
+                (Some(execution_id), None, None) => ParsedChatInput::Attach {
+                    execution_id,
+                    read_only: false,
+                },
+                (Some(execution_id), Some("--read-only"), None) => ParsedChatInput::Attach {
+                    execution_id,
+                    read_only: true,
+                },
+                _ => ParsedChatInput::UnknownCommand(command),
+            }
+        }
+        command if command.starts_with("/kill ") => {
+            let mut arguments = command["/kill ".len()..].split_whitespace();
+            match (arguments.next(), arguments.next(), arguments.next()) {
+                (Some(execution_id), None, None) => ParsedChatInput::Kill {
+                    execution_id,
+                    immediate: false,
+                },
+                (Some(execution_id), Some("--immediate"), None) => ParsedChatInput::Kill {
+                    execution_id,
+                    immediate: true,
+                },
+                _ => ParsedChatInput::UnknownCommand(command),
             }
         }
         "/clear" => ParsedChatInput::Command(ChatCommand::Clear),
@@ -86,6 +147,36 @@ mod tests {
         assert_eq!(
             parse_chat_input("/quit"),
             ParsedChatInput::Command(ChatCommand::Exit)
+        );
+        assert_eq!(parse_chat_input("/pwd"), ParsedChatInput::Pwd);
+        assert_eq!(
+            parse_chat_input("/cd child dir"),
+            ParsedChatInput::Cd {
+                path: "child dir",
+                host: false
+            }
+        );
+        assert_eq!(
+            parse_chat_input("/cd --host /tmp"),
+            ParsedChatInput::Cd {
+                path: "/tmp",
+                host: true
+            }
+        );
+        assert_eq!(parse_chat_input("/processes"), ParsedChatInput::Processes);
+        assert_eq!(
+            parse_chat_input("/attach exec_example --read-only"),
+            ParsedChatInput::Attach {
+                execution_id: "exec_example",
+                read_only: true
+            }
+        );
+        assert_eq!(
+            parse_chat_input("/kill exec_example --immediate"),
+            ParsedChatInput::Kill {
+                execution_id: "exec_example",
+                immediate: true
+            }
         );
     }
 

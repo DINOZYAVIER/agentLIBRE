@@ -109,15 +109,19 @@ for library in \
   libllama-common.so \
   libllama.so \
   libggml.so \
-  libggml-base.so \
-  libggml-cpu.so \
-  libggml-vulkan.so
+  libggml-base.so
 do
   if [[ ! -e "$llama_lib_dir/$library" ]]; then
     missing_llama_lib=1
     break
   fi
 done
+shopt -s nullglob
+cpu_backend_libraries=("$llama_lib_dir"/libggml-cpu-*.so)
+shopt -u nullglob
+if [[ ${#cpu_backend_libraries[@]} -eq 0 ]]; then
+  missing_llama_lib=1
+fi
 
 if [[ "$missing_llama_lib" -eq 1 ]]; then
   if [[ "$skip_llama_build" -eq 1 ]]; then

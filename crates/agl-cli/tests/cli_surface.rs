@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::io::{BufRead as _, BufReader};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+
 const AGL_BIN: &str = env!("CARGO_BIN_EXE_agl");
 const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
 
@@ -26,9 +31,11 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "chat");
+    assert_contains(&stdout, "process");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
+    assert_contains(&stdout, "model");
     assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
     assert_contains(&stdout, "cron");
@@ -81,6 +88,13 @@ fn command_help_exits_successfully_for_public_commands() {
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
+        &["process", "--help"][..],
+        &["process", "list", "--help"][..],
+        &["process", "status", "--help"][..],
+        &["process", "read", "--help"][..],
+        &["process", "attach", "--help"][..],
+        &["process", "kill", "--help"][..],
+        &["process", "doctor", "--help"][..],
         &["serve", "--help"][..],
         &["status", "--help"][..],
         &["function", "--help"][..],
@@ -89,6 +103,15 @@ fn command_help_exits_successfully_for_public_commands() {
         &["function", "status", "--help"][..],
         &["function", "init", "--help"][..],
         &["function", "doctor", "--help"][..],
+        &["model", "--help"][..],
+        &["model", "pull", "--help"][..],
+        &["model", "import", "--help"][..],
+        &["model", "list", "--help"][..],
+        &["model", "status", "--help"][..],
+        &["model", "verify", "--help"][..],
+        &["model", "unbind", "--help"][..],
+        &["model", "remove", "--help"][..],
+        &["model", "prune", "--help"][..],
         &["inference", "--help"][..],
         &["inference", "run", "--help"][..],
         &["inference", "chat", "--help"][..],
@@ -143,6 +166,299 @@ fn command_help_exits_successfully_for_public_commands() {
         assert_contains(&stdout, "Usage: agl");
         assert_no_noncanonical_product_spelling(&stdout);
     }
+}
+
+#[test]
+fn process_list_fails_clearly_when_daemon_is_unavailable() {
+    let home = TempHome::new("process-daemon-unavailable");
+    let output = run_agl(&["--home", &home.path_string(), "process", "list", "--json"]);
+
+    assert_failure(&output);
+    assert_empty_stdout(&output);
+    let stderr = stderr(&output);
+    assert_contains(&stderr, "agentLIBRE daemon is unavailable at");
+    assert_contains(&stderr, "start it with `agl serve`");
+}
+
+#[cfg(unix)]
+#[test]
+fn process_operator_commands_render_stable_table_json_and_raw_output() {
+    use agl_process::{
+        ExecutionChannel, ExecutionIo, ExecutionOwner, ExecutionProfile, ExecutionReadResult,
+        ExecutionState, ExecutionStatus, KillMode, ProcessBytes,
+    };
+    use agl_protocol::{
+        DaemonEventKind, DaemonRequestKind, ExecutionKillAcceptedEvent, ExecutionListEvent,
+        ExecutionPrivateCommand, ExecutionReadEvent, ExecutionStatusEvent,
+    };
+
+    let execution_id = agl_ids::ExecutionId::generate();
+    let run_id = agl_ids::RunId::generate();
+    let status = ExecutionStatus {
+        execution_id: execution_id.clone(),
+        owner: ExecutionOwner::Run {
+            run_id: run_id.clone(),
+            root_run_id: run_id,
+        },
+        state: ExecutionState::Running,
+        profile: ExecutionProfile::Workspace,
+        io: ExecutionIo::Pty,
+        cwd: PathBuf::from("/workspace"),
+        terminal_size: Some(agl_process::TerminalSize {
+            columns: 80,
+            rows: 24,
+        }),
+        exit: None,
+        first_retained_sequence: Some(1),
+        last_sequence: 2,
+        retained_bytes: 11,
+        discarded_output_bytes: 3,
+        output_truncated: true,
+        output_expired: false,
+        started_at_unix_ms: Some(1),
+        finished_at_unix_ms: None,
+        error_code: None,
+    };
+
+    let home = TempHome::new("process-list-table");
+    let list_status = status.clone();
+    let (output, request) = run_agl_with_fake_daemon(&home, &["process", "list"], move |_| {
+        DaemonEventKind::ExecutionList(ExecutionListEvent {
+            executions: vec![list_status.clone()],
+        })
+    });
+    assert_success_no_stderr(&output);
+    assert!(matches!(request, DaemonRequestKind::ExecutionList(_)));
+    let table = stdout(&output);
+    assert_contains(&table, "EXECUTION_ID\tOWNER\tSTATE\tPROFILE\tIO\tCWD");
+    assert_contains(&table, execution_id.as_str());
+    assert_contains(&table, "/workspace");
+
+    let home = TempHome::new("process-list-json");
+    let list_status = status.clone();
+    let (output, _) = run_agl_with_fake_daemon(&home, &["process", "list", "--json"], move |_| {
+        DaemonEventKind::ExecutionList(ExecutionListEvent {
+            executions: vec![list_status.clone()],
+        })
+    });
+    assert_success_no_stderr(&output);
+    let list_json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(list_json[0]["execution_id"], execution_id.as_str());
+    assert!(list_json[0].get("private_command").is_none());
+
+    let home = TempHome::new("process-status-table");
+    let detail_status = status.clone();
+    let (output, request) = run_agl_with_fake_daemon(
+        &home,
+        &["process", "status", execution_id.as_str()],
+        move |_| {
+            DaemonEventKind::ExecutionStatus(ExecutionStatusEvent {
+                status: detail_status.clone(),
+                private_command: None,
+            })
+        },
+    );
+    assert_success_no_stderr(&output);
+    assert!(matches!(
+        request,
+        DaemonRequestKind::ExecutionStatus(ref request) if !request.include_private_command
+    ));
+    let detail = stdout(&output);
+    assert_contains(&detail, "discarded_output_bytes=3");
+    assert_contains(&detail, "output_truncated=true");
+    assert!(!detail.contains("private_command="));
+
+    let home = TempHome::new("process-status-private-json");
+    let detail_status = status.clone();
+    let (output, request) = run_agl_with_fake_daemon(
+        &home,
+        &[
+            "process",
+            "status",
+            execution_id.as_str(),
+            "--private-command",
+            "--json",
+        ],
+        move |_| {
+            DaemonEventKind::ExecutionStatus(ExecutionStatusEvent {
+                status: detail_status.clone(),
+                private_command: Some(ExecutionPrivateCommand {
+                    display: "[\"/bin/echo\",\"private-value\"]".to_string(),
+                    truncated: false,
+                }),
+            })
+        },
+    );
+    assert_success_no_stderr(&output);
+    assert!(matches!(
+        request,
+        DaemonRequestKind::ExecutionStatus(ref request) if request.include_private_command
+    ));
+    let status_json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(status_json["status"]["execution_id"], execution_id.as_str());
+    assert_eq!(
+        status_json["private_command"]["display"],
+        "[\"/bin/echo\",\"private-value\"]"
+    );
+
+    let output_result = ExecutionReadResult {
+        execution_id: execution_id.clone(),
+        chunks: vec![
+            agl_process::ExecutionOutputChunk {
+                sequence: 1,
+                channel: ExecutionChannel::Stdout,
+                bytes: ProcessBytes::from_bytes(b"stdout-bytes"),
+            },
+            agl_process::ExecutionOutputChunk {
+                sequence: 2,
+                channel: ExecutionChannel::Stderr,
+                bytes: ProcessBytes::from_bytes(b"stderr-bytes"),
+            },
+        ],
+        next_sequence: 2,
+        state: ExecutionState::Running,
+        output_truncated: false,
+        output_expired: false,
+    };
+    let home = TempHome::new("process-read-raw");
+    let read_result = output_result.clone();
+    let (output, request) = run_agl_with_fake_daemon(
+        &home,
+        &["process", "read", execution_id.as_str()],
+        move |_| {
+            DaemonEventKind::ExecutionRead(ExecutionReadEvent {
+                output: read_result.clone(),
+            })
+        },
+    );
+    assert_success(&output);
+    assert!(matches!(request, DaemonRequestKind::ExecutionRead(_)));
+    assert_eq!(stdout(&output), "stdout-bytes");
+    assert_eq!(stderr(&output), "stderr-bytes");
+
+    let home = TempHome::new("process-read-json");
+    let read_result = output_result.clone();
+    let (output, _) = run_agl_with_fake_daemon(
+        &home,
+        &["process", "read", execution_id.as_str(), "--json"],
+        move |_| {
+            DaemonEventKind::ExecutionRead(ExecutionReadEvent {
+                output: read_result.clone(),
+            })
+        },
+    );
+    assert_success_no_stderr(&output);
+    let read_json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(read_json["next_sequence"], 2);
+    assert_eq!(read_json["chunks"][1]["channel"], "stderr");
+
+    for (label, extra, json) in [
+        ("process-kill-table", Vec::<&str>::new(), false),
+        ("process-kill-json", vec!["--json"], true),
+    ] {
+        let home = TempHome::new(label);
+        let mut arguments = vec!["process", "kill", execution_id.as_str(), "--yes"];
+        arguments.extend(extra);
+        let accepted_execution_id = execution_id.clone();
+        let (output, request) = run_agl_with_fake_daemon(&home, &arguments, move |_| {
+            DaemonEventKind::ExecutionKillAccepted(ExecutionKillAcceptedEvent {
+                execution_id: accepted_execution_id.clone(),
+                mode: KillMode::Graceful,
+            })
+        });
+        assert_success_no_stderr(&output);
+        assert!(matches!(request, DaemonRequestKind::ExecutionKill(_)));
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+            assert_eq!(value["execution_id"], execution_id.as_str());
+            assert_eq!(value["mode"], "graceful");
+        } else {
+            assert_contains(&stdout(&output), "termination=Graceful accepted=true");
+        }
+    }
+}
+
+#[test]
+fn process_doctor_prints_machine_and_human_diagnostics_even_when_unsupported() {
+    let home = TempHome::new("process-doctor-output");
+    let home_arg = home.path_string();
+    let table = run_agl(&["--home", &home_arg, "process", "doctor"]);
+    assert_contains(&stdout(&table), "platform=");
+    assert_contains(&stdout(&table), "supported=");
+    assert_contains(&stdout(&table), "workspace_root=");
+
+    let json = run_agl(&["--home", &home_arg, "process", "doctor", "--json"]);
+    let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert!(value["diagnostics"]["platform"].is_string());
+    assert!(value["diagnostics"]["supported"].is_boolean());
+    assert!(value["workspace_root"].is_string());
+}
+
+#[test]
+fn direct_chat_process_and_working_directory_commands_use_operator_path() {
+    let home = TempHome::new("chat-process-operator");
+    let workspace = home.path().join("workspace");
+    let child = workspace.join("child");
+    let host_directory = home.path().join("host-directory");
+    let next_workspace = home.path().join("next-workspace");
+    for directory in [&child, &host_directory, &next_workspace] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let config_path = home.write_local_inference_config(
+        "missing-model.toml",
+        "/tmp/agl-cli-surface-process-operator-missing.gguf",
+    );
+    let execution_id = agl_ids::ExecutionId::generate();
+    let input = format!(
+        "/pwd\n/cd child\n/pwd\n/cd --host {}\n/pwd\n/workspace {}\n/pwd\n/processes\n/attach {}\n/kill {} --immediate\n/quit\n",
+        host_directory.display(),
+        next_workspace.display(),
+        execution_id,
+        execution_id,
+    );
+    let home_arg = home.path_string();
+    let config_arg = config_path.display().to_string();
+    let workspace_arg = workspace.display().to_string();
+
+    let output = run_agl_with_stdin(
+        &[
+            "--home",
+            &home_arg,
+            "inference",
+            "chat",
+            "--config",
+            &config_arg,
+            "--workspace-root",
+            &workspace_arg,
+            "--session-id",
+            SESSION_ID,
+            "--max-output-tokens",
+            "1",
+        ],
+        &input,
+    );
+
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(
+        &stdout,
+        &format!("working_directory={}", workspace.display()),
+    );
+    assert_contains(&stdout, &format!("working_directory={}", child.display()));
+    assert_contains(
+        &stdout,
+        &format!("working_directory={}", host_directory.display()),
+    );
+    assert_contains(
+        &stdout,
+        &format!("workspace_root={}", next_workspace.display()),
+    );
+    assert_contains(&stdout, "EXECUTION_ID\tOWNER\tSTATE\tPROFILE\tIO\tCWD");
+    assert_contains(
+        &stdout,
+        "process_error=chat process attach requires local terminal stdin and stdout",
+    );
+    assert_contains(&stdout, "process_error=execution_not_found:");
 }
 
 #[test]
@@ -789,57 +1105,132 @@ fn batch_logging_init_failure_is_quiet_without_panicking() {
 }
 
 #[test]
-fn init_dry_run_includes_local_bootstrap_steps() {
-    let repo = TempRepo::new("init-dry-run-bootstrap");
-    let init = run_agl_in(repo.path(), &["init", "--dry-run"]);
-    let repo_init = run_agl_in(repo.path(), &["repo", "init", "--dry-run"]);
+fn init_dry_run_reports_conservative_catalog_without_writes() {
+    let repo = TempRepo::new("init-dry-run-plan");
+    let home = TempHome::new("init-dry-run-plan");
+    let hf_home = home.path().join("hf-home");
+    let home_arg = home.path_string();
+    let init = run_agl_in_with_hf_home(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "init",
+            "--dry-run",
+            "--json",
+            "--allow-low-memory",
+        ],
+        &hf_home,
+    );
 
-    assert_success_no_stderr(&init);
-    assert_success_no_stderr(&repo_init);
-    let init_stdout = stdout(&init);
-    let repo_stdout = stdout(&repo_init);
-    assert_contains(
-        &init_stdout,
-        "change path=.agl/workspace.toml action=would_write_file",
-    );
-    assert_contains(&init_stdout, "bootstrap.functions_root.path=.agl/functions");
-    assert_contains(
-        &init_stdout,
-        "bootstrap.functions_root.action=would_create_dir",
-    );
-    assert_contains(&init_stdout, "bootstrap.default_function=gemma4-12b");
-    assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
-    assert_contains(&init_stdout, "next_step=agl run --prompt");
+    assert_success(&init);
+    let stdout = stdout(&init);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("invalid setup JSON: {err}\n{stdout}"));
+    assert_eq!(report["state"], "planned");
+    assert_eq!(report["plan"]["selected_package"], "gemma4-e4b");
+    assert_eq!(report["plan"]["smoke_required"], true);
+    assert_eq!(report["plan"]["offline"], true);
+    let packages = report["plan"]["packages"]
+        .as_array()
+        .expect("setup plan packages");
+    for expected in ["gemma4-e4b", "gemma4-12b", "gemma4-26b", "gemma4-31b"] {
+        assert!(
+            packages
+                .iter()
+                .any(|package| package["package_id"] == expected),
+            "missing package {expected}:\n{stdout}"
+        );
+    }
     assert!(
-        !repo_stdout.contains("bootstrap.functions_root"),
-        "repo init should remain manifest-only:\n{repo_stdout}"
+        !repo.path().join(".agl/workspace.toml").exists(),
+        "guided dry-run must not initialize the workspace"
     );
     assert!(
-        !repo.path().join(".agl/functions").exists(),
-        "dry-run bootstrap must not create functions root"
+        !home.path().join("state/setup").exists(),
+        "guided dry-run must not persist a checkpoint"
     );
 }
 
 #[test]
-fn init_creates_functions_root_and_keeps_repo_init_manifest_behavior() {
-    let repo = TempRepo::new("init-bootstrap");
-    let init = run_agl_in(repo.path(), &["init"]);
+fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
+    let repo = TempRepo::new("init-resume-offline");
+    let home = TempHome::new("init-resume-offline");
+    let hf_home = home.path().join("hf-home");
+    let home_arg = home.path_string();
+    let args = [
+        "--home",
+        &home_arg,
+        "init",
+        "--yes",
+        "--non-interactive",
+        "--json",
+        "--allow-low-memory",
+    ];
+
+    let first = run_agl_in_with_hf_home(repo.path(), &args, &hf_home);
+    assert_failure(&first);
+    let first_stdout = stdout(&first);
+    let failure: serde_json::Value = serde_json::from_str(&first_stdout)
+        .unwrap_or_else(|err| panic!("invalid setup failure JSON: {err}\n{first_stdout}"));
+    assert_eq!(failure["state"], "failed");
+    assert_contains(
+        failure["error"].as_str().expect("failure error"),
+        "offline cache miss",
+    );
+    assert!(
+        !repo.path().join(".agl/workspace.toml").exists(),
+        "failed acquisition must not publish workspace state"
+    );
+
+    let setup_root = home.path().join("state/setup");
+    let checkpoints = fs::read_dir(&setup_root)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", setup_root.display()))
+        .map(|entry| entry.expect("checkpoint entry").path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert_eq!(checkpoints.len(), 1, "expected one workspace checkpoint");
+    let checkpoint_before = fs::read(&checkpoints[0]).expect("read setup checkpoint");
+    let checkpoint: serde_json::Value =
+        serde_json::from_slice(&checkpoint_before).expect("parse setup checkpoint");
+    assert_eq!(checkpoint["package_id"], "gemma4-e4b");
+    assert_eq!(
+        checkpoint["completed_phases"],
+        serde_json::json!(["confirmed"])
+    );
+
+    let second = run_agl_in_with_hf_home(repo.path(), &args, &hf_home);
+    assert_failure(&second);
+    assert_contains(&stderr(&second), "\"resuming\": true");
+    assert_eq!(
+        fs::read(&checkpoints[0]).expect("reread setup checkpoint"),
+        checkpoint_before,
+        "an identical interrupted plan must resume the existing checkpoint"
+    );
+}
+
+#[test]
+fn repo_init_remains_the_advanced_manifest_only_command() {
+    let repo = TempRepo::new("repo-init-manifest");
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
 
     assert_success_no_stderr(&init);
-    let init_stdout = stdout(&init);
-    assert_contains(&init_stdout, "state=initialized");
-    assert_contains(&init_stdout, "bootstrap.functions_root.action=created_dir");
-    assert_contains(&init_stdout, "bootstrap.default_function=gemma4-12b");
-    assert_contains(&init_stdout, "bootstrap.builtin_function=gemma4-12b");
+    assert_contains(&stdout(&init), "state=initialized");
     assert!(repo.path().join(".agl/workspace.toml").is_file());
     let manifest = fs::read_to_string(repo.path().join(".agl/workspace.toml")).unwrap();
     assert_contains(&manifest, "[functions]");
-    assert_contains(&manifest, "default = \"gemma4-12b\"");
-    assert!(repo.path().join(".agl/functions").is_dir());
+    assert_contains(&manifest, "default = \"gemma4-e4b\"");
+    assert!(
+        !repo.path().join(".agl/functions").exists(),
+        "manifest-only init must not invent an artifact root"
+    );
 
-    let second = run_agl_in(repo.path(), &["init"]);
+    let second = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success_no_stderr(&second);
-    assert_contains(&stdout(&second), "bootstrap.functions_root.action=exists");
+    assert_contains(
+        &stdout(&second),
+        "change path=.agl/workspace.toml action=exists",
+    );
 }
 
 #[test]
@@ -882,7 +1273,7 @@ create = ["."]
 
     let output = run_agl_in(
         repo.path(),
-        &["init", "--profile-file", &profile_arg, "--dry-run"],
+        &["repo", "init", "--profile-file", &profile_arg, "--dry-run"],
     );
 
     assert_success(&output);
@@ -900,7 +1291,7 @@ create = ["."]
 #[test]
 fn repo_export_profile_writes_portable_policy_manifest() {
     let repo = TempRepo::new("export-profile");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
     fs::write(
         repo.path().join(".agl/skill-trust.toml"),
@@ -933,7 +1324,7 @@ fn repo_export_profile_writes_portable_policy_manifest() {
 #[test]
 fn repo_import_profile_hidden_command_applies_explicit_profile() {
     let repo = TempRepo::new("import-profile");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
     let out = repo.path().join("repo-workflow.toml");
     let out_arg = out.display().to_string();
@@ -961,7 +1352,7 @@ fn repo_import_profile_hidden_command_applies_explicit_profile() {
 #[test]
 fn init_then_status_is_healthy_without_workspace_artifacts() {
     let repo = TempRepo::new("status-after-init");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
 
     let output = run_agl_in(repo.path(), &["status"]);
@@ -982,7 +1373,7 @@ fn init_then_status_is_healthy_without_workspace_artifacts() {
 #[test]
 fn status_strict_accepts_workspace_without_optional_artifacts() {
     let repo = TempRepo::new("status-strict");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
 
     let output = run_agl_in(repo.path(), &["status", "--strict"]);
@@ -994,7 +1385,7 @@ fn status_strict_accepts_workspace_without_optional_artifacts() {
 #[test]
 fn skill_list_reports_workspace_candidates_without_trusting_plain_dir() {
     let repo = TempRepo::new("skill-list-plain-dir");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
     write_workspace_skill(repo.path(), "repo-change");
 
@@ -1011,7 +1402,7 @@ fn skill_list_reports_workspace_candidates_without_trusting_plain_dir() {
 #[test]
 fn skill_list_supports_source_trusted_only_and_limit_filters() {
     let repo = TempRepo::new("skill-list-filters");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
     write_workspace_skill(repo.path(), "repo-change");
 
@@ -1061,7 +1452,7 @@ fn skill_list_supports_source_trusted_only_and_limit_filters() {
 #[test]
 fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
     let repo = TempRepo::new("skill-verify-missing");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
 
     let output = run_agl_in(repo.path(), &["skill", "verify"]);
@@ -1073,7 +1464,7 @@ fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
 #[test]
 fn skill_lock_refuses_plain_workspace_skills_directory() {
     let repo = TempRepo::new("skill-lock-plain-dir");
-    let init = run_agl_in(repo.path(), &["init"]);
+    let init = run_agl_in(repo.path(), &["repo", "init"]);
     assert_success(&init);
     write_workspace_skill(repo.path(), "repo-change");
 
@@ -1098,7 +1489,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 256
 references:
@@ -1146,7 +1537,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 requestable_tools: []
 context_budget_tokens: 256
@@ -1195,7 +1586,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 requestable_tools: []
 context_budget_tokens: 256
@@ -1258,7 +1649,7 @@ fn skill_inspect_runtime_rejects_untrusted_workspace_skill() {
     let repo = TempRepo::new("skill-inspect-runtime");
     let home = TempHome::new("skill-inspect-runtime");
     let home_arg = home.path_string();
-    let init = run_agl_in(repo.path(), &["--home", &home_arg, "init"]);
+    let init = run_agl_in(repo.path(), &["--home", &home_arg, "repo", "init"]);
     assert_success(&init);
     write_workspace_skill(repo.path(), "repo-change");
 
@@ -1404,9 +1795,14 @@ fn function_commands_manage_workspace_function_artifact() {
         repo.path(),
         &["--home", &home_arg, "function", "doctor", "coding"],
     );
-    assert_success_no_stderr(&doctor);
-    assert_contains(&stdout(&doctor), "doctor.smoke_prompt=");
-    assert_contains(&stdout(&doctor), "next_step=agl run --function coding");
+    assert_failure_stderr_contains(
+        &doctor,
+        "failed to open normal chat path for function smoke",
+    );
+    assert!(
+        !stdout(&doctor).contains("next_step="),
+        "function doctor must execute its smoke instead of reporting a follow-up command"
+    );
 }
 
 #[test]
@@ -1417,6 +1813,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     let list = run_agl(&["--home", &home_arg, "function", "list"]);
     assert_success_no_stderr(&list);
     let list_stdout = stdout(&list);
+    assert_contains(&list_stdout, "function id=gemma4-e4b source=builtin");
     assert_contains(
         &list_stdout,
         "function id=gemma4-12b source=builtin path=assets/functions/gemma4-12b/FUNCTION.md valid=true",
@@ -1512,7 +1909,6 @@ fn removed_command_names_fail_before_inference_path() {
         &["generate", "--help"][..],
         &["setup"][..],
         &["doctor"][..],
-        &["model", "pull", "owner/repo/model.gguf"][..],
     ] {
         let output = run_agl(args);
 
@@ -1553,7 +1949,7 @@ fn missing_default_inference_config_points_to_next_steps() {
     assert_contains(&stderr, "local inference config not found");
     assert_contains(&stderr, "Create this file or pass --config PATH");
     assert_contains(&stderr, "agl config paths");
-    assert_contains(&stderr, "existing local GGUF file");
+    assert_contains(&stderr, "Run `agl init` for guided model setup");
     assert!(
         !stderr.contains("No such file or directory"),
         "missing config should not expose raw IO as the primary error:\n{stderr}"
@@ -1632,9 +2028,103 @@ fn run_agl(args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
 }
 
+#[cfg(unix)]
+fn run_agl_with_fake_daemon<F>(
+    home: &TempHome,
+    args: &[&str],
+    response: F,
+) -> (Output, agl_protocol::DaemonRequestKind)
+where
+    F: Fn(&agl_protocol::DaemonRequestKind) -> agl_protocol::DaemonEventKind + Send + 'static,
+{
+    use agl_protocol::{
+        DaemonEvent, DaemonEventKind, DaemonRequestKind, HelloEvent, PROTOCOL_VERSION,
+    };
+
+    let paths = agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf());
+    let socket_path = agl_daemon::default_socket_path(&paths);
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+        let hello = read_fake_daemon_request(&mut reader);
+        assert!(matches!(hello.kind, DaemonRequestKind::Hello(_)));
+        write_fake_daemon_event(
+            &mut stream,
+            &DaemonEvent::new(
+                Some(hello.request_id),
+                DaemonEventKind::Hello(HelloEvent {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    product_version: env!("CARGO_PKG_VERSION").to_string(),
+                    capabilities: Vec::new(),
+                }),
+            ),
+        );
+
+        let request = read_fake_daemon_request(&mut reader);
+        let event = response(&request.kind);
+        write_fake_daemon_event(
+            &mut stream,
+            &DaemonEvent::new(Some(request.request_id), event),
+        );
+        request.kind
+    });
+
+    let home_arg = home.path_string();
+    let output = Command::new(AGL_BIN)
+        .args(["--home", &home_arg])
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"));
+    let request = server.join().expect("fake daemon thread panicked");
+    (output, request)
+}
+
+#[cfg(unix)]
+fn read_fake_daemon_request(
+    reader: &mut BufReader<std::os::unix::net::UnixStream>,
+) -> agl_protocol::DaemonRequest {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        !line.is_empty(),
+        "fake daemon client disconnected before request"
+    );
+    serde_json::from_str(&line).unwrap()
+}
+
+#[cfg(unix)]
+fn write_fake_daemon_event(
+    stream: &mut std::os::unix::net::UnixStream,
+    event: &agl_protocol::DaemonEvent,
+) {
+    serde_json::to_writer(&mut *stream, event).unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.flush().unwrap();
+}
+
 fn run_agl_in(cwd: &std::path::Path, args: &[&str]) -> Output {
     Command::new(AGL_BIN)
         .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
+}
+
+fn run_agl_in_with_hf_home(
+    cwd: &std::path::Path,
+    args: &[&str],
+    hf_home: &std::path::Path,
+) -> Output {
+    Command::new(AGL_BIN)
+        .current_dir(cwd)
+        .env("HF_HOME", hf_home)
+        .env("HF_HUB_OFFLINE", "YES")
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
@@ -1697,7 +2187,14 @@ fn submodule_workspace_with_skill(
     let source_arg = source.path().display().to_string();
     let init = run_agl_in(
         repo.path(),
-        &["--home", &home_arg, "init", "--skills-url", &source_arg],
+        &[
+            "--home",
+            &home_arg,
+            "repo",
+            "init",
+            "--skills-url",
+            &source_arg,
+        ],
     );
     assert_success(&init);
     git_run(
@@ -1765,7 +2262,7 @@ version: 1
 source: local
 pack: agl
 required_hooks:
-  - repo_path.validate
+  - core:repo_path.validate
 allowed_tools: []
 context_budget_tokens: 256
 references:

@@ -13,10 +13,11 @@ use agl_loop::{
     TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor, TurnInput,
     TurnOutput, TurnTerminal,
 };
+use agl_models::RuntimePlanSet;
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
 use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     ChatOptions, ChatTurnRuntime, InferenceClientHandle, InferenceSession, ToolAccessMode,
@@ -34,6 +35,7 @@ pub struct ChatSessionSummary {
     pub history_enabled: bool,
     pub resumed: bool,
     pub replayed_messages: usize,
+    pub automatic_runtime_plan: Option<RuntimePlanSet>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,6 +180,7 @@ impl ChatService {
             && ChatSessionStore::exists(runtime.paths.sessions_root(), &session_id);
         let explicit_artifact_root = InferenceSession::resolve_artifact_root(&options.inference);
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+        let admitted_execution_context = runtime.execution.context_snapshot(&workspace_root)?;
         let tool_mode = options.inference.tool_mode;
         let artifact_root_override = if history_enabled {
             explicit_artifact_root.or_else(|| Some(runtime.paths.session_dir(&session_id)))
@@ -191,12 +194,19 @@ impl ChatService {
             session_id.clone(),
             inference_client,
         )?;
-        let (chat_history, replay) = if history_enabled {
+        let (chat_history, replay, execution_context) = if history_enabled {
             if resumed_session {
                 let history =
                     ChatSessionStore::open(runtime.paths.sessions_root(), session_id.clone())?;
+                ensure!(
+                    history.execution_context().workspace_root == workspace_root,
+                    "resumed session workspace {} does not match requested workspace {}",
+                    history.execution_context().workspace_root.display(),
+                    workspace_root.display()
+                );
                 let replay = history.read_replay()?;
-                (Some(history), Some(replay))
+                let execution_context = history.execution_context().clone();
+                (Some(history), Some(replay), execution_context)
             } else {
                 (
                     Some(ChatSessionStore::start(
@@ -204,14 +214,23 @@ impl ChatService {
                         session_id.clone(),
                         session.config_path().to_path_buf(),
                         session.backend_name(),
+                        admitted_execution_context.clone(),
                     )?),
                     None,
+                    admitted_execution_context,
                 )
             }
         } else {
-            (None, None)
+            (None, None, admitted_execution_context)
         };
-        let turn_runtime = ChatTurnRuntime::new(session, &workspace_root)?;
+        let turn_runtime = ChatTurnRuntime::new(
+            session,
+            runtime,
+            &workspace_root,
+            execution_context,
+            Some(session_id.clone()),
+            history_enabled,
+        )?;
         let messages = replay
             .as_ref()
             .map(replay_turn_messages)
@@ -243,7 +262,15 @@ impl ChatService {
             usize::try_from(config.spec.limits.max_capability_calls).unwrap_or(usize::MAX);
         let session = InferenceSession::new_subagent(config, runtime, inference_client)?;
         let tool_mode = session.tool_mode();
-        let turn_runtime = ChatTurnRuntime::new(session, &workspace_root)?;
+        let execution_context = runtime.execution.context_snapshot(&workspace_root)?;
+        let turn_runtime = ChatTurnRuntime::new(
+            session,
+            runtime,
+            &workspace_root,
+            execution_context,
+            None,
+            false,
+        )?;
         Ok(Self {
             runtime: runtime.clone(),
             session_id: execution_session_id,
@@ -269,6 +296,11 @@ impl ChatService {
             history_enabled: self.history_enabled,
             resumed: self.resumed_session,
             replayed_messages: self.messages.len(),
+            automatic_runtime_plan: self
+                .turn_runtime
+                .session()
+                .automatic_runtime_plan()
+                .cloned(),
         }
     }
 
@@ -292,6 +324,18 @@ impl ChatService {
 
     pub fn workspace_root(&self) -> &Path {
         self.turn_runtime.workspace_root()
+    }
+
+    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+        self.turn_runtime.execution_context()
+    }
+
+    pub(crate) fn install_run_execution_context(
+        &mut self,
+        execution_context: agl_process::ExecutionContextSnapshot,
+    ) -> Result<()> {
+        self.turn_runtime
+            .install_execution_context(execution_context)
     }
 
     pub(crate) fn capability_delivery_class(
@@ -330,7 +374,86 @@ impl ChatService {
         if self.context_released {
             bail!("cannot change workspace root after the chat session context was released");
         }
-        self.turn_runtime.set_workspace_root(workspace_root)
+        let previous = self.turn_runtime.execution_context().clone();
+        let canonical = workspace_root.as_ref().canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize workspace root {}",
+                workspace_root.as_ref().display()
+            )
+        })?;
+        ensure!(
+            canonical.is_dir(),
+            "workspace root is not a directory: {}",
+            canonical.display()
+        );
+        let next = agl_process::ExecutionContextSnapshot {
+            workspace_root: canonical.clone(),
+            working_directory: canonical.clone(),
+            private_execution_roots: Vec::new(),
+            shell: previous.shell.clone(),
+            revision: previous
+                .revision
+                .checked_add(1)
+                .context("execution context revision overflow")?,
+            profile_metadata: "workspace".to_owned(),
+        };
+        if let Some(history) = &mut self.chat_history {
+            history.reload_execution_context()?;
+            history.reset_workspace_execution_context(previous.revision, next.clone())?;
+        }
+        if let Err(error) = self.turn_runtime.set_workspace_root(&canonical) {
+            if let Some(history) = &mut self.chat_history {
+                let rollback = agl_process::ExecutionContextSnapshot {
+                    revision: next
+                        .revision
+                        .checked_add(1)
+                        .context("execution context rollback revision overflow")?,
+                    ..previous.clone()
+                };
+                history
+                    .reset_workspace_execution_context(next.revision, rollback.clone())
+                    .context(
+                        "failed to roll back durable workspace after runtime rebuild failure",
+                    )?;
+                self.turn_runtime.install_execution_context(rollback)?;
+            }
+            return Err(error).context("failed to rebuild runtime context for the new workspace");
+        }
+        self.turn_runtime.install_execution_context(next)
+    }
+
+    pub fn set_working_directory(
+        &mut self,
+        requested: impl AsRef<Path>,
+        host: bool,
+    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+        if self.context_released {
+            bail!("cannot change working directory after the chat session context was released");
+        }
+        let current = self.turn_runtime.execution_context().clone();
+        let profile = if host {
+            agl_process::ExecutionProfile::Host
+        } else {
+            agl_process::ExecutionProfile::Workspace
+        };
+        let working_directory =
+            agl_process::resolve_execution_directory(&current, requested.as_ref(), profile, host)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let next = agl_process::ExecutionContextSnapshot {
+            working_directory,
+            revision: current
+                .revision
+                .checked_add(1)
+                .context("execution context revision overflow")?,
+            profile_metadata: if host { "host" } else { "workspace" }.to_owned(),
+            ..current.clone()
+        };
+        if let Some(history) = &mut self.chat_history {
+            history.reload_execution_context()?;
+            history.compare_and_set_execution_context(current.revision, next.clone())?;
+        }
+        self.turn_runtime.install_execution_context(next)?;
+        Ok(self.turn_runtime.execution_context())
     }
 
     pub fn reload_runtime_context(&mut self) -> Result<usize> {
@@ -358,6 +481,8 @@ impl ChatService {
         if self.session_finished {
             return Ok(());
         }
+        self.terminate_session_processes()?;
+        self.expire_session_permission_grants()?;
         self.release_inference_context()?;
         if let Some(history) = &mut self.chat_history {
             history.request_exit()?;
@@ -370,6 +495,8 @@ impl ChatService {
         if self.session_finished {
             return Ok(());
         }
+        self.terminate_session_processes()?;
+        self.expire_session_permission_grants()?;
         self.release_inference_context()?;
         if let Some(history) = &mut self.chat_history {
             history.finish_eof()?;
@@ -385,6 +512,25 @@ impl ChatService {
         self.turn_runtime.release_context()?;
         self.context_released = true;
         Ok(())
+    }
+
+    fn terminate_session_processes(&self) -> Result<usize> {
+        if !self.is_session_scoped() {
+            return Ok(0);
+        }
+        self.turn_runtime
+            .terminate_process_owner(&agl_process::ExecutionOwner::Session {
+                session_id: self.session_id.clone(),
+                root_run_id: RunId::generate(),
+            })
+    }
+
+    fn expire_session_permission_grants(&self) -> Result<usize> {
+        if !self.is_session_scoped() {
+            return Ok(0);
+        }
+        let store = agl_store::AglStore::open_current_at(self.turn_runtime.session().store_root())?;
+        Ok(store.expire_session_permission_grants(&self.session_id)?)
     }
 
     #[cfg(test)]
@@ -639,7 +785,12 @@ impl ChatService {
                 TurnEffectResult::ModelGeneration { key, outcome }
             }
             TurnEffect::CapabilityDispatch { key, request } => {
-                let outcome = match self.turn_runtime.execute_capability(request, step_id) {
+                let outcome = match self.turn_runtime.execute_capability(
+                    request,
+                    step_id,
+                    execution.cancellation.clone(),
+                    execution.deadline,
+                ) {
                     Ok(response) => EffectOutcome::Succeeded(response),
                     Err(error) => EffectOutcome::Failed(EffectFailure::new(
                         EffectFailureCode::Capability,
@@ -1260,6 +1411,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn manager_admission_errors_remain_retryable_at_the_effect_boundary() {
+        for error in [
+            ModelManagerError::QueueFull { capacity: 2 },
+            ModelManagerError::ManagerUnavailable,
+        ] {
+            let outcome = model_effect_failure(anyhow::Error::new(error.clone()));
+            let EffectOutcome::Failed(failure) = outcome else {
+                panic!("manager admission error did not remain a failed effect");
+            };
+            assert_eq!(failure.code, EffectFailureCode::Inference);
+            assert!(failure.retryable);
+            assert!(failure.message.contains("model request failed"));
+        }
+
+        assert_eq!(
+            model_effect_failure(anyhow::Error::new(ModelManagerError::Cancelled)),
+            EffectOutcome::Cancelled
+        );
+        let EffectOutcome::Failed(deadline) =
+            model_effect_failure(anyhow::Error::new(ModelManagerError::DeadlineExceeded))
+        else {
+            panic!("deadline did not remain a failed effect");
+        };
+        assert_eq!(deadline.code, EffectFailureCode::Deadline);
+        assert!(!deadline.retryable);
+    }
+
     struct TestChatService {
         service: ChatService,
         root: PathBuf,
@@ -1324,6 +1503,7 @@ tool_call_format = "hermes_json"
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
             history: agl_runtime::AgentLibreHistoryConfig::default(),
             workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let options = ChatOptions {
             inference: crate::InferenceOptions {
@@ -1673,6 +1853,78 @@ tool_call_format = "hermes_json"
     }
 
     #[test]
+    fn workspace_reset_persists_workspace_and_cwd_before_rebuilding_runtime() {
+        let mut chat = test_chat_service_with_history("workspace-reset", true);
+        let process_cwd = std::env::current_dir().unwrap();
+        let previous = chat.service.execution_context().clone();
+        let next_root = chat.root.join("next-workspace");
+        std::fs::create_dir_all(&next_root).unwrap();
+        let next_root = next_root.canonicalize().unwrap();
+        let session_id = chat.service.session_id().clone();
+
+        chat.service.set_workspace_root(&next_root).unwrap();
+
+        let current = chat.service.execution_context();
+        assert_eq!(current.workspace_root, next_root);
+        assert_eq!(current.working_directory, next_root);
+        assert_eq!(current.revision, previous.revision + 1);
+        assert_eq!(chat.service.workspace_root(), next_root);
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+
+        let paths = agl_runtime::AgentLibrePaths::from_agl_home(chat.root.join("home"));
+        let reopened = ChatSessionStore::open(paths.sessions_root(), session_id).unwrap();
+        assert_eq!(reopened.execution_context(), current);
+    }
+
+    #[test]
+    fn logical_cd_is_durable_scoped_and_never_changes_process_cwd() {
+        let mut chat = test_chat_service_with_history("logical-cd", true);
+        let process_cwd = std::env::current_dir().unwrap();
+        let child = chat.root.join("child");
+        let outside = chat.root.parent().unwrap().join(format!(
+            "agl-chat-service-outside-{}",
+            agl_ids::ExecutionId::generate()
+        ));
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let child = child.canonicalize().unwrap();
+        let outside = outside.canonicalize().unwrap();
+        let session_id = chat.service.session_id().clone();
+        let initial_revision = chat.service.execution_context().revision;
+
+        let snapshot = chat
+            .service
+            .set_working_directory("child", false)
+            .unwrap()
+            .clone();
+        assert_eq!(snapshot.working_directory, child);
+        assert_eq!(snapshot.revision, initial_revision + 1);
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+
+        let denied = chat
+            .service
+            .set_working_directory(&outside, false)
+            .unwrap_err();
+        assert!(denied.to_string().contains("outside the workspace"));
+        assert_eq!(chat.service.execution_context(), &snapshot);
+
+        let host_snapshot = chat
+            .service
+            .set_working_directory(&outside, true)
+            .unwrap()
+            .clone();
+        assert_eq!(host_snapshot.working_directory, outside);
+        assert_eq!(host_snapshot.profile_metadata, "host");
+        assert_eq!(host_snapshot.revision, initial_revision + 2);
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+
+        let paths = agl_runtime::AgentLibrePaths::from_agl_home(chat.root.join("home"));
+        let reopened = ChatSessionStore::open(paths.sessions_root(), session_id).unwrap();
+        assert_eq!(reopened.execution_context(), &host_snapshot);
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
     fn short_circuited_invalid_call_records_safe_denial_without_raw_name() {
         let mut chat = test_chat_service("invalid-call-denial");
         let run_id = run_id();
@@ -1939,7 +2191,7 @@ tool_call_format = "hermes_json"
 
         let hook_batches = vec![
             TurnHookBatch::new(agl_loop::HookEvent::ArtifactWrite)
-                .with_required_hook(agl_loop::HookId::new("task_spec.validate").unwrap()),
+                .with_required_hook(agl_loop::HookId::new("core:task_spec.validate").unwrap()),
         ];
 
         let visible_tools = vec![visible_tool("fs.read")];

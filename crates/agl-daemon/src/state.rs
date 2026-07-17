@@ -4,18 +4,20 @@ use std::sync::{Arc, Mutex};
 
 use agl_chat::{
     ChatOptions, ChatRunInput, ChatService, ChatSupervisorFactory, InferenceClientHandle,
-    InferenceOptions, ToolAccessMode as ChatToolMode,
+    InferenceOptions, ToolAccessMode as ChatToolMode, shared_process_handle,
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
 use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{RequestId, RunId, SessionId, TurnId};
 use agl_inference::ModelManagerStatus;
+use agl_process::{ExecutionCursor, ExecutionListFilter, ProcessError, ProcessErrorCode};
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent,
-    PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState,
-    ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent,
-    RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent,
-    SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
+    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
+    ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionReadEvent, ExecutionStatusEvent,
+    HelloEvent, PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolRunKind,
+    ProtocolRunState, ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent,
+    RunTreeEvent, RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent,
+    SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_session::ChatSessionStore;
@@ -32,6 +34,7 @@ use crate::transcript::transcript_event;
 
 const RUN_SUBMIT_IDEMPOTENCY_NAMESPACE: &str = "daemon.run_submit";
 const CRON_RUN_IDEMPOTENCY_NAMESPACE: &str = "daemon.cron_run";
+const PRIVATE_COMMAND_DISPLAY_MAX_BYTES: usize = 4096;
 
 pub struct DaemonState {
     runtime: AgentLibreRuntimeConfig,
@@ -39,6 +42,7 @@ pub struct DaemonState {
     inference_client: InferenceClientHandle,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     chat_factory: ChatSupervisorFactory,
+    process_handle: agl_process::ProcessHandle,
     _supervisor: Supervisor,
     supervisor_handle: SupervisorHandle,
 }
@@ -47,6 +51,7 @@ struct SessionRuntime {
     status: SessionStatus,
     options: ChatOptions,
     delegation_plan: Option<RuntimeDelegationPlan>,
+    execution_context: agl_process::ExecutionContextSnapshot,
 }
 
 impl DaemonState {
@@ -65,6 +70,8 @@ impl DaemonState {
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
         let store_root = runtime.paths.store_root();
+        let process_handle =
+            shared_process_handle(&runtime).context("failed to start daemon process supervisor")?;
         let chat_factory = ChatSupervisorFactory::with_runtime(
             &store_root,
             runtime.clone(),
@@ -83,6 +90,7 @@ impl DaemonState {
             inference_client,
             sessions: BTreeMap::new(),
             chat_factory,
+            process_handle,
             _supervisor: supervisor,
             supervisor_handle,
         })
@@ -112,6 +120,27 @@ impl DaemonState {
             DaemonRequestKind::RunSubscribe(_) => Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "run_subscribe must be handled by the streaming transport",
+                false,
+            )),
+            DaemonRequestKind::ExecutionList(request) => self.execution_list(request),
+            DaemonRequestKind::ExecutionStatus(request) => {
+                self.execution_status(request.execution_id, request.include_private_command)
+            }
+            DaemonRequestKind::ExecutionRead(request) => self.execution_read(
+                request.execution_id,
+                request.after_sequence,
+                request.max_bytes,
+            ),
+            DaemonRequestKind::ExecutionKill(request) => {
+                self.execution_kill(request.execution_id, request.mode)
+            }
+            DaemonRequestKind::ExecutionAttach(_)
+            | DaemonRequestKind::ExecutionLeaseRenew(_)
+            | DaemonRequestKind::ExecutionInput(_)
+            | DaemonRequestKind::ExecutionResize(_)
+            | DaemonRequestKind::ExecutionDetach(_) => Err(ProtocolError::new(
+                ProtocolErrorCode::InvalidRequest,
+                "execution attachment operations must be handled by the streaming transport",
                 false,
             )),
         };
@@ -146,72 +175,95 @@ impl DaemonState {
         self.supervisor_handle.clone()
     }
 
+    pub fn process_handle(&self) -> agl_process::ProcessHandle {
+        self.process_handle.clone()
+    }
+
+    pub fn process_read_limit(&self) -> usize {
+        self.runtime.execution.max_result_bytes
+    }
+
+    pub fn process_input_limit(&self) -> usize {
+        self.runtime.execution.max_input_bytes
+    }
+
     pub fn submit_cron_job(
         &mut self,
         job: &CronJob,
         scheduled_for: &str,
     ) -> Result<RunAccepted, ProtocolError> {
         let run_id = RunId::generate();
-        let (session_id, turn_id, input, registered_session) = match job.target_kind {
-            CronTargetKind::Builtin => {
-                if job.target_ref != STORE_STATUS_BUILTIN_CRON_TARGET {
-                    return Err(invalid(format!(
-                        "unsupported builtin cron target {}",
-                        job.target_ref
-                    )));
+        let (session_id, turn_id, input, registered_session, execution_context) =
+            match job.target_kind {
+                CronTargetKind::Builtin => {
+                    if job.target_ref != STORE_STATUS_BUILTIN_CRON_TARGET {
+                        return Err(invalid(format!(
+                            "unsupported builtin cron target {}",
+                            job.target_ref
+                        )));
+                    }
+                    let workspace = self
+                        .runtime
+                        .resolve_workspace_root(None)
+                        .map_err(runtime_error)?;
+                    (
+                        None,
+                        None,
+                        serde_json::to_value(BuiltinCronRunInput {
+                            builtin: job.target_ref.clone(),
+                        })
+                        .map_err(runtime_error)?,
+                        None,
+                        self.runtime
+                            .execution
+                            .context_snapshot(&workspace)
+                            .map_err(runtime_error)?,
+                    )
                 }
-                (
-                    None,
-                    None,
-                    serde_json::to_value(BuiltinCronRunInput {
-                        builtin: job.target_ref.clone(),
-                    })
-                    .map_err(runtime_error)?,
-                    None,
-                )
-            }
-            CronTargetKind::Skill => {
-                let prompt =
-                    crate::scheduler::render_cron_skill_prompt(job).map_err(runtime_error)?;
-                let mut inference = self.inference_defaults.clone();
-                inference.skills.push(job.target_ref.clone());
-                inference.tool_mode = ChatToolMode::Write;
-                let options = ChatOptions {
-                    inference,
-                    workspace_root: None,
-                    session_id: None,
-                    no_history: false,
-                    new_session: true,
-                };
-                let service = ChatService::open(
-                    options.clone(),
-                    &self.runtime,
-                    self.inference_client.clone(),
-                )
-                .map_err(runtime_error)?;
-                let session_id = service.session_id().clone();
-                let delegation_plan = service.delegation_plan();
-                let turn_id = TurnId::generate();
-                self.chat_factory.register(service).map_err(runtime_error)?;
-                let persisted_options = ChatOptions {
-                    session_id: Some(session_id.clone()),
-                    new_session: false,
-                    ..options
-                };
-                (
-                    Some(session_id.clone()),
-                    Some(turn_id),
-                    serde_json::to_value(ChatRunInput::Root {
-                        content: agl_content::Content::text(prompt).map_err(runtime_error)?,
-                        request_id: None,
-                        options: persisted_options,
-                        delegation_plan,
-                    })
-                    .map_err(runtime_error)?,
-                    Some(session_id),
-                )
-            }
-        };
+                CronTargetKind::Skill => {
+                    let prompt =
+                        crate::scheduler::render_cron_skill_prompt(job).map_err(runtime_error)?;
+                    let mut inference = self.inference_defaults.clone();
+                    inference.skills.push(job.target_ref.clone());
+                    inference.tool_mode = ChatToolMode::Write;
+                    let options = ChatOptions {
+                        inference,
+                        workspace_root: None,
+                        session_id: None,
+                        no_history: false,
+                        new_session: true,
+                    };
+                    let service = ChatService::open(
+                        options.clone(),
+                        &self.runtime,
+                        self.inference_client.clone(),
+                    )
+                    .map_err(runtime_error)?;
+                    let session_id = service.session_id().clone();
+                    let execution_context = service.execution_context().clone();
+                    let delegation_plan = service.delegation_plan();
+                    let turn_id = TurnId::generate();
+                    self.chat_factory.register(service).map_err(runtime_error)?;
+                    let persisted_options = ChatOptions {
+                        session_id: Some(session_id.clone()),
+                        new_session: false,
+                        ..options
+                    };
+                    (
+                        Some(session_id.clone()),
+                        Some(turn_id),
+                        serde_json::to_value(ChatRunInput::Root {
+                            content: agl_content::Content::text(prompt).map_err(runtime_error)?,
+                            request_id: None,
+                            options: persisted_options,
+                            delegation_plan,
+                        })
+                        .map_err(runtime_error)?,
+                        Some(session_id),
+                        execution_context,
+                    )
+                }
+            };
         let accepted = self
             .supervisor_handle
             .submit(RunSpec {
@@ -224,6 +276,7 @@ impl DaemonState {
                     input,
                     checkpoint: None,
                     effective_policy_hash: None,
+                    execution_context,
                     budget: RunBudget::default(),
                     not_before_ms: None,
                 },
@@ -261,8 +314,84 @@ impl DaemonState {
                 DaemonCapability::RunCancel,
                 DaemonCapability::RunReplay,
                 DaemonCapability::RunSubscribe,
+                DaemonCapability::ExecutionList,
+                DaemonCapability::ExecutionControl,
+                DaemonCapability::ExecutionAttach,
             ],
         }
+    }
+
+    fn execution_list(
+        &self,
+        request: agl_protocol::ExecutionListRequest,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        let executions = self
+            .process_handle
+            .operator_list(ExecutionListFilter {
+                session_id: request.session_id,
+                root_run_id: request.root_run_id,
+                include_finished: request.include_finished,
+            })
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionList(ExecutionListEvent {
+            executions,
+        }))
+    }
+
+    fn execution_status(
+        &self,
+        execution_id: agl_ids::ExecutionId,
+        include_private_command: bool,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        let status = self
+            .process_handle
+            .operator_status(&execution_id)
+            .map_err(process_error)?;
+        let private_command = include_private_command
+            .then(|| {
+                self.process_handle
+                    .operator_private_command(&execution_id, PRIVATE_COMMAND_DISPLAY_MAX_BYTES)
+                    .map_err(process_error)
+            })
+            .transpose()?;
+        Ok(DaemonEventKind::ExecutionStatus(ExecutionStatusEvent {
+            status,
+            private_command,
+        }))
+    }
+
+    fn execution_read(
+        &self,
+        execution_id: agl_ids::ExecutionId,
+        after_sequence: u64,
+        max_bytes: usize,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        if max_bytes == 0 || max_bytes > self.runtime.execution.max_result_bytes {
+            return Err(invalid(format!(
+                "execution max_bytes must be between 1 and {}",
+                self.runtime.execution.max_result_bytes
+            )));
+        }
+        let output = self
+            .process_handle
+            .operator_read(&execution_id, ExecutionCursor { after_sequence }, max_bytes)
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionRead(ExecutionReadEvent {
+            output,
+        }))
+    }
+
+    fn execution_kill(
+        &self,
+        execution_id: agl_ids::ExecutionId,
+        mode: agl_process::KillMode,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        self.process_handle
+            .operator_kill(&execution_id, mode)
+            .map_err(process_error)?;
+        Ok(DaemonEventKind::ExecutionKillAccepted(
+            ExecutionKillAcceptedEvent { execution_id, mode },
+        ))
     }
 
     fn open_session(
@@ -291,6 +420,7 @@ impl DaemonState {
         )
         .map_err(runtime_error)?;
         let summary = service.summary();
+        let execution_context = service.execution_context().clone();
         let delegation_plan = service.delegation_plan();
         let session_id = summary.session_id.clone();
         self.chat_factory.register(service).map_err(runtime_error)?;
@@ -304,6 +434,7 @@ impl DaemonState {
                     ..options
                 },
                 delegation_plan,
+                execution_context,
             },
         );
         Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
@@ -455,6 +586,7 @@ impl DaemonState {
                     input,
                     checkpoint: None,
                     effective_policy_hash: None,
+                    execution_context: session.execution_context.clone(),
                     budget: RunBudget {
                         wall_time_ms: request.budget.wall_time_ms,
                         model_input_tokens: request.budget.model_input_tokens,
@@ -611,6 +743,30 @@ impl SharedDaemonState {
             .lock()
             .map_err(|error| anyhow!("daemon state lock is poisoned: {error}"))?
             .supervisor_handle())
+    }
+
+    pub fn process_handle(&self) -> Result<agl_process::ProcessHandle> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|error| anyhow!("daemon state lock is poisoned: {error}"))?
+            .process_handle())
+    }
+
+    pub fn process_read_limit(&self) -> Result<usize> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|error| anyhow!("daemon state lock is poisoned: {error}"))?
+            .process_read_limit())
+    }
+
+    pub fn process_input_limit(&self) -> Result<usize> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|error| anyhow!("daemon state lock is poisoned: {error}"))?
+            .process_input_limit())
     }
 
     pub fn submit_cron_job(
@@ -775,6 +931,43 @@ fn not_found(resource: &str) -> ProtocolError {
 
 fn runtime_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(ProtocolErrorCode::RuntimeFailure, error.to_string(), false)
+}
+
+pub(crate) fn process_error(error: ProcessError) -> ProtocolError {
+    let (code, retryable) = match error.code() {
+        ProcessErrorCode::InvalidRequest
+        | ProcessErrorCode::InvalidBytes
+        | ProcessErrorCode::InputTooLarge
+        | ProcessErrorCode::InvalidTerminalSize
+        | ProcessErrorCode::IoModeMismatch
+        | ProcessErrorCode::InputLeaseExpired
+        | ProcessErrorCode::ExecutionNotLive => (ProtocolErrorCode::InvalidRequest, false),
+        ProcessErrorCode::ExecutionNotFound | ProcessErrorCode::OutputExpired => {
+            (ProtocolErrorCode::NotFound, false)
+        }
+        ProcessErrorCode::ExecutionNotOwned
+        | ProcessErrorCode::HostAuthorityRequired
+        | ProcessErrorCode::LoginAuthorityRequired
+        | ProcessErrorCode::GrantRevoked
+        | ProcessErrorCode::GrantExpired => (ProtocolErrorCode::Unauthorized, false),
+        ProcessErrorCode::PlatformUnsupported
+        | ProcessErrorCode::LauncherUnavailable
+        | ProcessErrorCode::SandboxUnavailable
+        | ProcessErrorCode::SandboxExecutableUnavailable => (ProtocolErrorCode::Unsupported, false),
+        ProcessErrorCode::ActiveLimitReached
+        | ProcessErrorCode::InputBackpressure
+        | ProcessErrorCode::InputLeaseBusy => (ProtocolErrorCode::Busy, true),
+        ProcessErrorCode::LauncherProtocol
+        | ProcessErrorCode::SpawnFailed
+        | ProcessErrorCode::Cancelled
+        | ProcessErrorCode::TimedOut
+        | ProcessErrorCode::OutputLimitExceeded
+        | ProcessErrorCode::SupervisorShutdown
+        | ProcessErrorCode::StateConflict
+        | ProcessErrorCode::StoreCorrupt
+        | ProcessErrorCode::Internal => (ProtocolErrorCode::RuntimeFailure, false),
+    };
+    ProtocolError::new(code, error.to_string(), retryable)
 }
 
 fn supervisor_error(error: agl_supervisor::SupervisorError) -> ProtocolError {

@@ -5,6 +5,7 @@ use rusqlite::Connection;
 mod artifacts;
 mod connection;
 mod error;
+mod executions;
 mod export;
 mod idempotency;
 mod matrix_outbox;
@@ -19,6 +20,7 @@ mod util;
 
 pub use artifacts::{ArtifactGcReport, ResolvedArtifact, StoredArtifact};
 pub use error::{Result, StoreError};
+pub use executions::AglExecutionRepository;
 pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
 #[cfg(test)]
 use path::database_path;

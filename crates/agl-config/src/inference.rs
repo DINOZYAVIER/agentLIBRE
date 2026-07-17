@@ -8,6 +8,7 @@ use crate::{ModelConfig, ModelId, PromptConfig};
 
 pub const MAX_GPU_LAYERS: u32 = 4096;
 pub const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
+pub const MIN_AUTO_CONTEXT_TOKENS: u32 = 32_768;
 pub const MAX_THREADS: u32 = 1024;
 pub const MAX_BATCH_TOKENS: u32 = 1_048_576;
 pub const MAX_MTP_DRAFT_TOKENS: u32 = 64;
@@ -48,7 +49,7 @@ pub struct InferencePreset {
 impl InferencePreset {
     pub fn validate(&self) -> Result<()> {
         self.runtime.validate()?;
-        if self.backend.multimodal_projector_id.is_some() && self.runtime.mtp.enabled {
+        if self.backend.multimodal_projector_id.is_some() && self.runtime.mtp_enabled() {
             bail!("multimodal projector presets cannot enable speculative MTP");
         }
         self.model.validate()?;
@@ -66,8 +67,89 @@ pub struct InferencePresetBackendConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum InferencePresetRuntimeConfig {
+    Auto(AutoRuntimePolicy),
+    Fixed(FixedRuntimePreset),
+}
+
+impl InferencePresetRuntimeConfig {
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Auto(policy) => policy.validate(),
+            Self::Fixed(runtime) => runtime.validate(),
+        }
+    }
+
+    pub fn mtp_enabled(&self) -> bool {
+        matches!(self, Self::Fixed(runtime) if runtime.mtp.enabled)
+    }
+
+    pub fn auto_policy(&self) -> Option<&AutoRuntimePolicy> {
+        match self {
+            Self::Auto(policy) => Some(policy),
+            Self::Fixed(_) => None,
+        }
+    }
+
+    pub fn fixed(&self) -> Option<&FixedRuntimePreset> {
+        match self {
+            Self::Auto(_) => None,
+            Self::Fixed(runtime) => Some(runtime),
+        }
+    }
+
+    pub(crate) fn into_fixed_resolved(
+        self,
+        draft_model: Option<PathBuf>,
+    ) -> Result<InferenceRuntimeConfig> {
+        match self {
+            Self::Fixed(runtime) => Ok(runtime.into_resolved(draft_model)),
+            Self::Auto(_) => {
+                bail!("automatic inference presets require host-aware resolution by agl-models")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InferencePresetRuntimeConfig {
+pub struct AutoRuntimePolicy {
+    pub max_context_tokens: u32,
+    pub max_batch_size: u32,
+    pub max_ubatch_size: u32,
+    pub flash_attention: RuntimeSwitch,
+    pub cache_type_k: KvCacheType,
+    pub cache_type_v: KvCacheType,
+}
+
+impl AutoRuntimePolicy {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_context_tokens < MIN_AUTO_CONTEXT_TOKENS
+            || self.max_context_tokens > MAX_CONTEXT_TOKENS
+        {
+            bail!(
+                "max_context_tokens {} must be between {} and {} for automatic agent profiles",
+                self.max_context_tokens,
+                MIN_AUTO_CONTEXT_TOKENS,
+                MAX_CONTEXT_TOKENS
+            );
+        }
+        validate_token_limit("max_batch_size", self.max_batch_size)?;
+        validate_token_limit("max_ubatch_size", self.max_ubatch_size)?;
+        ensure!(
+            self.max_ubatch_size <= self.max_batch_size,
+            "max_ubatch_size {} cannot exceed max_batch_size {}",
+            self.max_ubatch_size,
+            self.max_batch_size
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedRuntimePreset {
     pub gpu_layers: u32,
     pub context_tokens: u32,
     pub threads: u32,
@@ -91,7 +173,7 @@ pub struct InferencePresetRuntimeConfig {
     pub mtp: MtpPresetConfig,
 }
 
-impl InferencePresetRuntimeConfig {
+impl FixedRuntimePreset {
     fn validate(&self) -> Result<()> {
         if self.mtp.enabled && self.mtp.draft_model_id.is_none() {
             bail!("runtime.mtp enabled requires draft_model_id");
@@ -106,7 +188,7 @@ impl InferencePresetRuntimeConfig {
             .validate()
     }
 
-    pub(crate) fn into_resolved(self, draft_model: Option<PathBuf>) -> InferenceRuntimeConfig {
+    pub fn into_resolved(self, draft_model: Option<PathBuf>) -> InferenceRuntimeConfig {
         InferenceRuntimeConfig {
             gpu_layers: self.gpu_layers,
             context_tokens: self.context_tokens,
@@ -393,6 +475,13 @@ fn validate_optional_token_limit(name: &str, value: Option<u32>) -> Result<()> {
     if let Some(value) = value
         && (value == 0 || value > MAX_BATCH_TOKENS)
     {
+        bail!("{name} {value} must be between 1 and {MAX_BATCH_TOKENS}");
+    }
+    Ok(())
+}
+
+fn validate_token_limit(name: &str, value: u32) -> Result<()> {
+    if value == 0 || value > MAX_BATCH_TOKENS {
         bail!("{name} {value} must be between 1 and {MAX_BATCH_TOKENS}");
     }
     Ok(())

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,6 +24,7 @@ impl AglStore {
             "permission_requests.max_operation_kind",
         )?;
         validate_non_blank(&draft.duration, "permission_requests.duration")?;
+        validate_permission_duration(&draft.duration)?;
         validate_non_blank(&draft.reason, "permission_requests.reason")?;
         validate_non_blank(&draft.requester_ref, "permission_requests.requester_ref")?;
 
@@ -221,11 +224,15 @@ impl AglStore {
         let now = timestamp();
         self.conn.execute(
             "UPDATE permission_grants
-             SET status = 'expired',
+             SET status = CASE duration
+                     WHEN 'one_turn' THEN 'expired'
+                     WHEN 'session' THEN status
+                     ELSE status
+                 END,
                  updated_at = ?2,
                  admitted_at = COALESCE(admitted_at, ?2),
                  last_admitted_run_id = ?3,
-                 consumed_at = ?2
+                 consumed_at = CASE WHEN duration = 'one_turn' THEN ?2 ELSE consumed_at END
              WHERE id = ?1 AND status = 'active'",
             params![grant_id, now, run_id],
         )?;
@@ -233,6 +240,48 @@ impl AglStore {
             .ok_or_else(|| StoreError::NotFound {
                 resource: format!("permission grant {grant_id}"),
             })
+    }
+
+    pub fn expire_session_permission_grants(
+        &self,
+        session_id: &agl_ids::SessionId,
+    ) -> Result<usize> {
+        let now = timestamp();
+        let changed = self.conn.execute(
+            "UPDATE permission_grants
+             SET status = 'expired', updated_at = ?2, consumed_at = COALESCE(consumed_at, ?2)
+             WHERE status = 'active' AND duration = 'session'
+               AND json_extract(scope_json, '$.session_id') = ?1",
+            params![session_id.as_str(), now],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn live_process_permission_grant_ids(&self) -> Result<BTreeSet<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT grants.id
+             FROM permission_grants grants
+             WHERE (grants.duration = 'session' AND grants.status = 'active')
+                OR (
+                    grants.duration = 'one_turn'
+                    AND (
+                        grants.status = 'active'
+                        OR (
+                            grants.status = 'expired'
+                            AND grants.last_admitted_run_id IS NOT NULL
+                            AND EXISTS (
+                                SELECT 1 FROM runs
+                                WHERE runs.id = grants.last_admitted_run_id
+                                  AND runs.state IN ('queued', 'running', 'waiting')
+                            )
+                        )
+                    )
+                )
+             ORDER BY grants.id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(StoreError::from)
     }
 }
 
@@ -262,6 +311,7 @@ fn insert_permission_grant(
         "permission_grants.max_operation_kind",
     )?;
     validate_non_blank(&draft.duration, "permission_grants.duration")?;
+    validate_permission_duration(&draft.duration)?;
     validate_non_blank(&draft.granted_by_ref, "permission_grants.granted_by_ref")?;
     if let Some(request_id) = &draft.request_id {
         validate_non_blank(request_id, "permission_grants.request_id")?;
@@ -292,6 +342,18 @@ fn insert_permission_grant(
     permission_grant_by_id(conn, &id)?.ok_or_else(|| StoreError::NotFound {
         resource: format!("permission grant {id}"),
     })
+}
+
+fn validate_permission_duration(duration: &str) -> Result<()> {
+    if matches!(duration, "one_turn" | "session") {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidValue {
+            field: "permission_grants.duration",
+            value: duration.to_string(),
+            reason: "permission duration must be one_turn or session",
+        })
+    }
 }
 
 fn resolve_permission_request_on(
