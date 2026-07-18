@@ -387,7 +387,7 @@ impl CliExecutionAttachment {
         }
         match self
             .async_runtime
-            .block_on(tokio::time::timeout(timeout, self.inner.next()))
+            .block_on(async { tokio::time::timeout(timeout, self.inner.next()).await })
         {
             Ok(event) => {
                 self.pending = event?;

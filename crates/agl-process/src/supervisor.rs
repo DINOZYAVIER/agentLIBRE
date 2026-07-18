@@ -1327,33 +1327,37 @@ impl Reactor {
         writable: bool,
     ) -> Result<InputLease> {
         self.checked_status(execution_id, owner)?;
+        if !writable {
+            return Ok(InputLease {
+                attachment_id,
+                writable: false,
+            });
+        }
         self.expire_input_lease_if_needed(execution_id, Instant::now())?;
         let execution = self.active.get_mut(execution_id).ok_or_else(not_live)?;
         if execution.termination.is_some() {
             return Err(not_live());
         }
-        if writable {
-            if execution.writable_lease.is_some() {
-                return Err(ProcessError::new(
-                    ProcessErrorCode::InputLeaseBusy,
-                    "execution already has a writable input attachment",
-                ));
-            }
-            let lease = InputLease {
-                attachment_id: attachment_id.clone(),
-                writable,
-            };
-            self.repository.bind_input_lease(
-                execution_id,
-                &self.supervisor_id,
-                &lease,
-                unix_millis(),
-            )?;
-            execution.writable_lease = Some(WritableInputLease::new(
-                attachment_id.clone(),
-                Instant::now(),
+        if execution.writable_lease.is_some() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InputLeaseBusy,
+                "execution already has a writable input attachment",
             ));
         }
+        let lease = InputLease {
+            attachment_id: attachment_id.clone(),
+            writable,
+        };
+        self.repository.bind_input_lease(
+            execution_id,
+            &self.supervisor_id,
+            &lease,
+            unix_millis(),
+        )?;
+        execution.writable_lease = Some(WritableInputLease::new(
+            attachment_id.clone(),
+            Instant::now(),
+        ));
         Ok(InputLease {
             attachment_id,
             writable,
@@ -1367,27 +1371,28 @@ impl Reactor {
         lease: &InputLease,
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
+        if !lease.writable {
+            return Ok(());
+        }
         if self.expire_input_lease_if_needed(execution_id, Instant::now())? {
             return Err(input_lease_expired());
         }
         let execution = self.active.get_mut(execution_id).ok_or_else(not_live)?;
-        if lease.writable {
-            match execution.writable_lease.as_ref() {
-                Some(current) if current.attachment_id == lease.attachment_id => {
-                    self.repository.release_input_lease(
-                        execution_id,
-                        &self.supervisor_id,
-                        lease,
-                        unix_millis(),
-                    )?;
-                    execution.writable_lease = None;
-                }
-                _ => {
-                    return Err(ProcessError::new(
-                        ProcessErrorCode::InputLeaseBusy,
-                        "input attachment does not own the writable lease",
-                    ));
-                }
+        match execution.writable_lease.as_ref() {
+            Some(current) if current.attachment_id == lease.attachment_id => {
+                self.repository.release_input_lease(
+                    execution_id,
+                    &self.supervisor_id,
+                    lease,
+                    unix_millis(),
+                )?;
+                execution.writable_lease = None;
+            }
+            _ => {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::InputLeaseBusy,
+                    "input attachment does not own the writable lease",
+                ));
             }
         }
         Ok(())

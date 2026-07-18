@@ -68,7 +68,7 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
     );
 
     let root = std::env::temp_dir().join(format!(
-        "agl-cli-process-pty-native-{}-{}",
+        "ap-{}-{}",
         std::process::id(),
         ExecutionId::generate()
     ));
@@ -135,9 +135,11 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
         for _ in 0..3 {
             let (stream, _) = listener.accept().unwrap();
             stream.set_nonblocking(true).unwrap();
-            let stream = tokio::net::UnixStream::from_std(stream).unwrap();
             async_runtime
-                .block_on(agl_daemon::serve_connection(stream, &server_state))
+                .block_on(async {
+                    let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+                    agl_daemon::serve_connection(stream, &server_state).await
+                })
                 .unwrap();
         }
     });

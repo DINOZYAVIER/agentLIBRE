@@ -167,6 +167,14 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
     );
     harness
         .handle
+        .detach(&started.execution_id, &harness.owner, reader)
+        .unwrap();
+    harness
+        .handle
+        .detach(&started.execution_id, &harness.owner, second_reader)
+        .unwrap();
+    harness
+        .handle
         .write(
             &started.execution_id,
             &harness.owner,
@@ -179,23 +187,28 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .handle
         .detach(&started.execution_id, &harness.owner, writer)
         .unwrap();
-    harness
-        .handle
-        .detach(&started.execution_id, &harness.owner, reader)
-        .unwrap();
-    harness
-        .handle
-        .detach(&started.execution_id, &harness.owner, second_reader)
-        .unwrap();
     let status = harness.wait(&started.execution_id);
     let output = harness.output(&started.execution_id);
     assert_eq!(status.state, ExecutionState::Exited);
     assert_eq!(output.stdout, b"stdin\0bytes");
 
-    let (_, binary) =
+    let (binary_status, binary) =
         harness.run(harness.request(vec!["binary-stdio".to_owned()], ExecutionIo::Pipes));
     assert_eq!(binary.stdout, [b'o', 0, 0xff, b'\n']);
     assert_eq!(binary.stderr, [b'e', 0xfe, 0, b'\n']);
+    let retained_reader = harness
+        .handle
+        .attach(
+            &binary_status.execution_id,
+            &harness.owner,
+            RequestId::generate(),
+            false,
+        )
+        .unwrap();
+    harness
+        .handle
+        .detach(&binary_status.execution_id, &harness.owner, retained_reader)
+        .unwrap();
 
     let (_, closed) =
         harness.run(harness.request(vec!["close-stdout".to_owned()], ExecutionIo::Pipes));
@@ -252,8 +265,10 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
     let output = harness.output(&started.execution_id);
     assert!(contains(&output.terminal, b"resized=100x40"));
 
-    let interactive = harness.request(vec!["signal-eof".to_owned()], ExecutionIo::Pty);
+    let mut interactive = harness.request(vec!["signal-eof".to_owned()], ExecutionIo::Pty);
+    interactive.close_stdin_after_initial = false;
     let started = harness.handle.start(interactive).unwrap();
+    wait_for_output(harness, &started.execution_id, b"ready", None);
     let writer = harness
         .handle
         .attach(
@@ -288,7 +303,11 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .unwrap();
     let report: Value = serde_json::from_slice(report_line).unwrap();
     assert_eq!(report["eof"], true);
-    assert_eq!(report["input_bytes"], b"interactive request\n".len());
+    assert_eq!(
+        report["input_bytes"],
+        b"interactive request\n".len(),
+        "unexpected PTY EOF report: {report}"
+    );
 }
 
 fn supervisor_concurrency_and_backpressure_contract(harness: &Harness) {

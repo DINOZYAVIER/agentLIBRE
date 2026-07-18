@@ -5,7 +5,7 @@ use std::io::Write;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::{ExecutionProfile, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
@@ -21,6 +21,7 @@ const STANDARD_RUNTIME_ROOTS: &[&str] = &[
     "/lib",
     "/lib64",
     "/nix/store",
+    "/run/current-system/sw",
 ];
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
@@ -84,8 +85,10 @@ const AT_RECURSIVE: u32 = 0x8000;
 const AT_EMPTY_PATH: u32 = 0x1000;
 
 pub(super) fn enter_namespaces(profile: ExecutionProfile) -> Result<()> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
     unshare(libc::CLONE_NEWUSER, "user namespace")?;
-    install_identity_map()?;
+    install_identity_map(uid, gid)?;
     let mut flags = libc::CLONE_NEWNS | libc::CLONE_NEWPID;
     if profile == ExecutionProfile::Workspace {
         flags |= libc::CLONE_NEWNET;
@@ -167,6 +170,20 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
         "failed to create the workspace root filesystem",
     )?;
 
+    // Install private runtime paths before admitted nested mounts. A runtime
+    // root or workspace may live below /tmp; mounting private /tmp afterwards
+    // would hide those exact admitted paths.
+    bind_mount_at(
+        &request.private_tmp,
+        &root.join(SANDBOX_TMP.trim_start_matches('/')),
+        false,
+    )?;
+    bind_mount_at(
+        &request.private_home,
+        &root.join(SANDBOX_HOME.trim_start_matches('/')),
+        false,
+    )?;
+
     let mut read_only = BTreeSet::new();
     for candidate in STANDARD_RUNTIME_ROOTS {
         let path = PathBuf::from(candidate);
@@ -192,19 +209,6 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
         }
     }
 
-    // Install private runtime paths before the workspace. A disposable
-    // workspace may live below /tmp, in which case its exact absolute path is
-    // added as a nested bind without exposing the supervisor's state paths.
-    bind_mount_at(
-        &request.private_tmp,
-        &root.join(SANDBOX_TMP.trim_start_matches('/')),
-        false,
-    )?;
-    bind_mount_at(
-        &request.private_home,
-        &root.join(SANDBOX_HOME.trim_start_matches('/')),
-        false,
-    )?;
     bind_mount(&request.request.workspace_root, &root, false)?;
 
     let dev = root.join("dev");
@@ -251,9 +255,9 @@ pub(super) fn enter_target(
     root: Option<&Path>,
     admitted_cwd: RawFd,
     admitted_program: RawFd,
-) -> Result<()> {
+) -> Result<OwnedFd> {
     apply_resource_limits()?;
-    if request.request.profile == ExecutionProfile::Workspace {
+    let program = if request.request.profile == ExecutionProfile::Workspace {
         let root = root.ok_or_else(|| {
             ProcessError::new(
                 ProcessErrorCode::SandboxUnavailable,
@@ -262,17 +266,21 @@ pub(super) fn enter_target(
         })?;
         chroot(root)?;
         change_directory(&request.request.cwd, admitted_cwd)?;
-        verify_path_identity(&request.request.program, admitted_program, "executable")?;
+        let program =
+            verified_path_descriptor(&request.request.program, admitted_program, "executable")?;
         apply_landlock(request)?;
         drop_capabilities()?;
         apply_seccomp(true)?;
+        program
     } else {
         change_directory(&request.request.cwd, admitted_cwd)?;
-        verify_path_identity(&request.request.program, admitted_program, "executable")?;
+        let program =
+            verified_path_descriptor(&request.request.program, admitted_program, "executable")?;
         drop_capabilities()?;
         apply_seccomp(false)?;
-    }
-    Ok(())
+        program
+    };
+    Ok(program)
 }
 
 pub(super) fn diagnostics() -> ProcessPlatformDiagnostics {
@@ -315,9 +323,7 @@ pub(super) fn diagnostics() -> ProcessPlatformDiagnostics {
     }
 }
 
-fn install_identity_map() -> Result<()> {
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+fn install_identity_map(uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
     match fs::write("/proc/self/setgroups", "deny\n") {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -349,7 +355,7 @@ fn bind_mount_at(source: &Path, target: &Path, read_only: bool) -> Result<()> {
     })?;
     if metadata.is_dir() {
         ensure_directory(target, 0o755)?;
-    } else if metadata.is_file() {
+    } else if metadata.is_file() || metadata.file_type().is_char_device() {
         if let Some(parent) = target.parent() {
             ensure_directory(parent, 0o755)?;
         }
@@ -451,7 +457,7 @@ fn change_directory(path: &Path, admitted: RawFd) -> Result<()> {
     Ok(())
 }
 
-fn verify_path_identity(path: &Path, admitted: RawFd, label: &str) -> Result<()> {
+fn verified_path_descriptor(path: &Path, admitted: RawFd, label: &str) -> Result<OwnedFd> {
     let path = path_cstring(path)?;
     let descriptor = unsafe {
         libc::open(
@@ -471,7 +477,8 @@ fn verify_path_identity(path: &Path, admitted: RawFd, label: &str) -> Result<()>
         descriptor.as_raw_fd(),
         ProcessErrorCode::SandboxExecutableUnavailable,
         label,
-    )
+    )?;
+    Ok(descriptor)
 }
 
 fn verify_same_identity(
@@ -798,9 +805,11 @@ fn probe_namespace(flag: libc::c_int) -> bool {
         return false;
     }
     if pid == 0 {
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
         let mut ok = unshare(libc::CLONE_NEWUSER, "user namespace").is_ok();
         if ok {
-            ok = install_identity_map().is_ok();
+            ok = install_identity_map(uid, gid).is_ok();
         }
         if ok && flag != 0 {
             ok = unshare(flag, "diagnostic namespace").is_ok();

@@ -160,6 +160,8 @@ mod linux {
         for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
             unsafe { libc::signal(signal, received_signal as *const () as libc::sighandler_t) };
         }
+        io::stdout().write_all(b"ready\n")?;
+        io::stdout().flush()?;
         let mut input = Vec::new();
         loop {
             let mut buffer = [0_u8; 1024];

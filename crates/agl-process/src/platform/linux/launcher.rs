@@ -202,15 +202,19 @@ fn target_main(
         cwd.as_raw_fd(),
         program.as_raw_fd(),
     ]);
-    sandbox::enter_target(request, root, cwd.as_raw_fd(), program.as_raw_fd())?;
+    // Execute the identity-checked descriptor reopened inside the target mount
+    // view. The pre-admission descriptor points at the host mount hierarchy,
+    // which Landlock correctly refuses after the sandbox ruleset is active.
+    let target_program =
+        sandbox::enter_target(request, root, cwd.as_raw_fd(), program.as_raw_fd())?;
     close_descriptors_except(&[
         libc::STDIN_FILENO,
         libc::STDOUT_FILENO,
         libc::STDERR_FILENO,
         exec_error_fd,
-        program.as_raw_fd(),
+        target_program.as_raw_fd(),
     ]);
-    exec_target(request, program.as_raw_fd())
+    exec_target(request, target_program.as_raw_fd())
 }
 
 fn exec_target(request: &LauncherRequest, program_fd: RawFd) -> Result<()> {
