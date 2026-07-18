@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_client::{
-    AgentLibreClient, ExecutionAttachmentEvent, PresentationSubscriptionEvent, RunSubscriptionEvent,
+    AgentLibreClient, ClientError, ExecutionAttachmentEvent, PresentationSubscriptionEvent,
+    RunSubscriptionEvent,
 };
 use agl_ids::{ExecutionId, SessionId};
 use agl_protocol::{
@@ -618,7 +619,7 @@ async fn run_interactive_async(
         .unwrap_or_else(|| agl_daemon::default_socket_path(&runtime.paths));
     let client = AgentLibreClient::connect(&socket_path)
         .await
-        .with_context(|| missing_daemon_message(&socket_path))?;
+        .map_err(|error| interactive_connect_error(&socket_path, error))?;
     let session_id = resolve_session(&client, &options).await?;
     let mut presentation = client
         .subscribe_presentation(SessionPresentationSubscribeRequest {
@@ -794,6 +795,17 @@ fn missing_daemon_message(socket_path: &Path) -> String {
         socket_path.display(),
         socket_path.display()
     )
+}
+
+fn interactive_connect_error(socket_path: &Path, error: ClientError) -> anyhow::Error {
+    let context = match &error {
+        ClientError::Io(_) | ClientError::ConnectionClosed => missing_daemon_message(socket_path),
+        _ => format!(
+            "daemon at {} is running an incompatible protocol; restart it with the current `agl serve` binary",
+            socket_path.display()
+        ),
+    };
+    anyhow::Error::new(error).context(context)
 }
 
 enum UiControl {
@@ -1698,6 +1710,18 @@ mod tests {
         );
         assert!(lex_command("cd 'unfinished").is_err());
         assert!(lex_command("cd trailing\\").is_err());
+    }
+
+    #[test]
+    fn daemon_connection_errors_distinguish_missing_and_incompatible_servers() {
+        let socket = Path::new("/tmp/agentlibre-test.sock");
+        let missing = interactive_connect_error(socket, ClientError::Io("refused".to_owned()));
+        assert!(missing.to_string().contains("daemon is unavailable"));
+
+        let incompatible =
+            interactive_connect_error(socket, ClientError::Json("old schema".to_owned()));
+        assert!(incompatible.to_string().contains("incompatible protocol"));
+        assert!(format!("{incompatible:#}").contains("old schema"));
     }
 
     #[test]

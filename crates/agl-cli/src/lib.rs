@@ -1408,6 +1408,7 @@ fn run_daemon_status(
         Err(err) => {
             println!("state=not_running");
             println!("socket_path={}", socket_path.display());
+            println!("error={err}");
             println!("next_step=agl serve");
             tracing::debug!(
                 target: "agentlibre::app",

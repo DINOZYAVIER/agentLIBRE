@@ -53,8 +53,10 @@ pub enum ClientError {
 impl Display for ClientError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(_) => formatter.write_str("daemon connection I/O failed"),
-            Self::Json(_) => formatter.write_str("daemon protocol JSON was invalid"),
+            Self::Io(message) => write!(formatter, "daemon connection I/O failed: {message}"),
+            Self::Json(message) => {
+                write!(formatter, "daemon protocol JSON was invalid: {message}")
+            }
             Self::Protocol { code, retryable } => {
                 write!(
                     formatter,
