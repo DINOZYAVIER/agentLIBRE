@@ -1,12 +1,11 @@
 use std::env;
-use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
     ChatOptions, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
-    InferenceOptions, SupervisedChat, ToolAccessMode as ChatToolAccessMode, chat_workspace_root,
+    InferenceOptions, ToolAccessMode as ChatToolAccessMode,
 };
 use agl_client::AgentLibreClient;
 use agl_cron::{
@@ -19,7 +18,6 @@ use agl_daemon::{
     default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
 use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
-use agl_protocol::{HelloRequest, PROTOCOL_VERSION};
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
     read_workspace_default_function,
@@ -41,7 +39,6 @@ use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, bail};
 
 mod args;
-mod chat;
 mod config;
 mod doctor;
 mod function;
@@ -49,10 +46,12 @@ mod init;
 mod memory;
 mod model;
 mod notes;
+mod one_shot;
 #[path = "process.rs"]
 mod process_command;
 mod repo;
 mod store;
+mod tui;
 
 use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
@@ -63,13 +62,13 @@ use args::{
     SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
     SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
-use chat::{CHAT_COMMANDS_HELP, ChatCommand, ParsedChatInput, parse_chat_input};
 use config::run_config;
 use function::run_function;
 use init::run_init;
 use memory::run_memory;
 use model::run_model;
 use notes::run_notes;
+use one_shot::OneShotSession;
 use process_command::run_process;
 use repo::run_repo;
 use store::run_store;
@@ -199,12 +198,10 @@ enum CliRuntimeProfile {
 
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Run(_)
-        | CliCommand::Chat(_)
+        CliCommand::Interactive(_)
+        | CliCommand::Run(_)
         | CliCommand::Process(ProcessCommand::Attach(_))
-        | CliCommand::Inference(InferenceCommand::Run(_) | InferenceCommand::Chat(_)) => {
-            CliRuntimeProfile::Interactive
-        }
+        | CliCommand::Inference(InferenceCommand::Run(_)) => CliRuntimeProfile::Interactive,
         CliCommand::Config(_)
         | CliCommand::Cron(_)
         | CliCommand::Function(_)
@@ -227,6 +224,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
 
 fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
+        CliCommand::Interactive(options) => tui::run_interactive(options, runtime),
         CliCommand::Help { bin_name } => print_usage(bin_name),
         CliCommand::HelpPrinted => Ok(()),
         CliCommand::Completion { shell } => {
@@ -248,7 +246,6 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Inference(command) => run_inference(command, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
         CliCommand::Run(options) => run_one_shot(options, runtime),
-        CliCommand::Chat(options) => run_chat(options, runtime),
     }
 }
 
@@ -570,7 +567,7 @@ fn run_skill_cron_target(
     let mut inference = InferenceOptions::default();
     inference.skills.push(job.target_ref.clone());
     inference.tool_mode = ChatToolAccessMode::Write;
-    let chat = SupervisedChat::open(
+    let chat = OneShotSession::open(
         ChatOptions {
             inference,
             workspace_root: None,
@@ -1286,7 +1283,6 @@ fn apply_workspace_default_function_to_serve(
 fn run_inference(command: InferenceCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
         InferenceCommand::Run(options) => run_one_shot_raw(options, runtime),
-        InferenceCommand::Chat(options) => run_chat_raw(options, runtime),
         InferenceCommand::Serve(options) => run_serve_raw(options, runtime),
     }
 }
@@ -1314,7 +1310,7 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     let tool_mode = chat_options.inference.tool_mode;
     let model_manager = process_local_model_manager(runtime)?;
     let inference_client = InferenceClientHandle::from(model_manager.handle());
-    let chat = SupervisedChat::open(chat_options, runtime, inference_client)?;
+    let chat = OneShotSession::open(chat_options, runtime, inference_client)?;
     let summary = chat.summary()?;
     tracing::info!(
         target: "agentlibre::app",
@@ -1346,7 +1342,7 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
                 cpu_fallback_for_failed_turn(summary.automatic_runtime_plan.as_ref(), &message)
             {
                 bail!(
-                    "GPU inference failed: {message}\nA benchmarked CPU fallback is available (profile {}, context {}, expected speed {}), but non-interactive `agl run` never switches devices automatically. Run `agl chat` in a terminal to review and accept it.",
+                    "GPU inference failed: {message}\nA benchmarked CPU fallback is available (profile {}, context {}, expected speed {}), but non-interactive `agl run` never switches devices automatically. Select the CPU runtime explicitly and retry.",
                     cpu.profile_id,
                     cpu.runtime.context_tokens,
                     cpu.expected_speed
@@ -1370,10 +1366,14 @@ fn run_serve_raw(options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Re
         &runtime.paths,
         inference_options_from_serve_options(&options, runtime)?,
     );
-    if let Some(socket_path) = options.socket_path {
-        daemon_options.socket_path = socket_path;
-    }
-    println!("socket_path={}", daemon_options.socket_path.display());
+    daemon_options.listener_source = if options.systemd_activation {
+        agl_daemon::ListenerSource::Systemd
+    } else if let Some(socket_path) = options.socket_path {
+        agl_daemon::ListenerSource::Bind(socket_path)
+    } else {
+        daemon_options.listener_source
+    };
+    println!("listener={}", daemon_options.listener_source);
     DaemonServer::new(runtime.clone(), daemon_options).run_foreground()
 }
 
@@ -1385,11 +1385,12 @@ fn run_daemon_status(
     let socket_path = options
         .socket_path
         .unwrap_or_else(|| default_socket_path(&runtime.paths));
-    match AgentLibreClient::connect(&socket_path) {
-        Ok(mut client) => match client.hello(HelloRequest {
-            client_name: Some("agl-status".to_string()),
-            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
-        }) {
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build daemon status runtime")?;
+    match async_runtime.block_on(AgentLibreClient::connect(&socket_path)) {
+        Ok(client) => match client.hello() {
             Ok(hello) => {
                 println!("state=running");
                 println!("socket_path={}", socket_path.display());
@@ -1874,300 +1875,6 @@ fn print_skill_trust_update_report(report: &SkillTrustUpdateReport) {
     }
 }
 
-fn run_chat(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    apply_workspace_default_function_to_run(&mut options, runtime)?;
-    run_chat_raw(options, runtime)
-}
-
-fn run_chat_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "chat", "starting command");
-    let mut chat_options = chat_options_from_run_options(&options, runtime)?;
-    let mut model_manager = process_local_model_manager(runtime)?;
-    let inference_client = InferenceClientHandle::from(model_manager.handle());
-    let mut chat = SupervisedChat::open(chat_options.clone(), runtime, inference_client)?;
-    let summary = chat.summary()?;
-    let automatic_runtime_plan = summary.automatic_runtime_plan.clone();
-    let mut cpu_fallback_activated = false;
-    let stdin = io::stdin();
-
-    tracing::info!(
-        target: "agentlibre::app",
-        session_id = %summary.session_id,
-        artifact_root = %summary.artifact_root.display(),
-        workspace_root = %summary.workspace_root.display(),
-        tool_mode = summary.tool_mode,
-        history_enabled = summary.history_enabled,
-        resumed = summary.resumed,
-        replayed_messages = summary.replayed_messages,
-        "chat session started"
-    );
-    println!("session_id={}", chat.session_id());
-
-    loop {
-        print!("agl> ");
-        io::stdout().flush().context("failed to flush prompt")?;
-
-        let mut input = String::new();
-        let bytes_read = stdin
-            .read_line(&mut input)
-            .context("failed to read chat input")?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        let input = match parse_chat_input(&input) {
-            ParsedChatInput::Empty => {
-                continue;
-            }
-            ParsedChatInput::Message(input) => input,
-            ParsedChatInput::UnknownCommand(command) => {
-                println!("unknown_command={command}");
-                continue;
-            }
-            ParsedChatInput::Command(ChatCommand::Help) => {
-                print!("{CHAT_COMMANDS_HELP}");
-                continue;
-            }
-            ParsedChatInput::Command(ChatCommand::Session) => {
-                print_chat_session_summary(&chat)?;
-                continue;
-            }
-            ParsedChatInput::Command(ChatCommand::Reload) => {
-                match chat.reload_runtime_context() {
-                    Ok(visible_tools) => {
-                        let workspace_root = chat.workspace_root()?;
-                        tracing::info!(
-                            target: "agentlibre::app",
-                            session_id = %chat.session_id(),
-                            workspace_root = %workspace_root.display(),
-                            visible_tools,
-                            "chat runtime context reloaded"
-                        );
-                        println!("context_reloaded=true visible_tools={visible_tools}");
-                        println!("workspace_root={}", workspace_root.display());
-                        println!("profile_reloaded=false");
-                        println!("profile_reload_next_step=start a new chat or run command");
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "agentlibre::app",
-                            session_id = %chat.session_id(),
-                            error = %err,
-                            "chat runtime context reload failed"
-                        );
-                        println!("reload_error={err:#}");
-                    }
-                }
-                continue;
-            }
-            ParsedChatInput::Workspace(path) => {
-                if let Some(path) = path {
-                    let current_root = chat.workspace_root()?;
-                    let root = chat_workspace_root(path, &current_root);
-                    if let Err(err) = chat.set_workspace_root(&root) {
-                        tracing::warn!(
-                            target: "agentlibre::app",
-                            session_id = %chat.session_id(),
-                            requested_workspace_root = %root.display(),
-                            error = %err,
-                            "chat workspace root change failed"
-                        );
-                        println!("workspace_error={err:#}");
-                    } else {
-                        tracing::info!(
-                            target: "agentlibre::app",
-                            session_id = %chat.session_id(),
-                            workspace_root = %chat.workspace_root()?.display(),
-                            "chat workspace root changed"
-                        );
-                    }
-                }
-                println!("workspace_root={}", chat.workspace_root()?.display());
-                continue;
-            }
-            ParsedChatInput::Pwd => {
-                println!(
-                    "working_directory={}",
-                    chat.execution_context()?.working_directory.display()
-                );
-                continue;
-            }
-            ParsedChatInput::Cd { path, host } => {
-                match chat.set_working_directory(path, host) {
-                    Ok(snapshot) => {
-                        println!("working_directory={}", snapshot.working_directory.display());
-                        println!("execution_context_revision={}", snapshot.revision);
-                    }
-                    Err(error) => println!("process_error={error:#}"),
-                }
-                continue;
-            }
-            ParsedChatInput::Processes => {
-                let result = (|| -> Result<Vec<agl_process::ExecutionStatus>> {
-                    let process = agl_chat::shared_process_handle(runtime)?;
-                    let owner = chat_process_owner(chat.session_id());
-                    process
-                        .list_owned(
-                            agl_process::ExecutionListFilter {
-                                session_id: Some(chat.session_id().clone()),
-                                root_run_id: None,
-                                include_finished: false,
-                            },
-                            &owner,
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))
-                })();
-                match result {
-                    Ok(executions) => process_command::print_execution_list(&executions),
-                    Err(error) => println!("process_error={error:#}"),
-                }
-                continue;
-            }
-            ParsedChatInput::Attach {
-                execution_id,
-                read_only,
-            } => {
-                let result = (|| -> Result<()> {
-                    let execution_id = agl_ids::ExecutionId::parse(execution_id)
-                        .context("invalid execution identity")?;
-                    let process = agl_chat::shared_process_handle(runtime)?;
-                    let owner = chat_process_owner(chat.session_id());
-                    process_command::attach_owned_process(
-                        &process,
-                        &execution_id,
-                        &owner,
-                        read_only,
-                    )
-                })();
-                if let Err(error) = result {
-                    println!("process_error={error:#}");
-                }
-                continue;
-            }
-            ParsedChatInput::Kill {
-                execution_id,
-                immediate,
-            } => {
-                let result = (|| -> Result<()> {
-                    let execution_id = agl_ids::ExecutionId::parse(execution_id)
-                        .context("invalid execution identity")?;
-                    let process = agl_chat::shared_process_handle(runtime)?;
-                    let owner = chat_process_owner(chat.session_id());
-                    process
-                        .kill(
-                            &execution_id,
-                            &owner,
-                            if immediate {
-                                agl_process::KillMode::Immediate
-                            } else {
-                                agl_process::KillMode::Graceful
-                            },
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    println!("execution_id={execution_id} termination_accepted=true");
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    println!("process_error={error:#}");
-                }
-                continue;
-            }
-            ParsedChatInput::Command(ChatCommand::Clear) => {
-                let cleared_messages = chat.clear_context()?;
-                tracing::info!(
-                    target: "agentlibre::app",
-                    session_id = %chat.session_id(),
-                    cleared_messages,
-                    "chat context cleared"
-                );
-                println!("context_cleared=true cleared_messages={cleared_messages}");
-                continue;
-            }
-            ParsedChatInput::Command(ChatCommand::Exit) => {
-                chat.request_exit()?;
-                break;
-            }
-        };
-
-        let mut output = chat.run_user_turn(input)?;
-        if !cpu_fallback_activated
-            && let ChatTurnStatus::Failed { message } = &output.status
-            && let Some(cpu) =
-                cpu_fallback_for_failed_turn(automatic_runtime_plan.as_ref(), message)
-        {
-            eprintln!("GPU inference failed: {message}");
-            eprintln!(
-                "CPU fallback: profile {}, context {}, {} threads, expected speed {}.",
-                cpu.profile_id, cpu.runtime.context_tokens, cpu.runtime.threads, cpu.expected_speed
-            );
-            if !stdin.is_terminal() {
-                bail!(
-                    "CPU fallback requires explicit interactive confirmation; run `agl chat` in a terminal"
-                );
-            }
-            model::confirm(
-                false,
-                false,
-                "Retry this chat turn with the displayed CPU plan? [y/N] ",
-            )?;
-            let workspace_root = chat.workspace_root()?;
-            chat.shutdown()
-                .context("failed to stop the GPU chat session before CPU fallback")?;
-            model_manager
-                .shutdown()
-                .context("failed to stop the GPU model manager before CPU fallback")?;
-
-            chat_options.session_id = None;
-            chat_options.new_session = true;
-            chat_options.workspace_root = Some(workspace_root.clone());
-            chat_options.inference.workspace_root = Some(workspace_root);
-            chat_options.inference.runtime_plan_override = Some(cpu.clone());
-            model_manager = process_local_model_manager(runtime)?;
-            let inference_client = InferenceClientHandle::from(model_manager.handle());
-            chat = SupervisedChat::open(chat_options.clone(), runtime, inference_client)
-                .context("failed to open CPU fallback chat session")?;
-            cpu_fallback_activated = true;
-            println!("fallback_session_id={}", chat.session_id());
-            output = chat
-                .run_user_turn(input)
-                .context("failed to retry chat turn with the accepted CPU plan")?;
-        }
-        tracing::info!(
-            target: "agentlibre::app",
-            session_id = %chat.session_id(),
-            run_id = %output.run_id,
-            turn_id = %output.turn_id,
-            generated_requests = output.generated_requests,
-            "chat turn finished"
-        );
-        match output.status {
-            ChatTurnStatus::Answered { answer } => {
-                println!("assistant> {answer}");
-            }
-            ChatTurnStatus::Stopped { reason } => {
-                println!("stopped=true reason={}", reason.as_str());
-            }
-            ChatTurnStatus::Failed { message } => bail!("turn failed: {message}"),
-            ChatTurnStatus::Cancelled => bail!("turn cancelled"),
-        }
-    }
-
-    chat.finish_eof_if_needed()?;
-    tracing::info!(
-        target: "agentlibre::app",
-        session_id = %chat.session_id(),
-        "chat session finished"
-    );
-    Ok(())
-}
-
-fn chat_process_owner(session_id: &agl_ids::SessionId) -> agl_process::ExecutionOwner {
-    agl_process::ExecutionOwner::Session {
-        session_id: session_id.clone(),
-        root_run_id: agl_ids::RunId::generate(),
-    }
-}
-
 fn cpu_fallback_for_failed_turn<'a>(
     plans: Option<&'a agl_models::RuntimePlanSet>,
     message: &str,
@@ -2186,13 +1893,6 @@ fn is_gpu_load_failure_message(message: &str) -> bool {
             && (message.contains("memory") || message.contains("device")))
 }
 
-fn print_chat_session_summary(chat: &SupervisedChat) -> Result<()> {
-    println!("session_id={}", chat.session_id());
-    println!("artifact_root={}", chat.artifact_root()?.display());
-    println!("workspace_root={}", chat.workspace_root()?.display());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use crate::args::ConfigCommand;
@@ -2202,6 +1902,7 @@ mod tests {
     fn serve_options() -> ServeOptions {
         ServeOptions {
             socket_path: None,
+            systemd_activation: false,
             config: None,
             function_ref: None,
             artifact_root: None,

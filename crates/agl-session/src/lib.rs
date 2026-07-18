@@ -3,7 +3,7 @@ mod store;
 
 pub use store::{
     AgentLibreSessionFinishReason, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
-    SessionMetadata,
+    SessionCatalogEntry, SessionCatalogStatus, SessionMetadata,
 };
 
 #[cfg(test)]

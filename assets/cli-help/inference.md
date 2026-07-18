@@ -5,4 +5,3 @@ backend debugging, model smoke tests, or config repair.
 
 Common use:
   agl inference run --config /path/to/local.toml --prompt "Reply once."
-  agl inference chat --config /path/to/local.toml

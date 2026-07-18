@@ -5,7 +5,7 @@ path:
 
 ```bash
 agl init
-agl chat
+agl
 ```
 
 The conservative default is `gemma4-e4b`, a Gemma 4 E4B QAT Q4 main model plus
@@ -24,7 +24,7 @@ Machines below the recommended 8 GB physical-memory class stop before
 acquisition. `agl init --allow-low-memory` permits a best-effort attempt; it
 does not turn the host into a benchmarked/supported profile. CPU-only machines
 are supported when the package's measured CPU profile fits. When a selected
-GPU plan fails to load, interactive setup or chat displays the exact CPU plan
+GPU plan fails to load, interactive setup displays the exact CPU plan
 and asks before retrying. Non-interactive inference never changes devices
 silently. The CPU backend ships in the same build, while Vulkan and other
 accelerator backends load dynamically when present; starting the CLI does not
@@ -70,11 +70,11 @@ agl config status
 agl config status --config /path/to/local.toml --strict
 ```
 
-Direct inference commands intentionally bypass function selection and are for
+Direct one-shot inference intentionally bypasses function selection and is for
 backend diagnostics or a custom fixed profile:
 
 ```bash
-agl inference chat --config /path/to/local.toml
+agl inference run --config /path/to/local.toml --prompt "Reply once."
 ```
 
 Minimal fixed profile shape:
@@ -99,6 +99,6 @@ skills = ["repo-status"]
 ```
 
 Use measured numeric values for the target machine; do not use sentinel values
-such as `gpu_layers = 999`. Function-backed `agl chat` loads its selected
-profile when the session starts. Start a new chat after changing model/runtime
-fields or `[prompt].skills`.
+such as `gpu_layers = 999`. Bare `agl` loads the daemon-selected function
+profile when the session starts. Start a new session after changing
+model/runtime fields or `[prompt].skills`.

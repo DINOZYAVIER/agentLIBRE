@@ -1,17 +1,14 @@
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead as _, BufReader, Write as _};
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 
 const AGL_BIN: &str = env!("CARGO_BIN_EXE_agl");
-const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
-
 static TEMP_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -30,7 +27,8 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
-    assert_contains(&stdout, "chat");
+    assert_contains(&stdout, "--resume");
+    assert_contains(&stdout, "--no-input-history");
     assert_contains(&stdout, "process");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
@@ -80,7 +78,6 @@ fn version_output_uses_public_alias() {
 #[test]
 fn command_help_exits_successfully_for_public_commands() {
     for args in [
-        &["chat", "--help"][..],
         &["completion", "--help"][..],
         &["config", "--help"][..],
         &["config", "paths", "--help"][..],
@@ -114,7 +111,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["model", "prune", "--help"][..],
         &["inference", "--help"][..],
         &["inference", "run", "--help"][..],
-        &["inference", "chat", "--help"][..],
         &["inference", "serve", "--help"][..],
         &["skill", "--help"][..],
         &["skill", "init", "--help"][..],
@@ -392,73 +388,6 @@ fn process_doctor_prints_machine_and_human_diagnostics_even_when_unsupported() {
     assert!(value["diagnostics"]["platform"].is_string());
     assert!(value["diagnostics"]["supported"].is_boolean());
     assert!(value["workspace_root"].is_string());
-}
-
-#[test]
-fn direct_chat_process_and_working_directory_commands_use_operator_path() {
-    let home = TempHome::new("chat-process-operator");
-    let workspace = home.path().join("workspace");
-    let child = workspace.join("child");
-    let host_directory = home.path().join("host-directory");
-    let next_workspace = home.path().join("next-workspace");
-    for directory in [&child, &host_directory, &next_workspace] {
-        fs::create_dir_all(directory).unwrap();
-    }
-    let config_path = home.write_local_inference_config(
-        "missing-model.toml",
-        "/tmp/agl-cli-surface-process-operator-missing.gguf",
-    );
-    let execution_id = agl_ids::ExecutionId::generate();
-    let input = format!(
-        "/pwd\n/cd child\n/pwd\n/cd --host {}\n/pwd\n/workspace {}\n/pwd\n/processes\n/attach {}\n/kill {} --immediate\n/quit\n",
-        host_directory.display(),
-        next_workspace.display(),
-        execution_id,
-        execution_id,
-    );
-    let home_arg = home.path_string();
-    let config_arg = config_path.display().to_string();
-    let workspace_arg = workspace.display().to_string();
-
-    let output = run_agl_with_stdin(
-        &[
-            "--home",
-            &home_arg,
-            "inference",
-            "chat",
-            "--config",
-            &config_arg,
-            "--workspace-root",
-            &workspace_arg,
-            "--session-id",
-            SESSION_ID,
-            "--max-output-tokens",
-            "1",
-        ],
-        &input,
-    );
-
-    assert_success_no_stderr(&output);
-    let stdout = stdout(&output);
-    assert_contains(
-        &stdout,
-        &format!("working_directory={}", workspace.display()),
-    );
-    assert_contains(&stdout, &format!("working_directory={}", child.display()));
-    assert_contains(
-        &stdout,
-        &format!("working_directory={}", host_directory.display()),
-    );
-    assert_contains(
-        &stdout,
-        &format!("workspace_root={}", next_workspace.display()),
-    );
-    assert_contains(&stdout, "EXECUTION_ID\tOWNER\tSTATE\tPROFILE\tIO\tCWD");
-    assert_contains(
-        &stdout,
-        "process_error=chat process attach requires local terminal stdin and stdout",
-    );
-    assert_contains(&stdout, "process_error=execution_not_found:");
 }
 
 #[test]
@@ -1031,17 +960,11 @@ fn daemon_help_explains_process_boundaries() {
 
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
+    assert_contains(&stdout, "The daemon serves the interactive CLI");
+    assert_contains(&stdout, "Bare `agl` connects to its private socket");
     assert_contains(
         &stdout,
-        "The daemon serves long-running clients such as the Matrix bridge.",
-    );
-    assert_contains(
-        &stdout,
-        "Commands such as `agl run` and `agl chat` execute in the invoking process.",
-    );
-    assert_contains(
-        &stdout,
-        "`agl serve` starts the daemon, and `agl daemon status` inspects it.",
+        "development daemon, and `agl daemon status` inspects it.",
     );
 }
 
@@ -1875,34 +1798,6 @@ fn function_run_rejects_missing_model_binding_before_admission() {
 }
 
 #[test]
-fn chat_rejects_prompt_option_with_clap_error() {
-    let output = run_agl(&["chat", "--prompt", "hello"]);
-
-    assert_failure(&output);
-    assert_empty_stdout(&output);
-    let stderr = stderr(&output);
-    assert_contains(&stderr, "unexpected argument '--prompt'");
-    assert!(
-        !stderr.starts_with("error: error:"),
-        "clap errors should not be double-prefixed:\n{stderr}"
-    );
-}
-
-#[test]
-fn chat_new_session_conflict_fails_before_inference_path() {
-    let output = run_agl(&["chat", "--new-session", "--session-id", SESSION_ID]);
-
-    assert_failure(&output);
-    assert_empty_stdout(&output);
-    let stderr = stderr(&output);
-    assert_contains(&stderr, "--new-session cannot be used with --session-id");
-    assert!(
-        !stderr.contains("local inference config"),
-        "session flag conflict should not run inference path:\n{stderr}"
-    );
-}
-
-#[test]
 fn removed_command_names_fail_before_inference_path() {
     for args in [
         &["infer", "--help"][..],
@@ -1981,46 +1876,6 @@ fn invalid_workspace_root_fails_before_inference_config() {
     );
 }
 
-#[test]
-fn chat_model_failure_records_session_failed_and_exits_unsuccessfully() {
-    let home = TempHome::new("chat-model-failure");
-    let config_path = home.write_local_inference_config(
-        "missing-model.toml",
-        "/tmp/agl-cli-surface-missing-model.gguf",
-    );
-    let home_arg = home.path_string();
-    let config_arg = config_path.display().to_string();
-    let output = run_agl_with_stdin(
-        &[
-            "--home",
-            &home_arg,
-            "inference",
-            "chat",
-            "--config",
-            &config_arg,
-            "--session-id",
-            SESSION_ID,
-            "--max-output-tokens",
-            "1",
-        ],
-        "hello\n",
-    );
-
-    assert_failure(&output);
-    assert_contains(&stdout(&output), &format!("session_id={SESSION_ID}"));
-    assert_contains(&stderr(&output), "model request failed");
-
-    let transcript = fs::read_to_string(
-        home.path()
-            .join("data")
-            .join("sessions")
-            .join(SESSION_ID)
-            .join("transcript.jsonl"),
-    )
-    .expect("chat failure should write transcript");
-    assert_contains(&transcript, "\"kind\":\"session_failed\"");
-}
-
 fn run_agl(args: &[&str]) -> Output {
     Command::new(AGL_BIN)
         .args(args)
@@ -2061,6 +1916,7 @@ where
                 DaemonEventKind::Hello(HelloEvent {
                     protocol_version: PROTOCOL_VERSION.to_string(),
                     product_version: env!("CARGO_PKG_VERSION").to_string(),
+                    daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
                     capabilities: Vec::new(),
                 }),
             ),
@@ -2128,25 +1984,6 @@ fn run_agl_in_with_hf_home(
         .args(args)
         .output()
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
-}
-
-fn run_agl_with_stdin(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(AGL_BIN)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|err| panic!("failed to spawn agl binary at {AGL_BIN}: {err}"));
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin should be piped")
-        .write_all(input.as_bytes())
-        .expect("failed to write agl stdin");
-    child
-        .wait_with_output()
-        .expect("failed to wait for agl process")
 }
 
 fn submodule_workspace_with_skill(
@@ -2391,37 +2228,6 @@ impl TempHome {
 
     fn path(&self) -> &std::path::Path {
         &self.path
-    }
-
-    fn write_local_inference_config(&self, name: &str, model_path: &str) -> PathBuf {
-        let path = self.path.join(name);
-        fs::write(
-            &path,
-            format!(
-                r#"[backend]
-kind = "llama_cpp"
-model = "{model_path}"
-
-[runtime]
-gpu_layers = 0
-context_tokens = 128
-threads = 1
-batch_size = 16
-ubatch_size = 16
-
-[model]
-dialect = "qwen3"
-tool_call_format = "hermes_json"
-"#
-            ),
-        )
-        .unwrap_or_else(|err| {
-            panic!(
-                "failed to write local inference config {}: {err}",
-                path.display()
-            )
-        });
-        path
     }
 }
 

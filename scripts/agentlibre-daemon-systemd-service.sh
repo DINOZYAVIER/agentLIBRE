@@ -6,10 +6,10 @@ usage() {
 Usage:
   scripts/agentlibre-daemon-systemd-service.sh [OPTIONS]
 
-Installs a user-systemd service for `agl serve`.
+Installs paired user-systemd socket and service units for `agl serve`.
 
 Options:
-  --unit NAME           systemd user unit name
+  --unit NAME           systemd user service unit name
   --cwd PATH            working directory for the service
   --binary PATH         agl binary path
   --config PATH         local inference config TOML path
@@ -18,13 +18,13 @@ Options:
   --max-output-tokens N max generated tokens per turn
   --tool-mode MODE      read-only or write
   --log-filter FILTER   tracing filter for AGL_LOG
-  --enable              enable the unit
-  --restart             restart the unit after writing it
-  --dry-run             print the unit without writing it
+  --enable              enable the socket unit
+  --restart             restart the socket unit after writing it
+  --dry-run             print both units without writing them
   -h, --help            show this help
 
 Defaults:
-  --unit              agl.service
+  --unit              agentlibre-daemon.service
   --cwd               current git repo root, or current directory outside git
   --binary            ./target/release/agl under the repo root
   --config            ~/.config/agentLIBRE/inference/local.toml
@@ -43,7 +43,7 @@ source "$script_dir/systemd-lib.sh"
 config_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
 state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
 
-unit="agl.service"
+unit="agentlibre-daemon.service"
 cwd="$(git -C "$repo_root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$repo_root")"
 binary="${AGL_DAEMON_BINARY:-$repo_root/target/release/agl}"
 config="${AGL_DAEMON_CONFIG:-$config_home/agentLIBRE/inference/local.toml}"
@@ -119,6 +119,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 agl_systemd_validate_unit_name "$unit"
+if [[ "$unit" != *.service ]]; then
+  echo "--unit must end in .service: $unit" >&2
+  exit 2
+fi
 agl_systemd_validate_absolute_vars cwd binary config socket workspace_root
 
 if [[ ! "$max_output_tokens" =~ ^[1-9][0-9]*$ ]]; then
@@ -142,23 +146,41 @@ agl_systemd_require_file "$dry_run" "$config" "config file"
 
 unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
-unit_content="[Unit]
+socket_unit="${unit%.service}.socket"
+socket_unit_file="$unit_dir/$socket_unit"
+service_content="[Unit]
 Description=agentLIBRE daemon
+Requires=$socket_unit
+After=$socket_unit
 
 [Service]
 Type=simple
 WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
-ExecStart=$(agl_systemd_quote "$binary") serve --config $(agl_systemd_quote "$config") --socket $(agl_systemd_quote "$socket") --workspace-root $(agl_systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
-Restart=always
+ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --config $(agl_systemd_quote "$config") --workspace-root $(agl_systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
+Restart=on-failure
 RestartSec=5
-
-[Install]
-WantedBy=default.target
 "
 
-echo "unit: $unit"
+socket_content="[Unit]
+Description=agentLIBRE daemon socket
+
+[Socket]
+ListenStream=$socket
+FileDescriptorName=agentlibre
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=true
+Accept=no
+Service=$unit
+
+[Install]
+WantedBy=sockets.target
+"
+
+echo "service unit: $unit"
+echo "socket unit: $socket_unit"
 echo "cwd: $cwd"
 echo "binary: $binary"
 echo "config: $config"
@@ -168,11 +190,20 @@ echo "max output tokens: $max_output_tokens"
 echo "tool mode: $tool_mode"
 echo "log filter: $log_filter"
 echo "unit file: $unit_file"
+echo "socket unit file: $socket_unit_file"
 
 agl_systemd_print_or_install_user_unit \
   "$dry_run" \
   "$unit_dir" \
   "$unit" \
-  "$unit_content" \
+  "$service_content" \
+  0 \
+  0
+
+agl_systemd_print_or_install_user_unit \
+  "$dry_run" \
+  "$unit_dir" \
+  "$socket_unit" \
+  "$socket_content" \
   "$enable" \
   "$restart"

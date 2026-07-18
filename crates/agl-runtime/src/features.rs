@@ -162,7 +162,7 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
             summary: "inspect current grants and request exact tool access",
             read_only_actions: &["status", "request"],
             write_actions: &["grant", "revoke"],
-            commands: &["agl chat --tool-mode write"],
+            commands: &["agl --mode write"],
             requires: &["agl-store for durable request/grant evidence"],
             model_tools: &["permissions.status", "permissions.request"],
         },

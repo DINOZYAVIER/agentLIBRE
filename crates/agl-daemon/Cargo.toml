@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 agl-chat.workspace = true
+agl-app.workspace = true
 agl-cron.workspace = true
 agl-content.workspace = true
 agl-events.workspace = true
@@ -25,6 +26,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [build-dependencies]
 agl-llama-cpp-sys.workspace = true

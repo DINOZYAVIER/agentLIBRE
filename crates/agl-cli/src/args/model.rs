@@ -12,6 +12,7 @@ pub(crate) struct CliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
+    Interactive(InteractiveOptions),
     Help { bin_name: &'static str },
     HelpPrinted,
     Completion { shell: Shell },
@@ -30,7 +31,18 @@ pub(crate) enum CliCommand {
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
     Run(RunOptions),
-    Chat(RunOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InteractiveOptions {
+    pub(crate) resume: Option<String>,
+    pub(crate) input_history: bool,
+    pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) function_ref: Option<String>,
+    pub(crate) model_id: Option<String>,
+    pub(crate) operation_mode: Option<ToolAccessMode>,
+    pub(crate) skills: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,7 +142,6 @@ pub(crate) enum FunctionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum InferenceCommand {
     Run(RunOptions),
-    Chat(RunOptions),
     Serve(ServeOptions),
 }
 
@@ -721,6 +732,7 @@ pub(crate) struct FunctionDoctorOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServeOptions {
     pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) systemd_activation: bool,
     pub(crate) config: Option<PathBuf>,
     pub(crate) function_ref: Option<String>,
     pub(crate) artifact_root: Option<PathBuf>,

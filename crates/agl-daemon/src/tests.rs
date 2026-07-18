@@ -210,6 +210,7 @@ fn open_session(state: &mut DaemonState) -> SessionId {
             session_id: None,
             new_session: true,
             workspace_root: None,
+            function_ref: None,
             skills: Vec::new(),
             tool_mode: ProtocolToolMode::ReadOnly,
         },
@@ -229,7 +230,9 @@ fn submit(
     let event = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id: session_id.clone(),
         content: agl_content::Content::text(text).unwrap(),
-        idempotency_key: idempotency_key.map(str::to_string),
+        client_submission_id: idempotency_key
+            .map(str::to_string)
+            .unwrap_or_else(|| RequestId::generate().to_string()),
         budget: RunBudgetRequest::default(),
     })));
     match event.kind {
@@ -361,6 +364,7 @@ Return the daemon child verdict.
             session_id: None,
             new_session: true,
             workspace_root: Some(workspace.display().to_string()),
+            function_ref: None,
             skills: Vec::new(),
             tool_mode: ProtocolToolMode::Execute,
         },
@@ -507,7 +511,7 @@ fn conflicting_idempotency_fingerprint_fails_without_second_run() {
     let conflict = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
         session_id,
         content: agl_content::Content::text("different").unwrap(),
-        idempotency_key: Some("same-key".to_string()),
+        client_submission_id: "same-key".to_string(),
         budget: RunBudgetRequest::default(),
     })));
     assert!(matches!(

@@ -128,9 +128,17 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
     let listener = UnixListener::bind(&socket).unwrap();
     let server_state = state.clone();
     let server = std::thread::spawn(move || {
+        let async_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         for _ in 0..3 {
             let (stream, _) = listener.accept().unwrap();
-            agl_daemon::serve_connection(stream, &server_state).unwrap();
+            stream.set_nonblocking(true).unwrap();
+            let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+            async_runtime
+                .block_on(agl_daemon::serve_connection(stream, &server_state))
+                .unwrap();
         }
     });
 

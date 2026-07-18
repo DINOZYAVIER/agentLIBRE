@@ -16,6 +16,7 @@ agl-chat.workspace = true
 agl-capabilities.workspace = true
 agl-client.workspace = true
 agl-config.workspace = true
+agl-content.workspace = true
 agl-cron.workspace = true
 agl-daemon.workspace = true
 agl-functions.workspace = true
@@ -33,11 +34,17 @@ agl-store.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+fs2.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
 libc.workspace = true
+tokio.workspace = true
+unicode-segmentation.workspace = true
 
 [build-dependencies]
 agl-llama-cpp-sys.workspace = true

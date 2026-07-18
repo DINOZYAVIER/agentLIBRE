@@ -491,6 +491,53 @@ impl ChatService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_user_shell_started(
+        &mut self,
+        run_id: RunId,
+        step_id: agl_ids::StepId,
+        execution_id: agl_ids::ExecutionId,
+        command: String,
+        profile: agl_process::ExecutionProfile,
+        cwd: PathBuf,
+        background: bool,
+    ) -> Result<()> {
+        let history = self
+            .chat_history
+            .as_mut()
+            .context("user shell lifecycle requires durable session history")?;
+        history.append_user_shell_started(
+            run_id,
+            step_id,
+            execution_id,
+            command,
+            profile,
+            cwd,
+            background,
+        )
+    }
+
+    pub fn record_user_shell_finished(
+        &mut self,
+        execution_id: agl_ids::ExecutionId,
+        state: agl_process::ExecutionState,
+        exit: Option<agl_process::ExecutionExit>,
+        retained_after_sequence: u64,
+        output_truncated: bool,
+    ) -> Result<()> {
+        let history = self
+            .chat_history
+            .as_mut()
+            .context("user shell lifecycle requires durable session history")?;
+        history.append_user_shell_finished(
+            execution_id,
+            state,
+            exit,
+            retained_after_sequence,
+            output_truncated,
+        )
+    }
+
     pub fn finish_eof_if_needed(&mut self) -> Result<()> {
         if self.session_finished {
             return Ok(());

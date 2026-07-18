@@ -36,9 +36,9 @@ Run or chat through a function. The selected function is explicit when
 
 ```bash
 agl run --prompt "Summarize this repo."
-agl chat
+agl
 agl run --function coding --prompt "Summarize this repo."
-agl chat --function coding
+agl --function coding
 ```
 
 The MVP reads `FUNCTION.md`, reads the required sibling `SYSTEM.md`, resolves
@@ -160,15 +160,15 @@ context. The default selection order is:
 
 An initialized workspace must carry `[functions].default`. If
 `.agl/workspace.toml` exists but the default is missing, invalid, or points to a
-missing function, `agl run`, `agl chat`, and `agl serve` must fail with a repair
+missing function, `agl run`, bare `agl`, and `agl serve` must fail with a repair
 hint instead of falling back to raw inference. `agl init` is responsible for
 writing or repairing the default; it should not copy builtin functions into the
 workspace unless a user asks for a custom function.
 
 Top-level runtime commands are function-first:
 
-- `agl run`, `agl chat`, and `agl serve` resolve a function by default.
-- `--config PATH` on those commands overrides the selected function's model
+- `agl run`, bare `agl`, and `agl serve` resolve a function by default.
+- `--config PATH` on the non-interactive commands overrides the selected function's model
   config for that invocation, but keeps function context, skills, tools,
   subagents, memory policy, identity hooks, and evidence.
 - Direct model/config execution is available only through the low-level
@@ -179,7 +179,6 @@ debugging and backend smoke tests:
 
 ```bash
 agl inference run --config /path/to/local.toml --prompt "Reply once."
-agl inference chat --config /path/to/local.toml
 agl inference serve --config /path/to/local.toml
 ```
 
@@ -366,7 +365,7 @@ Resolution for `model.profile`:
 3. `local` maps to the existing local inference config.
 
 `model.config` and `model.profile` are mutually exclusive. `--config PATH` on
-`agl run`, `agl chat`, or `agl serve` overrides either one for that invocation.
+`agl run` or `agl serve` overrides either one for that invocation.
 It does not disable the function's skills, subagents, or system prompt context.
 
 Current builtin model functions:
@@ -378,7 +377,7 @@ Current builtin model functions:
 
 ## Runtime Semantics
 
-`agl run`, `agl chat`, and `agl serve` should:
+`agl run`, bare `agl`, and `agl serve` should:
 
 1. Select the function from CLI override or workspace default.
 2. Resolve the function.
@@ -400,7 +399,7 @@ CLI flags override or extend function defaults:
 - Explicit deny rules remain deny rules even if another source allows the same
   tool.
 
-Inside `agl chat`, `/reload` should refresh the selected or default function
+Inside the interactive CLI, `/reload` refreshes the selected or default function
 manifest, system prompt, selected skills, visible tools, and subagent registry.
 Changing the selected inference config/profile, model path, backend runtime
 settings, or `--config` requires starting a new chat, run, or serve process.
@@ -430,10 +429,10 @@ Function selection belongs to top-level runtime commands:
 
 ```bash
 agl run --prompt "Summarize this repo."
-agl chat
+agl
 agl serve
 agl run --function coding --prompt "Summarize this repo."
-agl chat --function coding
+agl --function coding
 agl serve --function coding
 ```
 
@@ -462,14 +461,13 @@ Required `agl init` behavior:
   manager.
 - Commit explicit bindings and `[functions] default = "gemma4-e4b"` only after
   smoke succeeds; preserve the previous working default on failure.
-- Resume the same confirmed intent after interruption and print `agl chat` only
+- Resume the same confirmed intent after interruption and print `agl` only
   for a complete ready state.
 
 Low-level direct inference is explicit:
 
 ```bash
 agl inference run --config /path/to/local.toml --prompt "Reply once."
-agl inference chat --config /path/to/local.toml
 agl inference serve --config /path/to/local.toml
 ```
 
@@ -593,10 +591,10 @@ fail malformed front matter and unsafe paths.
 3. Add `agl function list/show/status/init` and JSON output.
 4. Extend `.agl/workspace.toml` with `[functions] default = "gemma4-e4b"` from
    `agl init`.
-5. Make `agl run`, `agl chat`, and `agl serve` resolve the default function
+5. Make `agl run`, bare `agl`, and `agl serve` resolve the default function
    when `--function` is omitted.
-6. Move raw direct-config execution to `agl inference run`,
-   `agl inference chat`, and `agl inference serve`.
+6. Keep raw direct-config execution in `agl inference run` and
+   `agl inference serve`.
 7. Wire `/reload` to refresh function context and subagent registry.
 8. Add `agl function doctor`.
 9. Add named inference profile manager commands.

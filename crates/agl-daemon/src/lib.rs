@@ -1,12 +1,15 @@
+mod activation;
 mod options;
 mod run_factory;
 mod scheduler;
 mod server;
 mod state;
+mod surface;
 #[cfg(test)]
 mod tests;
 mod transcript;
 
+pub use activation::ListenerSource;
 pub use options::{DEFAULT_SOCKET_FILE, DaemonOptions, default_socket_path};
 pub use scheduler::{
     CronExecution, CronNotification, CronNotifier, CronSchedulerReport, CronTargetExecutor,

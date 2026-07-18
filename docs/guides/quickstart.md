@@ -6,7 +6,8 @@ chat:
 ```bash
 scripts/install-agl-cargo.sh
 agl init
-agl chat
+scripts/agentlibre-daemon-systemd-service.sh --enable --restart
+agl
 ```
 
 `agl init` defaults to the conservative Gemma 4 E4B QAT Q4 package, including

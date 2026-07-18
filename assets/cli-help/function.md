@@ -7,7 +7,7 @@ Common use:
   agl function init coding --workspace
   agl function status coding
   agl function show coding
-  agl chat --function coding
+  agl --function coding
 
 Workspace functions live under .agl/functions/<id>/ with FUNCTION.md and
 SYSTEM.md. Global functions live under the agentLIBRE config directory.

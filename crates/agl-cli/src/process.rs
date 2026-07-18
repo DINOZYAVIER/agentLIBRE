@@ -2,12 +2,12 @@ use std::io::{self, IsTerminal as _, Read as _, Write as _};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agl_client::{AgentLibreClient, ExecutionAttachmentEvent};
+use agl_client::{AgentLibreClient, ExecutionAttachment, ExecutionAttachmentEvent};
 use agl_process::ProcessPlatformDiagnostics;
 use agl_protocol::{
     ExecutionAttachRequest, ExecutionChannel, ExecutionIo, ExecutionKillRequest,
     ExecutionListRequest, ExecutionOwner, ExecutionReadRequest, ExecutionStatus,
-    ExecutionStatusRequest, HelloRequest, KillMode, PROTOCOL_VERSION, ProcessBytes,
+    ExecutionStatusRequest, KillMode, PROTOCOL_VERSION, ProcessBytes,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail};
@@ -37,7 +37,7 @@ pub(crate) fn run_process(
 
 #[cfg(unix)]
 fn process_list(options: ProcessListOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    let mut client = daemon_client(runtime)?;
+    let client = daemon_client(runtime)?;
     let event = client
         .execution_list(ExecutionListRequest {
             session_id: options.session_id,
@@ -57,7 +57,7 @@ fn process_list(_options: ProcessListOptions, _runtime: &AgentLibreRuntimeConfig
 
 #[cfg(unix)]
 fn process_status(options: ProcessStatusOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    let mut client = daemon_client(runtime)?;
+    let client = daemon_client(runtime)?;
     let event = client
         .execution_status(ExecutionStatusRequest {
             execution_id: options.execution_id,
@@ -83,7 +83,7 @@ fn process_status(
 
 #[cfg(unix)]
 fn process_read(options: ProcessReadOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    let mut client = daemon_client(runtime)?;
+    let client = daemon_client(runtime)?;
     let event = client
         .execution_read(ExecutionReadRequest {
             execution_id: options.execution_id,
@@ -110,7 +110,7 @@ fn process_kill(options: ProcessKillOptions, runtime: &AgentLibreRuntimeConfig) 
     } else {
         KillMode::Graceful
     };
-    let mut client = daemon_client(runtime)?;
+    let client = daemon_client(runtime)?;
     let event = client
         .execution_kill(ExecutionKillRequest {
             execution_id: options.execution_id,
@@ -161,7 +161,7 @@ fn process_attach(options: ProcessAttachOptions, runtime: &AgentLibreRuntimeConf
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("process attach requires local terminal stdin and stdout")
     }
-    let mut client = daemon_client(runtime)?;
+    let client = daemon_client(runtime)?;
     let mut attachment = client
         .execution_attach(ExecutionAttachRequest {
             execution_id: options.execution_id,
@@ -258,21 +258,24 @@ fn process_attach(
 }
 
 #[cfg(unix)]
-fn daemon_client(
-    runtime: &AgentLibreRuntimeConfig,
-) -> Result<AgentLibreClient<agl_client::UnixTransport>> {
+fn daemon_client(runtime: &AgentLibreRuntimeConfig) -> Result<CliDaemonClient> {
     let socket_path = agl_daemon::default_socket_path(&runtime.paths);
-    let mut client = AgentLibreClient::connect(&socket_path).with_context(|| {
-        format!(
-            "agentLIBRE daemon is unavailable at {}; start it with `agl serve`",
-            socket_path.display()
-        )
-    })?;
+    let async_runtime = std::sync::Arc::new(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build CLI async runtime")?,
+    );
+    let client = async_runtime
+        .block_on(AgentLibreClient::connect(&socket_path))
+        .with_context(|| {
+            format!(
+                "agentLIBRE daemon is unavailable at {}; start it with `agl serve`",
+                socket_path.display()
+            )
+        })?;
     let hello = client
-        .hello(HelloRequest {
-            client_name: Some("agl-process".to_string()),
-            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
-        })
+        .hello()
         .context("daemon process protocol handshake failed")?;
     if hello.protocol_version != PROTOCOL_VERSION {
         bail!(
@@ -281,7 +284,122 @@ fn daemon_client(
             PROTOCOL_VERSION
         );
     }
-    Ok(client)
+    Ok(CliDaemonClient {
+        async_runtime,
+        client,
+    })
+}
+
+#[cfg(unix)]
+struct CliDaemonClient {
+    async_runtime: std::sync::Arc<tokio::runtime::Runtime>,
+    client: AgentLibreClient,
+}
+
+#[cfg(unix)]
+impl CliDaemonClient {
+    fn execution_list(
+        &self,
+        request: ExecutionListRequest,
+    ) -> Result<agl_protocol::ExecutionListEvent, agl_client::ClientError> {
+        self.async_runtime
+            .block_on(self.client.execution_list(request))
+    }
+
+    fn execution_status(
+        &self,
+        request: ExecutionStatusRequest,
+    ) -> Result<agl_protocol::ExecutionStatusEvent, agl_client::ClientError> {
+        self.async_runtime
+            .block_on(self.client.execution_status(request))
+    }
+
+    fn execution_read(
+        &self,
+        request: ExecutionReadRequest,
+    ) -> Result<agl_protocol::ExecutionReadEvent, agl_client::ClientError> {
+        self.async_runtime
+            .block_on(self.client.execution_read(request))
+    }
+
+    fn execution_kill(
+        &self,
+        request: ExecutionKillRequest,
+    ) -> Result<agl_protocol::ExecutionKillAcceptedEvent, agl_client::ClientError> {
+        self.async_runtime
+            .block_on(self.client.execution_kill(request))
+    }
+
+    fn execution_attach(
+        &self,
+        request: ExecutionAttachRequest,
+    ) -> Result<CliExecutionAttachment, agl_client::ClientError> {
+        let inner = self
+            .async_runtime
+            .block_on(self.client.execution_attach(request))?;
+        Ok(CliExecutionAttachment {
+            async_runtime: std::sync::Arc::clone(&self.async_runtime),
+            inner,
+            pending: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+struct CliExecutionAttachment {
+    async_runtime: std::sync::Arc<tokio::runtime::Runtime>,
+    inner: ExecutionAttachment,
+    pending: Option<ExecutionAttachmentEvent>,
+}
+
+#[cfg(unix)]
+impl CliExecutionAttachment {
+    fn started(&self) -> &agl_protocol::ExecutionAttachmentStartedEvent {
+        &self.inner.started
+    }
+
+    fn resize(
+        &self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<agl_protocol::ExecutionResizeAcceptedEvent, agl_client::ClientError> {
+        self.async_runtime
+            .block_on(self.inner.resize(columns, rows))
+    }
+
+    fn input(
+        &self,
+        bytes: ProcessBytes,
+        eof: bool,
+    ) -> Result<agl_protocol::ExecutionInputAcceptedEvent, agl_client::ClientError> {
+        self.async_runtime.block_on(self.inner.input(bytes, eof))
+    }
+
+    fn detach(
+        &mut self,
+    ) -> Result<agl_protocol::ExecutionDetachAcceptedEvent, agl_client::ClientError> {
+        self.async_runtime.block_on(self.inner.detach())
+    }
+
+    fn wait_for_event(&mut self, timeout: Duration) -> Result<bool> {
+        if self.pending.is_some() {
+            return Ok(true);
+        }
+        match self
+            .async_runtime
+            .block_on(tokio::time::timeout(timeout, self.inner.next()))
+        {
+            Ok(event) => {
+                self.pending = event?;
+                Ok(self.pending.is_some())
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn next_event(&mut self) -> Result<Option<ExecutionAttachmentEvent>> {
+        Ok(self.pending.take())
+    }
 }
 
 fn confirm_kill(options: &ProcessKillOptions) -> Result<()> {
@@ -326,169 +444,6 @@ pub(crate) fn print_execution_list(executions: &[ExecutionStatus]) {
             status.retained_bytes,
         );
     }
-}
-
-#[cfg(unix)]
-pub(crate) fn attach_owned_process(
-    process: &agl_process::ProcessHandle,
-    execution_id: &agl_ids::ExecutionId,
-    owner: &agl_process::ExecutionOwner,
-    read_only: bool,
-) -> Result<()> {
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("chat process attach requires local terminal stdin and stdout")
-    }
-    let lease = process
-        .attach(
-            execution_id,
-            owner,
-            agl_ids::RequestId::generate(),
-            !read_only,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let result = (|| -> Result<bool> {
-        let status = process
-            .status(execution_id, owner)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let terminal = TerminalGuard::enter().context("failed to enter raw terminal mode")?;
-        let is_pty = status.io == ExecutionIo::Pty;
-        if is_pty && let Some((columns, rows)) = terminal_size() {
-            process
-                .resize(
-                    execution_id,
-                    owner,
-                    agl_process::TerminalSize { columns, rows },
-                )
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        }
-        let mut cursor = 0_u64;
-        let mut stdin_open = true;
-        loop {
-            if terminal_interrupted() {
-                process
-                    .detach(execution_id, owner, lease.clone())
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                drop(terminal);
-                eprintln!(
-                    "attachment_finished execution_id={execution_id} detached=true cursor={cursor}"
-                );
-                return Ok(true);
-            }
-            if is_pty
-                && terminal_resized()
-                && let Some((columns, rows)) = terminal_size()
-            {
-                process
-                    .resize(
-                        execution_id,
-                        owner,
-                        agl_process::TerminalSize { columns, rows },
-                    )
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            }
-            if stdin_open && stdin_ready()? {
-                let mut bytes = [0_u8; 4096];
-                let count = io::stdin()
-                    .read(&mut bytes)
-                    .context("failed to read attached terminal input")?;
-                if count == 0 {
-                    stdin_open = false;
-                    if lease.writable {
-                        process
-                            .write(
-                                execution_id,
-                                owner,
-                                lease.clone(),
-                                ProcessBytes::from_bytes(&[]),
-                                true,
-                            )
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    }
-                } else if let Some(detach_at) = bytes[..count]
-                    .iter()
-                    .position(|byte| *byte == ATTACH_DETACH_BYTE)
-                {
-                    if lease.writable && detach_at > 0 {
-                        process
-                            .write(
-                                execution_id,
-                                owner,
-                                lease.clone(),
-                                ProcessBytes::from_bytes(&bytes[..detach_at]),
-                                false,
-                            )
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    }
-                    process
-                        .detach(execution_id, owner, lease.clone())
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    drop(terminal);
-                    eprintln!(
-                        "attachment_finished execution_id={execution_id} detached=true cursor={cursor}"
-                    );
-                    return Ok(true);
-                } else if lease.writable {
-                    process
-                        .write(
-                            execution_id,
-                            owner,
-                            lease.clone(),
-                            ProcessBytes::from_bytes(&bytes[..count]),
-                            false,
-                        )
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                }
-            }
-
-            let output = process
-                .read(
-                    execution_id,
-                    owner,
-                    agl_process::ExecutionCursor {
-                        after_sequence: cursor,
-                    },
-                    65_536,
-                )
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            for chunk in &output.chunks {
-                write_attached_chunk(chunk)?;
-            }
-            cursor = output.next_sequence;
-            if output.state.is_terminal() && output.chunks.is_empty() {
-                drop(terminal);
-                eprintln!(
-                    "attachment_finished execution_id={execution_id} state={:?} detached=false cursor={cursor}",
-                    output.state
-                );
-                return Ok(false);
-            }
-            if output.chunks.is_empty() {
-                std::thread::sleep(ATTACH_POLL_INTERVAL);
-            }
-        }
-    })();
-    match result {
-        Ok(detached) => {
-            if !detached {
-                let _ = process.detach(execution_id, owner, lease);
-            }
-            Ok(())
-        }
-        Err(error) => {
-            let _ = process.detach(execution_id, owner, lease);
-            Err(error)
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn attach_owned_process(
-    _process: &agl_process::ProcessHandle,
-    _execution_id: &agl_ids::ExecutionId,
-    _owner: &agl_process::ExecutionOwner,
-    _read_only: bool,
-) -> Result<()> {
-    bail!("chat process attach is unsupported on this platform")
 }
 
 fn print_execution_detail(status: &ExecutionStatus) {

@@ -23,7 +23,6 @@ macro_rules! cli_help {
 mod help {
     pub(super) const WELCOME: &str = cli_help!("welcome");
     pub(super) const AGL: &str = cli_help!("agl");
-    pub(super) const CHAT: &str = cli_help!("chat");
     pub(super) const COMPLETION: &str = cli_help!("completion");
     pub(super) const CONFIG: &str = cli_help!("config");
     pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
@@ -49,7 +48,6 @@ mod help {
     pub(super) const DAEMON_STATUS: &str = cli_help!("daemon/status");
     pub(super) const INIT: &str = cli_help!("init");
     pub(super) const INFERENCE: &str = cli_help!("inference");
-    pub(super) const INFERENCE_CHAT: &str = cli_help!("inference/chat");
     pub(super) const INFERENCE_RUN: &str = cli_help!("inference/run");
     pub(super) const INFERENCE_SERVE: &str = cli_help!("inference/serve");
     pub(super) const INSTALL_HOOKS: &str = cli_help!("install-hooks");
@@ -133,6 +131,43 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
 
+    /// Resume the latest session or an explicit session ID in the interactive UI.
+    #[arg(
+        long,
+        value_name = "latest|SESSION_ID",
+        num_args = 0..=1,
+        default_missing_value = "latest"
+    )]
+    resume: Option<String>,
+
+    /// Disable private prompt and shell input history for this UI.
+    #[arg(long)]
+    no_input_history: bool,
+
+    /// Daemon Unix socket for the interactive UI.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
+    /// Initial interactive workspace root.
+    #[arg(long, value_name = "DIR")]
+    workspace_root: Option<PathBuf>,
+
+    /// Initial agentFUNCTION reference.
+    #[arg(long = "function", value_name = "REF")]
+    function_ref: Option<String>,
+
+    /// Initial installed model binding.
+    #[arg(long, value_name = "MODEL_ID")]
+    model: Option<String>,
+
+    /// Initial operation mode.
+    #[arg(long, value_enum)]
+    mode: Option<ToolAccessMode>,
+
+    /// Initial admitted skill selection.
+    #[arg(long = "skill", value_name = "SKILL_ID")]
+    skills: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -204,9 +239,6 @@ enum Commands {
     /// Run one prompt and print the final answer.
     #[command(long_about = help::RUN)]
     Run(RunArgs),
-    /// Start an interactive chat session.
-    #[command(long_about = help::CHAT)]
-    Chat(ChatArgs),
     /// Inspect and control durable local process executions.
     #[command(long_about = help::PROCESS)]
     Process {
@@ -324,9 +356,6 @@ enum InferenceCommands {
     /// Run one direct inference prompt and print the final answer.
     #[command(long_about = help::INFERENCE_RUN)]
     Run(InferenceRunArgs),
-    /// Start a direct inference chat session.
-    #[command(long_about = help::INFERENCE_CHAT)]
-    Chat(InferenceChatArgs),
     /// Run the direct inference daemon in the foreground.
     #[command(long_about = help::INFERENCE_SERVE)]
     Serve(InferenceServeArgs),
@@ -1575,31 +1604,17 @@ struct RunArgs {
 }
 
 #[derive(Debug, Args)]
-struct ChatArgs {
-    #[command(flatten)]
-    common: CommonRunArgs,
-
-    /// Resume or write a specific chat session id.
-    #[arg(long, value_name = "ID")]
-    session_id: Option<SessionId>,
-
-    /// Start a new chat session even when a session id is configured.
-    #[arg(long)]
-    new_session: bool,
-
-    /// Disable persisted chat history for this process.
-    #[arg(long)]
-    no_history: bool,
-}
-
-#[derive(Debug, Args)]
 struct ServeArgs {
     #[command(flatten)]
     common: CommonRunArgs,
 
     /// Unix socket path for the daemon.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "systemd_activation")]
     socket: Option<PathBuf>,
+
+    /// Adopt the single Unix listener passed by systemd on file descriptor 3.
+    #[arg(long, conflicts_with = "socket")]
+    systemd_activation: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1645,24 +1660,6 @@ struct InferenceRunArgs {
     /// Prompt text.
     #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-struct InferenceChatArgs {
-    #[command(flatten)]
-    common: CommonInferenceArgs,
-
-    /// Resume or write a specific chat session id.
-    #[arg(long, value_name = "ID")]
-    session_id: Option<SessionId>,
-
-    /// Start a new chat session even when a session id is configured.
-    #[arg(long)]
-    new_session: bool,
-
-    /// Disable persisted chat history for this process.
-    #[arg(long)]
-    no_history: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1803,6 +1800,9 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInv
 
 impl Cli {
     fn into_invocation(self, display_name: &'static str) -> Result<CliInvocation> {
+        if (self.resume.is_some() || self.no_input_history) && self.command.is_some() {
+            bail!("--resume and --no-input-history are available only with bare `agl`");
+        }
         let command = match self.command {
             Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
             Some(Commands::Config { command }) => CliCommand::Config(match command {
@@ -1827,7 +1827,6 @@ impl Cli {
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
             Some(Commands::Init(args)) => CliCommand::Init(setup_init_options(args)),
             Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
-            Some(Commands::Chat(args)) => CliCommand::Chat(chat_options_from_args(args)?),
             Some(Commands::Process { command }) => CliCommand::Process(process_command(command)?),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
             Some(Commands::Status(args)) => {
@@ -1864,6 +1863,21 @@ impl Cli {
                     socket_path: args.socket,
                 }),
             },
+            None if self.prompt.is_empty()
+                && std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal() =>
+            {
+                CliCommand::Interactive(InteractiveOptions {
+                    resume: self.resume,
+                    input_history: !self.no_input_history,
+                    socket_path: self.socket,
+                    workspace_root: self.workspace_root,
+                    function_ref: self.function_ref,
+                    model_id: self.model,
+                    operation_mode: self.mode,
+                    skills: validate_skill_ids(self.skills)?,
+                })
+            }
             None if self.prompt.is_empty() => CliCommand::Help {
                 bin_name: display_name,
             },
@@ -2135,9 +2149,6 @@ fn inference_command(command: InferenceCommands) -> Result<InferenceCommand> {
     Ok(match command {
         InferenceCommands::Run(args) => {
             InferenceCommand::Run(inference_run_options_from_args(args)?)
-        }
-        InferenceCommands::Chat(args) => {
-            InferenceCommand::Chat(inference_chat_options_from_args(args)?)
         }
         InferenceCommands::Serve(args) => {
             InferenceCommand::Serve(inference_serve_options_from_args(args)?)
@@ -2536,22 +2547,10 @@ fn run_options_from_prompt(prompt: String) -> Result<RunOptions> {
     })
 }
 
-fn chat_options_from_args(args: ChatArgs) -> Result<RunOptions> {
-    if args.new_session && args.session_id.is_some() {
-        bail!("--new-session cannot be used with --session-id");
-    }
-
-    Ok(RunOptions {
-        session_id: args.session_id,
-        no_history: args.no_history,
-        new_session: args.new_session,
-        ..run_options_from_common(args.common)?
-    })
-}
-
 fn serve_options_from_args(args: ServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
+        systemd_activation: args.systemd_activation,
         config: args.common.config,
         function_ref: args.common.function_ref,
         artifact_root: args.common.artifact_root,
@@ -2585,22 +2584,10 @@ fn inference_run_options_from_args(args: InferenceRunArgs) -> Result<RunOptions>
     })
 }
 
-fn inference_chat_options_from_args(args: InferenceChatArgs) -> Result<RunOptions> {
-    if args.new_session && args.session_id.is_some() {
-        bail!("--new-session cannot be used with --session-id");
-    }
-
-    Ok(RunOptions {
-        session_id: args.session_id,
-        no_history: args.no_history,
-        new_session: args.new_session,
-        ..run_options_from_inference_common(args.common)?
-    })
-}
-
 fn inference_serve_options_from_args(args: InferenceServeArgs) -> Result<ServeOptions> {
     Ok(ServeOptions {
         socket_path: args.socket,
+        systemd_activation: false,
         config: args.common.config,
         function_ref: None,
         artifact_root: args.common.artifact_root,
@@ -2701,7 +2688,7 @@ fn top_level_prompt_command(parts: Vec<String>) -> Result<CliCommand> {
     let first = parts.first().map(String::as_str);
     if matches!(
         first,
-        Some("infer" | "generate" | "setup" | "doctor" | "model")
+        Some("chat" | "infer" | "generate" | "setup" | "doctor" | "model")
     ) {
         let name = first.expect("checked by matches");
         bail!("unknown command `{name}`. Use `agl run --prompt TEXT` for a one-shot prompt.");
@@ -2818,8 +2805,6 @@ enum PublicCompletionCommands {
     Init(SetupInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
-    /// Start an interactive chat session.
-    Chat(ChatArgs),
     /// Inspect and control durable local process executions.
     Process {
         #[command(subcommand)]

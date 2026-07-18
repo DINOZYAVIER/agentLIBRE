@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_content::Content;
 use agl_events::{EventEnvelope, RuntimeEvent, RuntimeEventEnvelope};
-use agl_ids::{MessageId, RunId, SessionId, TurnId};
+use agl_ids::{ExecutionId, MessageId, RunId, SessionId, StepId, TurnId};
+use agl_process::{ExecutionExit, ExecutionProfile, ExecutionState};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,19 @@ pub struct ChatSessionReplay {
     pub events: Vec<ChatSessionEvent>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionCatalogStatus {
+    Active,
+    Finished,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionCatalogEntry {
+    pub metadata: SessionMetadata,
+    pub status: SessionCatalogStatus,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChatSessionEvent {
@@ -56,6 +70,24 @@ pub enum ChatSessionEvent {
         session_id: SessionId,
         message: String,
     },
+    UserShellStarted {
+        session_id: SessionId,
+        run_id: RunId,
+        step_id: StepId,
+        execution_id: ExecutionId,
+        command: String,
+        profile: ExecutionProfile,
+        cwd: PathBuf,
+        background: bool,
+    },
+    UserShellFinished {
+        session_id: SessionId,
+        execution_id: ExecutionId,
+        state: ExecutionState,
+        exit: Option<ExecutionExit>,
+        retained_after_sequence: u64,
+        output_truncated: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +101,47 @@ pub struct ChatSessionStore {
 }
 
 impl ChatSessionStore {
+    pub fn catalog(sessions_root: impl AsRef<Path>) -> Result<Vec<SessionCatalogEntry>> {
+        let sessions_root = sessions_root.as_ref();
+        let entries = match std::fs::read_dir(sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).context("failed to read chat sessions root"),
+        };
+        let mut catalog = Vec::new();
+        for entry in entries {
+            let entry = entry.context("failed to read chat session directory entry")?;
+            let file_type = entry
+                .file_type()
+                .context("failed to inspect chat session directory entry")?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            let metadata_path = entry.path().join("session.json");
+            if !metadata_path.is_file() {
+                continue;
+            }
+            let metadata: SessionMetadata = serde_json::from_slice(
+                &std::fs::read(&metadata_path)
+                    .with_context(|| format!("failed to read {}", metadata_path.display()))?,
+            )
+            .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
+            ensure!(
+                entry.file_name().to_string_lossy() == metadata.session_id.as_str(),
+                "chat session catalog directory does not match metadata identity"
+            );
+            let status = catalog_status(&entry.path().join("transcript.jsonl"))?;
+            catalog.push(SessionCatalogEntry { metadata, status });
+        }
+        catalog.sort_by(|left, right| {
+            left.metadata
+                .updated_at_unix_ms
+                .cmp(&right.metadata.updated_at_unix_ms)
+                .then_with(|| left.metadata.session_id.cmp(&right.metadata.session_id))
+        });
+        Ok(catalog)
+    }
+
     pub fn exists(sessions_root: impl AsRef<Path>, session_id: &SessionId) -> bool {
         sessions_root
             .as_ref()
@@ -506,6 +579,51 @@ impl ChatSessionStore {
         self.append_transition_event(ChatSessionTransition::ReadCommandExit)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_user_shell_started(
+        &mut self,
+        run_id: RunId,
+        step_id: StepId,
+        execution_id: ExecutionId,
+        command: String,
+        profile: ExecutionProfile,
+        cwd: PathBuf,
+        background: bool,
+    ) -> Result<()> {
+        ensure!(
+            !command.is_empty() && command.len() <= 16 * 1024 && !command.contains('\0'),
+            "user shell command is invalid"
+        );
+        self.append(&ChatSessionEvent::UserShellStarted {
+            session_id: self.session_id().clone(),
+            run_id,
+            step_id,
+            execution_id,
+            command,
+            profile,
+            cwd,
+            background,
+        })
+    }
+
+    pub fn append_user_shell_finished(
+        &mut self,
+        execution_id: ExecutionId,
+        state: ExecutionState,
+        exit: Option<ExecutionExit>,
+        retained_after_sequence: u64,
+        output_truncated: bool,
+    ) -> Result<()> {
+        self.append(&ChatSessionEvent::UserShellFinished {
+            session_id: self.session_id().clone(),
+            execution_id,
+            state,
+            exit,
+            retained_after_sequence,
+            output_truncated,
+        })
+    }
+
     pub fn fail(&mut self, message: impl Into<String>) -> Result<()> {
         self.append_transition_event(ChatSessionTransition::FailSession {
             message: message.into(),
@@ -573,16 +691,24 @@ impl ChatSessionStore {
     }
 
     fn append(&self, event: &ChatSessionEvent) -> Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.transcript_jsonl)
-            .with_context(|| {
-                format!(
-                    "failed to open chat transcript {}",
-                    self.transcript_jsonl.display()
-                )
-            })?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&self.transcript_jsonl).with_context(|| {
+            format!(
+                "failed to open chat transcript {}",
+                self.transcript_jsonl.display()
+            )
+        })?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &self.transcript_jsonl,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
         let line = serde_json::to_string(event).context("failed to serialize chat event")?;
         file.write_all(line.as_bytes())
             .context("failed to write chat event")?;
@@ -590,6 +716,34 @@ impl ChatSessionStore {
             .context("failed to write chat event newline")?;
         file.flush().context("failed to flush chat transcript")
     }
+}
+
+fn catalog_status(path: &Path) -> Result<SessionCatalogStatus> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SessionCatalogStatus::Active);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    let mut status = SessionCatalogStatus::Active;
+    for (index, line) in content.lines().enumerate() {
+        let event: ChatSessionEvent = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse chat session catalog {} line {}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        match event {
+            ChatSessionEvent::SessionFinished { .. } => status = SessionCatalogStatus::Finished,
+            ChatSessionEvent::SessionFailed { .. } => status = SessionCatalogStatus::Failed,
+            _ => {}
+        }
+    }
+    Ok(status)
 }
 
 fn control_event_from_transition(record: &ChatSessionTransitionRecord) -> Option<ChatSessionEvent> {
@@ -683,6 +837,12 @@ fn validate_session_event(
         }
         | ChatSessionEvent::SessionFailed {
             session_id: actual, ..
+        }
+        | ChatSessionEvent::UserShellStarted {
+            session_id: actual, ..
+        }
+        | ChatSessionEvent::UserShellFinished {
+            session_id: actual, ..
         } => ensure!(
             actual == session_id,
             "session transcript control record belongs to a different session"
@@ -696,7 +856,16 @@ fn create_new_session_dir(path: &Path) -> Result<()> {
         bail!("chat session already exists: {}", path.display());
     }
     std::fs::create_dir_all(path)
-        .with_context(|| format!("failed to create chat session directory {}", path.display()))
+        .with_context(|| format!("failed to create chat session directory {}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+        .with_context(|| {
+            format!(
+                "failed to restrict chat session directory {}",
+                path.display()
+            )
+        })?;
+    Ok(())
 }
 
 fn write_new_json<T>(path: &Path, value: &T) -> Result<()>
@@ -705,9 +874,14 @@ where
 {
     let bytes = serde_json::to_vec_pretty(value)
         .with_context(|| format!("failed to serialize JSON {}", path.display()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
         .open(path)
         .with_context(|| format!("failed to create {}", path.display()))?;
     file.write_all(&bytes)
@@ -721,9 +895,14 @@ where
     let bytes = serde_json::to_vec_pretty(value)
         .with_context(|| format!("failed to serialize JSON {}", path.display()))?;
     let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
         .open(&temporary)
         .with_context(|| format!("failed to create {}", temporary.display()))?;
     file.write_all(&bytes)

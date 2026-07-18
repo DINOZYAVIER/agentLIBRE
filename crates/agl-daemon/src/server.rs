@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,26 +15,33 @@ use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionAttachmentFinishReason, ExecutionAttachmentFinishedEvent,
     ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionInputAcceptedEvent,
-    ExecutionLeaseRenewedEvent, ExecutionOutputEvent, ExecutionResizeAcceptedEvent, ProtocolError,
-    ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
+    ExecutionLeaseRenewedEvent, ExecutionOutputEvent, ExecutionResizeAcceptedEvent,
+    PresentationSubscriptionFinishReason, ProtocolError, ProtocolErrorCode,
+    RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
+    SessionPresentationSubscriptionFinishedEvent, SessionPresentationSubscriptionStartedEvent,
+    SubscriptionCancelledEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt as _;
+use tokio::io::{AsyncWriteExt as _, WriteHalf};
+use tokio::net::{UnixListener as TokioUnixListener, UnixStream as TokioUnixStream};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::state::{process_error, protocol_run_state};
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions,
-    SharedDaemonState, render_cron_notification_body, run_cron_tick,
+    ListenerSource, SharedDaemonState, render_cron_notification_body, run_cron_tick,
 };
 
 const CONNECTION_WRITER_CAPACITY: usize = 128;
 const EXECUTION_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[cfg(unix)]
-use std::net::Shutdown;
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 
 pub struct DaemonServer {
     runtime: AgentLibreRuntimeConfig,
@@ -47,16 +53,25 @@ impl DaemonServer {
         Self { runtime, options }
     }
 
-    pub fn socket_path(&self) -> &Path {
-        &self.options.socket_path
+    pub fn listener_source(&self) -> &ListenerSource {
+        &self.options.listener_source
     }
 
     #[cfg(unix)]
     pub fn run_foreground(self) -> Result<()> {
-        let listener = bind_listener(&self.options.socket_path)?;
-        listener
-            .set_nonblocking(true)
-            .context("failed to set daemon socket nonblocking")?;
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("failed to build daemon Tokio runtime")?
+            .block_on(self.run_async())
+    }
+
+    #[cfg(unix)]
+    async fn run_async(self) -> Result<()> {
+        let listener = match &self.options.listener_source {
+            ListenerSource::Bind(path) => bind_listener(path)?,
+            ListenerSource::Systemd => crate::activation::claim_systemd_listener()?,
+        };
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
         let model_manager = ModelManager::spawn(
@@ -68,7 +83,7 @@ impl DaemonServer {
         let inference_client = InferenceClientHandle::from(model_manager.handle());
         tracing::info!(
             target: "agentlibre::daemon",
-            socket_path = %self.options.socket_path.display(),
+            listener = %self.options.listener_source,
             "daemon listening"
         );
         let state = SharedDaemonState::open(
@@ -76,58 +91,45 @@ impl DaemonServer {
             self.options.inference.clone(),
             inference_client.clone(),
         )?;
-        let mut last_cron_tick = None;
+        let mut cron_tick = tokio::time::interval(Duration::from_secs(
+            self.options.cron_interval_seconds.max(1),
+        ));
+        cron_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut linked_cron_runs = BTreeSet::new();
         loop {
-            let now = unix_now();
-            if last_cron_tick
-                .is_none_or(|last| now.saturating_sub(last) >= self.options.cron_interval_seconds)
-            {
-                last_cron_tick = Some(now);
-                let mut executor = DaemonCronExecutor {
-                    state: state.clone(),
-                };
-                let mut notifier = StoreCronNotifier { store: &store };
-                match run_cron_tick(&store, now, &mut executor, &mut notifier) {
-                    Ok(report) if report.due_jobs > 0 => tracing::info!(
-                        target: "agentlibre::daemon",
-                        due_jobs = report.due_jobs,
-                        recorded_runs = report.recorded_runs.len(),
-                        notifications = report.notifications,
-                        "cron scheduler tick completed"
-                    ),
-                    Ok(_) => {}
-                    Err(err) => tracing::warn!(
-                        target: "agentlibre::daemon",
-                        error = %err,
-                        "cron scheduler tick failed"
-                    ),
-                }
-                spawn_cron_run_linkers(
-                    &self.runtime.paths.store_root(),
-                    &store,
-                    &state,
-                    &mut linked_cron_runs,
-                );
-                trace_model_manager_status(&state);
-            }
-
-            match listener.accept() {
-                Ok((stream, _addr)) => {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _addr) = accepted.context("failed to accept daemon client")?;
                     let state = state.clone();
-                    thread::Builder::new()
-                        .name("agl-daemon-client".to_string())
-                        .spawn(move || {
-                            if let Err(err) = serve_connection(stream, &state) {
-                                tracing::warn!(target: "agentlibre::daemon", error = %err, "daemon client failed");
-                            }
-                        })
-                        .context("failed to spawn daemon client thread")?;
+                    tokio::spawn(async move {
+                        if let Err(err) = serve_connection(stream, &state).await {
+                            tracing::warn!(target: "agentlibre::daemon", error = %err, "daemon client failed");
+                        }
+                    });
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(250));
+                _ = cron_tick.tick() => {
+                    let now = unix_now();
+                    let mut executor = DaemonCronExecutor { state: state.clone() };
+                    let mut notifier = StoreCronNotifier { store: &store };
+                    match run_cron_tick(&store, now, &mut executor, &mut notifier) {
+                        Ok(report) if report.due_jobs > 0 => tracing::info!(
+                            target: "agentlibre::daemon",
+                            due_jobs = report.due_jobs,
+                            recorded_runs = report.recorded_runs.len(),
+                            notifications = report.notifications,
+                            "cron scheduler tick completed"
+                        ),
+                        Ok(_) => {}
+                        Err(err) => tracing::warn!(target: "agentlibre::daemon", error = %err, "cron scheduler tick failed"),
+                    }
+                    spawn_cron_run_linkers(
+                        &self.runtime.paths.store_root(),
+                        &store,
+                        &state,
+                        &mut linked_cron_runs,
+                    );
+                    trace_model_manager_status(&state);
                 }
-                Err(err) => return Err(err).context("failed to accept daemon client"),
             }
         }
     }
@@ -329,7 +331,7 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(unix)]
-fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
+fn bind_listener(socket_path: &Path) -> Result<TokioUnixListener> {
     let parent = socket_path
         .parent()
         .context("daemon socket path has no parent directory")?;
@@ -337,7 +339,7 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
         .with_context(|| format!("failed to create daemon socket dir {}", parent.display()))?;
 
     if socket_path.exists() {
-        match UnixStream::connect(socket_path) {
+        match StdUnixStream::connect(socket_path) {
             Ok(_) => bail!(
                 "daemon socket is already owned by a live process: {}",
                 socket_path.display()
@@ -351,8 +353,11 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
         }
     }
 
-    let listener = UnixListener::bind(socket_path)
+    let listener = StdUnixListener::bind(socket_path)
         .with_context(|| format!("failed to bind daemon socket {}", socket_path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to set daemon socket nonblocking")?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).with_context(
         || {
             format!(
@@ -361,31 +366,44 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
             )
         },
     )?;
-    Ok(listener)
+    TokioUnixListener::from_std(listener).context("failed to adopt daemon socket into Tokio")
 }
 
 #[cfg(unix)]
 #[doc(hidden)]
-pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result<()> {
-    let writer = stream
-        .try_clone()
-        .context("failed to clone daemon client stream")?;
-    let disconnect = stream
-        .try_clone()
-        .context("failed to clone daemon client stream for disconnect fencing")?;
-    let (raw_event_sender, event_receiver) = mpsc::sync_channel(CONNECTION_WRITER_CAPACITY);
+pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState) -> Result<()> {
+    let credentials = stream
+        .peer_cred()
+        .context("failed to read daemon peer credentials")?;
+    let expected_uid = unsafe { libc::geteuid() };
+    if credentials.uid() != expected_uid {
+        bail!("private daemon connection peer UID does not match daemon UID");
+    }
+    let (reader, writer) = tokio::io::split(stream);
+    let (raw_event_sender, event_receiver) = mpsc::channel(CONNECTION_WRITER_CAPACITY);
+    let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let event_sender = ConnectionEventSender {
         events: raw_event_sender,
-        disconnect: Arc::new(disconnect),
+        shutdown: shutdown.clone(),
     };
-    thread::Builder::new()
-        .name("agl-daemon-writer".to_string())
-        .spawn(move || run_connection_writer(writer, event_receiver))
-        .context("failed to spawn daemon connection writer")?;
+    let writer_task = tokio::spawn(run_connection_writer(writer, event_receiver, shutdown));
     let attachments = ConnectionAttachments::default();
-    let reader = BufReader::new(stream);
-    let result = (|| -> Result<()> {
-        for line in reader.lines() {
+    let subscriptions = ConnectionSubscriptions::default();
+    let mut reader = FramedRead::new(
+        reader,
+        LinesCodec::new_with_max_length(agl_protocol::MAX_JSONL_FRAME_BYTES),
+    );
+    let mut tasks = JoinSet::new();
+    let result = loop {
+        tokio::select! {
+            _ = shutdown_receiver.changed() => break Ok(()),
+            completed = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::debug!(target: "agentlibre::daemon", error = %error, "daemon connection task ended");
+                }
+            }
+            line = reader.next() => {
+            let Some(line) = line else { break Ok(()); };
             let line = line.context("failed to read daemon request")?;
             if line.trim().is_empty() {
                 continue;
@@ -399,9 +417,14 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                     let _ = schema;
                     let state = state.clone();
                     let sender = event_sender.clone();
-                    thread::Builder::new()
-                        .name(format!("agl-daemon-subscribe-{}", request.run_id))
-                        .spawn(move || {
+                    let subscription_id = request_id.clone();
+                    let registry_id = request_id.clone();
+                    let subscriptions_for_task = subscriptions.clone();
+                    let application = state.application();
+                    let refresh_state = state.clone();
+                    let refresh_run_id = request.run_id.clone();
+                    let handle = tasks.spawn(async move {
+                        tokio::task::spawn_blocking(move || {
                             if let Err(error) =
                                 stream_run_subscription(&sender, &state, request_id, request)
                             {
@@ -411,8 +434,38 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                                     "daemon run subscription ended"
                                 );
                             }
-                        })
-                        .context("failed to spawn daemon subscription")?;
+                        }).await.ok();
+                        if let Ok(outcome) = refresh_state.run_outcome(refresh_run_id)
+                            && let Some(session_id) = outcome.status.session_id
+                        {
+                            let _ = application.refresh(&session_id).await;
+                        }
+                        subscriptions_for_task.remove(&subscription_id);
+                    });
+                    subscriptions.insert(registry_id, handle)?;
+                }
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::SessionPresentationSubscribe(request),
+                    ..
+                }) => {
+                    let application = state.application();
+                    let sender = event_sender.clone();
+                    let subscription_id = request_id.clone();
+                    let registry_id = request_id.clone();
+                    let subscriptions_for_task = subscriptions.clone();
+                    let handle = tasks.spawn(async move {
+                        if let Err(error) = stream_presentation_subscription(
+                            &sender,
+                            &application,
+                            request_id,
+                            request,
+                        ).await {
+                            tracing::debug!(target: "agentlibre::daemon", error = %error, "presentation subscription ended");
+                        }
+                        subscriptions_for_task.remove(&subscription_id);
+                    });
+                    subscriptions.insert(registry_id, handle)?;
                 }
                 Ok(DaemonRequest {
                     schema,
@@ -423,9 +476,8 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                     let state = state.clone();
                     let sender = event_sender.clone();
                     let attachments = attachments.clone();
-                    thread::Builder::new()
-                        .name(format!("agl-daemon-attach-{}", request.execution_id))
-                        .spawn(move || {
+                    tasks.spawn(async move {
+                        tokio::task::spawn_blocking(move || {
                             if let Err(error) = stream_execution_attachment(
                                 &sender,
                                 &state,
@@ -439,8 +491,8 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                                     "daemon execution attachment ended"
                                 );
                             }
-                        })
-                        .context("failed to spawn daemon execution attachment")?;
+                        }).await.ok();
+                    });
                 }
                 Ok(DaemonRequest {
                     request_id,
@@ -450,6 +502,58 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                     &event_sender,
                     execution_lease_renew_event(state, &attachments, request_id, request),
                 )?,
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::SubscriptionCancel(request),
+                    ..
+                }) => {
+                    if subscriptions.cancel(&request.subscription_request_id) {
+                        queue_event(
+                            &event_sender,
+                            DaemonEvent::new(
+                                Some(request_id),
+                                DaemonEventKind::SubscriptionCancelled(
+                                    SubscriptionCancelledEvent {
+                                        subscription_request_id: request.subscription_request_id,
+                                    },
+                                ),
+                            ),
+                        )?;
+                    } else {
+                        queue_event(
+                            &event_sender,
+                            DaemonEvent::new(
+                                Some(request_id),
+                                DaemonEventKind::Error(ProtocolError::new(
+                                    ProtocolErrorCode::NotFound,
+                                    "subscription is not active on this connection",
+                                    false,
+                                )),
+                            ),
+                        )?;
+                    }
+                }
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: kind @ (DaemonRequestKind::CommandCatalog(_)
+                    | DaemonRequestKind::CommandSuggestions(_)
+                    | DaemonRequestKind::ApplicationAction(_)
+                    | DaemonRequestKind::SessionPresentation(_)
+                    | DaemonRequestKind::UserShellStart(_)),
+                    ..
+                }) => {
+                    let application = state.application();
+                    let sender = event_sender.clone();
+                    tasks.spawn(async move {
+                        let event = crate::surface::handle_finite_request(
+                            &application,
+                            request_id,
+                            kind,
+                            expected_uid,
+                        ).await;
+                        let _ = queue_event(&sender, event);
+                    });
+                }
                 Ok(DaemonRequest {
                     request_id,
                     kind: DaemonRequestKind::ExecutionInput(request),
@@ -475,7 +579,14 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                     execution_detach_event(state, &attachments, request_id, request),
                 )?,
                 Ok(request) => {
-                    queue_event(&event_sender, state.handle_request(request))?;
+                    let state = state.clone();
+                    let sender = event_sender.clone();
+                    tasks.spawn(async move {
+                        let event = tokio::task::spawn_blocking(move || state.handle_request(request)).await;
+                        if let Ok(event) = event {
+                            let _ = queue_event(&sender, event);
+                        }
+                    });
                 }
                 Err(err) => {
                     queue_event(
@@ -491,10 +602,13 @@ pub fn serve_connection(stream: UnixStream, state: &SharedDaemonState) -> Result
                     )?;
                 }
             }
+            }
         }
-        Ok(())
-    })();
+    };
+    tasks.abort_all();
     attachments.release_all(state);
+    drop(event_sender);
+    let _ = writer_task.await;
     result
 }
 
@@ -567,6 +681,123 @@ impl ConnectionAttachments {
         };
         for attachment in attachments.into_values() {
             let _ = process.operator_detach(&attachment.execution_id, attachment.lease);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct ConnectionSubscriptions {
+    inner: Arc<Mutex<BTreeMap<agl_ids::RequestId, tokio::task::AbortHandle>>>,
+}
+
+#[cfg(unix)]
+impl ConnectionSubscriptions {
+    fn insert(
+        &self,
+        request_id: agl_ids::RequestId,
+        handle: tokio::task::AbortHandle,
+    ) -> Result<()> {
+        let mut subscriptions = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("connection subscription registry is poisoned"))?;
+        if subscriptions.insert(request_id, handle).is_some() {
+            bail!("duplicate subscription request ID on one connection");
+        }
+        Ok(())
+    }
+
+    fn remove(&self, request_id: &agl_ids::RequestId) {
+        if let Ok(mut subscriptions) = self.inner.lock() {
+            subscriptions.remove(request_id);
+        }
+    }
+
+    fn cancel(&self, request_id: &agl_ids::RequestId) -> bool {
+        let Some(handle) = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|mut subscriptions| subscriptions.remove(request_id))
+        else {
+            return false;
+        };
+        handle.abort();
+        true
+    }
+}
+
+#[cfg(unix)]
+async fn stream_presentation_subscription(
+    sender: &ConnectionEventSender,
+    application: &agl_app::ApplicationService,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::SessionPresentationSubscribeRequest,
+) -> Result<()> {
+    let mut subscription = match application
+        .subscribe(crate::surface::presentation_subscribe(
+            request.session_id.clone(),
+        ))
+        .await
+    {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            return queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(request_id),
+                    DaemonEventKind::Error(crate::surface::protocol_error(error)),
+                ),
+            );
+        }
+    };
+    let snapshot = crate::surface::presentation_snapshot(subscription.snapshot.clone())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let mut last_cursor = snapshot.cursor.clone();
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id.clone()),
+            DaemonEventKind::SessionPresentationSubscriptionStarted(
+                SessionPresentationSubscriptionStartedEvent { snapshot },
+            ),
+        ),
+    )?;
+    loop {
+        match subscription.next().await {
+            Ok(event) => {
+                let event = crate::surface::presentation_event(event)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                last_cursor = event.cursor.clone();
+                queue_event(
+                    sender,
+                    DaemonEvent::new(
+                        Some(request_id.clone()),
+                        DaemonEventKind::SessionPresentationEvent(Box::new(event)),
+                    ),
+                )?;
+            }
+            Err(error) => {
+                let reason = if error.code == agl_app::ApplicationErrorCode::ResyncRequired {
+                    PresentationSubscriptionFinishReason::ResyncRequired
+                } else {
+                    PresentationSubscriptionFinishReason::DaemonShutdown
+                };
+                return queue_event(
+                    sender,
+                    DaemonEvent::new(
+                        Some(request_id),
+                        DaemonEventKind::SessionPresentationSubscriptionFinished(
+                            SessionPresentationSubscriptionFinishedEvent {
+                                session_id: request.session_id,
+                                last_delivered_cursor: last_cursor,
+                                reason,
+                            },
+                        ),
+                    ),
+                );
+            }
         }
     }
 }
@@ -1065,8 +1296,8 @@ fn stream_run_subscription(
 #[cfg(unix)]
 #[derive(Clone)]
 struct ConnectionEventSender {
-    events: mpsc::SyncSender<DaemonEvent>,
-    disconnect: Arc<UnixStream>,
+    events: mpsc::Sender<DaemonEvent>,
+    shutdown: watch::Sender<bool>,
 }
 
 #[cfg(unix)]
@@ -1077,12 +1308,12 @@ fn queue_event(sender: &ConnectionEventSender, event: DaemonEvent) -> Result<()>
         // socket so the client observes EOF and can resume from its last
         // delivered durable cursor instead of waiting forever on an attachment
         // whose producer has already stopped.
-        let _ = sender.disconnect.shutdown(Shutdown::Both);
+        let _ = sender.shutdown.send(true);
         match error {
-            mpsc::TrySendError::Full(_) => {
+            mpsc::error::TrySendError::Full(_) => {
                 anyhow::anyhow!("daemon connection writer queue is full; slow peer disconnected")
             }
-            mpsc::TrySendError::Disconnected(_) => {
+            mpsc::error::TrySendError::Closed(_) => {
                 anyhow::anyhow!("daemon connection writer is disconnected")
             }
         }
@@ -1090,9 +1321,21 @@ fn queue_event(sender: &ConnectionEventSender, event: DaemonEvent) -> Result<()>
 }
 
 #[cfg(unix)]
-fn run_connection_writer(mut writer: UnixStream, events: mpsc::Receiver<DaemonEvent>) {
-    for event in events {
-        if let Err(error) = write_event(&mut writer, &event) {
+async fn run_connection_writer(
+    mut writer: WriteHalf<TokioUnixStream>,
+    mut events: mpsc::Receiver<DaemonEvent>,
+    shutdown: watch::Sender<bool>,
+) {
+    while let Some(event) = events.recv().await {
+        let line = match serde_json::to_vec(&event) {
+            Ok(line) if line.len() <= agl_protocol::MAX_JSONL_FRAME_BYTES => line,
+            Ok(_) => break,
+            Err(error) => {
+                tracing::debug!(target: "agentlibre::daemon", error = %error, "daemon event serialization failed");
+                break;
+            }
+        };
+        if let Err(error) = writer.write_all(&line).await {
             tracing::debug!(
                 target: "agentlibre::daemon",
                 error = %error,
@@ -1100,16 +1343,11 @@ fn run_connection_writer(mut writer: UnixStream, events: mpsc::Receiver<DaemonEv
             );
             break;
         }
+        if writer.write_all(b"\n").await.is_err() || writer.flush().await.is_err() {
+            break;
+        }
     }
-}
-
-#[cfg(unix)]
-fn write_event(writer: &mut impl Write, event: &DaemonEvent) -> Result<()> {
-    serde_json::to_writer(&mut *writer, event).context("failed to serialize daemon event")?;
-    writer
-        .write_all(b"\n")
-        .context("failed to write daemon event newline")?;
-    writer.flush().context("failed to flush daemon event")
+    let _ = shutdown.send(true);
 }
 
 #[cfg(unix)]
@@ -1117,8 +1355,6 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(all(test, unix))]
 mod connection_writer_tests {
-    use std::io::Read as _;
-
     use super::*;
 
     fn test_event() -> DaemonEvent {
@@ -1130,21 +1366,16 @@ mod connection_writer_tests {
         )
     }
 
-    #[test]
-    fn full_bounded_writer_queue_disconnects_slow_peer() {
-        let (disconnect, mut peer) = UnixStream::pair().unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-        let (events, _receiver) = mpsc::sync_channel(1);
-        let sender = ConnectionEventSender {
-            events,
-            disconnect: Arc::new(disconnect),
-        };
+    #[tokio::test]
+    async fn full_bounded_writer_queue_disconnects_slow_peer() {
+        let (events, _receiver) = mpsc::channel(1);
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let sender = ConnectionEventSender { events, shutdown };
 
         queue_event(&sender, test_event()).unwrap();
         let error = queue_event(&sender, test_event()).unwrap_err();
 
         assert!(error.to_string().contains("slow peer disconnected"));
-        let mut byte = [0_u8; 1];
-        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+        assert!(*shutdown_receiver.borrow());
     }
 }

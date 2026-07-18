@@ -15,10 +15,11 @@ model. `agl init` writes the workspace default in `.agl/workspace.toml`:
 default = "gemma4-e4b"
 ```
 
-`agl run`, `agl chat`, and `agl serve` use that function when `--function` is
-omitted. On those commands, `--config PATH` overrides the selected function's
-model config for one invocation; it does not disable function context, skills,
-tools, subagents, memory policy, identity hooks, or function evidence.
+`agl run`, bare `agl`, and `agl serve` use that function when `--function` is
+omitted. `--config PATH` on the non-interactive runtime commands overrides the
+selected function's model config for one invocation; it does not disable
+function context, skills, tools, subagents, memory policy, identity hooks, or
+function evidence. Interactive sessions use the daemon's resolved profile.
 
 Packaged functions contain portable model ids. Bind those ids to files on this
 machine in `$AGL_HOME/config/models.toml`:
@@ -41,8 +42,8 @@ resolved paths, and the binding file to repair when an id is missing.
 The active local inference profile is resolved for low-level inference
 commands, config health checks, and function profile resolution in this order:
 
-1. `--config PATH` on `agl inference run`, `agl inference chat`,
-   `agl inference serve`, or `agl config status`.
+1. `--config PATH` on `agl inference run`, `agl inference serve`, or
+   `agl config status`.
 2. `AGL_LOCAL_INFERENCE_CONFIG`.
 3. `local_inference_config` from `agl config paths`.
 
@@ -55,7 +56,7 @@ agl config init
 
 Changing logging or workspace runtime config affects the next command
 invocation. Changing the selected function, local inference profile, or model
-requires starting a new `agl run`, `agl chat`, `agl serve`, or
+requires starting a new `agl run`, interactive session, `agl serve`, or
 `agl inference ...` process.
 
 ## Process execution

@@ -427,7 +427,7 @@ fn run_init_inner(
         completed_phases,
         repository: Some(repo_report),
         smoke: Some(smoke),
-        ready_command: Some("agl chat"),
+        ready_command: Some("agl"),
     })
 }
 
@@ -867,7 +867,7 @@ fn print_ready_report(report: &SetupReport) {
             smoke.answer.trim()
         );
     }
-    println!("Start with: agl chat");
+    println!("Start with: agl");
 }
 
 fn render_setup_progress(event: ModelProgressEvent, cached_only: bool) {

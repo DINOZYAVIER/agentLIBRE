@@ -30,6 +30,7 @@ fn assert_parse_error_contains(args: impl IntoIterator<Item = &'static str>, nee
 fn serve_options_default() -> ServeOptions {
     ServeOptions {
         socket_path: None,
+        systemd_activation: false,
         config: None,
         function_ref: None,
         artifact_root: None,
@@ -190,6 +191,7 @@ fn parse_serve_command_with_daemon_options() {
         ],
         CliCommand::Serve(ServeOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
+            systemd_activation: false,
             config: Some(PathBuf::from("local.toml")),
             function_ref: None,
             artifact_root: Some(PathBuf::from("artifacts")),
@@ -199,6 +201,27 @@ fn parse_serve_command_with_daemon_options() {
             skills: vec!["tool-smoke".to_string()],
             memory: false,
         }),
+    );
+}
+
+#[test]
+fn parse_serve_systemd_activation_and_reject_socket_conflict() {
+    assert_command(
+        ["agl", "serve", "--systemd-activation"],
+        CliCommand::Serve(ServeOptions {
+            systemd_activation: true,
+            ..serve_options_default()
+        }),
+    );
+    assert_parse_error_contains(
+        [
+            "agl",
+            "serve",
+            "--systemd-activation",
+            "--socket",
+            "/tmp/agl.sock",
+        ],
+        "cannot be used with",
     );
 }
 
@@ -262,13 +285,7 @@ fn parse_inference_commands_are_raw_without_function_refs() {
             ..RunOptions::default()
         })),
     );
-    assert_command(
-        ["agl", "inference", "chat", "--no-history"],
-        CliCommand::Inference(InferenceCommand::Chat(RunOptions {
-            no_history: true,
-            ..RunOptions::default()
-        })),
-    );
+    assert_parse_error_contains(["agl", "inference", "chat"], "unrecognized subcommand");
     assert_command(
         ["agl", "inference", "serve", "--config", "local.toml"],
         CliCommand::Inference(InferenceCommand::Serve(ServeOptions {
@@ -1130,7 +1147,7 @@ fn parse_bare_prompt_as_run() {
 
 #[test]
 fn removed_command_names_do_not_fall_through_to_bare_prompt() {
-    for command in ["infer", "generate", "setup", "doctor"] {
+    for command in ["chat", "infer", "generate", "setup", "doctor"] {
         let message = parse_error(["agl", command, "--help"]);
         assert!(message.contains("unknown command"), "{message}");
         assert!(message.contains("Use `agl run --prompt TEXT`"), "{message}");
@@ -1158,45 +1175,8 @@ fn parse_home_override() {
 }
 
 #[test]
-fn parse_chat_session_options() {
-    assert_command(
-        [
-            "agl",
-            "chat",
-            "--session-id",
-            SESSION_ID,
-            "--no-history",
-            "--workspace-root",
-            "/tmp/workspace",
-        ],
-        CliCommand::Chat(RunOptions {
-            session_id: Some(SessionId::parse(SESSION_ID).unwrap()),
-            no_history: true,
-            workspace_root: Some(PathBuf::from("/tmp/workspace")),
-            ..RunOptions::default()
-        }),
-    );
-}
-
-#[test]
-fn parse_chat_rejects_non_canonical_session_id() {
-    assert_parse_error_contains(
-        ["agl", "chat", "--session-id", "session-001"],
-        "ID must start with ses_",
-    );
-}
-
-#[test]
-fn parse_chat_rejects_new_session_with_session_id() {
-    assert_parse_error_contains(
-        ["agl", "chat", "--new-session", "--session-id", SESSION_ID],
-        "--new-session cannot be used with --session-id",
-    );
-}
-
-#[test]
-fn parse_chat_rejects_prompt() {
-    assert_parse_error_contains(["agl", "chat", "--prompt", "hello"], "unexpected argument");
+fn removed_chat_command_is_rejected() {
+    assert_parse_error_contains(["agl", "chat"], "unknown command");
 }
 
 #[test]

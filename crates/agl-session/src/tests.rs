@@ -609,3 +609,44 @@ fn malformed_transcript_reports_line_number() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn catalog_reports_durable_active_and_finished_sessions() {
+    let root = temp_root("catalog");
+    let id = session_id();
+    let mut store = start_session(&root, id.clone());
+
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].metadata.session_id, id);
+    assert_eq!(catalog[0].status, SessionCatalogStatus::Active);
+
+    store.request_exit().unwrap();
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog[0].status, SessionCatalogStatus::Finished);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(store.session_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for name in ["session.json", "transcript.jsonl"] {
+            assert_eq!(
+                std::fs::metadata(store.session_dir().join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -159,7 +159,7 @@ fn run_function_init(
         wrote: true,
         next_steps: vec![
             "agl function status <id>".to_string(),
-            "agl chat --function <id>".to_string(),
+            "start the daemon with the selected function, then run `agl`".to_string(),
         ],
     };
     crate::print_json_or(options.json, &report, || {

@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
 
+mod surface;
+pub use surface::*;
+
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
-use agl_ids::{AttemptId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_ids::{
+    AttemptId, DaemonInstanceId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
+    TurnId,
+};
 pub use agl_process::{
     ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionOutputChunk, ExecutionOwner,
     ExecutionPrivateCommand, ExecutionProfile, ExecutionReadResult, ExecutionState,
@@ -11,9 +17,9 @@ pub use agl_process::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v4alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v4alpha";
-pub const PROTOCOL_VERSION: &str = "v4alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v5alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v5alpha";
+pub const PROTOCOL_VERSION: &str = "v5alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -74,6 +80,13 @@ pub enum DaemonRequestKind {
     RunCancel(RunCancelRequest),
     RunEvents(RunEventsRequest),
     RunSubscribe(RunSubscribeRequest),
+    CommandCatalog(CommandCatalogRequest),
+    CommandSuggestions(CommandSuggestionsRequest),
+    ApplicationAction(ApplicationActionRequest),
+    SessionPresentation(SessionPresentationRequest),
+    SessionPresentationSubscribe(SessionPresentationSubscribeRequest),
+    SubscriptionCancel(SubscriptionCancelRequest),
+    UserShellStart(UserShellStartRequest),
     ExecutionList(ExecutionListRequest),
     ExecutionStatus(ExecutionStatusRequest),
     ExecutionRead(ExecutionReadRequest),
@@ -176,6 +189,15 @@ pub enum DaemonEventKind {
     RunSubscriptionStarted(RunSubscriptionStartedEvent),
     RunEvent(Box<SafeRuntimeEventEnvelope>),
     RunSubscriptionFinished(RunSubscriptionFinishedEvent),
+    CommandCatalog(CommandCatalogEvent),
+    CommandSuggestions(CommandSuggestionsEvent),
+    ApplicationActionResult(ApplicationActionResultEvent),
+    SessionPresentation(SessionPresentationEvent),
+    SessionPresentationSubscriptionStarted(SessionPresentationSubscriptionStartedEvent),
+    SessionPresentationEvent(Box<SessionPresentationEventEnvelope>),
+    SessionPresentationSubscriptionFinished(SessionPresentationSubscriptionFinishedEvent),
+    SubscriptionCancelled(SubscriptionCancelledEvent),
+    UserShellAccepted(UserShellAcceptedEvent),
     ExecutionList(ExecutionListEvent),
     ExecutionStatus(ExecutionStatusEvent),
     ExecutionRead(ExecutionReadEvent),
@@ -204,6 +226,7 @@ pub struct HelloRequest {
 pub struct HelloEvent {
     pub protocol_version: String,
     pub product_version: String,
+    pub daemon_instance_id: DaemonInstanceId,
     pub capabilities: Vec<DaemonCapability>,
 }
 
@@ -227,6 +250,12 @@ pub enum DaemonCapability {
     ExecutionList,
     ExecutionControl,
     ExecutionAttach,
+    CommandCatalog,
+    CommandSuggestions,
+    ApplicationActions,
+    SessionPresentation,
+    UserShell,
+    AssistantDeltas,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -238,6 +267,8 @@ pub struct SessionOpenRequest {
     pub new_session: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     #[serde(default)]
@@ -256,8 +287,7 @@ pub struct SessionOpenedEvent {
 pub struct RunSubmitRequest {
     pub session_id: SessionId,
     pub content: Content,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
+    pub client_submission_id: String,
     #[serde(default)]
     pub budget: RunBudgetRequest,
 }
@@ -672,6 +702,7 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: SessionStatus,
+    pub updated_at_unix_ms: u128,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -865,14 +896,14 @@ mod tests {
             DaemonRequestKind::RunSubmit(RunSubmitRequest {
                 session_id: session_id(),
                 content: Content::text("hello").unwrap(),
-                idempotency_key: Some("matrix-event-001".to_string()),
+                client_submission_id: "matrix-event-001".to_string(),
                 budget: RunBudgetRequest::default(),
             }),
         );
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v4alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v5alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
         assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -886,6 +917,7 @@ mod tests {
             DaemonEventKind::Hello(HelloEvent {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 product_version: "1.0.0-alpha.6".to_string(),
+                daemon_instance_id: DaemonInstanceId::generate(),
                 capabilities: vec![
                     DaemonCapability::SessionOpen,
                     DaemonCapability::RunSubmit,
@@ -1054,7 +1086,7 @@ mod tests {
     #[test]
     fn previous_alpha_and_untyped_id_shapes_are_rejected() {
         let previous_alpha = serde_json::json!({
-            "schema": "agentlibre.daemon.request.v3alpha",
+            "schema": format!("agentlibre.daemon.request.v{}alpha", 4),
             "request_id": REQUEST_ID,
             "kind": "session_turn",
             "payload": {

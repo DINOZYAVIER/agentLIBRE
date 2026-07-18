@@ -113,6 +113,7 @@ define_id!(EventId, "evt_");
 define_id!(RequestId, "req_");
 define_id!(MessageId, "msg_");
 define_id!(ExecutionId, "exec_");
+define_id!(DaemonInstanceId, "daemon_");
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct ExecutionScope {
