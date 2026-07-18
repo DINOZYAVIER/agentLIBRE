@@ -650,3 +650,23 @@ fn catalog_reports_durable_active_and_finished_sessions() {
 
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn catalog_ignores_directories_outside_the_current_session_id_format() {
+    let root = temp_root("catalog-non-session-directory");
+    let id = session_id();
+    let _store = start_session(&root, id.clone());
+    let obsolete = root.join("session-legacy");
+    std::fs::create_dir_all(&obsolete).unwrap();
+    std::fs::write(
+        obsolete.join("session.json"),
+        b"not-current-session-metadata",
+    )
+    .unwrap();
+
+    let catalog = ChatSessionStore::catalog(&root).unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].metadata.session_id, id);
+
+    std::fs::remove_dir_all(root).unwrap();
+}

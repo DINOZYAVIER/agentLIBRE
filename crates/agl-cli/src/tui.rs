@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal as _};
 use std::io::{Read as _, Write as _};
@@ -1205,8 +1205,18 @@ async fn handle_command(
     match response {
         Ok(event) => match event.result {
             ApplicationActionResult::SessionExited { .. } => return Ok(true),
-            ApplicationActionResult::Status { header }
-            | ApplicationActionResult::WorkspaceChanged { header }
+            ApplicationActionResult::Status { header } => {
+                let notice = match name.as_str() {
+                    "pwd" => Some(header.cwd.clone()),
+                    "workspace" => Some(header.workspace_root.clone()),
+                    _ => None,
+                };
+                state.snapshot.header = header;
+                if let Some(notice) = notice {
+                    state.notice(notice);
+                }
+            }
+            ApplicationActionResult::WorkspaceChanged { header }
             | ApplicationActionResult::WorkingDirectoryChanged { header } => {
                 state.snapshot.header = header;
             }
@@ -1436,6 +1446,7 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
 
 fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
     let mut lines = Vec::new();
+    let mut presented_executions = BTreeSet::new();
     for item in &state.snapshot.items {
         match item {
             SessionPresentationItem::UserMessage { content, .. } => {
@@ -1457,28 +1468,57 @@ fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) 
                 message.clone(),
                 Style::default().fg(Color::Yellow),
             )),
+            SessionPresentationItem::UserExecution {
+                execution_id,
+                command,
+                profile,
+                state: execution_state,
+                output,
+                ..
+            } => {
+                presented_executions.insert(execution_id.clone());
+                if let Some(local) = state.executions.get(execution_id) {
+                    push_execution_lines(
+                        &mut lines,
+                        execution_id,
+                        &local.command,
+                        local.profile,
+                        &local.state,
+                        &local.output,
+                    );
+                } else {
+                    let mut rendered_output = String::new();
+                    for chunk in output {
+                        if let Ok(bytes) = chunk.bytes.decode(MAX_LOCAL_OUTPUT_BYTES) {
+                            rendered_output.push_str(&sanitize_terminal_output(&bytes));
+                        }
+                    }
+                    push_execution_lines(
+                        &mut lines,
+                        execution_id,
+                        command,
+                        *profile,
+                        &format!("{execution_state:?}").to_ascii_lowercase(),
+                        &rendered_output,
+                    );
+                }
+            }
             _ => {}
         }
         lines.push(Line::raw(""));
     }
     for (execution_id, execution) in &state.executions {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("! {:?}", execution.profile).to_ascii_lowercase(),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::raw(format!(
-                "  {}  [{}, {}]",
-                execution.command, execution_id, execution.state
-            )),
-        ]));
-        lines.extend(
-            execution
-                .output
-                .lines()
-                .map(|line| Line::raw(line.to_owned())),
-        );
-        lines.push(Line::raw(""));
+        if !presented_executions.contains(execution_id) {
+            push_execution_lines(
+                &mut lines,
+                execution_id,
+                &execution.command,
+                execution.profile,
+                &execution.state,
+                &execution.output,
+            );
+            lines.push(Line::raw(""));
+        }
     }
     for notice in &state.notices {
         lines.push(Line::styled(
@@ -1486,13 +1526,30 @@ fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) 
             Style::default().fg(Color::Yellow),
         ));
     }
-    let scroll = lines.len().saturating_sub(area.height as usize) as u16;
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        area,
-    );
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    let scroll = paragraph
+        .line_count(area.width)
+        .saturating_sub(area.height as usize)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+}
+
+fn push_execution_lines(
+    lines: &mut Vec<Line<'static>>,
+    execution_id: &ExecutionId,
+    command: &str,
+    profile: ExecutionProfile,
+    state: &str,
+    output: &str,
+) {
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("! {profile:?}").to_ascii_lowercase(),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(format!("  {command}  [{execution_id}, {state}]")),
+    ]));
+    lines.extend(output.lines().map(|line| Line::raw(line.to_owned())));
 }
 
 fn draw_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {

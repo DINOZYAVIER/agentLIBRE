@@ -438,6 +438,16 @@ impl DaemonState {
         if request.new_session && request.session_id.is_some() {
             return Err(invalid("new session cannot include session_id"));
         }
+        if !request.new_session
+            && let Some(session_id) = request.session_id.as_ref()
+            && self.sessions.contains_key(session_id)
+            && self.chat_factory.has_session(session_id)
+        {
+            return Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
+                session_id: session_id.clone(),
+                resumed: true,
+            }));
+        }
         let resumed_workspace = if !request.new_session
             && request.workspace_root.is_none()
             && let Some(session_id) = request.session_id.as_ref()
@@ -793,7 +803,7 @@ impl DaemonState {
             .map_err(application_runtime_error)?;
         let replay = store.read_replay().map_err(application_runtime_error)?;
         let mut items = Vec::new();
-        let mut shell_items = BTreeMap::new();
+        let mut shell_item_indexes = BTreeMap::new();
         for event in replay.events {
             match event {
                 agl_session::ChatSessionEvent::Runtime { envelope } => match envelope.payload {
@@ -827,19 +837,17 @@ impl DaemonState {
                     cwd,
                     ..
                 } => {
-                    shell_items.insert(
-                        execution_id.clone(),
-                        SessionPresentationItem::UserExecution {
-                            execution_id,
-                            command,
-                            profile,
-                            cwd: cwd.to_string_lossy().into_owned(),
-                            state: agl_process::ExecutionState::OutcomeUnknown,
-                            exit: None,
-                            output: Vec::new(),
-                            output_truncated: false,
-                        },
-                    );
+                    shell_item_indexes.insert(execution_id.clone(), items.len());
+                    items.push(SessionPresentationItem::UserExecution {
+                        execution_id,
+                        command,
+                        profile,
+                        cwd: cwd.to_string_lossy().into_owned(),
+                        state: agl_process::ExecutionState::OutcomeUnknown,
+                        exit: None,
+                        output: Vec::new(),
+                        output_truncated: false,
+                    });
                 }
                 agl_session::ChatSessionEvent::UserShellFinished {
                     execution_id,
@@ -848,12 +856,13 @@ impl DaemonState {
                     output_truncated,
                     ..
                 } => {
-                    if let Some(SessionPresentationItem::UserExecution {
-                        state: item_state,
-                        exit: item_exit,
-                        output_truncated: item_truncated,
-                        ..
-                    }) = shell_items.get_mut(&execution_id)
+                    if let Some(index) = shell_item_indexes.get(&execution_id)
+                        && let Some(SessionPresentationItem::UserExecution {
+                            state: item_state,
+                            exit: item_exit,
+                            output_truncated: item_truncated,
+                            ..
+                        }) = items.get_mut(*index)
                     {
                         *item_state = state;
                         *item_exit = exit;
@@ -879,13 +888,14 @@ impl DaemonState {
             if !matches!(status.owner, ExecutionOwner::Session { .. }) {
                 continue;
             }
-            if let Some(SessionPresentationItem::UserExecution {
-                state,
-                exit,
-                output,
-                output_truncated,
-                ..
-            }) = shell_items.get_mut(&status.execution_id)
+            if let Some(index) = shell_item_indexes.get(&status.execution_id)
+                && let Some(SessionPresentationItem::UserExecution {
+                    state,
+                    exit,
+                    output,
+                    output_truncated,
+                    ..
+                }) = items.get_mut(*index)
             {
                 *state = status.state;
                 *exit = status.exit.clone();
@@ -907,7 +917,6 @@ impl DaemonState {
                 output_truncated: status.output_truncated || status.output_expired,
             });
         }
-        items.extend(shell_items.into_values());
         let active_execution_count = executions
             .iter()
             .filter(|execution| execution.state.is_live())

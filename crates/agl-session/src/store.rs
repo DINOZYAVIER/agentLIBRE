@@ -117,6 +117,11 @@ impl ChatSessionStore {
             if !file_type.is_dir() || file_type.is_symlink() {
                 continue;
             }
+            let directory_name = entry.file_name();
+            let directory_name = directory_name.to_string_lossy();
+            if SessionId::parse(&directory_name).is_err() {
+                continue;
+            }
             let metadata_path = entry.path().join("session.json");
             if !metadata_path.is_file() {
                 continue;
@@ -127,7 +132,7 @@ impl ChatSessionStore {
             )
             .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
             ensure!(
-                entry.file_name().to_string_lossy() == metadata.session_id.as_str(),
+                directory_name == metadata.session_id.as_str(),
                 "chat session catalog directory does not match metadata identity"
             );
             let status = catalog_status(&entry.path().join("transcript.jsonl"))?;

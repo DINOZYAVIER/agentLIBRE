@@ -221,6 +221,32 @@ fn open_session(state: &mut DaemonState) -> SessionId {
     }
 }
 
+#[test]
+fn resume_of_an_already_loaded_session_is_idempotent() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let session_id = open_session(&mut state);
+
+    let event = state.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: Some(session_id.clone()),
+            new_session: false,
+            workspace_root: None,
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+
+    match event.kind {
+        DaemonEventKind::SessionOpened(opened) => {
+            assert_eq!(opened.session_id, session_id);
+            assert!(opened.resumed);
+        }
+        other => panic!("unexpected resume event: {other:?}"),
+    }
+}
+
 fn submit(
     state: &mut DaemonState,
     session_id: &SessionId,
