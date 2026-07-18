@@ -11,6 +11,11 @@ agl_ci_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AGL_CI_REPO_ROOT="$(cd -- "$agl_ci_script_dir/../.." && pwd)"
 export AGL_CI_REPO_ROOT
 
+# CI may run without Vulkan headers even on a developer workstation. Keep its
+# CPU-only llama.cpp build isolated so it cannot remove a local runtime's
+# dynamically loaded GPU backend from target/llama-cpp/build.
+export AGL_LLAMA_CPP_BUILD_DIR="${AGL_LLAMA_CPP_BUILD_DIR:-$AGL_CI_REPO_ROOT/target/llama-cpp/ci-build}"
+
 if [[ -d "$HOME/.cargo/bin" ]]; then
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
