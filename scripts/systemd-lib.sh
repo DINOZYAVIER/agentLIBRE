@@ -68,6 +68,58 @@ agl_systemd_require_file() {
   fi
 }
 
+agl_systemd_prepare_private_socket_parent() {
+  local dry_run="$1"
+  local socket_path="$2"
+  local parent
+  local canonical_parent
+  local expected_uid
+  local actual_uid
+  local actual_mode
+
+  parent="$(dirname -- "$socket_path")"
+  canonical_parent="$(realpath -m -- "$parent")"
+  if [[ "$canonical_parent" != "$parent" ]]; then
+    echo "daemon socket parent must be canonical and contain no symlink components: $parent" >&2
+    exit 1
+  fi
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ -L "$parent" ]]; then
+    echo "daemon socket parent must not be a symlink: $parent" >&2
+    exit 1
+  fi
+  if [[ -e "$parent" && ! -d "$parent" ]]; then
+    echo "daemon socket parent is not a directory: $parent" >&2
+    exit 1
+  fi
+
+  mkdir -p -- "$parent"
+  expected_uid="$(id -u)"
+  actual_uid="$(stat -c '%u' -- "$parent")"
+  if [[ "$actual_uid" != "$expected_uid" ]]; then
+    echo "daemon socket parent must be owned by uid $expected_uid: $parent" >&2
+    exit 1
+  fi
+
+  chmod 0700 -- "$parent"
+
+  if [[ -L "$parent" || ! -d "$parent" ]]; then
+    echo "daemon socket parent changed while securing it: $parent" >&2
+    exit 1
+  fi
+  canonical_parent="$(realpath -e -- "$parent")"
+  actual_uid="$(stat -c '%u' -- "$parent")"
+  actual_mode="$(stat -c '%a' -- "$parent")"
+  if [[ "$canonical_parent" != "$parent" || "$actual_uid" != "$expected_uid" || "$actual_mode" != "700" ]]; then
+    echo "daemon socket parent must be canonical, owned by uid $expected_uid, and mode 0700: $parent" >&2
+    exit 1
+  fi
+}
+
 agl_systemd_quote() {
   local value="$1"
   value="${value//\\/\\\\}"

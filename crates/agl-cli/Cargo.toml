@@ -35,7 +35,6 @@ anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 crossterm.workspace = true
-futures-util.workspace = true
 fs2.workspace = true
 ratatui.workspace = true
 serde.workspace = true

@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest as _, Sha256};
 
+use crate::terminal::environment::PrivateTerminalEnvironment;
 use crate::{
     ExecutionIo, ExecutionProfile, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics,
     Result, TerminalSize,
 };
 
-use super::super::{LauncherRequest, LauncherResponse};
+use super::super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
 use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error, sandbox, wire};
 
 static FORWARDED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -34,8 +35,10 @@ pub(super) fn main() -> i32 {
 
 fn doctor_main() -> i32 {
     let diagnostics = sandbox::diagnostics();
-    match serde_json::to_writer(std::io::stdout(), &diagnostics) {
-        Ok(()) if diagnostics.supported => 0,
+    let supported = diagnostics.supported;
+    let envelope = LauncherDiagnosticsEnvelope::current(diagnostics);
+    match serde_json::to_writer(std::io::stdout(), &envelope) {
+        Ok(()) if supported => 0,
         Ok(()) => 1,
         Err(error) => {
             eprintln!("failed to render process diagnostics: {error}");
@@ -45,22 +48,26 @@ fn doctor_main() -> i32 {
 }
 
 fn launch_main() -> Result<i32> {
-    let expected_parent = unsafe { libc::getppid() };
+    let expected_parent = parse_expected_parent_pid()?;
     configure_parent_death(expected_parent)?;
     let control_fd = parse_control_fd()?;
     let (request, mut descriptors): (LauncherRequest, Vec<OwnedFd>) =
-        wire::receive_json_with_fds(control_fd, 2)?;
-    if descriptors.len() != 2 {
+        wire::receive_json_with_fds(control_fd, 3)?;
+    if let Err(error) = request.validate_launcher_identity() {
+        return send_failure_and_return(control_fd, error);
+    }
+    if !(2..=3).contains(&descriptors.len()) {
         return send_failure_and_return(
             control_fd,
             ProcessError::new(
                 ProcessErrorCode::LauncherProtocol,
-                "process launcher requires admitted working-directory and executable handles",
+                "process launcher requires admitted working-directory and executable handles plus at most one private environment handle",
             ),
         );
     }
     let cwd = descriptors.remove(0);
     let program = descriptors.remove(0);
+    let mut private_environment = descriptors.pop();
     if let Err(error) = request.request.validate() {
         return send_failure_and_return(control_fd, error);
     }
@@ -86,6 +93,11 @@ fn launch_main() -> Result<i32> {
         return send_failure_and_return(control_fd, error);
     }
 
+    let expected_namespace_parent = unsafe { libc::getpid() };
+    let (namespace_parent_liveness, namespace_parent_lifetime) = match pipe_pair() {
+        Ok(pipe) => pipe,
+        Err(error) => return send_failure_and_return(control_fd, error),
+    };
     let namespace_pid = unsafe { libc::fork() };
     if namespace_pid < 0 {
         return send_failure_and_return(
@@ -98,23 +110,38 @@ fn launch_main() -> Result<i32> {
     }
     if namespace_pid == 0 {
         unsafe { libc::close(control_fd) };
+        drop(namespace_parent_lifetime);
         drop(exec_read);
         io.close_supervisor_side();
-        let parent = unsafe { libc::getppid() };
-        if let Err(error) = configure_parent_death(parent) {
+        if let Err(error) = configure_namespace_parent_death(
+            expected_namespace_parent,
+            namespace_parent_liveness.as_raw_fd(),
+        ) {
             write_exec_failure(exec_write.as_raw_fd(), &error);
             unsafe { libc::_exit(125) }
         }
-        let status = namespace_init(&request, &mut io, exec_write, &cwd, &program);
+        drop(namespace_parent_liveness);
+        let status = namespace_init(
+            &request,
+            &mut io,
+            exec_write,
+            &cwd,
+            &program,
+            private_environment.take(),
+        );
         unsafe { libc::_exit(mirror_wait_status(status)) }
     }
 
+    drop(namespace_parent_liveness);
+    drop(private_environment);
     drop(exec_write);
     io.close_target_side();
     let setup = await_exec_handshake(&exec_read, Duration::from_millis(request.setup_timeout_ms));
-    match setup {
+    let result = match setup {
         Ok(()) => {
             let response = LauncherResponse {
+                protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+                build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
                 ok: true,
                 io: Some(request.request.io),
                 error_code: None,
@@ -131,7 +158,9 @@ fn launch_main() -> Result<i32> {
             let _ = wait_for_pid(namespace_pid);
             send_failure_and_return(control_fd, error)
         }
-    }
+    };
+    drop(namespace_parent_lifetime);
+    result
 }
 
 fn namespace_init(
@@ -140,6 +169,7 @@ fn namespace_init(
     exec_write: OwnedFd,
     cwd: &OwnedFd,
     program: &OwnedFd,
+    mut private_environment: Option<OwnedFd>,
 ) -> i32 {
     if let Err(error) = sandbox::prepare_pid_namespace(request) {
         write_exec_failure(exec_write.as_raw_fd(), &error);
@@ -168,12 +198,14 @@ fn namespace_init(
             root.as_deref(),
             cwd,
             program,
+            private_environment.take(),
         ) {
             write_exec_failure(exec_write.as_raw_fd(), &error);
             unsafe { libc::_exit(126) }
         }
         unreachable!("execve returned success");
     }
+    drop(private_environment);
     drop(exec_write);
     io.close_target_side();
     reap_namespace(target_pid)
@@ -186,6 +218,7 @@ fn target_main(
     root: Option<&Path>,
     cwd: &OwnedFd,
     program: &OwnedFd,
+    private_environment: Option<OwnedFd>,
 ) -> Result<()> {
     if unsafe { libc::setsid() } < 0 {
         return Err(last_os_error(
@@ -194,30 +227,42 @@ fn target_main(
         ));
     }
     io.attach_target(request.request.terminal_size)?;
-    close_descriptors_except(&[
+    let mut preserved = vec![
         libc::STDIN_FILENO,
         libc::STDOUT_FILENO,
         libc::STDERR_FILENO,
         exec_error_fd,
         cwd.as_raw_fd(),
         program.as_raw_fd(),
-    ]);
+    ];
+    if let Some(private_environment) = &private_environment {
+        preserved.push(private_environment.as_raw_fd());
+    }
+    close_descriptors_except(&preserved);
     // Execute the identity-checked descriptor reopened inside the target mount
     // view. The pre-admission descriptor points at the host mount hierarchy,
     // which Landlock correctly refuses after the sandbox ruleset is active.
     let target_program =
         sandbox::enter_target(request, root, cwd.as_raw_fd(), program.as_raw_fd())?;
-    close_descriptors_except(&[
+    let mut preserved = vec![
         libc::STDIN_FILENO,
         libc::STDOUT_FILENO,
         libc::STDERR_FILENO,
         exec_error_fd,
         target_program.as_raw_fd(),
-    ]);
-    exec_target(request, target_program.as_raw_fd())
+    ];
+    if let Some(private_environment) = &private_environment {
+        preserved.push(private_environment.as_raw_fd());
+    }
+    close_descriptors_except(&preserved);
+    exec_target(request, target_program.as_raw_fd(), private_environment)
 }
 
-fn exec_target(request: &LauncherRequest, program_fd: RawFd) -> Result<()> {
+fn exec_target(
+    request: &LauncherRequest,
+    program_fd: RawFd,
+    private_environment: Option<OwnedFd>,
+) -> Result<()> {
     let program = CString::new(request.request.program.as_os_str().as_bytes()).map_err(|_| {
         ProcessError::new(
             ProcessErrorCode::InvalidRequest,
@@ -234,29 +279,20 @@ fn exec_target(request: &LauncherRequest, program_fd: RawFd) -> Result<()> {
             )
         })?);
     }
-    let mut environment = request.request.environment.values.clone();
-    environment.insert(
-        "PWD".to_owned(),
-        request
-            .request
-            .cwd
-            .as_os_str()
-            .to_string_lossy()
-            .into_owned(),
-    );
-    if request.request.profile == ExecutionProfile::Workspace {
-        environment.insert("HOME".to_owned(), SANDBOX_HOME.to_owned());
-        environment.insert("TMPDIR".to_owned(), SANDBOX_TMP.to_owned());
-        environment
-            .entry("TERM".to_owned())
-            .or_insert_with(|| "xterm-256color".to_owned());
-    }
-    let environment = encode_environment(&environment)?;
+    let private_environment = match private_environment {
+        Some(descriptor) => {
+            let mut file = File::from(descriptor);
+            PrivateTerminalEnvironment::read_launch_transport(&mut file)?
+        }
+        None => PrivateTerminalEnvironment::default(),
+    };
+    let environment = encode_environment(request, &private_environment)?;
+    drop(private_environment);
     let mut argv_ptrs = argv.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
     argv_ptrs.push(std::ptr::null());
     let mut env_ptrs = environment
         .iter()
-        .map(|value| value.as_ptr())
+        .map(EncodedEnvironmentValue::as_ptr)
         .collect::<Vec<_>>();
     env_ptrs.push(std::ptr::null());
     let empty = c"";
@@ -341,18 +377,116 @@ fn clear_close_on_exec(descriptor: RawFd) -> Result<()> {
     Ok(())
 }
 
-fn encode_environment(values: &BTreeMap<String, String>) -> Result<Vec<CString>> {
-    values
+fn encode_environment(
+    request: &LauncherRequest,
+    private_environment: &PrivateTerminalEnvironment,
+) -> Result<Vec<EncodedEnvironmentValue>> {
+    let mut values = request
+        .request
+        .environment
+        .values
         .iter()
-        .map(|(name, value)| {
-            CString::new(format!("{name}={value}")).map_err(|_| {
-                ProcessError::new(
+        .map(|(name, value)| (name.clone(), TargetEnvironmentValue::Public(value.as_str())))
+        .collect::<BTreeMap<_, _>>();
+    for (name, value) in private_environment.exposed_values() {
+        values.insert(name.to_owned(), TargetEnvironmentValue::Private(value));
+    }
+    values.insert(
+        "PWD".to_owned(),
+        TargetEnvironmentValue::Owned(
+            request
+                .request
+                .cwd
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+    if request.request.profile == ExecutionProfile::Workspace {
+        values.insert(
+            "HOME".to_owned(),
+            TargetEnvironmentValue::Public(SANDBOX_HOME),
+        );
+        values.insert(
+            "TMPDIR".to_owned(),
+            TargetEnvironmentValue::Public(SANDBOX_TMP),
+        );
+        values
+            .entry("TERM".to_owned())
+            .or_insert(TargetEnvironmentValue::Public("xterm-256color"));
+    }
+    values
+        .into_iter()
+        .map(|(name, value)| EncodedEnvironmentValue::new(&name, value))
+        .collect()
+}
+
+enum TargetEnvironmentValue<'a> {
+    Public(&'a str),
+    Private(&'a str),
+    Owned(String),
+}
+
+impl TargetEnvironmentValue<'_> {
+    fn value(&self) -> &str {
+        match self {
+            Self::Public(value) | Self::Private(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+
+    fn is_private(&self) -> bool {
+        matches!(self, Self::Private(_))
+    }
+}
+
+struct EncodedEnvironmentValue {
+    value: CString,
+    private: bool,
+}
+
+impl EncodedEnvironmentValue {
+    fn new(name: &str, value: TargetEnvironmentValue<'_>) -> Result<Self> {
+        let private = value.is_private();
+        let mut encoded = Vec::with_capacity(name.len() + value.value().len() + 1);
+        encoded.extend_from_slice(name.as_bytes());
+        encoded.push(b'=');
+        encoded.extend_from_slice(value.value().as_bytes());
+        let value = match CString::new(encoded) {
+            Ok(value) => value,
+            Err(error) => {
+                let mut encoded = error.into_vec();
+                if private {
+                    crate::terminal::environment::zeroize(&mut encoded);
+                }
+                return Err(ProcessError::new(
                     ProcessErrorCode::InvalidRequest,
                     "environment name or value contains NUL",
-                )
-            })
-        })
-        .collect()
+                ));
+            }
+        };
+        Ok(Self { value, private })
+    }
+
+    fn as_ptr(&self) -> *const libc::c_char {
+        self.value.as_ptr()
+    }
+}
+
+impl Drop for EncodedEnvironmentValue {
+    fn drop(&mut self) {
+        if !self.private {
+            return;
+        }
+        for offset in 0..self.value.as_bytes().len() {
+            // SAFETY: this value is exclusively borrowed during destruction;
+            // overwriting initialized bytes does not change its allocation.
+            unsafe {
+                std::ptr::write_volatile(self.value.as_ptr().add(offset).cast_mut(), 0);
+            }
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 struct PreparedIo {
@@ -593,6 +727,8 @@ fn write_exec_failure(fd: RawFd, error: &ProcessError) {
 
 fn send_failure_and_return(control_fd: RawFd, error: ProcessError) -> Result<i32> {
     let response = LauncherResponse {
+        protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+        build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
         ok: false,
         io: None,
         error_code: Some(error.code().as_str().to_owned()),
@@ -633,6 +769,25 @@ fn parse_control_fd() -> Result<RawFd> {
     })
 }
 
+fn parse_expected_parent_pid() -> Result<libc::pid_t> {
+    let value = std::env::var(super::LAUNCHER_PARENT_PID_ENV).map_err(|_| {
+        ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "launcher parent identity is missing",
+        )
+    })?;
+    value
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::LauncherProtocol,
+                "launcher parent identity is invalid",
+            )
+        })
+}
+
 fn configure_parent_death(expected_parent: libc::pid_t) -> Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
         return Err(last_os_error(
@@ -647,6 +802,49 @@ fn configure_parent_death(expected_parent: libc::pid_t) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn configure_namespace_parent_death(
+    expected_parent: libc::pid_t,
+    parent_liveness: RawFd,
+) -> Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        return Err(last_os_error(
+            ProcessErrorCode::SandboxUnavailable,
+            "failed to arm namespace parent-death protection",
+        ));
+    }
+
+    // The namespace init is the first child after CLONE_NEWPID, so its parent
+    // lives outside the child's PID namespace and getppid() is always zero.
+    // The pipe was created by expected_parent before fork; only that process
+    // retains the writer. HUP therefore proves that the original parent died
+    // before PR_SET_PDEATHSIG was armed, without relying on a namespace-local
+    // PID that cannot represent the parent.
+    let mut poll = libc::pollfd {
+        fd: parent_liveness,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+        if ready == 0 {
+            return Ok(());
+        }
+        if ready > 0 {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SpawnFailed,
+                format!("namespace parent {expected_parent} changed during parent-death setup"),
+            ));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SpawnFailed,
+                format!("failed to verify namespace parent liveness: {error}"),
+            ));
+        }
+    }
 }
 
 extern "C" fn forward_signal(signal: libc::c_int) {
@@ -764,3 +962,260 @@ fn parse_error_code(value: &str) -> ProcessErrorCode {
 
 #[allow(dead_code)]
 fn _diagnostics_type(_: ProcessPlatformDiagnostics) {}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Command;
+
+    use agl_ids::{RunId, SessionId, StepId};
+
+    use super::*;
+    use crate::terminal::environment::{
+        TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalSecretReference,
+        TerminalSecretResolver, TerminalSecretValue,
+    };
+    use crate::{
+        EnvironmentOverride, ExecutionAuthorization, ExecutionKind, ExecutionLimits, ExecutionOwner,
+    };
+
+    const SECRET_NAME: &str = "AGL_TEST_PRIVATE_EXEC_VALUE";
+    const SENTINEL: &str = "private-exec-sentinel-9a071c";
+    const HELPER_DESCRIPTOR: RawFd = 198;
+    const HELPER_DESCRIPTOR_ENV: &str = "AGL_TEST_PRIVATE_ENVIRONMENT_FD";
+    const HELPER_TEST: &str = "platform::linux::launcher::tests::private_environment_exec_helper";
+
+    #[test]
+    fn mismatched_launcher_request_returns_a_typed_protocol_failure_without_launching() {
+        let mut request = exec_request();
+        request.protocol_version = "agl-process-launcher.future/test".to_owned();
+        let error = request.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+
+        let (launcher, supervisor) = wire::socket_pair().unwrap();
+        let status = send_failure_and_return(launcher.as_raw_fd(), error).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(supervisor.as_raw_fd(), 0).unwrap();
+
+        assert_eq!(status, exit_status(125));
+        assert!(descriptors.is_empty());
+        response.validate_launcher_identity().unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.io, None);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(ProcessErrorCode::LauncherProtocol.as_str())
+        );
+    }
+
+    #[test]
+    fn matching_protocol_with_mismatched_launcher_request_build_returns_a_typed_failure() {
+        let mut request = exec_request();
+        request.build_id = "sha256:stale-supervisor-build".to_owned();
+        let error = request.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+        assert!(error.message().contains("build identity mismatch"));
+
+        let (launcher, supervisor) = wire::socket_pair().unwrap();
+        let status = send_failure_and_return(launcher.as_raw_fd(), error).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(supervisor.as_raw_fd(), 0).unwrap();
+
+        assert_eq!(status, exit_status(125));
+        assert!(descriptors.is_empty());
+        response.validate_launcher_identity().unwrap();
+        assert!(!response.ok);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(ProcessErrorCode::LauncherProtocol.as_str())
+        );
+    }
+
+    #[test]
+    fn stale_launcher_request_without_a_version_is_not_deserializable() {
+        let mut stale = serde_json::to_value(exec_request()).unwrap();
+        stale
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol_version")
+            .unwrap();
+
+        assert!(serde_json::from_value::<LauncherRequest>(stale).is_err());
+    }
+
+    #[test]
+    fn stale_launcher_request_without_a_build_id_is_not_deserializable() {
+        let mut stale = serde_json::to_value(exec_request()).unwrap();
+        stale.as_object_mut().unwrap().remove("build_id").unwrap();
+
+        assert!(serde_json::from_value::<LauncherRequest>(stale).is_err());
+    }
+
+    #[test]
+    fn namespace_parent_liveness_pipe_accepts_only_a_live_original_writer() {
+        let (live_reader, live_writer) = pipe_pair().unwrap();
+        configure_namespace_parent_death(unsafe { libc::getpid() }, live_reader.as_raw_fd())
+            .unwrap();
+        drop(live_writer);
+
+        let (dead_reader, dead_writer) = pipe_pair().unwrap();
+        drop(dead_writer);
+        let error =
+            configure_namespace_parent_death(unsafe { libc::getpid() }, dead_reader.as_raw_fd())
+                .unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::SpawnFailed);
+        assert!(
+            error
+                .message()
+                .contains("changed during parent-death setup")
+        );
+    }
+
+    #[test]
+    fn final_exec_child_receives_private_environment_outside_the_launcher_dto() {
+        struct Secret;
+        impl TerminalSecretResolver for Secret {
+            fn resolve(&self, _reference: &TerminalSecretReference) -> Result<TerminalSecretValue> {
+                TerminalSecretValue::new(SENTINEL)
+            }
+        }
+
+        let request = exec_request();
+
+        let mut environment = TerminalEnvironmentRequest::default();
+        environment.agl_env.insert(
+            SECRET_NAME.to_owned(),
+            TerminalEnvironmentValue::Secret(
+                TerminalSecretReference::new("test:private-exec").unwrap(),
+            ),
+        );
+        let (public, private) = environment.resolve(&Secret).unwrap().into_launch_parts();
+        assert!(public.values.is_empty());
+        assert!(!format!("{request:?} {private:?}").contains(SENTINEL));
+        assert!(!serde_json::to_string(&request).unwrap().contains(SENTINEL));
+        let private_descriptor = super::super::private_environment_transport(Some(private))
+            .unwrap()
+            .unwrap();
+        let inherited_descriptor = private_descriptor.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg(HELPER_TEST)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(HELPER_DESCRIPTOR_ENV, HELPER_DESCRIPTOR.to_string());
+        // SAFETY: the pre-exec closure performs only async-signal-safe fcntl
+        // and dup2 syscalls and does not allocate or touch shared Rust state.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(inherited_descriptor, HELPER_DESCRIPTOR) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let flags = libc::fcntl(HELPER_DESCRIPTOR, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(HELPER_DESCRIPTOR, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut output = command.output().unwrap();
+        drop(private_descriptor);
+        assert!(
+            !output
+                .stderr
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "private environment value escaped through the launch failure channel"
+        );
+        assert!(
+            output.status.success(),
+            "private environment exec helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = format!("{SECRET_NAME}={SENTINEL}");
+        assert!(
+            output
+                .stdout
+                .windows(expected.len())
+                .any(|window| window == expected.as_bytes()),
+            "final exec child did not receive its private environment entry"
+        );
+        crate::terminal::environment::zeroize(&mut output.stdout);
+        crate::terminal::environment::zeroize(&mut output.stderr);
+    }
+
+    #[test]
+    fn private_environment_exec_helper() {
+        let Some(descriptor) = std::env::var_os(HELPER_DESCRIPTOR_ENV) else {
+            return;
+        };
+        let descriptor = descriptor
+            .to_string_lossy()
+            .parse::<RawFd>()
+            .expect("private environment helper descriptor must be numeric");
+        assert_eq!(descriptor, HELPER_DESCRIPTOR);
+        // SAFETY: the parent test transfers unique ownership of this inherited
+        // descriptor to the helper process at the agreed fixed number.
+        let private_environment = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let request = exec_request();
+        let program = File::open(&request.request.program).unwrap();
+        if let Err(error) = exec_target(&request, program.as_raw_fd(), Some(private_environment)) {
+            panic!("private environment exec helper failed: {error}");
+        }
+        unreachable!("exec_target returned success without replacing the helper");
+    }
+
+    fn exec_request() -> LauncherRequest {
+        let program = ["/usr/bin/env", "/bin/env"]
+            .into_iter()
+            .map(Path::new)
+            .find(|candidate| candidate.is_file())
+            .expect("Linux launcher test requires env(1)")
+            .to_path_buf();
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let run_id = RunId::generate();
+        let request = LauncherRequest {
+            protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
+            execution_id: agl_ids::ExecutionId::generate(),
+            request: crate::ExecutionRequest {
+                owner: ExecutionOwner::Session {
+                    session_id: SessionId::generate(),
+                    root_run_id: run_id.clone(),
+                },
+                creating_run_id: run_id,
+                creating_step_id: StepId::generate(),
+                kind: ExecutionKind::Argv,
+                program,
+                program_digest: None,
+                args: Vec::new(),
+                workspace_root: cwd.clone(),
+                cwd: cwd.clone(),
+                read_only_roots: Vec::new(),
+                environment: EnvironmentOverride {
+                    values: BTreeMap::from([("PUBLIC_MARKER".to_owned(), "visible".to_owned())]),
+                },
+                stdin: None,
+                close_stdin_after_initial: false,
+                io: ExecutionIo::Pipes,
+                terminal_size: None,
+                profile: ExecutionProfile::Workspace,
+                authorization: ExecutionAuthorization::default(),
+                grant_lease: None,
+                limits: ExecutionLimits {
+                    timeout_ms: None,
+                    max_input_bytes: 1024,
+                    max_output_bytes: 4096,
+                },
+            },
+            execution_root: cwd.join("unused-execution-root"),
+            private_home: cwd.join("unused-private-home"),
+            private_tmp: cwd.join("unused-private-tmp"),
+            setup_timeout_ms: 1_000,
+        };
+        request.request.validate().unwrap();
+        request
+    }
+}

@@ -37,7 +37,11 @@ need_tool readelf
 config="$(smoke_abs_path "$config")"
 
 cd "$repo_root"
-cargo build -p agl-cli
+cargo build \
+  -p agl-cli \
+  -p agl-process \
+  --bin agl \
+  --bin agl-process-launcher
 agl_bin="$(smoke_abs_path "$agl_bin")"
 
 linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"

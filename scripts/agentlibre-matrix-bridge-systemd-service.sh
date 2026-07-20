@@ -101,8 +101,8 @@ unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
 unit_content="[Unit]
 Description=agentLIBRE Matrix bridge
-Wants=agl.service
-After=agl.service
+Wants=agentlibre-daemon.socket
+After=agentlibre-daemon.socket
 
 [Service]
 Type=simple

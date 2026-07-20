@@ -180,7 +180,11 @@ agl_bin="${AGL_INIT_SMOKE_AGL_BIN:-$repo_root/target/release/agl}"
 if [[ "${AGL_INIT_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
   (
     cd "$repo_root"
-    cargo build --locked --release -p agl-cli
+    cargo build --locked --release \
+      -p agl-cli \
+      -p agl-process \
+      --bin agl \
+      --bin agl-process-launcher
   )
 fi
 [[ -x "$agl_bin" ]] || fail "agl binary is not executable: $agl_bin"

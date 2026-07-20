@@ -18,8 +18,8 @@ use crate::llama_cpp::NativeAbortTestProbe;
 use crate::{
     ContextKey, InferenceCancellation, InferenceJob, InferenceRequest, InferenceResponse,
     LlamaCppModelRuntime, ModelGeneration, ModelKey, ModelManager, ModelManagerError,
-    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime, RuntimeFailure,
-    RuntimeOperation,
+    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime,
+    NoopInferenceOutputSink, RuntimeFailure, RuntimeOperation,
 };
 
 const SMOKE_SCHEMA: &str = "agentlibre.smoke.agl139.v1";
@@ -572,6 +572,7 @@ fn prepare_job(
         artifact_root.clone(),
         store_root.to_path_buf(),
         max_output_tokens,
+        Arc::new(NoopInferenceOutputSink),
     )?
     .with_cancellation(cancellation);
     Ok(PreparedSmokeJob {

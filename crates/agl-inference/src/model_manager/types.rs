@@ -10,8 +10,8 @@ use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::InferenceRequest;
 use crate::evidence::InferenceArtifactRoot;
+use crate::{InferenceOutputSink, InferenceRequest};
 
 const MAX_RESOLVED_IMAGES: usize = 8;
 const MAX_RESOLVED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -235,7 +235,7 @@ pub struct InferenceJobScope {
     pub request_id: Option<RequestId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InferenceJob {
     config: ResolvedInferenceConfig,
     request: InferenceRequest,
@@ -247,6 +247,26 @@ pub struct InferenceJob {
     max_output_tokens: u32,
     deadline: Option<Instant>,
     cancellation: InferenceCancellation,
+    output_sink: Arc<dyn InferenceOutputSink>,
+}
+
+impl fmt::Debug for InferenceJob {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InferenceJob")
+            .field("config", &self.config)
+            .field("request", &self.request)
+            .field("model_key", &self.model_key)
+            .field("context_key", &self.context_key)
+            .field("artifact_root", &self.artifact_root)
+            .field("content_store_root", &self.content_store_root)
+            .field("resolved_content", &self.resolved_content)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("deadline", &self.deadline)
+            .field("cancellation", &self.cancellation)
+            .field("output_sink", &"<volatile>")
+            .finish()
+    }
 }
 
 impl InferenceJob {
@@ -257,6 +277,7 @@ impl InferenceJob {
         artifact_root: InferenceArtifactRoot,
         content_store_root: PathBuf,
         max_output_tokens: u32,
+        output_sink: Arc<dyn InferenceOutputSink>,
     ) -> Result<Self, ModelManagerError> {
         let model_key = ModelKey::from_config(&config)?;
         if context_key.model_key() != &model_key {
@@ -292,6 +313,7 @@ impl InferenceJob {
             max_output_tokens,
             deadline: None,
             cancellation: InferenceCancellation::new(),
+            output_sink,
         })
     }
 
@@ -339,6 +361,10 @@ impl InferenceJob {
 
     pub fn cancellation(&self) -> &InferenceCancellation {
         &self.cancellation
+    }
+
+    pub fn output_sink(&self) -> &dyn InferenceOutputSink {
+        self.output_sink.as_ref()
     }
 
     pub fn scope(&self) -> InferenceJobScope {

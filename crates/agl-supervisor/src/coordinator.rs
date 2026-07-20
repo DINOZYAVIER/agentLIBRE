@@ -51,6 +51,13 @@ pub struct RunSubscription {
     overflowed: Arc<Mutex<bool>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunSubscriptionPoll {
+    Event(Box<SafeRuntimeEventEnvelope>),
+    Complete,
+    Pending,
+}
+
 impl RunSubscription {
     pub fn recv(&self) -> Result<Option<SafeRuntimeEventEnvelope>> {
         match self.receiver.recv() {
@@ -68,14 +75,14 @@ impl RunSubscription {
         }
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<SafeRuntimeEventEnvelope>> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<RunSubscriptionPoll> {
         match self.receiver.recv_timeout(timeout) {
             Ok(SubscriptionMessage::Event(event)) => {
                 self.last_delivered.store(event.sequence, Ordering::Release);
-                Ok(Some(*event))
+                Ok(RunSubscriptionPoll::Event(event))
             }
-            Ok(SubscriptionMessage::Complete) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Ok(SubscriptionMessage::Complete) => Ok(RunSubscriptionPoll::Complete),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(RunSubscriptionPoll::Pending),
             Err(mpsc::RecvTimeoutError::Disconnected)
                 if *self.overflowed.lock().expect("overflow flag poisoned") =>
             {
@@ -373,6 +380,7 @@ impl Coordinator {
                             kind: run.kind,
                             state: run.state,
                             priority: run.priority,
+                            concurrency_key: run.concurrency_key,
                             usage: run.usage,
                             cancellation_requested: run.cancellation_requested_at_ms.is_some(),
                             attempts: run.attempts,

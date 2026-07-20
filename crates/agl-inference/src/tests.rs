@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agl_config::{
     BackendKind, InferenceBackendConfig, InferenceRuntimeConfig, ModelConfig, ModelDialect,
@@ -150,6 +151,7 @@ fn invalid_job_scope_is_rejected_before_manager_admission() {
             InferenceArtifactRoot::new("/tmp/unused"),
             PathBuf::from("/tmp/unused-store"),
             32,
+            Arc::new(NoopInferenceOutputSink),
         ),
         Err(ModelManagerError::ProfileInvalid { .. })
     ));

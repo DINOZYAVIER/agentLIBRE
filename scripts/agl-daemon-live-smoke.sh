@@ -44,7 +44,12 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$home"
-cargo build -p agl-cli >/dev/null
+cargo build \
+  -p agl-cli \
+  -p agl-process \
+  --bin agl \
+  --bin agl-process-launcher \
+  >/dev/null
 
 "$agl_bin" \
   --home "$home" \

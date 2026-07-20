@@ -1,24 +1,27 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use agl_app::{
-    ApplicationBackend, ApplicationError, ApplicationErrorCode, ApplicationService, CommandContext,
-    CommandId, LocalOperatorPrincipal, PresentationSubscribe, PromptAdmission, PromptSubmission,
-    SessionOpen, SessionOpened, SessionPresentationEventEnvelope, SessionPresentationSnapshot,
-    SuggestionPage, SuggestionRequest, UserShellAdmission, UserShellSubmission,
+    ApplicationBackend, ApplicationCallContext, ApplicationError, ApplicationErrorCode,
+    ApplicationService, CommandContext, CommandId, HumanTerminalEnsure, PresentationSubscribe,
+    PromptAdmission, PromptAdmissionState, PromptBudget, PromptSubmission, SessionOpen,
+    SessionOpened, SessionPresentationEventEnvelope, SessionPresentationSnapshot, SuggestionPage,
+    SuggestionRequest, TerminalEnsured,
 };
 use agl_ids::{DaemonInstanceId, RequestId, SessionId};
 use agl_protocol::{
     ApplicationActionResultEvent, CommandCatalogEvent, CommandCatalogRequest, DaemonEvent,
-    DaemonEventKind, DaemonRequestKind, ProtocolError, ProtocolErrorCode, SessionPresentationEvent,
-    UserShellAcceptedEvent,
+    DaemonEventKind, DaemonRequestKind, HumanHostTerminalEnsureRequest, HumanTerminalEnsuredEvent,
+    ProtocolError, ProtocolErrorCode, ProtocolRunState, RunAcceptedEvent, RunSubmitRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::state::DaemonState;
+use crate::state::{
+    DaemonState, DaemonStateExecutor, SharedDaemonState, daemon_state_application_error,
+};
 
 pub(crate) fn application_service(
     daemon_instance_id: DaemonInstanceId,
-    state: Weak<Mutex<DaemonState>>,
+    state: Weak<DaemonStateExecutor>,
 ) -> ApplicationService {
     ApplicationService::new(
         daemon_instance_id,
@@ -26,63 +29,140 @@ pub(crate) fn application_service(
     )
 }
 
+pub(crate) async fn handle_prompt_submit_request(
+    application: &ApplicationService,
+    request_id: RequestId,
+    request: RunSubmitRequest,
+) -> DaemonEvent {
+    let result = application
+        .submit_prompt(PromptSubmission {
+            session_id: request.session_id,
+            client_submission_id: request.client_submission_id,
+            content: request.content,
+            budget: PromptBudget {
+                wall_time_ms: request.budget.wall_time_ms,
+                model_input_tokens: request.budget.model_input_tokens,
+                model_output_tokens: request.budget.model_output_tokens,
+                model_attempts: request.budget.model_attempts,
+                capability_calls: request.budget.capability_calls,
+            },
+        })
+        .await
+        .map(|admission| {
+            DaemonEventKind::RunAccepted(RunAcceptedEvent {
+                session_id: admission.session_id,
+                run_id: admission.run_id,
+                turn_id: admission.turn_id,
+                state: match admission.state {
+                    PromptAdmissionState::Queued => ProtocolRunState::Queued,
+                    PromptAdmissionState::Running => ProtocolRunState::Running,
+                    PromptAdmissionState::Waiting => ProtocolRunState::Waiting,
+                    PromptAdmissionState::Succeeded => ProtocolRunState::Succeeded,
+                    PromptAdmissionState::Failed => ProtocolRunState::Failed,
+                    PromptAdmissionState::Cancelled => ProtocolRunState::Cancelled,
+                },
+                replayed: admission.replayed,
+            })
+        });
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(|error| DaemonEventKind::Error(protocol_error(error))),
+    )
+}
+
 struct DaemonApplicationBackend {
-    state: Weak<Mutex<DaemonState>>,
+    state: Weak<DaemonStateExecutor>,
 }
 
 impl DaemonApplicationBackend {
     fn with_state<T>(
         &self,
-        operation: impl FnOnce(&mut DaemonState) -> Result<T, ApplicationError>,
-    ) -> Result<T, ApplicationError> {
+        context: ApplicationCallContext,
+        operation: impl FnOnce(&mut DaemonState, &ApplicationCallContext) -> Result<T, ApplicationError>
+        + Send
+        + 'static,
+    ) -> Result<T, ApplicationError>
+    where
+        T: Send + 'static,
+    {
         let state = self.state.upgrade().ok_or_else(|| {
             ApplicationError::new(
                 ApplicationErrorCode::OutcomeUnknown,
                 "daemon is shutting down",
             )
         })?;
-        let mut state = state.lock().map_err(|_| {
-            ApplicationError::new(ApplicationErrorCode::Internal, "daemon state lock poisoned")
-        })?;
-        operation(&mut state)
+        state
+            .call(context, operation)
+            .map_err(daemon_state_application_error)?
     }
 }
 
 impl ApplicationBackend for DaemonApplicationBackend {
-    fn open_session(&self, request: SessionOpen) -> Result<SessionOpened, ApplicationError> {
-        self.with_state(|state| state.application_open_session(request))
+    fn open_session(
+        &self,
+        context: ApplicationCallContext,
+        request: SessionOpen,
+    ) -> Result<SessionOpened, ApplicationError> {
+        self.with_state(context, move |state, _| {
+            state.application_open_session(request)
+        })
     }
 
-    fn snapshot(
+    fn snapshot_page(
         &self,
+        context: ApplicationCallContext,
         session_id: &SessionId,
-    ) -> Result<SessionPresentationSnapshot, ApplicationError> {
-        self.with_state(|state| state.application_snapshot(session_id))
+        page_cursor: Option<&str>,
+    ) -> Result<agl_app::PresentationSnapshotPage, ApplicationError> {
+        let session_id = session_id.clone();
+        let page_cursor = page_cursor.map(str::to_owned);
+        self.with_state(context, move |state, _| {
+            state.application_snapshot_page(&session_id, page_cursor.as_deref())
+        })
     }
 
     fn invoke(
         &self,
+        context: ApplicationCallContext,
         request: agl_app::ApplicationActionRequest,
     ) -> Result<agl_app::ApplicationActionResult, ApplicationError> {
-        self.with_state(|state| state.application_invoke(request))
+        let state = self.state.upgrade().ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::OutcomeUnknown,
+                "daemon is shutting down",
+            )
+        })?;
+        state.invoke_application(context, request)
     }
 
     fn submit_prompt(
         &self,
+        context: ApplicationCallContext,
         request: PromptSubmission,
     ) -> Result<PromptAdmission, ApplicationError> {
-        self.with_state(|state| state.application_submit_prompt(request))
+        self.with_state(context, move |state, _| {
+            state.application_submit_prompt(request)
+        })
     }
 
-    fn start_user_shell(
+    fn ensure_human_terminal(
         &self,
-        request: UserShellSubmission,
-    ) -> Result<UserShellAdmission, ApplicationError> {
-        self.with_state(|state| state.application_start_user_shell(request))
+        context: ApplicationCallContext,
+        request: HumanTerminalEnsure,
+    ) -> Result<TerminalEnsured, ApplicationError> {
+        self.with_state(context, move |state, _| {
+            state.application_ensure_human_terminal(request)
+        })
     }
 
-    fn suggestions(&self, request: SuggestionRequest) -> Result<SuggestionPage, ApplicationError> {
-        self.with_state(|state| state.application_suggestions(request))
+    fn suggestions(
+        &self,
+        context: ApplicationCallContext,
+        request: SuggestionRequest,
+    ) -> Result<SuggestionPage, ApplicationError> {
+        self.with_state(context, move |state, _| {
+            state.application_suggestions(request)
+        })
     }
 }
 
@@ -90,13 +170,14 @@ pub(crate) async fn handle_finite_request(
     application: &ApplicationService,
     request_id: RequestId,
     request: DaemonRequestKind,
-    operator_uid: u32,
+    _operator_uid: u32,
 ) -> DaemonEvent {
     let result = match request {
         DaemonRequestKind::CommandCatalog(request) => command_catalog(application, request).await,
         DaemonRequestKind::CommandSuggestions(request) => {
             let request = (|| {
                 Ok(SuggestionRequest {
+                    session_id: request.session_id,
                     command_id: CommandId::parse(request.command_id)?,
                     argument_id: request.argument_id,
                     query: request.query,
@@ -123,34 +204,56 @@ pub(crate) async fn handle_finite_request(
                 }),
             Err(error) => Err(error),
         },
-        DaemonRequestKind::SessionPresentation(request) => application
-            .snapshot(&request.session_id)
-            .await
-            .and_then(wire_convert)
-            .map(|snapshot| {
-                DaemonEventKind::SessionPresentation(SessionPresentationEvent { snapshot })
-            }),
-        DaemonRequestKind::UserShellStart(request) => {
-            let submission = UserShellSubmission {
-                session_id: request.session_id,
-                client_submission_id: request.client_submission_id,
-                command: request.command,
-                execution_context_revision: request.execution_context_revision,
-                profile: request.profile,
-                terminal_size: request.terminal_size,
-                background: request.background,
-                operator: LocalOperatorPrincipal { uid: operator_uid },
-            };
-            application
-                .start_user_shell(submission)
+        DaemonRequestKind::HumanTerminalEnsure(request) => match wire_convert(request) {
+            Ok(request) => application
+                .ensure_human_terminal(request)
                 .await
-                .and_then(wire_convert::<_, UserShellAcceptedEvent>)
-                .map(DaemonEventKind::UserShellAccepted)
-        }
+                .and_then(wire_convert::<_, HumanTerminalEnsuredEvent>)
+                .map(DaemonEventKind::HumanTerminalEnsured),
+            Err(error) => Err(error),
+        },
         _ => Err(ApplicationError::new(
             ApplicationErrorCode::InvalidArguments,
             "request is not a finite application-surface operation",
         )),
+    };
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(|error| DaemonEventKind::Error(protocol_error(error))),
+    )
+}
+
+pub(crate) async fn handle_human_host_terminal_request(
+    state: &SharedDaemonState,
+    application: &ApplicationService,
+    request_id: RequestId,
+    request: HumanHostTerminalEnsureRequest,
+    operator_uid: u32,
+) -> DaemonEvent {
+    let session_id = request.terminal.session_id.clone();
+    let confirmed = request.confirm_host_authority;
+    let result = match wire_convert(request.terminal) {
+        Ok(request) => {
+            match state
+                .operator_ensure_human_host_terminal(request, operator_uid, confirmed)
+                .await
+            {
+                Ok(ensured) => {
+                    let result = ensured
+                        .validate_for_session(&session_id)
+                        .and_then(|_| wire_convert::<_, HumanTerminalEnsuredEvent>(ensured));
+                    match result {
+                        Ok(event) => application
+                            .refresh(&session_id)
+                            .await
+                            .map(|_| DaemonEventKind::HumanTerminalEnsured(event)),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
     };
     DaemonEvent::new(
         Some(request_id),
@@ -169,43 +272,27 @@ async fn command_catalog(
     };
     let catalog = application.command_catalog(context).await?;
     let mut event: CommandCatalogEvent = wire_convert(catalog)?;
-    if request
-        .client_effects
-        .contains(&agl_protocol::ClientEffectKind::Help)
-    {
-        event.descriptors.push(client_descriptor(
-            "client.help",
-            "help",
-            "Show command help",
-        ));
-    }
-    if request
-        .client_effects
-        .contains(&agl_protocol::ClientEffectKind::Disconnect)
-    {
-        event.descriptors.push(client_descriptor(
-            "client.disconnect",
-            "disconnect",
-            "Disconnect this surface",
-        ));
-    }
+    event.descriptors.retain(|descriptor| {
+        client_effect_is_admitted(descriptor.action_kind, &request.client_effects)
+    });
     event
         .descriptors
         .sort_by(|left, right| left.id.cmp(&right.id));
     Ok(DaemonEventKind::CommandCatalog(event))
 }
 
-fn client_descriptor(id: &str, name: &str, summary: &str) -> agl_protocol::CommandDescriptor {
-    agl_protocol::CommandDescriptor {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        aliases: Vec::new(),
-        summary: summary.to_owned(),
-        category: agl_protocol::CommandCategory::Client,
-        arguments: Vec::new(),
-        action_kind: agl_protocol::ApplicationActionKind::SessionStatus,
-        concurrency: agl_protocol::CommandConcurrency::SurfaceLocal,
-        availability: agl_protocol::CommandAvailability::Enabled,
+fn client_effect_is_admitted(
+    action: agl_protocol::ApplicationActionKind,
+    effects: &[agl_protocol::ClientEffectKind],
+) -> bool {
+    match action {
+        agl_protocol::ApplicationActionKind::ClientHelp => {
+            effects.contains(&agl_protocol::ClientEffectKind::Help)
+        }
+        agl_protocol::ApplicationActionKind::ClientDisconnect => {
+            effects.contains(&agl_protocol::ClientEffectKind::Disconnect)
+        }
+        _ => true,
     }
 }
 
@@ -217,9 +304,18 @@ fn application_action_result(
             Ok(agl_protocol::ApplicationActionResult::SessionOpened {
                 session_id: opened.session_id,
                 resumed: opened.resumed,
-                snapshot: Box::new(wire_convert(opened.snapshot)?),
             })
         }
+        agl_app::ApplicationActionResult::SessionExited {
+            session_id,
+            cancelled_runs,
+            terminated_terminals,
+            terminated_executions: _,
+        } => Ok(agl_protocol::ApplicationActionResult::SessionExited {
+            session_id,
+            cancelled_runs,
+            terminated_terminals,
+        }),
         other => wire_convert(other),
     }
 }
@@ -231,32 +327,65 @@ pub(crate) fn presentation_subscribe(session_id: SessionId) -> PresentationSubsc
 pub(crate) fn presentation_event(
     event: SessionPresentationEventEnvelope,
 ) -> Result<agl_protocol::SessionPresentationEventEnvelope, ApplicationError> {
+    if matches!(
+        &event.event,
+        agl_app::SessionPresentationEvent::SnapshotReplaced { .. }
+    ) {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::Internal,
+            "snapshot replacement must use the bounded transfer adapter",
+        ));
+    }
     wire_convert(event)
 }
 
 pub(crate) fn presentation_snapshot(
     snapshot: SessionPresentationSnapshot,
+    older_page_cursor: Option<String>,
 ) -> Result<agl_protocol::SessionPresentationSnapshot, ApplicationError> {
-    wire_convert(snapshot)
+    let mut value = serde_json::to_value(snapshot).map_err(conversion_error)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        ApplicationError::new(
+            ApplicationErrorCode::Internal,
+            "application snapshot is not a JSON object",
+        )
+    })?;
+    object.insert(
+        "older_page_cursor".to_owned(),
+        serde_json::to_value(older_page_cursor).map_err(conversion_error)?,
+    );
+    serde_json::from_value(value).map_err(conversion_error)
 }
 
 pub(crate) fn protocol_error(error: ApplicationError) -> ProtocolError {
     let (code, retryable) = match error.code {
-        ApplicationErrorCode::InvalidArguments | ApplicationErrorCode::StaleContextRevision => {
-            (ProtocolErrorCode::InvalidRequest, false)
-        }
+        ApplicationErrorCode::InvalidArguments => (ProtocolErrorCode::InvalidArguments, false),
+        ApplicationErrorCode::CommandUnavailable => (ProtocolErrorCode::CommandUnavailable, false),
+        ApplicationErrorCode::SessionBusy => (ProtocolErrorCode::SessionBusy, true),
         ApplicationErrorCode::NotFound => (ProtocolErrorCode::NotFound, false),
-        ApplicationErrorCode::NotAuthorized => (ProtocolErrorCode::Unauthorized, false),
-        ApplicationErrorCode::CommandUnavailable
-        | ApplicationErrorCode::ModelNotInstalled
-        | ApplicationErrorCode::ModelContextTooSmall
-        | ApplicationErrorCode::SkillNotAdmitted => (ProtocolErrorCode::Unsupported, false),
-        ApplicationErrorCode::SessionBusy | ApplicationErrorCode::InputBackpressure => {
-            (ProtocolErrorCode::Busy, true)
+        ApplicationErrorCode::NotAuthorized => (ProtocolErrorCode::NotAuthorized, false),
+        ApplicationErrorCode::AuthorizationRequired => {
+            (ProtocolErrorCode::AuthorizationRequired, false)
         }
-        ApplicationErrorCode::ResyncRequired
-        | ApplicationErrorCode::OutcomeUnknown
-        | ApplicationErrorCode::Internal => (ProtocolErrorCode::RuntimeFailure, false),
+        ApplicationErrorCode::ConfirmationRequired => {
+            (ProtocolErrorCode::ConfirmationRequired, false)
+        }
+        ApplicationErrorCode::StaleContextRevision => {
+            (ProtocolErrorCode::StaleContextRevision, false)
+        }
+        ApplicationErrorCode::TerminalOwnerMismatch => {
+            (ProtocolErrorCode::TerminalOwnerMismatch, false)
+        }
+        ApplicationErrorCode::WriterLeaseBusy => (ProtocolErrorCode::WriterLeaseBusy, true),
+        ApplicationErrorCode::ModelNotInstalled => (ProtocolErrorCode::ModelNotInstalled, false),
+        ApplicationErrorCode::ModelContextTooSmall => {
+            (ProtocolErrorCode::ModelContextTooSmall, false)
+        }
+        ApplicationErrorCode::SkillNotAdmitted => (ProtocolErrorCode::SkillNotAdmitted, false),
+        ApplicationErrorCode::InputBackpressure => (ProtocolErrorCode::InputBackpressure, true),
+        ApplicationErrorCode::ResyncRequired => (ProtocolErrorCode::ResyncRequired, true),
+        ApplicationErrorCode::OutcomeUnknown => (ProtocolErrorCode::OutcomeUnknown, false),
+        ApplicationErrorCode::Internal => (ProtocolErrorCode::Internal, false),
     };
     let mut protocol = ProtocolError::new(code, error.message, retryable);
     protocol.safe_metadata.insert(
@@ -280,4 +409,27 @@ fn conversion_error(error: serde_json::Error) -> ApplicationError {
         ApplicationErrorCode::Internal,
         format!("surface protocol conversion failed: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_effect_is_admitted;
+    use agl_protocol::{ApplicationActionKind, ClientEffectKind};
+
+    #[test]
+    fn client_catalog_entries_are_negotiated_without_synthetic_duplicates() {
+        let effects = [ClientEffectKind::Help];
+        assert!(client_effect_is_admitted(
+            ApplicationActionKind::ClientHelp,
+            &effects
+        ));
+        assert!(!client_effect_is_admitted(
+            ApplicationActionKind::ClientDisconnect,
+            &effects
+        ));
+        assert!(client_effect_is_admitted(
+            ApplicationActionKind::SessionStatus,
+            &[]
+        ));
+    }
 }

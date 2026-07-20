@@ -6,12 +6,12 @@ use agl_config::ResolvedInferenceConfig;
 use agl_ids::SessionId;
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    ContextKey, InferenceCancellation, InferenceJob, InferenceRequest, InferenceResponse,
-    ModelManagerHandle, ModelManagerStatus,
+    ContextKey, InferenceCancellation, InferenceJob, InferenceOutputSink, InferenceRequest,
+    InferenceResponse, ModelManagerHandle, ModelManagerStatus,
 };
 use anyhow::{Result, ensure};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChatInferenceJob {
     pub config: ResolvedInferenceConfig,
     pub artifact_root: InferenceArtifactRoot,
@@ -21,6 +21,24 @@ pub struct ChatInferenceJob {
     pub request: InferenceRequest,
     pub cancellation: InferenceCancellation,
     pub deadline: Option<Instant>,
+    pub output_sink: Arc<dyn InferenceOutputSink>,
+}
+
+impl std::fmt::Debug for ChatInferenceJob {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChatInferenceJob")
+            .field("config", &self.config)
+            .field("artifact_root", &self.artifact_root)
+            .field("content_store_root", &self.content_store_root)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("session_id", &self.session_id)
+            .field("request", &self.request)
+            .field("cancellation", &self.cancellation)
+            .field("deadline", &self.deadline)
+            .field("output_sink", &"<volatile>")
+            .finish()
+    }
 }
 
 pub trait InferenceClient: Send + Sync + 'static {
@@ -86,6 +104,7 @@ impl InferenceClient for ModelManagerHandle {
             job.artifact_root,
             job.content_store_root,
             job.max_output_tokens,
+            job.output_sink,
         )?
         .with_cancellation(job.cancellation);
         if let Some(deadline) = job.deadline {

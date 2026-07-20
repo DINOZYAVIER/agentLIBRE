@@ -24,7 +24,10 @@ mode; selecting a skill never upgrades the mode by itself.
 Use `process.exec` for a foreground argv and `process.start` for a background
 argv. Spaces, quotes, `;`, `|`, redirects, globs, `$`, and `$()` are literal
 argument data. Use `shell.exec` only when shell parsing is intentional. It
-passes the command as one argument to the shell profile frozen at session/run
+uses the calling main agent's or subagent's persistent workspace terminal, so
+`cd`, exports, aliases, functions and shell jobs remain local to that owner
+across calls. A separately granted Host `shell.exec` remains a bounded
+one-shot execution. Both paths use the shell profile frozen at session/run
 admission rather than consulting a later `$SHELL`, `PATH`, or symlink change.
 
 ## Workspace and host profiles
@@ -74,6 +77,43 @@ digest, both argument vectors, and the set of inheritable environment names.
 Each launch rechecks the digest and executes a retained executable descriptor;
 later config, `PATH`, symlink, file replacement, or newly inherited environment
 names cannot substitute a different shell profile.
+
+## Persistent terminals
+
+The daemon lazily owns one Human workspace terminal, an optional separately
+approved Human Host terminal, one main-agent workspace terminal, and one
+workspace terminal per live subagent. Each terminal has a stable
+`TerminalSessionId` and one backing `ExecutionId`; switching between Chat and
+Terminal only changes the client view. It does not launch a new shell or stop
+the existing shell, foreground program, REPL, editor, jobs, cwd, or exports.
+
+Workspace terminals are interactive non-login Bash or Zsh processes. They do
+not source host dotfiles. Their `PATH` is assembled from canonical standard
+Linux runtime roots plus configured admitted roots, so ordinary tools such as
+`ls` work without granting the whole host filesystem. A Human Host terminal
+requires an explicit same-UID operator confirmation and is a distinct
+immutable execution. Sourcing the selected shell's user rc is a separate
+creation-time choice; it is never inferred or enabled for an agent terminal.
+
+A private authenticated shell-integration channel supplies prompt, cwd,
+command-boundary and exit metadata. PTY text and control sequences cannot
+forge it. While a command is active, the process owner samples `tcgetpgrp` on
+the daemon-owned PTY and merges foreground-program changes into the same
+terminal-local event sequence; shell hooks never guess a child pgrp before it
+exists. If the channel degrades, prompt-sensitive `!` switching and cwd sync
+stop; raw Terminal attach remains available. Human commands and PTY output are
+never copied into Chat or model context. Agent `shell.exec` serializes commands
+through a bounded per-terminal FIFO and returns only the command's bounded
+output range.
+
+Terminal identity is reserved durably before spawn. A daemon restart converts
+every previously live terminal record to `outcome_unknown`; it never relaunches
+the shell or claims to recover its jobs. Unpromoted subagent terminals end with
+their owner. Explicit Human promotion revokes the agent writer and changes
+lifecycle ownership without expanding the terminal's workspace authority.
+Human command history is a private, bounded `0600` store keyed by a digest of
+the workspace's exact Linux path bytes. It never uses global Bash/Zsh history;
+agent terminal history is memory-only and disappears with its owner.
 
 ## Ownership, attach, and output
 
@@ -127,10 +167,12 @@ agl process kill EXECUTION_ID [--immediate] [--yes] [--json]
 agl process doctor [--json]
 ```
 
-Direct chat provides `/pwd`, `/cd PATH`, `/cd --host PATH`, `/processes`,
-`/attach EXECUTION_ID [--read-only]`, and `/kill EXECUTION_ID [--immediate]`.
-Those commands address that chat's in-process supervisor. A separate top-level
-CLI does not claim process-local direct-chat handles.
+The daemon-backed interactive surface provides `/processes`, `/attach
+EXECUTION_ID [--read-only]`, and `/kill EXECUTION_ID [--immediate]`. It has no
+`/pwd` or `/cd`: the Human persistent Bash/Zsh terminal performs those as
+ordinary stateful shell builtins. Interactive actions are scoped to the current
+durable session; knowledge of an execution ID from another session does not
+grant attach or kill authority.
 
 `agl process doctor` reports launcher, namespace, Landlock, seccomp, pidfd, and
 PTY preflight fields. Linux target construction fails closed if any required
@@ -145,6 +187,12 @@ normal shutdown, but a daemon crash cannot prove the command's final exit or
 side effects. On restart, every prior-owner live execution and its linked step
 becomes `outcome_unknown`; agentLIBRE retains safe metadata/output and never
 automatically reruns the command.
+
+Persistent terminals follow the same rule. Their durable
+`TerminalSessionId -> ExecutionId` mapping remains visible as
+`outcome_unknown`, keeps its topology slot fenced, and cannot be replaced until
+the old outcome is known. Shell input, jobs and private integration events are
+not replayed.
 
 A future graphical terminal UI will attach to the same protocol. It is not part
 of the current process implementation.

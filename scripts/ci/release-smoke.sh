@@ -16,6 +16,7 @@ if [[ "${AGL_CI_SKIP_PREPARE:-0}" != "1" ]]; then
 fi
 
 agl_bin="$AGL_CI_REPO_ROOT/target/release/agl"
+launcher_bin="$AGL_CI_REPO_ROOT/target/release/agl-process-launcher"
 if [[ -n "${AGL_CI_SMOKE_HOME:-}" ]]; then
   smoke_home="$AGL_CI_SMOKE_HOME"
   mkdir -p "$smoke_home"
@@ -24,10 +25,15 @@ else
   trap 'rm -rf "$smoke_home"' EXIT
 fi
 
-ci_section "Building release CLI"
-ci_run cargo build --locked --release -p agl-cli
+ci_section "Building release runtime bundle"
+ci_run cargo build --locked --release \
+  -p agl-cli \
+  -p agl-process \
+  --bin agl \
+  --bin agl-process-launcher
 
 [[ -x "$agl_bin" ]] || ci_fail "missing release binary: $agl_bin"
+[[ -x "$launcher_bin" ]] || ci_fail "missing release binary: $launcher_bin"
 
 ci_section "Checking release binary link metadata"
 linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"

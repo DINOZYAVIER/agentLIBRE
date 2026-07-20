@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use agl_capabilities::CapabilityId;
@@ -154,6 +155,7 @@ pub struct ChatService {
     context_released: bool,
     session_finished: bool,
     max_tool_calls: usize,
+    runtime_selection_revision: u64,
 }
 
 impl ChatService {
@@ -182,6 +184,8 @@ impl ChatService {
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let admitted_execution_context = runtime.execution.context_snapshot(&workspace_root)?;
         let tool_mode = options.inference.tool_mode;
+        let function_ref = options.inference.function_ref.clone();
+        let selected_skill_ids = options.inference.skills.clone();
         let artifact_root_override = if history_enabled {
             explicit_artifact_root.or_else(|| Some(runtime.paths.session_dir(&session_id)))
         } else {
@@ -215,6 +219,13 @@ impl ChatService {
                         session.config_path().to_path_buf(),
                         session.backend_name(),
                         admitted_execution_context.clone(),
+                        agl_session::SessionRuntimeSelection {
+                            function_ref,
+                            model_id: session.selected_model_id(),
+                            operation_mode: tool_mode.as_str().to_owned(),
+                            skill_ids: selected_skill_ids,
+                            revision: 1,
+                        },
                     )?),
                     None,
                     admitted_execution_context,
@@ -235,6 +246,10 @@ impl ChatService {
             .as_ref()
             .map(replay_turn_messages)
             .unwrap_or_default();
+        let runtime_selection_revision = chat_history
+            .as_ref()
+            .map(|history| history.runtime_selection().revision)
+            .unwrap_or(1);
         Ok(Self {
             runtime: runtime.clone(),
             scope_session_id: Some(session_id.clone()),
@@ -248,6 +263,7 @@ impl ChatService {
             context_released: false,
             session_finished: false,
             max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
+            runtime_selection_revision,
         })
     }
 
@@ -284,6 +300,7 @@ impl ChatService {
             context_released: false,
             session_finished: false,
             max_tool_calls,
+            runtime_selection_revision: 1,
         })
     }
 
@@ -302,6 +319,10 @@ impl ChatService {
                 .automatic_runtime_plan()
                 .cloned(),
         }
+    }
+
+    pub(crate) fn set_presentation_sink(&mut self, sink: Arc<dyn crate::TurnPresentationSink>) {
+        self.turn_runtime.set_presentation_sink(sink);
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -368,6 +389,34 @@ impl ChatService {
 
     pub(crate) fn is_session_scoped(&self) -> bool {
         self.scope_session_id.is_some()
+    }
+
+    /// Resolves and builds the next workspace-owned runtime without mutating
+    /// the durable session. Callers that must terminate old-root work before
+    /// committing can use this to reject deterministic target/config errors
+    /// before any destructive lifecycle action.
+    pub fn preflight_workspace_root(&self, workspace_root: impl AsRef<Path>) -> Result<PathBuf> {
+        if self.context_released {
+            bail!("cannot change workspace root after the chat session context was released");
+        }
+        let canonical = workspace_root.as_ref().canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize workspace root {}",
+                workspace_root.as_ref().display()
+            )
+        })?;
+        ensure!(
+            canonical.is_dir(),
+            "workspace root is not a directory: {}",
+            canonical.display()
+        );
+        self.turn_runtime
+            .execution_context()
+            .revision
+            .checked_add(1)
+            .context("execution context revision overflow")?;
+        self.turn_runtime.preflight_workspace_root(&canonical)?;
+        Ok(canonical)
     }
 
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
@@ -461,7 +510,111 @@ impl ChatService {
             bail!("cannot reload a released chat session context");
         }
         self.turn_runtime.reload_runtime_context()?;
+        self.persist_runtime_selection()?;
         Ok(self.turn_runtime.session().turn_visible_tools().len())
+    }
+
+    pub fn selected_model_id(&self) -> Option<String> {
+        self.turn_runtime.session().selected_model_id()
+    }
+
+    pub fn context_limit_tokens(&self) -> u32 {
+        self.turn_runtime.session().context_limit_tokens()
+    }
+
+    pub fn runtime_selection_revision(&self) -> u64 {
+        self.runtime_selection_revision
+    }
+
+    pub fn select_model(&mut self, model_id: &str, model_path: PathBuf) -> Result<()> {
+        if self.context_released {
+            bail!("cannot select a model after the session context was released");
+        }
+        let retained_bytes = self
+            .messages
+            .iter()
+            .map(|message| serde_json::to_vec(message).map(|bytes| bytes.len()))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum::<usize>();
+        let conservative_tokens = retained_bytes.saturating_add(3) / 4;
+        let limit = self.turn_runtime.session().context_limit_tokens() as usize;
+        ensure!(
+            conservative_tokens < limit,
+            "retained conversation requires about {conservative_tokens} tokens but the model context limit is {limit}"
+        );
+        let previous_model_id = self.turn_runtime.session().selected_model_id();
+        let previous_model_path = self.turn_runtime.session().current_model_path();
+        self.turn_runtime
+            .session_mut()
+            .select_model(model_id, model_path)?;
+        if let Err(error) = self.persist_runtime_selection() {
+            if let Some(previous_model_id) = previous_model_id {
+                self.turn_runtime
+                    .session_mut()
+                    .select_model(&previous_model_id, previous_model_path)
+                    .context("failed to roll back model selection")?;
+            }
+            return Err(error).context("failed to persist model selection");
+        }
+        Ok(())
+    }
+
+    pub fn select_operation_mode(&mut self, mode: ToolAccessMode) -> Result<()> {
+        if self.context_released {
+            bail!("cannot select a mode after the session context was released");
+        }
+        let previous = self.tool_mode;
+        self.turn_runtime
+            .session_mut()
+            .select_operation_mode(mode)?;
+        self.tool_mode = mode;
+        self.turn_runtime.rebuild_tool_runtime()?;
+        if let Err(error) = self.persist_runtime_selection() {
+            self.turn_runtime
+                .session_mut()
+                .select_operation_mode(previous)
+                .context("failed to roll back operation mode")?;
+            self.tool_mode = previous;
+            self.turn_runtime.rebuild_tool_runtime()?;
+            return Err(error).context("failed to persist operation mode");
+        }
+        Ok(())
+    }
+
+    pub fn select_skills(&mut self, skill_ids: Vec<String>) -> Result<Vec<String>> {
+        if self.context_released {
+            bail!("cannot select skills after the session context was released");
+        }
+        let previous = self.turn_runtime.session().selected_skill_ids();
+        self.turn_runtime.session_mut().select_skills(skill_ids)?;
+        self.turn_runtime.rebuild_tool_runtime()?;
+        if let Err(error) = self.persist_runtime_selection() {
+            self.turn_runtime
+                .session_mut()
+                .select_skills(previous)
+                .context("failed to roll back selected skills")?;
+            self.turn_runtime.rebuild_tool_runtime()?;
+            return Err(error).context("failed to persist selected skills");
+        }
+        Ok(self.turn_runtime.session().selected_skill_ids())
+    }
+
+    fn persist_runtime_selection(&mut self) -> Result<()> {
+        let selection = agl_session::SessionRuntimeSelection {
+            function_ref: self.turn_runtime.session().function_ref(),
+            model_id: self.turn_runtime.session().selected_model_id(),
+            operation_mode: self.tool_mode.as_str().to_owned(),
+            skill_ids: self.turn_runtime.session().selected_skill_ids(),
+            revision: self.runtime_selection_revision,
+        };
+        let Some(history) = self.chat_history.as_mut() else {
+            return Ok(());
+        };
+        self.runtime_selection_revision = history
+            .update_runtime_selection(self.runtime_selection_revision, selection)?
+            .revision;
+        Ok(())
     }
 
     pub fn clear_context(&mut self) -> Result<usize> {
@@ -489,53 +642,6 @@ impl ChatService {
         }
         self.session_finished = true;
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_user_shell_started(
-        &mut self,
-        run_id: RunId,
-        step_id: agl_ids::StepId,
-        execution_id: agl_ids::ExecutionId,
-        command: String,
-        profile: agl_process::ExecutionProfile,
-        cwd: PathBuf,
-        background: bool,
-    ) -> Result<()> {
-        let history = self
-            .chat_history
-            .as_mut()
-            .context("user shell lifecycle requires durable session history")?;
-        history.append_user_shell_started(
-            run_id,
-            step_id,
-            execution_id,
-            command,
-            profile,
-            cwd,
-            background,
-        )
-    }
-
-    pub fn record_user_shell_finished(
-        &mut self,
-        execution_id: agl_ids::ExecutionId,
-        state: agl_process::ExecutionState,
-        exit: Option<agl_process::ExecutionExit>,
-        retained_after_sequence: u64,
-        output_truncated: bool,
-    ) -> Result<()> {
-        let history = self
-            .chat_history
-            .as_mut()
-            .context("user shell lifecycle requires durable session history")?;
-        history.append_user_shell_finished(
-            execution_id,
-            state,
-            exit,
-            retained_after_sequence,
-            output_truncated,
-        )
     }
 
     pub fn finish_eof_if_needed(&mut self) -> Result<()> {
@@ -820,9 +926,14 @@ impl ChatService {
                 };
                 TurnEffectResult::HookBatch { key, outcome }
             }
-            TurnEffect::ModelGeneration { key, request } => {
+            TurnEffect::ModelGeneration {
+                key,
+                provisional_message_id,
+                request,
+            } => {
                 let outcome = match self.turn_runtime.execute_model(
                     request,
+                    provisional_message_id,
                     execution.cancellation.clone(),
                     execution.deadline,
                 ) {
@@ -849,10 +960,16 @@ impl ChatService {
             }
             TurnEffect::TranscriptAppend {
                 key,
+                assistant_message_id,
                 messages,
                 output,
             } => {
-                let outcome = match self.record_transcript_effect(execution, messages, &output) {
+                let outcome = match self.record_transcript_effect(
+                    execution,
+                    assistant_message_id,
+                    messages,
+                    &output,
+                ) {
                     Ok(()) => EffectOutcome::Succeeded(()),
                     Err(error) => EffectOutcome::Failed(EffectFailure::new(
                         EffectFailureCode::Transcript,
@@ -868,6 +985,7 @@ impl ChatService {
     fn record_transcript_effect(
         &mut self,
         execution: &ChatTurnExecution,
+        assistant_message_id: Option<MessageId>,
         mut messages: Vec<TurnMessage>,
         output: &TurnOutput,
     ) -> Result<()> {
@@ -893,6 +1011,7 @@ impl ChatService {
         let mut recording = CompletedTurnRecording {
             session_id: &self.session_id,
             remaining_attempt_ids: execution.attempt_ids.iter(),
+            final_assistant_message_id: assistant_message_id,
             runtime: &self.runtime,
         };
         record_completed_turn_messages(
@@ -953,6 +1072,9 @@ impl ChatService {
             )?,
             TurnTerminal::Cancelled => {
                 self.messages = execution.executor.checkpoint().state().messages.clone();
+                if let Some(history) = &mut self.chat_history {
+                    history.complete_cancelled_turn()?;
+                }
                 let runtime_events = self.turn_runtime.take_runtime_events()?;
                 ChatTurnOutput {
                     run_id: execution.run_id.clone(),
@@ -964,6 +1086,17 @@ impl ChatService {
                 }
             }
         };
+        let presentation_outcome = match &output.status {
+            ChatTurnStatus::Answered { .. } => crate::TurnPresentationOutcome::Answered,
+            ChatTurnStatus::Stopped { .. } => crate::TurnPresentationOutcome::Stopped,
+            ChatTurnStatus::Failed { .. } => crate::TurnPresentationOutcome::Failed,
+            ChatTurnStatus::Cancelled => crate::TurnPresentationOutcome::Cancelled,
+        };
+        self.turn_runtime.publish_turn_finished(
+            execution.run_id.clone(),
+            execution.turn_id.clone(),
+            presentation_outcome,
+        );
         execution.output = Some(output);
         Ok(())
     }
@@ -1134,6 +1267,7 @@ fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: Cont
 struct CompletedTurnRecording<'a> {
     session_id: &'a SessionId,
     remaining_attempt_ids: std::slice::Iter<'a, AttemptId>,
+    final_assistant_message_id: Option<MessageId>,
     runtime: &'a AgentLibreRuntimeConfig,
 }
 
@@ -1149,9 +1283,16 @@ fn record_completed_turn_messages(
         match message {
             TurnMessage::System { .. } | TurnMessage::User { .. } => {}
             TurnMessage::Assistant { content } => {
-                link_next_attempt(chat_history, turn_runtime, recording)?;
-                let message_id = MessageId::generate();
                 let is_stop_marker = pending_stop_reason.take().is_some();
+                link_next_attempt(chat_history, turn_runtime, recording)?;
+                let message_id = if is_stop_marker {
+                    MessageId::generate()
+                } else {
+                    recording
+                        .final_assistant_message_id
+                        .take()
+                        .context("assistant answer has no provisional message ID")?
+                };
                 log_message_metadata(
                     "assistant",
                     recording.session_id,
@@ -1161,7 +1302,7 @@ fn record_completed_turn_messages(
                 );
                 let envelope =
                     turn_runtime.append_runtime_event(RuntimeEvent::AssistantMessage {
-                        message_id,
+                        message_id: message_id.clone(),
                         content: content.clone(),
                     })?;
                 if let Some(history) = chat_history.as_mut() {
@@ -1171,6 +1312,7 @@ fn record_completed_turn_messages(
                         history.append_assistant_message(envelope)?;
                     }
                 }
+                turn_runtime.publish_final_assistant_message(message_id, content.clone());
             }
             TurnMessage::AssistantToolCall { name, arguments } => {
                 link_next_attempt(chat_history, turn_runtime, recording)?;
@@ -1390,7 +1532,7 @@ mod tests {
     use agl_events::{
         EVENT_SCHEMA, EventDraft, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus,
     };
-    use agl_ids::{EventId, MessageId, RequestId, RunId, SessionId, TurnId};
+    use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, TurnId};
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
     };
@@ -1660,6 +1802,192 @@ tool_call_format = "hermes_json"
         })
     }
 
+    struct RecordingInferenceClient {
+        attempt_ids: Arc<Mutex<Vec<AttemptId>>>,
+    }
+
+    #[derive(Default)]
+    struct RecordingTurnPresentationSink {
+        events: Mutex<Vec<crate::TurnPresentationEvent>>,
+    }
+
+    impl crate::TurnPresentationSink for RecordingTurnPresentationSink {
+        fn try_publish(&self, event: crate::TurnPresentationEvent) -> crate::PresentationDelivery {
+            self.events.lock().unwrap().push(event);
+            crate::PresentationDelivery::Delivered
+        }
+    }
+
+    impl InferenceClient for RecordingInferenceClient {
+        fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse> {
+            let attempt_id = job.request.attempt_id;
+            self.attempt_ids.lock().unwrap().push(attempt_id.clone());
+            Ok(InferenceResponse {
+                attempt_id,
+                content: "done".to_string(),
+                finish_reason: InferenceFinishReason::Stop,
+                metadata: InferenceResponseMetadata {
+                    model_state: Some("recording".to_string()),
+                    selected_device: None,
+                    duration_ms: 0,
+                    input_tokens: 4,
+                    output_tokens: 2,
+                },
+            })
+        }
+
+        fn clear_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+    }
+
+    #[test]
+    fn checkpoint_retry_and_final_append_share_provisional_message_id() {
+        let observed_attempt_ids = Arc::new(Mutex::new(Vec::new()));
+        let client = InferenceClientHandle::new(RecordingInferenceClient {
+            attempt_ids: Arc::clone(&observed_attempt_ids),
+        });
+        let mut chat = test_chat_service_with_client("stable-message-id", false, client);
+        let presentation = Arc::new(RecordingTurnPresentationSink::default());
+        chat.service.set_presentation_sink(presentation.clone());
+        let mut execution = chat
+            .service
+            .start_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), text("hello"))
+            .unwrap();
+        let provisional_message_id = match execution.pending_effect().unwrap() {
+            TurnEffect::ModelGeneration {
+                provisional_message_id,
+                ..
+            } => provisional_message_id.clone(),
+            effect => panic!("expected model generation, got {:?}", effect.kind()),
+        };
+
+        let abandoned_result = chat
+            .service
+            .execute_user_turn_effect(&mut execution)
+            .unwrap();
+        assert!(matches!(
+            abandoned_result,
+            TurnEffectResult::ModelGeneration {
+                outcome: EffectOutcome::Succeeded(_),
+                ..
+            }
+        ));
+
+        let checkpoint: TurnCheckpoint =
+            serde_json::from_slice(&serde_json::to_vec(&execution.checkpoint()).unwrap()).unwrap();
+        let mut executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
+        let advance = executor.next_effect().unwrap();
+        let retry_message_id = match &advance.state {
+            TurnAdvanceState::Pending {
+                effect:
+                    TurnEffect::ModelGeneration {
+                        provisional_message_id,
+                        ..
+                    },
+            } => provisional_message_id,
+            state => panic!("expected retried model generation, got {state:?}"),
+        };
+        assert_eq!(retry_message_id, &provisional_message_id);
+        execution.executor = executor;
+        execution.advance = advance;
+
+        let retry_result = chat
+            .service
+            .execute_user_turn_effect(&mut execution)
+            .unwrap();
+        chat.service
+            .resume_user_turn_effect(&mut execution, retry_result)
+            .unwrap();
+        let transcript_message_id = match execution.pending_effect().unwrap() {
+            TurnEffect::TranscriptAppend {
+                assistant_message_id,
+                ..
+            } => assistant_message_id.as_ref(),
+            effect => panic!("expected transcript append, got {:?}", effect.kind()),
+        };
+        assert_eq!(transcript_message_id, Some(&provisional_message_id));
+
+        let checkpoint: TurnCheckpoint =
+            serde_json::from_slice(&serde_json::to_vec(&execution.checkpoint()).unwrap()).unwrap();
+        let mut executor = TurnExecutor::from_checkpoint(checkpoint).unwrap();
+        let advance = executor.next_effect().unwrap();
+        let restored_message_id = match &advance.state {
+            TurnAdvanceState::Pending {
+                effect:
+                    TurnEffect::TranscriptAppend {
+                        assistant_message_id,
+                        ..
+                    },
+            } => assistant_message_id.as_ref(),
+            state => panic!("expected restored transcript append, got {state:?}"),
+        };
+        assert_eq!(restored_message_id, Some(&provisional_message_id));
+        execution.executor = executor;
+        execution.advance = advance;
+
+        while !execution.is_terminal() {
+            chat.service.advance_user_turn(&mut execution).unwrap();
+        }
+        let output = execution.take_output().unwrap();
+        let observed_attempt_ids = observed_attempt_ids.lock().unwrap().clone();
+        assert_eq!(observed_attempt_ids.len(), 2);
+        assert_ne!(observed_attempt_ids[0], observed_attempt_ids[1]);
+        assert_eq!(output.attempt_ids, observed_attempt_ids);
+        let final_message_id = output.runtime_events.iter().find_map(|event| {
+            if let SafeRuntimeEvent::AssistantMessage { message_id, .. } = &event.payload {
+                Some(message_id)
+            } else {
+                None
+            }
+        });
+        assert_eq!(final_message_id, Some(&provisional_message_id));
+        let presentation_events = presentation.events.lock().unwrap();
+        let started = presentation_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::TurnPresentationEvent::ModelAttemptStarted {
+                        provisional_message_id: message_id,
+                        ..
+                    } if message_id == &provisional_message_id
+                )
+            })
+            .unwrap();
+        let final_item = presentation_events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    crate::TurnPresentationEvent::AssistantMessageFinal { message_id, .. }
+                        if message_id == &provisional_message_id
+                )
+            })
+            .unwrap();
+        let turn_finished = presentation_events
+            .iter()
+            .position(|event| matches!(event, crate::TurnPresentationEvent::TurnFinished { .. }))
+            .unwrap();
+        assert!(started < final_item && final_item < turn_finished);
+    }
+
     #[test]
     fn stepping_driver_exposes_initial_events_before_answer_terminal() {
         let mut chat = test_chat_service_with_client(
@@ -1766,6 +2094,11 @@ tool_call_format = "hermes_json"
                 status: TurnFinishStatus::Cancelled
             }
         ));
+        assert!(matches!(
+            chat.service.run_user_turn("next").unwrap().status,
+            ChatTurnStatus::Answered { ref answer } if answer == "unused"
+        ));
+        chat.service.request_exit().unwrap();
     }
 
     #[test]
@@ -1921,6 +2254,18 @@ tool_call_format = "hermes_json"
         let paths = agl_runtime::AgentLibrePaths::from_agl_home(chat.root.join("home"));
         let reopened = ChatSessionStore::open(paths.sessions_root(), session_id).unwrap();
         assert_eq!(reopened.execution_context(), current);
+    }
+
+    #[test]
+    fn workspace_preflight_rejects_invalid_target_without_mutating_context() {
+        let chat = test_chat_service_with_history("workspace-preflight", true);
+        let previous = chat.service.execution_context().clone();
+        let missing = chat.root.join("missing-workspace");
+
+        let error = chat.service.preflight_workspace_root(&missing).unwrap_err();
+        assert!(error.to_string().contains("failed to canonicalize"));
+        assert_eq!(chat.service.execution_context(), &previous);
+        assert_eq!(chat.service.workspace_root(), previous.workspace_root);
     }
 
     #[test]

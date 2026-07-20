@@ -13,7 +13,13 @@ Use the `!agl` command prefix unless `matrix.command_prefix` is changed.
 Build the bridge and start an agent daemon:
 
 ```sh
-cargo build --release -p agl-cli -p agl-matrix-bridge
+cargo build --release \
+  -p agl-cli \
+  -p agl-process \
+  -p agl-matrix-bridge \
+  --bin agl \
+  --bin agl-process-launcher \
+  --bin agl-matrix-bridge
 ./target/release/agl serve --config /path/to/local-inference.toml
 ```
 
@@ -22,8 +28,11 @@ For a user-systemd daemon:
 ```sh
 scripts/agentlibre-daemon-systemd-service.sh --dry-run
 scripts/agentlibre-daemon-systemd-service.sh --enable --restart
-./target/release/agl status
+./target/release/agl daemon status
 ```
+
+Use either the socket-activated user service or a manual `agl serve` process,
+never both on the same socket.
 
 Copy `examples/config.toml` to
 `~/.config/agentLIBRE/matrix-bridge/config.toml` and edit:

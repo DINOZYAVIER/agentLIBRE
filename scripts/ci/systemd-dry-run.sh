@@ -10,9 +10,29 @@ ci_section "Systemd service dry-run"
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
+  chmod -R u+w "$tmp_dir" 2>/dev/null || true
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+
+runtime_root="$tmp_dir/runtime"
+runtime_generation="$runtime_root/libexec/agentlibre/generations/generation-test"
+mkdir -p "$tmp_dir/bin" "$runtime_root/bin" "$runtime_generation"
+chmod 0755 \
+  "$runtime_root" \
+  "$runtime_root/bin" \
+  "$runtime_root/libexec" \
+  "$runtime_root/libexec/agentlibre" \
+  "$runtime_root/libexec/agentlibre/generations"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl-process-launcher"
+chmod 0555 "$runtime_generation/agl" "$runtime_generation/agl-process-launcher"
+chmod 0555 "$runtime_generation"
+ln -s generations/generation-test "$runtime_root/libexec/agentlibre/current"
+ln -s ../libexec/agentlibre/current/agl "$runtime_root/bin/agl"
+ln -s ../libexec/agentlibre/current/agl-process-launcher \
+  "$runtime_root/bin/agl-process-launcher"
+ln -s "$runtime_root/bin/agl" "$tmp_dir/bin/agl"
 
 require_output_contains() {
   local output="$1"
@@ -23,11 +43,20 @@ require_output_contains() {
   fi
 }
 
-daemon_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+require_output_not_contains() {
+  local output="$1"
+  local needle="$2"
+  if [[ "$output" == *"$needle"* ]]; then
+    printf 'expected dry-run output not to contain:\n%s\n\nactual output:\n%s\n' "$needle" "$output" >&2
+    exit 1
+  fi
+}
+
+daemon_output="$(env PATH="$tmp_dir/bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
   --dry-run \
   --unit agl-test.service \
   --cwd "$tmp_dir/workspace" \
-  --binary "$tmp_dir/bin/agl" \
   --config "$tmp_dir/config/local.toml" \
   --socket "$tmp_dir/state/daemon/agl.sock" \
   --workspace-root "$tmp_dir/workspace" \
@@ -37,13 +66,18 @@ daemon_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh
 
 require_output_contains "$daemon_output" "service unit: agl-test.service"
 require_output_contains "$daemon_output" "socket unit: agl-test.socket"
+require_output_contains "$daemon_output" "requested binary: $tmp_dir/bin/agl"
+require_output_contains "$daemon_output" "binary: $runtime_root/bin/agl"
+require_output_contains "$daemon_output" "resolved binary: $runtime_generation/agl"
+require_output_contains "$daemon_output" "process launcher: $runtime_generation/agl-process-launcher"
 require_output_contains "$daemon_output" "unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.service"
 require_output_contains "$daemon_output" "socket unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.socket"
 require_output_contains "$daemon_output" "WorkingDirectory=$tmp_dir/workspace"
 require_output_contains "$daemon_output" "Environment=AGL_LOG=agentlibre=debug"
 require_output_contains "$daemon_output" "Environment=AGL_LOG_STDERR=always"
+require_output_contains "$daemon_output" "UMask=0077"
 require_output_contains "$daemon_output" "Requires=agl-test.socket"
-require_output_contains "$daemon_output" "ExecStart=\"$tmp_dir/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
+require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
 require_output_contains "$daemon_output" "ListenStream=$tmp_dir/state/daemon/agl.sock"
 require_output_contains "$daemon_output" "FileDescriptorName=agentlibre"
 require_output_contains "$daemon_output" "SocketMode=0600"
@@ -52,6 +86,56 @@ require_output_contains "$daemon_output" "RemoveOnStop=true"
 require_output_contains "$daemon_output" "Accept=no"
 require_output_contains "$daemon_output" "Service=agl-test.service"
 require_output_contains "$daemon_output" "WantedBy=sockets.target"
+if [[ -e "$tmp_dir/state" || -L "$tmp_dir/state" ]]; then
+  ci_fail "daemon dry-run created or replaced the socket parent"
+fi
+
+writable_ancestor_status=0
+chmod 0775 "$runtime_root/libexec"
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-writable-ancestor-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$runtime_root/bin/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/writable-ancestor.out" \
+  2>"$tmp_dir/writable-ancestor.err" || writable_ancestor_status=$?
+chmod 0755 "$runtime_root/libexec"
+[[ "$writable_ancestor_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a group-writable managed ancestor"
+grep -F "managed runtime ancestor must not be group/other writable" \
+  "$tmp_dir/writable-ancestor.err" >/dev/null ||
+  ci_fail "group-writable managed ancestor rejection was not actionable"
+
+umask_runtime_root="$tmp_dir/umask-zero-runtime"
+umask_runtime_generation="$umask_runtime_root/libexec/agentlibre/generations/generation-test"
+(umask 000; mkdir -p "$umask_runtime_root/bin" "$umask_runtime_generation")
+printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl-process-launcher"
+chmod 0555 "$umask_runtime_generation/agl" "$umask_runtime_generation/agl-process-launcher"
+chmod 0555 "$umask_runtime_generation"
+ln -s generations/generation-test "$umask_runtime_root/libexec/agentlibre/current"
+ln -s ../libexec/agentlibre/current/agl "$umask_runtime_root/bin/agl"
+ln -s ../libexec/agentlibre/current/agl-process-launcher \
+  "$umask_runtime_root/bin/agl-process-launcher"
+umask_runtime_status=0
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-umask-zero-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$umask_runtime_root/bin/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/umask-zero.out" \
+  2>"$tmp_dir/umask-zero.err" || umask_runtime_status=$?
+[[ "$umask_runtime_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a runtime created under umask 000"
+grep -F "managed runtime ancestor must not be group/other writable" \
+  "$tmp_dir/umask-zero.err" >/dev/null ||
+  ci_fail "umask-000 runtime rejection was not actionable"
 
 bridge_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-matrix-bridge-systemd-service.sh" \
   --dry-run \
@@ -62,6 +146,9 @@ bridge_output="$("$AGL_CI_REPO_ROOT/scripts/agentlibre-matrix-bridge-systemd-ser
   --log-filter "agl_matrix_bridge=debug")"
 
 require_output_contains "$bridge_output" "unit: agl-matrix-test.service"
+require_output_contains "$bridge_output" "Wants=agentlibre-daemon.socket"
+require_output_contains "$bridge_output" "After=agentlibre-daemon.socket"
+require_output_not_contains "$bridge_output" "agl.service"
 require_output_contains "$bridge_output" "WorkingDirectory=$tmp_dir/workspace"
 require_output_contains "$bridge_output" "UMask=0077"
 require_output_contains "$bridge_output" "Environment=AGL_MATRIX_LOG=agl_matrix_bridge=debug"
@@ -72,7 +159,7 @@ invalid_status=0
   --dry-run \
   --unit ../bad.service \
   --cwd "$tmp_dir/workspace" \
-  --binary "$tmp_dir/bin/agl" \
+  --binary "$runtime_root/bin/agl" \
   --config "$tmp_dir/config/local.toml" \
   --socket "$tmp_dir/state/daemon/agl.sock" \
   --workspace-root "$tmp_dir/workspace" \
@@ -85,5 +172,133 @@ fi
 
 grep -F -- "--unit must be a unit name" "$tmp_dir/invalid-unit.err" >/dev/null ||
   ci_fail "invalid unit error message changed"
+
+mkdir -p "$tmp_dir/mutable"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl-process-launcher"
+chmod 0755 "$tmp_dir/mutable/agl" "$tmp_dir/mutable/agl-process-launcher"
+mutable_status=0
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-mutable-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$tmp_dir/mutable/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/mutable.out" 2>"$tmp_dir/mutable.err" || mutable_status=$?
+[[ "$mutable_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a mutable runtime binary"
+grep -F "must resolve through an immutable runtime bundle" "$tmp_dir/mutable.err" >/dev/null ||
+  ci_fail "mutable runtime rejection was not actionable"
+
+install_root="$tmp_dir/daemon-install"
+mkdir -p \
+  "$install_root/bin" \
+  "$install_root/config" \
+  "$install_root/fake-bin" \
+  "$install_root/libexec/agentlibre/generations/generation-test" \
+  "$install_root/state/daemon" \
+  "$install_root/workspace"
+chmod 0755 \
+  "$install_root" \
+  "$install_root/bin" \
+  "$install_root/libexec" \
+  "$install_root/libexec/agentlibre" \
+  "$install_root/libexec/agentlibre/generations"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "${AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE:-}" == "1" && "${FAKE_IDENTITY_FAIL:-}" == "1" ]]; then' \
+  '  exit 43' \
+  'fi' \
+  'exit 0' \
+  >"$install_root/libexec/agentlibre/generations/generation-test/agl"
+printf '#!/usr/bin/env bash\nexit 0\n' \
+  >"$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher"
+chmod 0555 \
+  "$install_root/libexec/agentlibre/generations/generation-test/agl" \
+  "$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher"
+chmod 0555 "$install_root/libexec/agentlibre/generations/generation-test"
+ln -s generations/generation-test "$install_root/libexec/agentlibre/current"
+ln -s ../libexec/agentlibre/current/agl "$install_root/bin/agl"
+ln -s ../libexec/agentlibre/current/agl-process-launcher \
+  "$install_root/bin/agl-process-launcher"
+printf '[backend]\nkind = "llama_cpp"\n' >"$install_root/config/local.toml"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"${AGL_TEST_SYSTEMCTL_LOG:?}"\n' \
+  >"$install_root/fake-bin/systemctl"
+chmod 0755 "$install_root/fake-bin/systemctl"
+chmod 0755 "$install_root/state" "$install_root/state/daemon"
+
+identity_status=0
+env \
+  HOME="$install_root/home" \
+  XDG_CONFIG_HOME="$install_root/config-home" \
+  AGL_TEST_SYSTEMCTL_LOG="$install_root/systemctl.log" \
+  FAKE_IDENTITY_FAIL=1 \
+  PATH="$install_root/fake-bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+    --unit agl-install-test.service \
+    --cwd "$install_root/workspace" \
+    --binary "$install_root/bin/agl" \
+    --config "$install_root/config/local.toml" \
+    --socket "$install_root/state/daemon/agl.sock" \
+    --workspace-root "$install_root/workspace" \
+    >"$install_root/identity.out" \
+    2>"$install_root/identity.err" || identity_status=$?
+[[ "$identity_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a mismatched runtime bundle"
+grep -F "do not have matching build identities" "$install_root/identity.err" >/dev/null ||
+  ci_fail "mismatched runtime bundle rejection was not actionable"
+[[ "$(stat -c '%a' -- "$install_root/state/daemon")" == "755" ]] ||
+  ci_fail "runtime identity rejection mutated the socket parent"
+[[ ! -e "$install_root/config-home/systemd/user/agl-install-test.service" ]] ||
+  ci_fail "runtime identity rejection installed a service unit"
+
+env \
+  HOME="$install_root/home" \
+  XDG_CONFIG_HOME="$install_root/config-home" \
+  AGL_TEST_SYSTEMCTL_LOG="$install_root/systemctl.log" \
+  PATH="$install_root/fake-bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+    --unit agl-install-test.service \
+    --cwd "$install_root/workspace" \
+    --binary "$install_root/bin/agl" \
+    --config "$install_root/config/local.toml" \
+    --socket "$install_root/state/daemon/agl.sock" \
+    --workspace-root "$install_root/workspace" \
+    >"$install_root/install.out"
+
+[[ ! -L "$install_root/state/daemon" ]] ||
+  ci_fail "daemon installer accepted a symlink socket parent"
+[[ "$(stat -c '%u' -- "$install_root/state/daemon")" == "$(id -u)" ]] ||
+  ci_fail "daemon installer did not preserve exact socket-parent ownership"
+[[ "$(stat -c '%a' -- "$install_root/state/daemon")" == "700" ]] ||
+  ci_fail "daemon installer did not tighten an existing socket parent to 0700"
+[[ "$(stat -c '%a' -- "$install_root/state")" == "755" ]] ||
+  ci_fail "daemon installer changed an ancestor instead of only the socket parent"
+[[ -f "$install_root/config-home/systemd/user/agl-install-test.service" ]] ||
+  ci_fail "daemon service unit was not installed in the temporary config home"
+[[ -f "$install_root/config-home/systemd/user/agl-install-test.socket" ]] ||
+  ci_fail "daemon socket unit was not installed in the temporary config home"
+
+mkdir -p "$tmp_dir/symlink-target"
+chmod 0755 "$tmp_dir/symlink-target"
+ln -s "$tmp_dir/symlink-target" "$tmp_dir/symlink-parent"
+symlink_status=0
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-symlink-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$runtime_root/bin/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/symlink-parent/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/symlink.out" 2>"$tmp_dir/symlink.err" || symlink_status=$?
+[[ "$symlink_status" -eq 1 ]] ||
+  ci_fail "daemon dry-run did not reject a symlinked socket parent"
+grep -F -- "must be canonical and contain no symlink components" "$tmp_dir/symlink.err" >/dev/null ||
+  ci_fail "symlinked socket-parent error message changed"
+[[ "$(stat -c '%a' -- "$tmp_dir/symlink-target")" == "755" ]] ||
+  ci_fail "daemon dry-run mutated the symlink target"
 
 printf 'systemd dry-run checks passed\n'

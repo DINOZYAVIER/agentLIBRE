@@ -113,10 +113,20 @@ pub struct ExecutionLimits {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionGrantLease {
+    pub origin: ExecutionLeaseOrigin,
     pub grant_id: String,
     pub duration: String,
     pub scope_digest: String,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionLeaseOrigin {
+    CapabilityGrant,
+    LocalOperatorTerminal,
+}
+
+pub const LOCAL_OPERATOR_TERMINAL_LEASE_DURATION: &str = "daemon_lifetime";
 
 impl ExecutionGrantLease {
     pub fn validate(&self) -> Result<()> {
@@ -129,7 +139,19 @@ impl ExecutionGrantLease {
                 "execution grant lease fields must be nonempty",
             ));
         }
+        if self.origin == ExecutionLeaseOrigin::LocalOperatorTerminal
+            && self.duration != LOCAL_OPERATOR_TERMINAL_LEASE_DURATION
+        {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "local-operator terminal authority must have daemon-lifetime duration",
+            ));
+        }
         Ok(())
+    }
+
+    pub fn is_capability_grant(&self) -> bool {
+        self.origin == ExecutionLeaseOrigin::CapabilityGrant
     }
 }
 
@@ -670,10 +692,37 @@ mod tests {
 
         request.authorization.host_process_execution = true;
         request.grant_lease = Some(ExecutionGrantLease {
+            origin: ExecutionLeaseOrigin::CapabilityGrant,
             grant_id: "grant-test".to_owned(),
             duration: "one_turn".to_owned(),
             scope_digest: "sha256:test".to_owned(),
         });
         request.validate().unwrap();
+    }
+
+    #[test]
+    fn authority_lease_origin_is_explicit_and_local_operator_duration_is_fixed() {
+        let local = ExecutionGrantLease {
+            origin: ExecutionLeaseOrigin::LocalOperatorTerminal,
+            grant_id: "private-operator-authority".to_owned(),
+            duration: LOCAL_OPERATOR_TERMINAL_LEASE_DURATION.to_owned(),
+            scope_digest: "sha256:terminal-scope".to_owned(),
+        };
+        local.validate().unwrap();
+        assert!(!local.is_capability_grant());
+
+        let encoded = serde_json::to_value(&local).unwrap();
+        assert_eq!(encoded["origin"], "local_operator_terminal");
+        assert_eq!(
+            serde_json::from_value::<ExecutionGrantLease>(encoded).unwrap(),
+            local
+        );
+
+        let mut wrong_duration = local;
+        wrong_duration.duration = "session".to_owned();
+        assert_eq!(
+            wrong_duration.validate().unwrap_err().code(),
+            ProcessErrorCode::InvalidRequest
+        );
     }
 }

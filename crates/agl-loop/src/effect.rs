@@ -2,7 +2,7 @@ use std::fmt;
 
 use agl_capabilities::{HookBatchRequest, HookBatchResult};
 use agl_events::{EventDraft, RuntimeEvent};
-use agl_ids::TurnId;
+use agl_ids::{MessageId, TurnId};
 use agl_turn::{
     ModelRequest, ModelResponse, ToolDispatchRequest, ToolDispatchResponse, TurnMessage, TurnOutput,
 };
@@ -44,6 +44,7 @@ pub enum TurnEffect {
     },
     ModelGeneration {
         key: EffectKey,
+        provisional_message_id: MessageId,
         request: ModelRequest,
     },
     CapabilityDispatch {
@@ -52,6 +53,7 @@ pub enum TurnEffect {
     },
     TranscriptAppend {
         key: EffectKey,
+        assistant_message_id: Option<MessageId>,
         messages: Vec<TurnMessage>,
         output: TurnOutput,
     },

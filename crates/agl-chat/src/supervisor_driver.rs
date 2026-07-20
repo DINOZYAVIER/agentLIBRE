@@ -56,6 +56,7 @@ pub struct ChatSupervisorFactory {
     services: Arc<Mutex<BTreeMap<SessionId, ChatService>>>,
     runtime: Option<agl_runtime::AgentLibreRuntimeConfig>,
     inference_client: Option<crate::InferenceClientHandle>,
+    presentation_sink: Arc<dyn crate::TurnPresentationSink>,
 }
 
 impl ChatSupervisorFactory {
@@ -65,6 +66,7 @@ impl ChatSupervisorFactory {
             services: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: None,
             inference_client: None,
+            presentation_sink: Arc::new(crate::NoopTurnPresentationSink),
         }
     }
 
@@ -78,7 +80,13 @@ impl ChatSupervisorFactory {
             services: Arc::new(Mutex::new(BTreeMap::new())),
             runtime: Some(runtime),
             inference_client: Some(inference_client),
+            presentation_sink: Arc::new(crate::NoopTurnPresentationSink),
         }
+    }
+
+    pub fn with_presentation_sink(mut self, sink: Arc<dyn crate::TurnPresentationSink>) -> Self {
+        self.presentation_sink = sink;
+        self
     }
 
     pub fn register(&self, service: ChatService) -> Result<()> {
@@ -273,6 +281,8 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
                 )
             }
         };
+
+        service.set_presentation_sink(Arc::clone(&self.presentation_sink));
 
         if run.session_id.is_none() {
             service

@@ -23,6 +23,48 @@ const STANDARD_RUNTIME_ROOTS: &[&str] = &[
     "/nix/store",
     "/run/current-system/sw",
 ];
+const PRIVATE_DEVICE_PATHS: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
+
+pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
+    let mut roots = BTreeSet::new();
+    for candidate in STANDARD_RUNTIME_ROOTS {
+        let candidate = Path::new(candidate);
+        match fs::metadata(candidate) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(ProcessError::new(
+                        ProcessErrorCode::SandboxUnavailable,
+                        format!(
+                            "standard Linux runtime root {} is not a directory",
+                            candidate.display()
+                        ),
+                    ));
+                }
+                let canonical = candidate.canonicalize().map_err(|error| {
+                    sandbox_io(
+                        &format!(
+                            "standard Linux runtime root {} cannot be canonicalized",
+                            candidate.display()
+                        ),
+                        error,
+                    )
+                })?;
+                roots.insert(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(sandbox_io(
+                    &format!(
+                        "standard Linux runtime root {} cannot be inspected",
+                        candidate.display()
+                    ),
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(roots.into_iter().collect())
+}
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
@@ -43,6 +85,7 @@ const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
 const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 const LANDLOCK_READ_ACCESS: u64 =
     LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+const LANDLOCK_DEVICE_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE;
 const LANDLOCK_WRITE_ACCESS: u64 = LANDLOCK_READ_ACCESS
     | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REMOVE_DIR
@@ -221,12 +264,12 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
         Some("mode=0755,size=1048576"),
         "failed to create private /dev",
     )?;
-    for source in ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"] {
+    for source in PRIVATE_DEVICE_PATHS {
         if Path::new(source).exists() {
             bind_mount_at(
                 Path::new(source),
                 &root.join(source.trim_start_matches('/')),
-                true,
+                false,
             )?;
         }
     }
@@ -383,17 +426,19 @@ fn bind_mount_at(source: &Path, target: &Path, read_only: bool) -> Result<()> {
         None,
         "failed to bind an admitted sandbox path",
     )?;
-    set_mount_attributes(target, read_only)
+    set_mount_attributes(target, read_only, metadata.file_type().is_char_device())
 }
 
-fn set_mount_attributes(target: &Path, read_only: bool) -> Result<()> {
+fn set_mount_attributes(target: &Path, read_only: bool, permits_device: bool) -> Result<()> {
     let descriptor = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(target)
         .map_err(|error| sandbox_io("failed to open an admitted mount", error))?;
     let attributes = MountAttr {
-        attr_set: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | (u64::from(read_only) * MOUNT_ATTR_RDONLY),
+        attr_set: MOUNT_ATTR_NOSUID
+            | (u64::from(!permits_device) * MOUNT_ATTR_NODEV)
+            | (u64::from(read_only) * MOUNT_ATTR_RDONLY),
         ..MountAttr::default()
     };
     let empty = CString::new("").expect("empty C string");
@@ -542,6 +587,12 @@ fn apply_landlock(request: &LauncherRequest) -> Result<()> {
     ] {
         add_landlock_path(ruleset.as_raw_fd(), path, LANDLOCK_WRITE_ACCESS)?;
     }
+    for path in PRIVATE_DEVICE_PATHS {
+        let path = Path::new(path);
+        if path.exists() {
+            add_landlock_path(ruleset.as_raw_fd(), path, LANDLOCK_DEVICE_ACCESS)?;
+        }
+    }
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(last_os_error(
             ProcessErrorCode::SandboxUnavailable,
@@ -684,7 +735,8 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
         }
     }
 
-    let errno = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let permission_denied = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let unsupported = SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
     let mut filters = vec![
         stmt(BPF_LD_W_ABS, ARCH_OFFSET),
         jump(BPF_JMP_JEQ_K, AUDIT_ARCH, 1, 0),
@@ -704,8 +756,14 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
             0,
             1,
         ),
-        stmt(BPF_RET_K, errno),
+        stmt(BPF_RET_K, permission_denied),
         stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+        // clone3 stores its flags behind a userspace pointer, which classic
+        // seccomp BPF cannot inspect. Keep it unavailable, but report ENOSYS so
+        // libc can safely fall back to clone, whose namespace flags are
+        // filtered above. Returning EPERM here breaks ordinary thread creation.
+        jump(BPF_JMP_JEQ_K, libc::SYS_clone3 as u32, 0, 1),
+        stmt(BPF_RET_K, unsupported),
     ];
     let mut denied = vec![
         libc::SYS_unshare,
@@ -719,7 +777,6 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
         libc::SYS_keyctl,
         libc::SYS_add_key,
         libc::SYS_request_key,
-        libc::SYS_clone3,
         libc::SYS_fsopen,
         libc::SYS_fsconfig,
         libc::SYS_fsmount,
@@ -744,7 +801,7 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
     }
     for syscall in denied {
         filters.push(jump(BPF_JMP_JEQ_K, syscall as u32, 0, 1));
-        filters.push(stmt(BPF_RET_K, errno));
+        filters.push(stmt(BPF_RET_K, permission_denied));
     }
     filters.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
     let program = libc::sock_fprog {
@@ -957,6 +1014,8 @@ mod tests {
 
     fn launcher_request(workspace_root: PathBuf, program: PathBuf) -> LauncherRequest {
         LauncherRequest {
+            protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
             execution_id: ExecutionId::generate(),
             request: ExecutionRequest {
                 owner: ExecutionOwner::Run {
@@ -1040,5 +1099,19 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_runtime_roots_are_existing_canonical_directories_without_alias_duplicates() {
+        let roots = standard_runtime_roots().unwrap();
+        assert!(!roots.is_empty());
+        assert!(roots.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(roots.iter().all(|root| {
+            root.is_absolute()
+                && root.is_dir()
+                && root
+                    .canonicalize()
+                    .is_ok_and(|canonical| canonical == *root)
+        }));
     }
 }

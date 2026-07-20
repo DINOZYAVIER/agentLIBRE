@@ -550,6 +550,7 @@ mod tests {
                 turn_id: None,
                 kind: RunKind::Cron,
                 priority: 0,
+                concurrency_key: None,
                 input: json!({}),
                 checkpoint: None,
                 effective_policy_hash: None,

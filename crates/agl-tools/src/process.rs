@@ -7,12 +7,14 @@ use agl_capabilities::{
     ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionInvocation,
     ActionResult, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
-use agl_ids::{ExecutionId, ExecutionScope, RequestId, StepId};
+use agl_ids::{ExecutionId, ExecutionScope, RequestId, SessionId, StepId};
 use agl_process::{
-    EnvironmentOverride, ExecutionAuthorization, ExecutionContextSnapshot, ExecutionCursor,
-    ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
-    ExecutionProfile, ExecutionRequest, KillMode, ProcessBytes, ProcessBytesEncoding,
-    ProcessHandle, TerminalSize, resolve_execution_directory,
+    AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
+    ExecutionContextSnapshot, ExecutionCursor, ExecutionGrantLease, ExecutionIo, ExecutionKind,
+    ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest, HostStartupPolicy,
+    KillMode, ProcessBytes, ProcessBytesEncoding, ProcessHandle, TerminalEnsureRequest,
+    TerminalEnvironmentRequest, TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize,
+    resolve_execution_directory,
 };
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
@@ -56,6 +58,10 @@ pub const PROCESS_TOOL_IDS: &[&str] = &[
 pub struct ProcessExecutionAdmission {
     pub snapshot: ExecutionContextSnapshot,
     pub owner: ExecutionOwner,
+    /// Durable Human session that owns the terminal topology. A session-owned
+    /// root run uses its own session ID; a run-owned subagent resolves this to
+    /// the root run's durable session before tool dispatch.
+    pub durable_session_id: SessionId,
 }
 
 pub trait ProcessExecutionContext: Send + Sync {
@@ -106,6 +112,7 @@ impl ProcessToolRuntimeConfig {
 #[derive(Clone)]
 pub struct ProcessTools {
     process: ProcessHandle,
+    terminals: Arc<TerminalRegistry>,
     context: Arc<dyn ProcessExecutionContext>,
     config: ProcessToolRuntimeConfig,
 }
@@ -113,12 +120,14 @@ pub struct ProcessTools {
 impl ProcessTools {
     pub fn new(
         process: ProcessHandle,
+        terminals: Arc<TerminalRegistry>,
         context: Arc<dyn ProcessExecutionContext>,
         config: ProcessToolRuntimeConfig,
     ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             process,
+            terminals,
             context,
             config,
         })
@@ -165,7 +174,7 @@ impl ProcessTools {
         let invocation = context.into_invocation();
         let args = parse_args::<CdArgs>(PROCESS_CD_TOOL_ID, invocation.arguments)?;
         validate_text(&args.path, "process.cd path", false, MAX_PROCESS_PATH_BYTES)?;
-        let profile = args.profile.unwrap_or_default().into();
+        let profile: ExecutionProfile = args.profile.unwrap_or_default().into();
         let admission = self.context.load(&invocation.scope)?;
         let resolved = resolve_execution_directory(
             &admission.snapshot,
@@ -253,11 +262,110 @@ impl ProcessTools {
             true,
             MAX_PROCESS_TEXT_BYTES,
         )?;
-        let profile = args.profile.unwrap_or_default().into();
-        let login = args.login.unwrap_or(false);
-        if login && profile != ExecutionProfile::Host {
-            bail!("shell.exec login startup is available only with profile=host");
+        let profile: ExecutionProfile = args.profile.unwrap_or_default().into();
+        if profile == ExecutionProfile::Workspace {
+            return self.agent_shell(context, args);
         }
+        self.one_shot_host_shell(context, args)
+    }
+
+    fn agent_shell(&self, context: ActionDispatchContext, args: ShellArgs) -> Result<Value> {
+        ensure!(
+            args.cwd.is_none() && args.env.is_none() && args.terminal_size.is_none(),
+            "persistent workspace shell.exec uses the owner's durable cwd, environment, and terminal size"
+        );
+        ensure!(
+            !args.background.unwrap_or(false),
+            "persistent workspace shell.exec uses native shell job control; put `&` in the command"
+        );
+        ensure!(
+            !args.login.unwrap_or(false),
+            "persistent workspace shell.exec is interactive and non-login"
+        );
+        let invocation = context.invocation();
+        let admission = self.context.load(&invocation.scope)?;
+        let execution_owner = admission.owner.clone();
+        admission
+            .snapshot
+            .shell
+            .verify_executable()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let (owner, root_run_id) = terminal_owner(&admission)?;
+        let shell = admitted_agent_shell(&admission.snapshot)?;
+        let environment = self.agent_terminal_environment(&admission.snapshot, &shell)?;
+        let timeout_ms = self.timeout_ms(args.timeout_ms, true, context.control().remaining())?;
+        let deadline = timeout_ms
+            .map(Duration::from_millis)
+            .and_then(|duration| std::time::Instant::now().checked_add(duration));
+        let result = self
+            .terminals
+            .execute_agent_command_cancellable(
+                TerminalEnsureRequest {
+                    session_id: admission.durable_session_id,
+                    owner,
+                    root_run_id,
+                    creating_run_id: invocation.scope.run_id().clone(),
+                    creating_step_id: creating_step_id(&invocation.scope)?,
+                    context: admission.snapshot,
+                    profile: ExecutionProfile::Workspace,
+                    shell,
+                    environment,
+                    runtime_read_only_roots: self.config.runtime_read_only_roots.clone(),
+                    host_startup: HostStartupPolicy::ManagedOnly,
+                    authorization: ExecutionAuthorization::default(),
+                    grant_lease: None,
+                    terminal_size: self.config.default_terminal_size,
+                    limits: self.execution_limits(None),
+                    history_seed: TerminalHistorySeed::empty(),
+                },
+                args.command,
+                deadline,
+                || context.control().is_cancelled(),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let mut output = self
+            .process
+            .read(
+                &result.execution_id,
+                &execution_owner,
+                ExecutionCursor {
+                    after_sequence: result.output.after_sequence,
+                },
+                self.config.max_result_bytes,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        output
+            .chunks
+            .retain(|chunk| chunk.sequence <= result.output.through_sequence);
+        let next_sequence = output
+            .chunks
+            .last()
+            .map_or(result.output.after_sequence, |chunk| chunk.sequence);
+        let output_truncated =
+            output.output_truncated || next_sequence < result.output.through_sequence;
+        Ok(json!({
+            "tool": SHELL_EXEC_TOOL_ID,
+            "terminal_id": result.terminal_id,
+            "execution_id": result.execution_id,
+            "command_sequence": result.command_sequence,
+            "cwd": result.cwd,
+            "exit": result.exit,
+            "after_sequence": result.output.after_sequence,
+            "through_sequence": result.output.through_sequence,
+            "chunks": output.chunks,
+            "next_sequence": next_sequence,
+            "output_truncated": output_truncated,
+            "output_expired": output.output_expired,
+        }))
+    }
+
+    fn one_shot_host_shell(
+        &self,
+        context: ActionDispatchContext,
+        args: ShellArgs,
+    ) -> Result<Value> {
+        let profile = ExecutionProfile::Host;
+        let login = args.login.unwrap_or(false);
         let background = args.background.unwrap_or(false);
         let invocation = context.invocation();
         let (authorization, grant_lease) = execution_authorization(&context, profile, login)?;
@@ -530,6 +638,26 @@ impl ProcessTools {
         Ok(environment)
     }
 
+    fn agent_terminal_environment(
+        &self,
+        snapshot: &ExecutionContextSnapshot,
+        shell: &AdmittedShellProfile,
+    ) -> Result<TerminalEnvironmentRequest> {
+        let mut admitted_base = frozen_base_environment(snapshot, &self.config.base_environment);
+        let inherited_path = admitted_base
+            .get("PATH")
+            .context("persistent agent terminal requires an admitted PATH")?;
+        let roots = canonical_terminal_runtime_roots(&self.config.runtime_read_only_roots)?;
+        let path = build_managed_terminal_path(inherited_path, &shell.snapshot.program, &roots)?;
+        admitted_base.insert("PATH".to_owned(), path);
+        Ok(TerminalEnvironmentRequest {
+            admitted_base,
+            selected_parent: BTreeMap::new(),
+            agl_env: BTreeMap::new(),
+            admitted_path_roots: roots,
+        })
+    }
+
     fn timeout_ms(
         &self,
         requested: Option<u64>,
@@ -607,6 +735,134 @@ fn frozen_base_environment(
         .filter(|(name, _)| admitted_names.contains(name.as_str()))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
+}
+
+fn terminal_owner(
+    admission: &ProcessExecutionAdmission,
+) -> Result<(TerminalOwner, agl_ids::RunId)> {
+    match &admission.owner {
+        ExecutionOwner::Session {
+            session_id,
+            root_run_id,
+        } => {
+            ensure!(
+                session_id == &admission.durable_session_id,
+                "session process owner differs from its durable terminal session"
+            );
+            Ok((
+                TerminalOwner::MainAgent {
+                    session_id: session_id.clone(),
+                },
+                root_run_id.clone(),
+            ))
+        }
+        ExecutionOwner::Run {
+            run_id,
+            root_run_id,
+        } => Ok((
+            TerminalOwner::Subagent {
+                root_run_id: root_run_id.clone(),
+                owner_run_id: run_id.clone(),
+            },
+            root_run_id.clone(),
+        )),
+    }
+}
+
+fn admitted_agent_shell(snapshot: &ExecutionContextSnapshot) -> Result<AdmittedShellProfile> {
+    let executable = snapshot
+        .shell
+        .program
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("persistent agent terminal shell has no UTF-8 executable basename")?;
+    let kind = match executable {
+        "bash" => AdmittedShellKind::Bash,
+        "zsh" => AdmittedShellKind::Zsh,
+        _ => bail!("persistent agent terminal supports only admitted Bash or Zsh on Linux"),
+    };
+    let shell = AdmittedShellProfile {
+        kind,
+        snapshot: snapshot.shell.clone(),
+    };
+    shell
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(shell)
+}
+
+fn canonical_terminal_runtime_roots(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut roots = agl_process::process_standard_runtime_roots()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    for root in configured {
+        let canonical = root.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize terminal runtime root {}",
+                root.display()
+            )
+        })?;
+        ensure!(
+            canonical == *root && canonical.is_dir(),
+            "terminal runtime roots must be existing canonical directories"
+        );
+        roots.push(canonical);
+    }
+    roots.sort();
+    roots.dedup();
+    ensure!(
+        !roots.is_empty(),
+        "persistent terminal has no admitted Linux runtime roots"
+    );
+    Ok(roots)
+}
+
+fn build_managed_terminal_path(
+    inherited_path: &str,
+    shell_program: &Path,
+    admitted_roots: &[PathBuf],
+) -> Result<String> {
+    ensure!(
+        admitted_roots
+            .iter()
+            .any(|root| shell_program.starts_with(root)),
+        "configured shell is outside admitted terminal runtime roots"
+    );
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    let mut admit = |candidate: PathBuf| {
+        if candidate.is_dir()
+            && admitted_roots
+                .iter()
+                .any(|root| candidate.starts_with(root))
+            && seen.insert(candidate.clone())
+        {
+            paths.push(candidate);
+        }
+    };
+    for candidate in std::env::split_paths(inherited_path) {
+        if let Ok(canonical) = candidate.canonicalize() {
+            admit(canonical);
+        }
+    }
+    if let Some(parent) = shell_program.parent() {
+        admit(parent.to_path_buf());
+    }
+    for root in admitted_roots {
+        if root.file_name().and_then(|name| name.to_str()) == Some("bin") {
+            admit(root.clone());
+        }
+        if let Ok(bin) = root.join("bin").canonicalize() {
+            admit(bin);
+        }
+    }
+    ensure!(
+        paths.iter().any(|path| path.join("ls").is_file()),
+        "admitted terminal PATH does not provide the required `ls` utility"
+    );
+    std::env::join_paths(paths)
+        .context("failed to join admitted terminal PATH")?
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("admitted terminal PATH is not valid UTF-8"))
 }
 
 impl ActionHandler for ProcessTools {
@@ -786,6 +1042,7 @@ fn execution_authorization(
             .grant_provenance()
             .context("host process execution lacks immutable grant provenance")?;
         Some(ExecutionGrantLease {
+            origin: agl_process::ExecutionLeaseOrigin::CapabilityGrant,
             grant_id: provenance.grant_id.clone(),
             duration: provenance.duration.clone(),
             scope_digest: provenance.scope_digest.clone(),
@@ -1158,6 +1415,7 @@ mod tests {
     struct TestExecutionContext {
         snapshot: Mutex<ExecutionContextSnapshot>,
         owner: ExecutionOwner,
+        durable_session_id: SessionId,
     }
 
     impl ProcessExecutionContext for TestExecutionContext {
@@ -1165,6 +1423,7 @@ mod tests {
             Ok(ProcessExecutionAdmission {
                 snapshot: self.snapshot.lock().unwrap().clone(),
                 owner: self.owner.clone(),
+                durable_session_id: self.durable_session_id.clone(),
             })
         }
 
@@ -1180,6 +1439,7 @@ mod tests {
             Ok(ProcessExecutionAdmission {
                 snapshot: next,
                 owner: self.owner.clone(),
+                durable_session_id: self.durable_session_id.clone(),
             })
         }
     }
@@ -1382,6 +1642,7 @@ mod tests {
                 profile_metadata: "workspace".to_string(),
             }),
             owner,
+            durable_session_id: SessionId::generate(),
         });
         let repository = Arc::new(agl_process::InMemoryExecutionRepository::new());
         let spool = Arc::new(agl_process::FileOutputSpool::new(root.join("spool")).unwrap());
@@ -1408,6 +1669,14 @@ mod tests {
         .unwrap();
         let tools = ProcessTools::new(
             supervisor.handle(),
+            Arc::new(
+                TerminalRegistry::new(
+                    supervisor.handle(),
+                    Arc::new(agl_process::RejectTerminalSecrets),
+                    Arc::new(agl_process::InMemoryTerminalRepository::new()),
+                )
+                .unwrap(),
+            ),
             execution_context.clone(),
             ProcessToolRuntimeConfig {
                 base_environment: EnvironmentOverride {
