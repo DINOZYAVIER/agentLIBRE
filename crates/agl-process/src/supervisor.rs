@@ -12,13 +12,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use agl_ids::{ExecutionId, RequestId};
 
 use crate::platform::{self, LaunchDirectories, LaunchedProcess};
+use crate::terminal::shell::{ManagedShellIntegrationTransport, ManagedShellStartup};
 use crate::{
     CommittedOutputFrame, ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionListFilter,
     ExecutionOutputChunk, ExecutionOwner, ExecutionPrivateCommand, ExecutionReadResult,
     ExecutionRepository, ExecutionRequest, ExecutionState, ExecutionStatus,
     ExecutionTerminalUpdate, InputLease, KillMode, OutputSpool, ProcessBytes, ProcessError,
-    ProcessErrorCode, ProcessSupervisorOptions, Result, TerminalSize, WRITABLE_INPUT_LEASE_TTL,
+    ProcessErrorCode, ProcessSupervisorOptions, Result, ShellIntegrationReadResult, TerminalSize,
+    WRITABLE_INPUT_LEASE_TTL,
 };
+
+const MAX_BUFFERED_SHELL_INTEGRATION_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct ProcessHandle {
@@ -36,7 +40,9 @@ struct SupervisorInner {
 
 enum Command {
     Start {
+        reserved_execution_id: Option<ExecutionId>,
         request: Box<ExecutionRequest>,
+        managed_startup: Option<Box<ManagedShellStartup>>,
         cancelled: Arc<AtomicBool>,
         timed_out: Arc<AtomicBool>,
         reply: Reply<ExecutionStatus>,
@@ -62,6 +68,12 @@ enum Command {
         cursor: ExecutionCursor,
         maximum_bytes: usize,
         reply: Reply<ExecutionReadResult>,
+    },
+    ReadShellIntegration {
+        execution_id: ExecutionId,
+        owner: Option<ExecutionOwner>,
+        maximum_bytes: usize,
+        reply: Reply<ShellIntegrationReadResult>,
     },
     Attach {
         execution_id: ExecutionId,
@@ -100,6 +112,17 @@ enum Command {
         execution_id: ExecutionId,
         owner: Option<ExecutionOwner>,
         terminal_size: TerminalSize,
+        reply: Reply<()>,
+    },
+    InterruptForeground {
+        execution_id: ExecutionId,
+        owner: Option<ExecutionOwner>,
+        reply: Reply<()>,
+    },
+    HandoffManagedTerminal {
+        execution_id: ExecutionId,
+        owner: ExecutionOwner,
+        interrupt_foreground: bool,
         reply: Reply<()>,
     },
     Kill {
@@ -180,6 +203,7 @@ struct Reactor {
     spool: Arc<dyn OutputSpool>,
     supervisor_id: String,
     active: BTreeMap<ExecutionId, ActiveExecution>,
+    shell_integrations: BTreeMap<ExecutionId, ActiveShellIntegration>,
     shutting_down: bool,
     shutdown_replies: Vec<Reply<()>>,
     next_retention_scan: Instant,
@@ -203,6 +227,20 @@ struct ActiveExecution {
     writable_lease: Option<WritableInputLease>,
     deadline: Option<Instant>,
     termination: Option<Termination>,
+}
+
+struct ManagedLaunchedProcess {
+    process: LaunchedProcess,
+    shell_integration: Option<ManagedShellIntegrationTransport>,
+}
+
+struct ActiveShellIntegration {
+    reader: Option<OwnedFd>,
+    fifo_path: std::path::PathBuf,
+    buffered: VecDeque<u8>,
+    closed: bool,
+    degraded: bool,
+    output_through_sequence: u64,
 }
 
 #[derive(Clone)]
@@ -265,6 +303,7 @@ impl ProcessSupervisor {
             spool,
             supervisor_id,
             active: BTreeMap::new(),
+            shell_integrations: BTreeMap::new(),
             shutting_down: false,
             shutdown_replies: Vec::new(),
             next_retention_scan: Instant::now(),
@@ -309,6 +348,32 @@ impl ProcessHandle {
         deadline: Option<Instant>,
         cancelled: impl Fn() -> bool,
     ) -> Result<ExecutionStatus> {
+        self.start_cancellable_with_startup(request, None, None, deadline, cancelled)
+    }
+
+    pub(crate) fn start_reserved_managed_terminal(
+        &self,
+        execution_id: ExecutionId,
+        request: ExecutionRequest,
+        managed_startup: ManagedShellStartup,
+    ) -> Result<ExecutionStatus> {
+        self.start_cancellable_with_startup(
+            request,
+            Some(execution_id),
+            Some(managed_startup),
+            None,
+            || false,
+        )
+    }
+
+    fn start_cancellable_with_startup(
+        &self,
+        request: ExecutionRequest,
+        reserved_execution_id: Option<ExecutionId>,
+        managed_startup: Option<ManagedShellStartup>,
+        deadline: Option<Instant>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<ExecutionStatus> {
         let (reply, response) = mpsc::channel();
         let admission_cancelled = Arc::new(AtomicBool::new(false));
         let admission_timed_out = Arc::new(AtomicBool::new(false));
@@ -320,7 +385,9 @@ impl ProcessHandle {
             .clone()
             .ok_or_else(supervisor_shutdown)?;
         match sender.try_send(Command::Start {
+            reserved_execution_id,
             request: Box::new(request),
+            managed_startup: managed_startup.map(Box::new),
             cancelled: Arc::clone(&admission_cancelled),
             timed_out: Arc::clone(&admission_timed_out),
             reply,
@@ -418,6 +485,23 @@ impl ProcessHandle {
         maximum_bytes: usize,
     ) -> Result<ExecutionReadResult> {
         self.read_with_owner(execution_id, None, cursor, maximum_bytes)
+    }
+
+    pub fn read_shell_integration(
+        &self,
+        execution_id: &ExecutionId,
+        owner: &ExecutionOwner,
+        maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
+        self.read_shell_integration_with_owner(execution_id, Some(owner.clone()), maximum_bytes)
+    }
+
+    pub fn operator_read_shell_integration(
+        &self,
+        execution_id: &ExecutionId,
+        maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
+        self.read_shell_integration_with_owner(execution_id, None, maximum_bytes)
     }
 
     pub fn attach(
@@ -522,6 +606,32 @@ impl ProcessHandle {
         terminal_size: TerminalSize,
     ) -> Result<()> {
         self.resize_with_owner(execution_id, None, terminal_size)
+    }
+
+    pub fn interrupt_foreground(
+        &self,
+        execution_id: &ExecutionId,
+        owner: &ExecutionOwner,
+    ) -> Result<()> {
+        self.interrupt_foreground_with_owner(execution_id, Some(owner.clone()))
+    }
+
+    pub fn operator_interrupt_foreground(&self, execution_id: &ExecutionId) -> Result<()> {
+        self.interrupt_foreground_with_owner(execution_id, None)
+    }
+
+    pub(crate) fn operator_handoff_managed_terminal(
+        &self,
+        execution_id: &ExecutionId,
+        owner: ExecutionOwner,
+        interrupt_foreground: bool,
+    ) -> Result<()> {
+        self.request(|reply| Command::HandoffManagedTerminal {
+            execution_id: execution_id.clone(),
+            owner,
+            interrupt_foreground,
+            reply,
+        })
     }
 
     pub fn kill(
@@ -638,6 +748,20 @@ impl ProcessHandle {
         })
     }
 
+    fn read_shell_integration_with_owner(
+        &self,
+        execution_id: &ExecutionId,
+        owner: Option<ExecutionOwner>,
+        maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
+        self.request(|reply| Command::ReadShellIntegration {
+            execution_id: execution_id.clone(),
+            owner,
+            maximum_bytes,
+            reply,
+        })
+    }
+
     fn attach_with_owner(
         &self,
         execution_id: &ExecutionId,
@@ -724,6 +848,18 @@ impl ProcessHandle {
             execution_id: execution_id.clone(),
             owner,
             terminal_size,
+            reply,
+        })
+    }
+
+    fn interrupt_foreground_with_owner(
+        &self,
+        execution_id: &ExecutionId,
+        owner: Option<ExecutionOwner>,
+    ) -> Result<()> {
+        self.request(|reply| Command::InterruptForeground {
+            execution_id: execution_id.clone(),
+            owner,
             reply,
         })
     }
@@ -834,12 +970,20 @@ impl Reactor {
     fn handle(&mut self, command: Command) {
         match command {
             Command::Start {
+                reserved_execution_id,
                 request,
+                managed_startup,
                 cancelled,
                 timed_out,
                 reply,
             } => {
-                let _ = reply.send(self.start_execution(*request, &cancelled, &timed_out));
+                let _ = reply.send(self.start_execution(
+                    *request,
+                    reserved_execution_id,
+                    managed_startup.map(|startup| *startup),
+                    &cancelled,
+                    &timed_out,
+                ));
             }
             Command::Status {
                 execution_id,
@@ -886,6 +1030,18 @@ impl Reactor {
                     &execution_id,
                     owner.as_ref(),
                     cursor,
+                    maximum_bytes,
+                ));
+            }
+            Command::ReadShellIntegration {
+                execution_id,
+                owner,
+                maximum_bytes,
+                reply,
+            } => {
+                let _ = reply.send(self.read_shell_integration(
+                    &execution_id,
+                    owner.as_ref(),
                     maximum_bytes,
                 ));
             }
@@ -948,6 +1104,26 @@ impl Reactor {
                 let _ =
                     reply.send(self.resize_terminal(&execution_id, owner.as_ref(), terminal_size));
             }
+            Command::InterruptForeground {
+                execution_id,
+                owner,
+                reply,
+            } => {
+                let _ = reply
+                    .send(self.interrupt_foreground_process_group(&execution_id, owner.as_ref()));
+            }
+            Command::HandoffManagedTerminal {
+                execution_id,
+                owner,
+                interrupt_foreground,
+                reply,
+            } => {
+                let _ = reply.send(self.handoff_managed_terminal_owner(
+                    &execution_id,
+                    owner,
+                    interrupt_foreground,
+                ));
+            }
             Command::Kill {
                 execution_id,
                 owner,
@@ -955,30 +1131,15 @@ impl Reactor {
                 reason,
                 reply,
             } => {
-                let result =
-                    self.checked_status(&execution_id, owner.as_ref())
-                        .and_then(|status| {
-                            if !status.state.is_live() {
-                                return Err(ProcessError::new(
-                                    ProcessErrorCode::ExecutionNotLive,
-                                    "execution is not live",
-                                ));
-                            }
-                            self.begin_termination(&execution_id, mode, reason)
-                        });
-                let _ = reply.send(result);
+                let _ =
+                    reply.send(self.kill_execution(&execution_id, owner.as_ref(), mode, reason));
             }
             Command::TerminateOwner {
                 owner,
                 reason,
                 reply,
             } => {
-                let ids = self
-                    .active
-                    .iter()
-                    .filter(|(_, execution)| execution.request.owner.may_access(&owner))
-                    .map(|(id, _)| id.clone())
-                    .collect::<Vec<_>>();
+                let ids = self.active_execution_ids_owned_by(&owner);
                 let mut terminated = 0;
                 let mut error = None;
                 for id in ids {
@@ -1000,11 +1161,9 @@ impl Reactor {
                     .active
                     .iter()
                     .filter(|(_, execution)| {
-                        execution
-                            .request
-                            .grant_lease
-                            .as_ref()
-                            .is_some_and(|lease| lease.grant_id == grant_id)
+                        execution.request.grant_lease.as_ref().is_some_and(|lease| {
+                            lease.is_capability_grant() && lease.grant_id == grant_id
+                        })
                     })
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>();
@@ -1021,11 +1180,9 @@ impl Reactor {
                     .iter()
                     .filter(|(_, execution)| {
                         execution.request.creating_run_id == creating_run_id
-                            && execution
-                                .request
-                                .grant_lease
-                                .as_ref()
-                                .is_some_and(|lease| lease.duration == duration)
+                            && execution.request.grant_lease.as_ref().is_some_and(|lease| {
+                                lease.is_capability_grant() && lease.duration == duration
+                            })
                     })
                     .map(|(id, _)| id.clone())
                     .collect::<Vec<_>>();
@@ -1055,12 +1212,23 @@ impl Reactor {
 
     fn start_execution(
         &mut self,
-        request: ExecutionRequest,
+        mut request: ExecutionRequest,
+        reserved_execution_id: Option<ExecutionId>,
+        managed_startup: Option<ManagedShellStartup>,
         cancelled: &AtomicBool,
         timed_out: &AtomicBool,
     ) -> Result<ExecutionStatus> {
         if self.shutting_down {
             return Err(supervisor_shutdown());
+        }
+        if reserved_execution_id.is_some() && managed_startup.is_none() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "a reserved execution identity is valid only for a managed terminal",
+            ));
+        }
+        if let Some(execution_id) = reserved_execution_id.as_ref() {
+            self.require_reserved_execution_id_available(execution_id)?;
         }
         request.validate()?;
         if let Some(root) = request
@@ -1093,7 +1261,17 @@ impl Reactor {
         if cancelled.load(Ordering::Acquire) {
             return Err(admission_interrupted(timed_out));
         }
-        let execution_id = ExecutionId::generate();
+        let explicitly_reserved = reserved_execution_id.is_some();
+        let execution_id = reserved_execution_id.unwrap_or_else(ExecutionId::generate);
+        let (directories, shell_integration_reader, private_environment) = if let Some(startup) =
+            managed_startup
+        {
+            let directories = self.execution_directories(&execution_id)?;
+            let (reader, private_environment) = startup.materialize(&mut request, &directories)?;
+            (Some(directories), Some(reader), Some(private_environment))
+        } else {
+            (None, None, None)
+        };
         let now = unix_millis();
         let status = ExecutionStatus {
             execution_id: execution_id.clone(),
@@ -1119,7 +1297,9 @@ impl Reactor {
             .repository
             .admit(&status, &request, &self.supervisor_id)
         {
-            let _ = self.spool.remove(&execution_id);
+            if !explicitly_reserved {
+                let _ = self.spool.remove(&execution_id);
+            }
             return Err(error);
         }
         if let Err(error) = commit_lifecycle_with_confirmation(
@@ -1136,15 +1316,19 @@ impl Reactor {
             return self.fail_unspawned_execution(&execution_id, admission_interrupted(timed_out));
         }
 
-        let directories = match self.execution_directories(&execution_id) {
-            Ok(directories) => directories,
-            Err(error) => return self.fail_unspawned_execution(&execution_id, error),
+        let directories = match directories {
+            Some(directories) => directories,
+            None => match self.execution_directories(&execution_id) {
+                Ok(directories) => directories,
+                Err(error) => return self.fail_unspawned_execution(&execution_id, error),
+            },
         };
         let launched = platform::launch(
             &self.options.launcher_path,
             &execution_id,
             &request,
             &directories,
+            private_environment,
             self.options.setup_timeout,
             cancelled,
         );
@@ -1166,6 +1350,10 @@ impl Reactor {
             .timeout_ms
             .map(Duration::from_millis)
             .and_then(|duration| Instant::now().checked_add(duration));
+        let launched = ManagedLaunchedProcess {
+            process: launched,
+            shell_integration: shell_integration_reader,
+        };
         if let Err(error) = commit_running_with_confirmation(
             &self.repository,
             &execution_id,
@@ -1184,9 +1372,13 @@ impl Reactor {
         ) {
             return self.adopt_failed_spawn(execution_id, request, launched, deadline, 2, error);
         }
+        if let Some(reader) = launched.shell_integration {
+            self.shell_integrations
+                .insert(execution_id.clone(), ActiveShellIntegration::new(reader));
+        }
         self.active.insert(
             execution_id.clone(),
-            ActiveExecution::from_launch(request, launched, deadline),
+            ActiveExecution::from_launch(request, launched.process, deadline),
         );
         if cancelled.load(Ordering::Acquire) {
             let error = admission_interrupted(timed_out);
@@ -1199,6 +1391,23 @@ impl Reactor {
             return Err(error);
         }
         self.repository.status(&execution_id)
+    }
+
+    fn require_reserved_execution_id_available(&self, execution_id: &ExecutionId) -> Result<()> {
+        if self.active.contains_key(execution_id) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                format!("reserved execution identity `{execution_id}` is already active"),
+            ));
+        }
+        match self.repository.status(execution_id) {
+            Ok(_) => Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                format!("reserved execution identity `{execution_id}` is already admitted"),
+            )),
+            Err(error) if error.code() == ProcessErrorCode::ExecutionNotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn fail_unspawned_execution(
@@ -1243,13 +1452,17 @@ impl Reactor {
         &mut self,
         execution_id: ExecutionId,
         request: ExecutionRequest,
-        launched: LaunchedProcess,
+        launched: ManagedLaunchedProcess,
         deadline: Option<Instant>,
         next_sequence: u64,
         error: ProcessError,
     ) -> Result<ExecutionStatus> {
-        let mut execution = ActiveExecution::from_launch(request, launched, deadline);
+        let mut execution = ActiveExecution::from_launch(request, launched.process, deadline);
         execution.next_sequence = next_sequence;
+        if let Some(reader) = launched.shell_integration {
+            self.shell_integrations
+                .insert(execution_id.clone(), ActiveShellIntegration::new(reader));
+        }
         self.active.insert(execution_id.clone(), execution);
         let _ = self.begin_termination(
             &execution_id,
@@ -1278,6 +1491,20 @@ impl Reactor {
             ));
         }
         Ok(status)
+    }
+
+    fn require_managed_terminal_operator(
+        &self,
+        execution_id: &ExecutionId,
+        owner: Option<&ExecutionOwner>,
+    ) -> Result<()> {
+        if owner.is_some() && self.shell_integrations.contains_key(execution_id) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotOwned,
+                "managed terminal control is available only through its terminal registry operator",
+            ));
+        }
+        Ok(())
     }
 
     fn read_output(
@@ -1319,6 +1546,69 @@ impl Reactor {
         })
     }
 
+    fn read_shell_integration(
+        &mut self,
+        execution_id: &ExecutionId,
+        owner: Option<&ExecutionOwner>,
+        maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
+        if maximum_bytes == 0 || maximum_bytes > self.options.max_result_bytes {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "shell integration read bound is zero or exceeds the supervisor result limit",
+            ));
+        }
+        let status = self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
+        if status.output_expired {
+            return Err(ProcessError::new(
+                ProcessErrorCode::OutputExpired,
+                "private shell integration has expired",
+            ));
+        }
+        let observe_foreground = self
+            .shell_integrations
+            .get(execution_id)
+            .is_some_and(|integration| integration.reader.is_some());
+        let foreground_process_group = if observe_foreground {
+            let execution = self.active.get(execution_id).ok_or_else(not_live)?;
+            let terminal = execution.terminal.as_ref().ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::IoModeMismatch,
+                    "managed shell integration requires one live PTY execution",
+                )
+            })?;
+            let shell_process_group = i32::try_from(execution.child.id()).map_err(|_| {
+                ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "managed shell process identity exceeds Linux pid_t",
+                )
+            })?;
+            platform::terminal_foreground_process_group(terminal, shell_process_group)?
+        } else {
+            None
+        };
+        let integration = self
+            .shell_integrations
+            .get_mut(execution_id)
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "execution has no managed shell integration channel",
+                )
+            })?;
+        let byte_count = maximum_bytes.min(integration.buffered.len());
+        let bytes = integration.buffered.drain(..byte_count).collect::<Vec<_>>();
+        Ok(ShellIntegrationReadResult {
+            execution_id: execution_id.clone(),
+            bytes: ProcessBytes::from_bytes(&bytes),
+            output_through_sequence: integration.output_through_sequence,
+            foreground_process_group,
+            channel_closed: integration.closed,
+            degraded: integration.degraded,
+        })
+    }
+
     fn attach_input(
         &mut self,
         execution_id: &ExecutionId,
@@ -1327,6 +1617,7 @@ impl Reactor {
         writable: bool,
     ) -> Result<InputLease> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
         if !writable {
             return Ok(InputLease {
                 attachment_id,
@@ -1371,6 +1662,7 @@ impl Reactor {
         lease: &InputLease,
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
         if !lease.writable {
             return Ok(());
         }
@@ -1405,6 +1697,7 @@ impl Reactor {
         lease: &InputLease,
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
         if !lease.writable {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
@@ -1438,6 +1731,7 @@ impl Reactor {
         lease: &InputLease,
     ) -> Result<bool> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
         if !lease.writable {
             return Ok(true);
         }
@@ -1493,6 +1787,8 @@ impl Reactor {
         eof: bool,
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
+        let managed_terminal = self.shell_integrations.contains_key(execution_id);
         if self.expire_input_lease_if_needed(execution_id, Instant::now())? {
             return Err(input_lease_expired());
         }
@@ -1511,19 +1807,22 @@ impl Reactor {
                 "input write requires the current writable attachment lease",
             ));
         }
-        let mut decoded = bytes.decode(self.options.max_input_bytes)?;
+        let admitted_input_bytes = usize::try_from(execution.request.limits.max_input_bytes)
+            .unwrap_or(usize::MAX)
+            .min(self.options.max_input_bytes);
+        let mut decoded = bytes.decode(admitted_input_bytes)?;
         if eof && execution.terminal.is_some() {
             decoded.push(0x04);
         }
         let new_total = execution
             .accepted_input_bytes
             .saturating_add(decoded.len() as u64);
-        if new_total > execution.request.limits.max_input_bytes
-            || queued_bytes(execution).saturating_add(decoded.len()) > self.options.max_input_bytes
+        if (!managed_terminal && new_total > execution.request.limits.max_input_bytes)
+            || queued_bytes(execution).saturating_add(decoded.len()) > admitted_input_bytes
         {
             return Err(ProcessError::new(
                 ProcessErrorCode::InputBackpressure,
-                "execution input exceeds its admitted or queued byte limit",
+                "execution input exceeds its admitted lifetime or pending byte limit",
             ));
         }
         self.repository.accept_input(
@@ -1549,6 +1848,7 @@ impl Reactor {
         terminal_size: TerminalSize,
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
         let terminal_size = terminal_size.validate()?;
         let execution = self.active.get_mut(execution_id).ok_or_else(not_live)?;
         if execution.termination.is_some() {
@@ -1566,6 +1866,19 @@ impl Reactor {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        let mut previous_dimensions = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+        let dimensions_unchanged = unsafe {
+            libc::ioctl(
+                terminal.as_raw_fd(),
+                libc::TIOCGWINSZ,
+                previous_dimensions.as_mut_ptr(),
+            ) == 0
+                && {
+                    let previous_dimensions = previous_dimensions.assume_init();
+                    previous_dimensions.ws_row == dimensions.ws_row
+                        && previous_dimensions.ws_col == dimensions.ws_col
+                }
+        };
         if unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ, &dimensions) } != 0 {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidTerminalSize,
@@ -1574,6 +1887,9 @@ impl Reactor {
                     std::io::Error::last_os_error()
                 ),
             ));
+        }
+        if dimensions_unchanged {
+            platform::notify_terminal_resize(terminal)?;
         }
         self.repository.update_terminal_size(
             execution_id,
@@ -1584,6 +1900,132 @@ impl Reactor {
         )?;
         execution.next_sequence += 1;
         Ok(())
+    }
+
+    fn interrupt_foreground_process_group(
+        &self,
+        execution_id: &ExecutionId,
+        owner: Option<&ExecutionOwner>,
+    ) -> Result<()> {
+        self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
+        let terminal = self
+            .active
+            .get(execution_id)
+            .and_then(|execution| execution.terminal.as_ref())
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::IoModeMismatch,
+                    "foreground interruption requires one live PTY execution",
+                )
+            })?;
+        platform::interrupt_terminal_foreground(terminal)
+    }
+
+    fn handoff_managed_terminal_owner(
+        &mut self,
+        execution_id: &ExecutionId,
+        owner: ExecutionOwner,
+        interrupt_foreground: bool,
+    ) -> Result<()> {
+        self.checked_status(execution_id, None)?;
+        if !self.shell_integrations.contains_key(execution_id) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "only a live managed terminal can change runtime owner",
+            ));
+        }
+        let ExecutionOwner::Session {
+            root_run_id: next_root_run_id,
+            ..
+        } = &owner
+        else {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "managed terminal promotion requires a session runtime owner",
+            ));
+        };
+        let execution = self.active.get(execution_id).ok_or_else(not_live)?;
+        let ExecutionOwner::Run {
+            root_run_id: current_root_run_id,
+            ..
+        } = &execution.request.owner
+        else {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "only a run-owned managed terminal can be promoted",
+            ));
+        };
+        if execution.termination.is_some() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotLive,
+                "managed terminal teardown won the promotion race",
+            ));
+        }
+        if current_root_run_id != next_root_run_id {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotOwned,
+                "managed terminal promotion cannot cross its root run boundary",
+            ));
+        }
+        let writable_lease = execution
+            .writable_lease
+            .as_ref()
+            .map(WritableInputLease::as_input_lease);
+        if let Some(lease) = &writable_lease {
+            self.repository.release_input_lease(
+                execution_id,
+                &self.supervisor_id,
+                lease,
+                unix_millis(),
+            )?;
+        }
+
+        let execution = self.active.get_mut(execution_id).ok_or_else(not_live)?;
+        execution.writable_lease = None;
+        execution.input.clear();
+        execution.input_offset = 0;
+        execution.close_stdin_when_drained = false;
+        if interrupt_foreground {
+            let terminal = execution.terminal.as_ref().ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::IoModeMismatch,
+                    "managed terminal promotion requires one live PTY execution",
+                )
+            })?;
+            platform::interrupt_terminal_foreground(terminal)?;
+        }
+        // Durable admission keeps its original owner in this bounded slice.
+        // Runtime teardown and control authorization use this private owner;
+        // every owner-facing managed-terminal control path is fenced above.
+        execution.request.owner = owner;
+        Ok(())
+    }
+
+    fn kill_execution(
+        &mut self,
+        execution_id: &ExecutionId,
+        owner: Option<&ExecutionOwner>,
+        mode: KillMode,
+        reason: TerminationReason,
+    ) -> Result<()> {
+        let status = self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
+        if !status.state.is_live() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotLive,
+                "execution is not live",
+            ));
+        }
+        self.begin_termination(execution_id, mode, reason)
+    }
+
+    fn active_execution_ids_owned_by(&self, owner: &ExecutionOwner) -> Vec<ExecutionId> {
+        self.active
+            .iter()
+            .filter(|(_, execution)| execution.request.owner.may_access(owner))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     fn begin_termination(
@@ -1682,18 +2124,22 @@ impl Reactor {
         let mut finished = Vec::new();
         for id in ids {
             let _ = self.expire_input_lease_if_needed(&id, Instant::now());
-            if let Err(error) = self.pump_one(&id) {
-                let reason = if error.code() == ProcessErrorCode::OutputLimitExceeded {
-                    TerminationReason::OutputLimit
-                } else {
-                    TerminationReason::RuntimeFailure(error.code())
-                };
-                if reason == TerminationReason::OutputLimit
-                    && let Some(execution) = self.active.get_mut(&id)
-                {
-                    execution.output_truncated = true;
+            match self.pump_one(&id) {
+                Ok(true) => self.pump_shell_integration(&id),
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = if error.code() == ProcessErrorCode::OutputLimitExceeded {
+                        TerminationReason::OutputLimit
+                    } else {
+                        TerminationReason::RuntimeFailure(error.code())
+                    };
+                    if reason == TerminationReason::OutputLimit
+                        && let Some(execution) = self.active.get_mut(&id)
+                    {
+                        execution.output_truncated = true;
+                    }
+                    let _ = self.begin_termination(&id, KillMode::Immediate, reason);
                 }
-                let _ = self.begin_termination(&id, KillMode::Immediate, reason);
             }
             if let Some(execution) = self.active.get_mut(&id) {
                 match execution.child.try_wait() {
@@ -1732,6 +2178,9 @@ impl Reactor {
             if self.spool.remove(&execution_id).is_err() {
                 continue;
             }
+            if let Some(mut integration) = self.shell_integrations.remove(&execution_id) {
+                integration.close(false);
+            }
             if remove_private_directory(
                 &self
                     .options
@@ -1747,7 +2196,56 @@ impl Reactor {
         }
     }
 
-    fn pump_one(&mut self, execution_id: &ExecutionId) -> Result<()> {
+    fn pump_shell_integration(&mut self, execution_id: &ExecutionId) {
+        let output_through_sequence = self
+            .active
+            .get(execution_id)
+            .map_or(0, |execution| execution.next_sequence.saturating_sub(1));
+        self.pump_shell_integration_at(execution_id, output_through_sequence);
+    }
+
+    fn pump_shell_integration_at(
+        &mut self,
+        execution_id: &ExecutionId,
+        output_through_sequence: u64,
+    ) {
+        let Some(integration) = self.shell_integrations.get_mut(execution_id) else {
+            return;
+        };
+        if integration.reader.as_ref().is_some_and(|reader| {
+            !platform::shell_integration_path_is_intact(&integration.fifo_path, reader)
+        }) {
+            integration.close(true);
+            return;
+        }
+        for _ in 0..32 {
+            let Some(reader) = integration.reader.as_ref() else {
+                break;
+            };
+            let mut bytes = [0u8; 16 * 1024];
+            let read =
+                unsafe { libc::read(reader.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+            if read > 0 {
+                integration.ingest(&bytes[..read as usize], output_through_sequence);
+                continue;
+            }
+            if read == 0 {
+                integration.close(true);
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                break;
+            }
+            integration.close(true);
+            break;
+        }
+    }
+
+    fn pump_one(&mut self, execution_id: &ExecutionId) -> Result<bool> {
         let now = Instant::now();
         let timeout = self
             .active
@@ -1796,7 +2294,9 @@ impl Reactor {
                 ]
             })
             .unwrap_or([None, None, None]);
+        let mut output_quiescent = true;
         for (descriptor, channel) in descriptors.into_iter().flatten() {
+            let mut descriptor_quiescent = false;
             for _ in 0..8 {
                 let mut buffer = [0u8; 16 * 1024];
                 let read_bound = self
@@ -1830,15 +2330,18 @@ impl Reactor {
                 }
                 if read == 0 {
                     self.close_output_descriptor(execution_id, channel);
+                    descriptor_quiescent = true;
                     break;
                 }
                 let error = std::io::Error::last_os_error();
                 if error.kind() == std::io::ErrorKind::WouldBlock {
+                    descriptor_quiescent = true;
                     break;
                 }
                 if channel == ExecutionChannel::Terminal && error.raw_os_error() == Some(libc::EIO)
                 {
                     self.close_output_descriptor(execution_id, channel);
+                    descriptor_quiescent = true;
                     break;
                 }
                 if error.kind() == std::io::ErrorKind::Interrupted {
@@ -1849,8 +2352,9 @@ impl Reactor {
                     format!("failed to drain process output: {error}"),
                 ));
             }
+            output_quiescent &= descriptor_quiescent;
         }
-        Ok(())
+        Ok(output_quiescent)
     }
 
     fn record_lifecycle(&mut self, execution_id: &ExecutionId, kind: &str) -> Result<()> {
@@ -2022,6 +2526,10 @@ impl Reactor {
             ] {
                 drain_descriptor(&drain, execution_id, &mut execution, channel)?;
             }
+            self.pump_shell_integration_at(execution_id, execution.next_sequence.saturating_sub(1));
+            if let Some(integration) = self.shell_integrations.get_mut(execution_id) {
+                integration.close(false);
+            }
 
             let (state, exit, error_code) = if let Some(termination) = execution.termination {
                 (
@@ -2119,6 +2627,49 @@ impl ActiveExecution {
             deadline,
             termination: None,
         }
+    }
+}
+
+impl ActiveShellIntegration {
+    fn new(transport: ManagedShellIntegrationTransport) -> Self {
+        Self {
+            reader: Some(transport.reader),
+            fifo_path: transport.fifo_path,
+            buffered: VecDeque::new(),
+            closed: false,
+            degraded: false,
+            output_through_sequence: 0,
+        }
+    }
+
+    fn ingest(&mut self, bytes: &[u8], output_through_sequence: u64) {
+        if self.degraded {
+            return;
+        }
+        let remaining = MAX_BUFFERED_SHELL_INTEGRATION_BYTES.saturating_sub(self.buffered.len());
+        let retained = remaining.min(bytes.len());
+        self.buffered.extend(&bytes[..retained]);
+        if retained != 0 {
+            self.output_through_sequence = output_through_sequence;
+        }
+        if retained != bytes.len() {
+            self.degraded = true;
+        }
+    }
+
+    /// Unlink before closing the supervisor's O_RDWR endpoint. A shell hook
+    /// that races channel loss then fails its open instead of blocking forever
+    /// on a FIFO path with no reader.
+    fn close(&mut self, degraded: bool) {
+        self.degraded |= degraded;
+        let reader = self.reader.take();
+        match fs::remove_file(&self.fifo_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => self.degraded = true,
+        }
+        drop(reader);
+        self.closed = true;
     }
 }
 
@@ -2348,7 +2899,9 @@ fn grant_lease_is_inactive(
     lease: Option<&crate::ExecutionGrantLease>,
     live_grant_ids: &BTreeSet<String>,
 ) -> bool {
-    lease.is_some_and(|lease| !live_grant_ids.contains(&lease.grant_id))
+    lease.is_some_and(|lease| {
+        lease.is_capability_grant() && !live_grant_ids.contains(&lease.grant_id)
+    })
 }
 
 fn ensure_private_directory(path: &std::path::Path) -> Result<()> {
@@ -2484,6 +3037,235 @@ fn exit_status(code: i32) -> i32 {
 mod tests {
     use super::*;
 
+    struct ManagedReactorFixture {
+        reactor: Reactor,
+        execution_id: ExecutionId,
+        run_owner: ExecutionOwner,
+        session_owner: ExecutionOwner,
+        root: std::path::PathBuf,
+    }
+
+    impl Drop for ManagedReactorFixture {
+        fn drop(&mut self) {
+            if let Some(mut integration) =
+                self.reactor.shell_integrations.remove(&self.execution_id)
+            {
+                integration.close(false);
+            }
+            if let Some(mut execution) = self.reactor.active.remove(&self.execution_id) {
+                let _ = execution.child.kill();
+                let _ = execution.child.wait();
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn managed_reactor_fixture(max_input_bytes: u64) -> ManagedReactorFixture {
+        let root = std::env::temp_dir().join(format!(
+            "agl-managed-reactor-{}-{}",
+            std::process::id(),
+            ExecutionId::generate()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let repository: Arc<dyn ExecutionRepository> =
+            Arc::new(crate::InMemoryExecutionRepository::new());
+        let spool: Arc<dyn OutputSpool> =
+            Arc::new(crate::FileOutputSpool::new(root.join("spool")).unwrap());
+        let root_run_id = agl_ids::RunId::generate();
+        let run_owner = ExecutionOwner::Run {
+            run_id: agl_ids::RunId::generate(),
+            root_run_id: root_run_id.clone(),
+        };
+        let session_owner = ExecutionOwner::Session {
+            session_id: agl_ids::SessionId::generate(),
+            root_run_id,
+        };
+        let request = ExecutionRequest {
+            owner: run_owner.clone(),
+            creating_run_id: agl_ids::RunId::generate(),
+            creating_step_id: agl_ids::StepId::generate(),
+            kind: crate::ExecutionKind::Shell,
+            program: std::path::PathBuf::from("/bin/sh"),
+            program_digest: None,
+            args: Vec::new(),
+            workspace_root: workspace.clone(),
+            cwd: workspace.clone(),
+            read_only_roots: Vec::new(),
+            environment: crate::EnvironmentOverride {
+                values: BTreeMap::new(),
+            },
+            stdin: None,
+            close_stdin_after_initial: false,
+            io: crate::ExecutionIo::Pty,
+            terminal_size: Some(TerminalSize::default()),
+            profile: crate::ExecutionProfile::Workspace,
+            authorization: crate::ExecutionAuthorization::default(),
+            grant_lease: None,
+            limits: crate::ExecutionLimits {
+                timeout_ms: None,
+                max_input_bytes,
+                max_output_bytes: 4096,
+            },
+        };
+        let execution_id = ExecutionId::generate();
+        let status = ExecutionStatus {
+            execution_id: execution_id.clone(),
+            owner: run_owner.clone(),
+            state: ExecutionState::Running,
+            profile: crate::ExecutionProfile::Workspace,
+            io: crate::ExecutionIo::Pty,
+            cwd: workspace,
+            terminal_size: Some(TerminalSize::default()),
+            exit: None,
+            first_retained_sequence: None,
+            last_sequence: 0,
+            retained_bytes: 0,
+            discarded_output_bytes: 0,
+            output_truncated: false,
+            output_expired: false,
+            started_at_unix_ms: Some(1),
+            finished_at_unix_ms: None,
+            error_code: None,
+        };
+        repository.admit(&status, &request, "test-owner").unwrap();
+        spool.prepare(&execution_id).unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let terminal = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .unwrap()
+            .into();
+        let execution = ActiveExecution::from_launch(
+            request,
+            LaunchedProcess {
+                child,
+                stdin: None,
+                stdout: None,
+                stderr: None,
+                terminal: Some(terminal),
+            },
+            None,
+        );
+        let options = ProcessSupervisorOptions {
+            launcher_path: root.join("unused-launcher"),
+            data_root: root.join("data"),
+            state_root: root.join("state"),
+            max_active: 2,
+            command_capacity: 8,
+            poll_interval: Duration::from_millis(1),
+            setup_timeout: Duration::from_millis(100),
+            termination_grace: Duration::from_millis(10),
+            max_input_bytes: usize::try_from(max_input_bytes).unwrap(),
+            max_result_bytes: 1024,
+            max_spool_bytes: 4096,
+            termination_output_headroom_bytes: 1024,
+            finished_retention: Duration::from_secs(60),
+            runtime_read_only_roots: Vec::new(),
+        };
+        let mut reactor = Reactor {
+            options,
+            repository,
+            spool,
+            supervisor_id: "test-owner".to_owned(),
+            active: BTreeMap::from([(execution_id.clone(), execution)]),
+            shell_integrations: BTreeMap::new(),
+            shutting_down: false,
+            shutdown_replies: Vec::new(),
+            next_retention_scan: Instant::now() + Duration::from_secs(60),
+        };
+        reactor.shell_integrations.insert(
+            execution_id.clone(),
+            ActiveShellIntegration {
+                reader: None,
+                fifo_path: root.join("absent-integration.fifo"),
+                buffered: VecDeque::new(),
+                closed: false,
+                degraded: false,
+                output_through_sequence: 0,
+            },
+        );
+        ManagedReactorFixture {
+            reactor,
+            execution_id,
+            run_owner,
+            session_owner,
+            root,
+        }
+    }
+
+    fn managed_shell_fixture(
+        workspace: &std::path::Path,
+    ) -> (ExecutionRequest, ManagedShellStartup) {
+        let program = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|directory| directory.join("bash"))
+            .find(|candidate| candidate.is_file())
+            .expect("supervisor tests require Bash")
+            .canonicalize()
+            .unwrap();
+        let shell = crate::terminal::shell::AdmittedShellProfile {
+            kind: crate::terminal::shell::AdmittedShellKind::Bash,
+            snapshot: crate::ShellProfileSnapshot {
+                program: program.clone(),
+                command_args: vec!["-c".to_owned()],
+                login_command_args: None,
+                environment_names: vec!["PATH".to_owned()],
+                executable_digest:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                config_digest: "sha256:test-bash".to_owned(),
+            },
+        };
+        let root_run_id = agl_ids::RunId::generate();
+        let request = ExecutionRequest {
+            owner: ExecutionOwner::Session {
+                session_id: agl_ids::SessionId::generate(),
+                root_run_id: root_run_id.clone(),
+            },
+            creating_run_id: root_run_id,
+            creating_step_id: agl_ids::StepId::generate(),
+            kind: crate::ExecutionKind::Shell,
+            program,
+            program_digest: Some(shell.snapshot.executable_digest.clone()),
+            args: Vec::new(),
+            workspace_root: workspace.to_path_buf(),
+            cwd: workspace.to_path_buf(),
+            read_only_roots: Vec::new(),
+            environment: crate::EnvironmentOverride {
+                values: BTreeMap::new(),
+            },
+            stdin: None,
+            close_stdin_after_initial: false,
+            io: crate::ExecutionIo::Pty,
+            terminal_size: Some(TerminalSize::default()),
+            profile: crate::ExecutionProfile::Workspace,
+            authorization: crate::ExecutionAuthorization::default(),
+            grant_lease: None,
+            limits: crate::ExecutionLimits {
+                timeout_ms: None,
+                max_input_bytes: 1024,
+                max_output_bytes: 4096,
+            },
+        };
+        let startup = ManagedShellStartup {
+            shell,
+            host_startup: crate::terminal::shell::HostStartupPolicy::ManagedOnly,
+            history_seed: crate::terminal::history::TerminalHistorySeed::empty(),
+            integration_token: crate::terminal::shell::ShellIntegrationToken::generate().unwrap(),
+            private_environment: crate::terminal::environment::PrivateTerminalEnvironment::default(
+            ),
+        };
+        (request, startup)
+    }
+
     #[test]
     fn termination_reasons_have_distinct_durable_states() {
         assert_eq!(
@@ -2515,22 +3297,375 @@ mod tests {
     }
 
     #[test]
+    fn active_reserved_execution_identity_is_rejected_before_private_materialization() {
+        let mut fixture = managed_reactor_fixture(65_536);
+        let execution_id = fixture.execution_id.clone();
+        let workspace = fixture.root.join("workspace").canonicalize().unwrap();
+        let (request, startup) = managed_shell_fixture(&workspace);
+        let execution_root = fixture
+            .reactor
+            .options
+            .state_root
+            .join("executions")
+            .join(execution_id.as_str());
+        let spool_path = fixture
+            .root
+            .join("spool")
+            .join(execution_id.as_str())
+            .join("stream.aglspool");
+        let spool_before = fs::read(&spool_path).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let timed_out = AtomicBool::new(false);
+
+        let error = fixture
+            .reactor
+            .start_execution(
+                request,
+                Some(execution_id.clone()),
+                Some(startup),
+                &cancelled,
+                &timed_out,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), ProcessErrorCode::StateConflict);
+        assert!(!execution_root.exists());
+        assert_eq!(fs::read(spool_path).unwrap(), spool_before);
+        assert!(
+            fixture
+                .reactor
+                .active
+                .get_mut(&execution_id)
+                .unwrap()
+                .child
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn managed_terminal_control_is_operator_only_and_promotion_handoffs_runtime_owner() {
+        let mut fixture = managed_reactor_fixture(65_536);
+        let execution_id = fixture.execution_id.clone();
+        let run_owner = fixture.run_owner.clone();
+        let session_owner = fixture.session_owner.clone();
+
+        assert_eq!(
+            fixture
+                .reactor
+                .attach_input(&execution_id, Some(&run_owner), RequestId::generate(), true,)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        fixture
+            .reactor
+            .read_output(
+                &execution_id,
+                Some(&run_owner),
+                ExecutionCursor { after_sequence: 0 },
+                1,
+            )
+            .unwrap();
+        fixture
+            .reactor
+            .read_shell_integration(&execution_id, None, 1)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .reactor
+                .read_shell_integration(&execution_id, Some(&run_owner), 1)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .resize_terminal(&execution_id, Some(&run_owner), TerminalSize::default(),)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .interrupt_foreground_process_group(&execution_id, Some(&run_owner))
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .kill_execution(
+                    &execution_id,
+                    Some(&run_owner),
+                    KillMode::Immediate,
+                    TerminationReason::Cancelled,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        let run_owned = fixture.reactor.active_execution_ids_owned_by(&run_owner);
+        assert_eq!(run_owned.as_slice(), std::slice::from_ref(&execution_id));
+
+        let lease = fixture
+            .reactor
+            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .reactor
+                .queue_input(
+                    &execution_id,
+                    Some(&run_owner),
+                    &lease,
+                    ProcessBytes::from_bytes(b"forged"),
+                    false,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        fixture
+            .reactor
+            .queue_input(
+                &execution_id,
+                None,
+                &lease,
+                ProcessBytes::from_bytes(b"operator"),
+                false,
+            )
+            .unwrap();
+        fixture
+            .reactor
+            .handoff_managed_terminal_owner(&execution_id, session_owner.clone(), false)
+            .unwrap();
+
+        assert!(
+            !fixture
+                .reactor
+                .input_lease_is_active(&execution_id, None, &lease)
+                .unwrap()
+        );
+        assert!(fixture.reactor.active[&execution_id].input.is_empty());
+        assert_eq!(
+            fixture.reactor.active[&execution_id].request.owner,
+            session_owner
+        );
+        assert!(
+            fixture
+                .reactor
+                .active_execution_ids_owned_by(&run_owner)
+                .is_empty()
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .terminate_ids(
+                    fixture.reactor.active_execution_ids_owned_by(&run_owner),
+                    TerminationReason::Cancelled,
+                )
+                .unwrap(),
+            0
+        );
+        assert!(fixture.reactor.active[&execution_id].termination.is_none());
+        assert_eq!(
+            fixture
+                .reactor
+                .kill_execution(
+                    &execution_id,
+                    Some(&run_owner),
+                    KillMode::Immediate,
+                    TerminationReason::Cancelled,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+        fixture
+            .reactor
+            .kill_execution(
+                &execution_id,
+                None,
+                KillMode::Graceful,
+                TerminationReason::Cancelled,
+            )
+            .unwrap();
+        assert!(fixture.reactor.active[&execution_id].termination.is_some());
+
+        let mut unpromoted = managed_reactor_fixture(65_536);
+        let unpromoted_execution_id = unpromoted.execution_id.clone();
+        let ids = unpromoted
+            .reactor
+            .active_execution_ids_owned_by(&unpromoted.run_owner);
+        assert_eq!(
+            ids.as_slice(),
+            std::slice::from_ref(&unpromoted_execution_id)
+        );
+        assert_eq!(
+            unpromoted
+                .reactor
+                .terminate_ids(ids, TerminationReason::Cancelled)
+                .unwrap(),
+            1
+        );
+        assert!(
+            unpromoted.reactor.active[&unpromoted_execution_id]
+                .termination
+                .is_some()
+        );
+        assert_eq!(
+            unpromoted
+                .reactor
+                .handoff_managed_terminal_owner(
+                    &unpromoted_execution_id,
+                    unpromoted.session_owner.clone(),
+                    false,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotLive
+        );
+    }
+
+    #[test]
+    fn managed_terminal_input_is_pending_bounded_not_lifetime_bounded() {
+        const LIMIT: usize = 65_536;
+        let mut fixture = managed_reactor_fixture(LIMIT as u64);
+        let execution_id = fixture.execution_id.clone();
+        let lease = fixture
+            .reactor
+            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .unwrap();
+        let chunk = vec![b'x'; LIMIT / 2];
+        for _ in 0..3 {
+            fixture
+                .reactor
+                .queue_input(
+                    &execution_id,
+                    None,
+                    &lease,
+                    ProcessBytes::from_bytes(&chunk),
+                    false,
+                )
+                .unwrap();
+            let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
+            execution.input.clear();
+            execution.input_offset = 0;
+        }
+        assert_eq!(
+            fixture.reactor.active[&execution_id].accepted_input_bytes,
+            (LIMIT + LIMIT / 2) as u64
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .queue_input(
+                    &execution_id,
+                    None,
+                    &lease,
+                    ProcessBytes::from_bytes(&vec![b'x'; LIMIT + 1]),
+                    false,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputTooLarge
+        );
+
+        fixture.reactor.shell_integrations.remove(&execution_id);
+        let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
+        execution.accepted_input_bytes = 0;
+        execution.input.clear();
+        fixture
+            .reactor
+            .queue_input(
+                &execution_id,
+                None,
+                &lease,
+                ProcessBytes::from_bytes(&chunk),
+                false,
+            )
+            .unwrap();
+        let execution = fixture.reactor.active.get_mut(&execution_id).unwrap();
+        execution.input.clear();
+        execution.input_offset = 0;
+        assert_eq!(
+            fixture
+                .reactor
+                .queue_input(
+                    &execution_id,
+                    None,
+                    &lease,
+                    ProcessBytes::from_bytes(&vec![b'y'; LIMIT / 2 + 1]),
+                    false,
+                )
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputBackpressure
+        );
+    }
+
+    #[test]
+    fn private_shell_integration_buffer_is_bounded_and_unlinks_before_close() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-supervisor-shell-integration-{}-{}",
+            std::process::id(),
+            ExecutionId::generate()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let fifo_path = root.join("integration.fifo");
+        let reader = platform::create_shell_integration_reader(&fifo_path).unwrap();
+        let mut integration = ActiveShellIntegration::new(ManagedShellIntegrationTransport {
+            reader,
+            fifo_path: fifo_path.clone(),
+        });
+
+        integration.ingest(&vec![0x41; MAX_BUFFERED_SHELL_INTEGRATION_BYTES + 1], 17);
+
+        assert_eq!(
+            integration.buffered.len(),
+            MAX_BUFFERED_SHELL_INTEGRATION_BYTES
+        );
+        assert!(integration.degraded);
+        assert_eq!(integration.output_through_sequence, 17);
+        integration.close(false);
+        assert!(integration.closed);
+        assert!(integration.reader.is_none());
+        assert!(!fifo_path.exists());
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
     fn grant_reconciliation_ignores_workspace_processes_and_fences_missing_leases() {
         let live = BTreeSet::from(["grant-live".to_owned()]);
         let live_lease = crate::ExecutionGrantLease {
+            origin: crate::ExecutionLeaseOrigin::CapabilityGrant,
             grant_id: "grant-live".to_owned(),
             duration: "session".to_owned(),
             scope_digest: "sha256:live".to_owned(),
         };
         let stale_lease = crate::ExecutionGrantLease {
+            origin: crate::ExecutionLeaseOrigin::CapabilityGrant,
             grant_id: "grant-stale".to_owned(),
             duration: "one_turn".to_owned(),
             scope_digest: "sha256:stale".to_owned(),
+        };
+        let local_operator_lease = crate::ExecutionGrantLease {
+            origin: crate::ExecutionLeaseOrigin::LocalOperatorTerminal,
+            grant_id: "private-operator-authority".to_owned(),
+            duration: crate::LOCAL_OPERATOR_TERMINAL_LEASE_DURATION.to_owned(),
+            scope_digest: "sha256:terminal".to_owned(),
         };
 
         assert!(!grant_lease_is_inactive(None, &live));
         assert!(!grant_lease_is_inactive(Some(&live_lease), &live));
         assert!(grant_lease_is_inactive(Some(&stale_lease), &live));
+        assert!(!grant_lease_is_inactive(Some(&local_operator_lease), &live));
     }
 
     #[test]
@@ -2776,6 +3911,7 @@ mod tests {
             spool,
             supervisor_id: "owner".to_owned(),
             active: BTreeMap::new(),
+            shell_integrations: BTreeMap::new(),
             shutting_down: false,
             shutdown_replies: Vec::new(),
             next_retention_scan: Instant::now() + Duration::from_secs(60),
@@ -2784,7 +3920,10 @@ mod tests {
             .adopt_failed_spawn(
                 execution_id.clone(),
                 request,
-                launched,
+                ManagedLaunchedProcess {
+                    process: launched,
+                    shell_integration: None,
+                },
                 None,
                 2,
                 ProcessError::new(
@@ -2809,6 +3948,222 @@ mod tests {
         assert_eq!(terminal.error_code.as_deref(), Some("internal"));
         drop(child_guard);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reserved_managed_terminal_identity_is_durable_and_cannot_be_reused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "agl-process-reserved-terminal-{}-{}",
+            std::process::id(),
+            ExecutionId::generate()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let marker = root.join("launcher-starts");
+        let launcher = root.join("failing-launcher");
+        fs::write(
+            &launcher,
+            format!("#!/bin/sh\nprintf x >> '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let repository_impl = Arc::new(crate::InMemoryExecutionRepository::new());
+        let repository: Arc<dyn ExecutionRepository> = repository_impl.clone();
+        let spool_impl = Arc::new(crate::FileOutputSpool::new(root.join("spool")).unwrap());
+        let spool: Arc<dyn OutputSpool> = spool_impl.clone();
+        let (mut request, startup) = managed_shell_fixture(&workspace);
+        let runtime_root = request.program.parent().unwrap().to_path_buf();
+        request.read_only_roots.push(runtime_root.clone());
+        let supervisor = ProcessSupervisor::start(
+            ProcessSupervisorOptions {
+                launcher_path: launcher,
+                data_root: root.join("data"),
+                state_root: root.join("state"),
+                max_active: 1,
+                command_capacity: 8,
+                poll_interval: Duration::from_millis(1),
+                setup_timeout: Duration::from_secs(1),
+                termination_grace: Duration::from_millis(10),
+                max_input_bytes: 1024,
+                max_result_bytes: 1024,
+                max_spool_bytes: 4096,
+                termination_output_headroom_bytes: 1024,
+                finished_retention: Duration::from_secs(60),
+                runtime_read_only_roots: vec![runtime_root],
+            },
+            repository,
+            spool,
+        )
+        .unwrap();
+        let execution_id = ExecutionId::generate();
+
+        supervisor
+            .handle()
+            .start_reserved_managed_terminal(execution_id.clone(), request.clone(), startup)
+            .unwrap_err();
+
+        let status = repository_impl.status(&execution_id).unwrap();
+        assert_eq!(status.execution_id, execution_id);
+        assert!(status.state.is_terminal());
+        assert_eq!(fs::read(&marker).unwrap(), b"x");
+        let execution_root = root
+            .join("state")
+            .join("executions")
+            .join(execution_id.as_str());
+        let startup_path = execution_root.join("home/agl-terminal/bashrc");
+        assert!(execution_root.join("home").is_dir());
+        assert!(execution_root.join("tmp").is_dir());
+        let startup_before = fs::read(&startup_path).unwrap();
+
+        spool_impl
+            .append(
+                &execution_id,
+                &ExecutionOutputChunk {
+                    sequence: 99,
+                    channel: ExecutionChannel::Stdout,
+                    bytes: ProcessBytes::from_bytes(b"reserved-spool-sentinel"),
+                },
+            )
+            .unwrap();
+        spool_impl.sync(&execution_id).unwrap();
+        let spool_path = spool_impl
+            .root()
+            .join(execution_id.as_str())
+            .join("stream.aglspool");
+        let spool_before = fs::read(&spool_path).unwrap();
+        let (_, second_startup) = managed_shell_fixture(&workspace);
+
+        let error = supervisor
+            .handle()
+            .start_reserved_managed_terminal(execution_id, request, second_startup)
+            .unwrap_err();
+
+        assert_eq!(error.code(), ProcessErrorCode::StateConflict);
+        assert_eq!(fs::read(marker).unwrap(), b"x");
+        assert_eq!(fs::read(startup_path).unwrap(), startup_before);
+        assert_eq!(fs::read(spool_path).unwrap(), spool_before);
+
+        supervisor.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_terminal_environment_bypasses_repository_and_launcher_environment() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const SECRET_NAME: &str = "AGL_TEST_PRIVATE_REPOSITORY_VALUE";
+        const SENTINEL: &str = "repository-private-sentinel-1c043e";
+
+        struct Secret;
+        impl crate::TerminalSecretResolver for Secret {
+            fn resolve(
+                &self,
+                _reference: &crate::TerminalSecretReference,
+            ) -> Result<crate::TerminalSecretValue> {
+                crate::TerminalSecretValue::new(SENTINEL)
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "agl-process-private-environment-{}-{}",
+            std::process::id(),
+            ExecutionId::generate()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let launcher_environment = root.join("launcher-environment");
+        let launcher = root.join("failing-launcher");
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"${{{SECRET_NAME}-unset}}\" > '{}'\nexit 1\n",
+                launcher_environment.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let repository_impl = Arc::new(crate::InMemoryExecutionRepository::new());
+        let repository: Arc<dyn ExecutionRepository> = repository_impl.clone();
+        let spool: Arc<dyn OutputSpool> =
+            Arc::new(crate::FileOutputSpool::new(root.join("spool")).unwrap());
+        let (mut request, mut startup) = managed_shell_fixture(&workspace);
+        let runtime_root = request.program.parent().unwrap().to_path_buf();
+        request.read_only_roots.push(runtime_root.clone());
+        let mut environment = crate::TerminalEnvironmentRequest::default();
+        environment.agl_env.insert(
+            SECRET_NAME.to_owned(),
+            crate::TerminalEnvironmentValue::Secret(
+                crate::TerminalSecretReference::new("test:private-repository").unwrap(),
+            ),
+        );
+        let (public_environment, private_environment) =
+            environment.resolve(&Secret).unwrap().into_launch_parts();
+        request.environment = public_environment;
+        startup.private_environment = private_environment;
+        assert!(!format!("{request:?} {startup:?}").contains(SENTINEL));
+        assert!(!serde_json::to_string(&request).unwrap().contains(SENTINEL));
+
+        let supervisor = ProcessSupervisor::start(
+            ProcessSupervisorOptions {
+                launcher_path: launcher,
+                data_root: root.join("data"),
+                state_root: root.join("state"),
+                max_active: 1,
+                command_capacity: 8,
+                poll_interval: Duration::from_millis(1),
+                setup_timeout: Duration::from_secs(1),
+                termination_grace: Duration::from_millis(10),
+                max_input_bytes: 1024,
+                max_result_bytes: 1024,
+                max_spool_bytes: 4096,
+                termination_output_headroom_bytes: 1024,
+                finished_retention: Duration::from_secs(60),
+                runtime_read_only_roots: vec![runtime_root],
+            },
+            repository,
+            spool,
+        )
+        .unwrap();
+        let execution_id = ExecutionId::generate();
+
+        let error = supervisor
+            .handle()
+            .start_reserved_managed_terminal(execution_id.clone(), request, startup)
+            .unwrap_err();
+
+        assert!(!error.message().contains(SENTINEL));
+        assert!(!format!("{error:?}").contains(SENTINEL));
+        assert_eq!(fs::read(&launcher_environment).unwrap(), b"unset");
+        let stored_request = repository_impl.admitted_request(&execution_id).unwrap();
+        assert!(!stored_request.environment.values.contains_key(SECRET_NAME));
+        assert!(!format!("{stored_request:?}").contains(SENTINEL));
+        assert!(
+            !serde_json::to_string(&stored_request)
+                .unwrap()
+                .contains(SENTINEL)
+        );
+        let private_home = root
+            .join("state")
+            .join("executions")
+            .join(execution_id.as_str())
+            .join("home/agl-terminal");
+        for name in ["bashrc", "history.seed"] {
+            assert!(
+                !fs::read(private_home.join(name))
+                    .unwrap()
+                    .windows(SENTINEL.len())
+                    .any(|window| window == SENTINEL.as_bytes())
+            );
+        }
+
+        supervisor.shutdown().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2965,6 +4320,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(statuses.len(), 2);
+        assert_ne!(statuses[0].execution_id, statuses[1].execution_id);
         assert!(statuses.iter().any(|status| {
             status.state == ExecutionState::TimedOut
                 && status.error_code.as_deref() == Some(ProcessErrorCode::TimedOut.as_str())

@@ -92,6 +92,16 @@ pub(crate) fn print_json_or(
 }
 
 pub fn run_cli() {
+    if env::var_os("AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        if let Err(err) = process_command::verify_runtime_bundle_identity() {
+            eprintln!("error: {err:#}");
+            process::exit(1);
+        }
+        println!("runtime bundle identity verified");
+        return;
+    }
     let invocation = match parse_cli(env::args()) {
         Ok(invocation) => invocation,
         Err(err) => {

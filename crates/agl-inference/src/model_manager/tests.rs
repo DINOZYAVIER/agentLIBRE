@@ -339,6 +339,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
             turn_id: None,
             kind: agl_store::RunKind::Cron,
             priority: 0,
+            concurrency_key: None,
             input: serde_json::json!({}),
             checkpoint: None,
             effective_policy_hash: None,
@@ -398,6 +399,7 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
         InferenceArtifactRoot::new(&root),
         root.clone(),
         32,
+        Arc::new(crate::NoopInferenceOutputSink),
     )
     .unwrap();
     let control = Arc::new(FakeControl::default());
@@ -465,6 +467,7 @@ fn text_only_profile_rejects_artifact_content_before_queue_admission() {
         InferenceArtifactRoot::new("/tmp/unused"),
         PathBuf::from("/tmp/unused-store"),
         32,
+        Arc::new(crate::NoopInferenceOutputSink),
     )
     .unwrap_err();
 
@@ -819,6 +822,7 @@ fn job(
         InferenceArtifactRoot::new(root),
         root.to_path_buf(),
         32,
+        Arc::new(crate::NoopInferenceOutputSink),
     )
     .unwrap()
 }

@@ -3,6 +3,7 @@ mod backend;
 pub mod evidence;
 mod llama_cpp;
 mod model_manager;
+mod output;
 
 pub use attempt_fsm::{
     InferenceAttemptMachine, InferenceAttemptPhase, InferenceAttemptTransition,
@@ -20,6 +21,9 @@ pub use model_manager::{
     InferenceJob, InferenceJobScope, ModelGeneration, ModelKey, ModelManager, ModelManagerError,
     ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime, ResolvedContentPart,
     ResolvedMessageContent, ResolvedModelContent, RuntimeFailure, RuntimeOperation,
+};
+pub use output::{
+    InferenceOutputEvent, InferenceOutputSink, NoopInferenceOutputSink, OutputDelivery,
 };
 
 #[cfg(test)]

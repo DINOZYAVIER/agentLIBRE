@@ -10,11 +10,12 @@ use agl_content::{
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_ids::{EventId, ExecutionId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_process::{
-    EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit, ExecutionIo,
-    ExecutionKind, ExecutionLimits, ExecutionOutputChunk, ExecutionOwner, ExecutionProfile,
-    ExecutionRepository, ExecutionRequest, ExecutionState, ExecutionStatus,
-    ExecutionTerminalUpdate, FileOutputSpool, InputLease, OutputSpool, ProcessBytes,
-    ProcessErrorCode, ProcessSupervisor, ProcessSupervisorOptions,
+    EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit,
+    ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLeaseOrigin, ExecutionLimits,
+    ExecutionOutputChunk, ExecutionOwner, ExecutionProfile, ExecutionRepository, ExecutionRequest,
+    ExecutionState, ExecutionStatus, ExecutionTerminalUpdate, FileOutputSpool, InputLease,
+    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OutputSpool, ProcessBytes, ProcessErrorCode,
+    ProcessSupervisor, ProcessSupervisorOptions,
 };
 use serde_json::json;
 
@@ -1271,6 +1272,51 @@ fn execution_private_command_and_retention_remain_bounded_and_private() {
 }
 
 #[test]
+fn local_operator_terminal_authority_is_kept_in_the_private_execution_record() {
+    let root = temp_root("local-operator-terminal-authority");
+    let repository = AglExecutionRepository::open_at(&root, Duration::from_secs(60)).unwrap();
+    let run_id = RunId::generate();
+    let step_id = StepId::generate();
+    let (mut status, mut request) =
+        execution_fixture(&run_id, &step_id, Vec::new(), BTreeMap::new());
+    let owner = ExecutionOwner::Session {
+        session_id: SessionId::generate(),
+        root_run_id: run_id,
+    };
+    status.owner = owner.clone();
+    status.profile = ExecutionProfile::Host;
+    request.owner = owner;
+    request.profile = ExecutionProfile::Host;
+    request.authorization.host_process_execution = true;
+    request.grant_lease = Some(ExecutionGrantLease {
+        origin: ExecutionLeaseOrigin::LocalOperatorTerminal,
+        grant_id: "private-local-operator-authority".to_owned(),
+        duration: LOCAL_OPERATOR_TERMINAL_LEASE_DURATION.to_owned(),
+        scope_digest: "sha256:private-terminal-scope".to_owned(),
+    });
+    repository.admit(&status, &request, "daemon-owner").unwrap();
+
+    let store = AglStore::open_current_at(&root).unwrap();
+    let lease_json: String = store
+        .connection()
+        .query_row(
+            "SELECT grant_lease_json FROM executions WHERE id = ?1",
+            [status.execution_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let lease: ExecutionGrantLease = serde_json::from_str(&lease_json).unwrap();
+    assert_eq!(lease.origin, ExecutionLeaseOrigin::LocalOperatorTerminal);
+    assert_eq!(lease.grant_id, "private-local-operator-authority");
+
+    let command = repository
+        .private_command(&status.execution_id, 4096)
+        .unwrap();
+    assert!(!command.display.contains("private-local-operator-authority"));
+    assert!(!command.display.contains("private-terminal-scope"));
+}
+
+#[test]
 fn artifacts_are_private_deduplicated_and_run_scoped() {
     let (root, store) = open_temp_store("artifacts");
     let first_run = run_draft(None);
@@ -2175,6 +2221,11 @@ fn temp_root(label: &str) -> TempRoot {
 
 fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
     let turn_id = session_id.as_ref().map(|_| TurnId::generate());
+    let concurrency_key = session_id
+        .as_ref()
+        .map(RunConcurrencyKey::session)
+        .transpose()
+        .unwrap();
     let kind = if turn_id.is_some() {
         RunKind::Turn
     } else {
@@ -2186,6 +2237,7 @@ fn run_draft(session_id: Option<SessionId>) -> DurableRunDraft {
         turn_id,
         kind,
         priority: 0,
+        concurrency_key,
         input: json!({"prompt": "test"}),
         checkpoint: None,
         effective_policy_hash: None,

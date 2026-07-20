@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tokio_util::codec::{Framed, LinesCodec};
 
@@ -14,19 +14,23 @@ use agl_ids::{RequestId, RunId};
 use agl_protocol::*;
 
 const OUTBOUND_CAPACITY: usize = 128;
+const ONE_SHOT_CAPACITY: usize = 32;
 const SUBSCRIPTION_CAPACITY: usize = 256;
+const EXECUTION_ATTACHMENT_CAPACITY: usize = 256;
+const ABANDONED_STREAM_CAPACITY: usize = 256;
+const CONNECTION_ROUTE_CAPACITY: usize = 256;
+const IGNORED_TERMINAL_CAPACITY: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientError {
     Io(String),
-    Json(String),
+    InvalidProtocolFrame,
     Protocol {
         code: ProtocolErrorCode,
         retryable: bool,
     },
     SchemaMismatch {
         expected: &'static str,
-        actual: String,
     },
     RequestMismatch {
         expected: RequestId,
@@ -45,29 +49,32 @@ pub enum ClientError {
         expected: u64,
         actual: u64,
     },
+    SnapshotChunkOutOfOrder {
+        expected: u16,
+        actual: u16,
+    },
+    SnapshotTransferInvalid(&'static str),
+    SnapshotDigestMismatch,
     DaemonInstanceChanged,
     ConnectionClosed,
     InputBackpressure,
+    FrameTooLarge,
+    InvalidRequest(String),
 }
 
 impl Display for ClientError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(message) => write!(formatter, "daemon connection I/O failed: {message}"),
-            Self::Json(message) => {
-                write!(formatter, "daemon protocol JSON was invalid: {message}")
-            }
+            Self::InvalidProtocolFrame => formatter.write_str("daemon protocol frame was invalid"),
             Self::Protocol { code, retryable } => {
                 write!(
                     formatter,
                     "daemon request failed with {code:?} (retryable={retryable})"
                 )
             }
-            Self::SchemaMismatch { expected, actual } => {
-                write!(
-                    formatter,
-                    "daemon schema {actual} does not match {expected}"
-                )
+            Self::SchemaMismatch { expected } => {
+                write!(formatter, "daemon schema does not match {expected}")
             }
             Self::RequestMismatch { expected, actual } => {
                 write!(
@@ -92,11 +99,23 @@ impl Display for ClientError {
                     "stream sequence {actual} is not expected sequence {expected}"
                 )
             }
+            Self::SnapshotChunkOutOfOrder { expected, actual } => write!(
+                formatter,
+                "presentation snapshot chunk {actual} arrived, expected {expected}"
+            ),
+            Self::SnapshotTransferInvalid(message) => formatter.write_str(message),
+            Self::SnapshotDigestMismatch => {
+                formatter.write_str("presentation snapshot transfer digest does not match")
+            }
             Self::DaemonInstanceChanged => {
                 formatter.write_str("daemon instance changed; request a fresh snapshot")
             }
             Self::ConnectionClosed => formatter.write_str("daemon connection closed"),
             Self::InputBackpressure => formatter.write_str("client request queue is full"),
+            Self::FrameTooLarge => formatter.write_str("daemon protocol frame exceeds 1 MiB"),
+            Self::InvalidRequest(message) => {
+                write!(formatter, "daemon request is invalid: {message}")
+            }
         }
     }
 }
@@ -109,10 +128,27 @@ impl From<std::io::Error> for ClientError {
     }
 }
 
+fn verify_peer(stream: &UnixStream) -> Result<(), ClientError> {
+    let peer = stream.peer_cred()?;
+    // SAFETY: geteuid has no preconditions and does not modify process state.
+    let expected_uid = unsafe { libc::geteuid() };
+    verify_peer_identity(peer.uid(), expected_uid)
+}
+
+fn verify_peer_identity(peer_uid: u32, expected_uid: u32) -> Result<(), ClientError> {
+    if peer_uid != expected_uid {
+        return Err(ClientError::IdentityMismatch(
+            "daemon socket peer UID does not match the current user",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AgentLibreClient {
     sender: mpsc::Sender<ConnectionCommand>,
     hello: Arc<RwLock<Option<HelloEvent>>>,
+    one_shot_slots: Arc<Semaphore>,
 }
 
 impl AgentLibreClient {
@@ -122,11 +158,17 @@ impl AgentLibreClient {
     }
 
     pub async fn from_stream(stream: UnixStream) -> Result<Self, ClientError> {
+        verify_peer(&stream)?;
+        Self::from_verified_stream(stream).await
+    }
+
+    async fn from_verified_stream(stream: UnixStream) -> Result<Self, ClientError> {
         let (sender, receiver) = mpsc::channel(OUTBOUND_CAPACITY);
-        tokio::spawn(connection_task(stream, receiver));
+        tokio::spawn(connection_task(stream, receiver, sender.downgrade()));
         let client = Self {
             sender,
             hello: Arc::new(RwLock::new(None)),
+            one_shot_slots: Arc::new(Semaphore::new(ONE_SHOT_CAPACITY)),
         };
         let hello = match client
             .request(DaemonRequestKind::Hello(HelloRequest {
@@ -141,7 +183,6 @@ impl AgentLibreClient {
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(ClientError::SchemaMismatch {
                 expected: PROTOCOL_VERSION,
-                actual: hello.protocol_version,
             });
         }
         *client
@@ -149,6 +190,11 @@ impl AgentLibreClient {
             .write()
             .map_err(|_| ClientError::ConnectionClosed)? = Some(hello);
         Ok(client)
+    }
+
+    #[cfg(test)]
+    async fn from_test_stream(stream: UnixStream) -> Result<Self, ClientError> {
+        Self::from_verified_stream(stream).await
     }
 
     pub fn hello(&self) -> Result<HelloEvent, ClientError> {
@@ -247,6 +293,19 @@ impl AgentLibreClient {
         }
     }
 
+    /// Admits an interactive prompt through the daemon's shared application
+    /// surface. The wire family stays `RunSubmit` so the accepted run can use
+    /// the existing run-status and run-subscription streams.
+    pub async fn submit_prompt(
+        &self,
+        request: RunSubmitRequest,
+    ) -> Result<RunAcceptedEvent, ClientError> {
+        match self.request(DaemonRequestKind::RunSubmit(request)).await? {
+            DaemonEventKind::RunAccepted(event) => Ok(event),
+            other => Err(unexpected("run_accepted", &other)),
+        }
+    }
+
     pub async fn run_status(&self, run_id: RunId) -> Result<RunStatusEvent, ClientError> {
         match self
             .request(DaemonRequestKind::RunStatus(RunStatusRequest { run_id }))
@@ -293,10 +352,7 @@ impl AgentLibreClient {
     ) -> Result<RunSubscription, ClientError> {
         let run_id = request.run_id.clone();
         let mut raw = self
-            .stream(
-                DaemonRequestKind::RunSubscribe(request),
-                Expected::RunStream,
-            )
+            .stream(DaemonRequestKind::RunSubscribe(request))
             .await?;
         let started = match raw.recv().await? {
             DaemonEventKind::RunSubscriptionStarted(started) if started.run_id == run_id => started,
@@ -362,17 +418,19 @@ impl AgentLibreClient {
         }
     }
 
-    pub async fn execution_attach(
+    pub async fn attach_execution(
         &self,
-        request: ExecutionAttachRequest,
+        execution_id: agl_ids::ExecutionId,
+        after_sequence: u64,
+        writable: bool,
     ) -> Result<ExecutionAttachment, ClientError> {
-        let execution_id = request.execution_id.clone();
-        let writable = request.writable;
+        let request = ExecutionAttachRequest {
+            execution_id: execution_id.clone(),
+            after_sequence,
+            writable,
+        };
         let mut raw = self
-            .stream(
-                DaemonRequestKind::ExecutionAttach(request),
-                Expected::ExecutionStream,
-            )
+            .stream(DaemonRequestKind::ExecutionAttach(request))
             .await?;
         let started = match raw.recv().await? {
             DaemonEventKind::ExecutionAttachmentStarted(started)
@@ -382,6 +440,12 @@ impl AgentLibreClient {
             }
             other => return Err(unexpected("execution_attachment_started", &other)),
         };
+        if started.next_sequence != after_sequence {
+            return Err(ClientError::SequenceGap {
+                expected: after_sequence,
+                actual: started.next_sequence,
+            });
+        }
         let heartbeat = started.heartbeat_interval_ms.map(|milliseconds| {
             let period = Duration::from_millis(milliseconds);
             let mut interval = tokio::time::interval_at(Instant::now() + period, period);
@@ -442,14 +506,22 @@ impl AgentLibreClient {
     pub async fn session_presentation(
         &self,
         request: SessionPresentationRequest,
-    ) -> Result<SessionPresentationEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::SessionPresentation(request))
-            .await?
-        {
-            DaemonEventKind::SessionPresentation(event) => Ok(event),
-            other => Err(unexpected("session_presentation", &other)),
-        }
+    ) -> Result<SessionPresentationSnapshot, ClientError> {
+        let session_id = request.session_id.clone();
+        let daemon_instance_id = self.hello()?.daemon_instance_id;
+        let mut raw = self
+            .stream(DaemonRequestKind::SessionPresentation(request))
+            .await?;
+        let assembled = receive_snapshot_transfer(
+            &mut raw,
+            &session_id,
+            &daemon_instance_id,
+            ExpectedSnapshotPurpose::Requested,
+            None,
+        )
+        .await?;
+        raw.terminal = true;
+        Ok(assembled.snapshot)
     }
 
     pub async fn subscribe_presentation(
@@ -458,31 +530,20 @@ impl AgentLibreClient {
     ) -> Result<PresentationSubscription, ClientError> {
         let session_id = request.session_id.clone();
         let mut raw = self
-            .stream(
-                DaemonRequestKind::SessionPresentationSubscribe(request),
-                Expected::PresentationStream,
-            )
+            .stream(DaemonRequestKind::SessionPresentationSubscribe(request))
             .await?;
-        let started = match raw.recv().await? {
-            DaemonEventKind::SessionPresentationSubscriptionStarted(started)
-                if started.snapshot.session_id == session_id =>
-            {
-                started
-            }
-            other => {
-                return Err(unexpected(
-                    "session_presentation_subscription_started",
-                    &other,
-                ));
-            }
-        };
         let daemon_instance_id = self.hello()?.daemon_instance_id;
-        if started.snapshot.cursor.daemon_instance_id != daemon_instance_id {
-            return Err(ClientError::DaemonInstanceChanged);
-        }
-        let next_revision = started.snapshot.cursor.revision.saturating_add(1);
+        let assembled = receive_snapshot_transfer(
+            &mut raw,
+            &session_id,
+            &daemon_instance_id,
+            ExpectedSnapshotPurpose::SubscriptionInitial,
+            None,
+        )
+        .await?;
+        let next_revision = assembled.snapshot.cursor.revision.saturating_add(1);
         Ok(PresentationSubscription {
-            snapshot: started.snapshot,
+            snapshot: assembled.snapshot,
             raw,
             next_revision,
             daemon_instance_id,
@@ -490,57 +551,91 @@ impl AgentLibreClient {
         })
     }
 
-    pub async fn start_user_shell(
+    pub async fn ensure_human_terminal(
         &self,
-        request: UserShellStartRequest,
-    ) -> Result<UserShellAcceptedEvent, ClientError> {
+        request: HumanTerminalEnsureRequest,
+    ) -> Result<HumanTerminalEnsuredEvent, ClientError> {
         match self
-            .request(DaemonRequestKind::UserShellStart(request))
+            .request(DaemonRequestKind::HumanTerminalEnsure(request))
             .await?
         {
-            DaemonEventKind::UserShellAccepted(event) => Ok(event),
-            other => Err(unexpected("user_shell_accepted", &other)),
+            DaemonEventKind::HumanTerminalEnsured(event) => Ok(event),
+            other => Err(unexpected("human_terminal_ensured", &other)),
+        }
+    }
+
+    pub async fn ensure_human_host_terminal(
+        &self,
+        request: HumanHostTerminalEnsureRequest,
+    ) -> Result<HumanTerminalEnsuredEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::HumanHostTerminalEnsure(request))
+            .await?
+        {
+            DaemonEventKind::HumanTerminalEnsured(event) => Ok(event),
+            other => Err(unexpected("human_terminal_ensured", &other)),
         }
     }
 
     async fn request(&self, kind: DaemonRequestKind) -> Result<DaemonEventKind, ClientError> {
-        let request_id = RequestId::generate();
-        let expected = Expected::for_request(&kind, false);
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(ConnectionCommand::Send {
-                request: DaemonRequest::new(request_id, kind),
-                route: Some(Route::OneShot { expected, reply }),
-            })
+        let _permit = Arc::clone(&self.one_shot_slots)
+            .acquire_owned()
             .await
             .map_err(|_| ClientError::ConnectionClosed)?;
+        let request_id = RequestId::generate();
+        let expected = Expected::for_request(&kind, false).ok_or(ClientError::InvalidRequest(
+            "request family requires a stream handle".to_owned(),
+        ))?;
+        let (reply, response) = oneshot::channel();
+        let request = DaemonRequest::new(request_id, kind);
+        request
+            .validate()
+            .map_err(|error| ClientError::InvalidRequest(error.to_string()))?;
+        self.sender
+            .try_send(ConnectionCommand::Send {
+                request,
+                route: Some(Route::OneShot { expected, reply }),
+            })
+            .map_err(map_send_error)?;
         response.await.map_err(|_| ClientError::ConnectionClosed)?
     }
 
-    async fn stream(
-        &self,
-        kind: DaemonRequestKind,
-        expected: Expected,
-    ) -> Result<RawSubscription, ClientError> {
+    async fn stream(&self, kind: DaemonRequestKind) -> Result<RawSubscription, ClientError> {
         let request_id = RequestId::generate();
-        let (events, receiver) = mpsc::channel(SUBSCRIPTION_CAPACITY);
+        let expected = Expected::for_request(&kind, true).ok_or(ClientError::InvalidRequest(
+            "request family does not produce a stream".to_owned(),
+        ))?;
+        let cancellation = expected
+            .stream_cancellation()
+            .expect("a stream response family must define cancellation");
+        let capacity = if matches!(expected, Expected::ExecutionStream) {
+            EXECUTION_ATTACHMENT_CAPACITY
+        } else {
+            SUBSCRIPTION_CAPACITY
+        };
+        let (events, receiver) = mpsc::channel(capacity);
         let (failure, failure_receiver) = watch::channel(None);
+        let request = DaemonRequest::new(request_id.clone(), kind);
+        request
+            .validate()
+            .map_err(|error| ClientError::InvalidRequest(error.to_string()))?;
         self.sender
-            .send(ConnectionCommand::Send {
-                request: DaemonRequest::new(request_id.clone(), kind),
+            .try_send(ConnectionCommand::Send {
+                request,
                 route: Some(Route::Stream {
                     expected,
                     events,
                     failure,
+                    last_sequence: 0,
                 }),
             })
-            .await
-            .map_err(|_| ClientError::ConnectionClosed)?;
+            .map_err(map_send_error)?;
         Ok(RawSubscription {
             request_id,
             events: receiver,
             failure: failure_receiver,
             sender: self.sender.clone(),
+            cancellation,
             terminal: false,
             last_sequence: 0,
         })
@@ -583,6 +678,12 @@ impl RunSubscription {
                 Ok(Some(RunSubscriptionEvent::Event(event)))
             }
             DaemonEventKind::RunSubscriptionFinished(event) if event.run_id == self.run_id => {
+                if event.last_sequence != self.last_sequence {
+                    return Err(ClientError::SequenceGap {
+                        expected: self.last_sequence,
+                        actual: event.last_sequence,
+                    });
+                }
                 self.raw.terminal = true;
                 Ok(Some(RunSubscriptionEvent::Finished(event)))
             }
@@ -601,8 +702,276 @@ pub struct PresentationSubscription {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PresentationSubscriptionEvent {
+    SnapshotReplaced {
+        event_id: agl_ids::EventId,
+        snapshot: Box<SessionPresentationSnapshot>,
+    },
     Event(Box<SessionPresentationEventEnvelope>),
     Finished(SessionPresentationSubscriptionFinishedEvent),
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedSnapshotPurpose {
+    Requested,
+    SubscriptionInitial,
+    Replacement,
+}
+
+#[derive(Debug)]
+struct AssembledPresentationSnapshot {
+    snapshot: SessionPresentationSnapshot,
+    purpose: SessionPresentationSnapshotTransferPurpose,
+}
+
+struct PresentationSnapshotAssembly {
+    manifest: SessionPresentationSnapshotManifestEvent,
+    next_chunk: u16,
+    bytes: Vec<u8>,
+}
+
+struct PresentationSnapshotAssembler {
+    expected_session_id: agl_ids::SessionId,
+    expected_daemon_instance_id: agl_ids::DaemonInstanceId,
+    expected_purpose: ExpectedSnapshotPurpose,
+    assembly: Option<PresentationSnapshotAssembly>,
+    complete: bool,
+}
+
+impl PresentationSnapshotAssembler {
+    fn new(
+        expected_session_id: &agl_ids::SessionId,
+        expected_daemon_instance_id: &agl_ids::DaemonInstanceId,
+        expected_purpose: ExpectedSnapshotPurpose,
+    ) -> Self {
+        Self {
+            expected_session_id: expected_session_id.clone(),
+            expected_daemon_instance_id: expected_daemon_instance_id.clone(),
+            expected_purpose,
+            assembly: None,
+            complete: false,
+        }
+    }
+
+    fn manifest(
+        &mut self,
+        manifest: SessionPresentationSnapshotManifestEvent,
+    ) -> Result<(), ClientError> {
+        if self.complete || self.assembly.is_some() {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot transfer sent more than one manifest",
+            ));
+        }
+        manifest.validate().map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot manifest failed bounded validation",
+            )
+        })?;
+        self.validate_identity_and_purpose(&manifest.transfer)?;
+        let capacity = usize::try_from(manifest.decoded_bytes).map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot decoded byte count does not fit this client",
+            )
+        })?;
+        self.assembly = Some(PresentationSnapshotAssembly {
+            manifest,
+            next_chunk: 0,
+            bytes: Vec::with_capacity(capacity),
+        });
+        Ok(())
+    }
+
+    fn chunk(&mut self, chunk: SessionPresentationSnapshotChunkEvent) -> Result<(), ClientError> {
+        chunk.validate().map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot chunk failed bounded validation",
+            )
+        })?;
+        let assembly = self
+            .assembly
+            .as_mut()
+            .ok_or(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot chunk arrived before its manifest",
+            ))?;
+        if chunk.transfer != assembly.manifest.transfer
+            || chunk.chunk_count != assembly.manifest.chunk_count
+        {
+            return Err(ClientError::IdentityMismatch(
+                "presentation snapshot chunk belongs to another transfer",
+            ));
+        }
+        if chunk.chunk_index != assembly.next_chunk {
+            return Err(ClientError::SnapshotChunkOutOfOrder {
+                expected: assembly.next_chunk,
+                actual: chunk.chunk_index,
+            });
+        }
+        let bytes = chunk
+            .bytes
+            .decode(MAX_PRESENTATION_SNAPSHOT_CHUNK_BYTES)
+            .map_err(|_| {
+                ClientError::SnapshotTransferInvalid(
+                    "presentation snapshot chunk could not be decoded",
+                )
+            })?;
+        let decoded_bytes = usize::try_from(assembly.manifest.decoded_bytes).map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot decoded byte count does not fit this client",
+            )
+        })?;
+        if assembly.bytes.len().saturating_add(bytes.len()) > decoded_bytes {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot chunks exceed the manifest byte count",
+            ));
+        }
+        assembly.bytes.extend_from_slice(&bytes);
+        assembly.next_chunk = assembly.next_chunk.saturating_add(1);
+        Ok(())
+    }
+
+    fn finished(
+        &mut self,
+        finished: SessionPresentationSnapshotFinishedEvent,
+    ) -> Result<AssembledPresentationSnapshot, ClientError> {
+        if self.complete {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot transfer finished more than once",
+            ));
+        }
+        finished.validate().map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot finish marker failed bounded validation",
+            )
+        })?;
+        let assembly = self
+            .assembly
+            .take()
+            .ok_or(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot finish marker arrived before its manifest",
+            ))?;
+        if finished.transfer != assembly.manifest.transfer
+            || finished.item_count != assembly.manifest.item_count
+            || finished.decoded_bytes != assembly.manifest.decoded_bytes
+            || finished.chunk_count != assembly.manifest.chunk_count
+            || finished.digest != assembly.manifest.digest
+        {
+            return Err(ClientError::IdentityMismatch(
+                "presentation snapshot finish marker belongs to another transfer",
+            ));
+        }
+        if assembly.next_chunk != assembly.manifest.chunk_count {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot transfer finished before every chunk arrived",
+            ));
+        }
+        if assembly.bytes.len()
+            != usize::try_from(assembly.manifest.decoded_bytes).map_err(|_| {
+                ClientError::SnapshotTransferInvalid(
+                    "presentation snapshot decoded byte count does not fit this client",
+                )
+            })?
+        {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot decoded byte count does not match its manifest",
+            ));
+        }
+        if PresentationSnapshotDigest::from_bytes(&assembly.bytes) != assembly.manifest.digest {
+            return Err(ClientError::SnapshotDigestMismatch);
+        }
+        let snapshot: SessionPresentationSnapshot = serde_json::from_slice(&assembly.bytes)
+            .map_err(|_| {
+                ClientError::SnapshotTransferInvalid(
+                    "presentation snapshot transfer is not a typed snapshot",
+                )
+            })?;
+        let canonical = snapshot.canonical_json_bytes().map_err(|_| {
+            ClientError::SnapshotTransferInvalid(
+                "presentation snapshot transfer failed snapshot validation",
+            )
+        })?;
+        if canonical != assembly.bytes {
+            return Err(ClientError::SnapshotTransferInvalid(
+                "presentation snapshot transfer is not canonical JSON",
+            ));
+        }
+        if snapshot.session_id != assembly.manifest.transfer.session_id
+            || snapshot.cursor != assembly.manifest.transfer.cursor
+            || snapshot.items.len()
+                != usize::try_from(assembly.manifest.item_count).unwrap_or(usize::MAX)
+        {
+            return Err(ClientError::IdentityMismatch(
+                "presentation snapshot contents do not match the transfer manifest",
+            ));
+        }
+        self.complete = true;
+        Ok(AssembledPresentationSnapshot {
+            snapshot,
+            purpose: assembly.manifest.transfer.purpose,
+        })
+    }
+
+    fn validate_identity_and_purpose(
+        &self,
+        transfer: &SessionPresentationSnapshotTransferIdentity,
+    ) -> Result<(), ClientError> {
+        if transfer.session_id != self.expected_session_id {
+            return Err(ClientError::IdentityMismatch(
+                "presentation snapshot transfer belongs to another session",
+            ));
+        }
+        if transfer.cursor.daemon_instance_id != self.expected_daemon_instance_id {
+            return Err(ClientError::DaemonInstanceChanged);
+        }
+        let purpose_matches = matches!(
+            (self.expected_purpose, &transfer.purpose),
+            (
+                ExpectedSnapshotPurpose::Requested,
+                SessionPresentationSnapshotTransferPurpose::Requested
+            ) | (
+                ExpectedSnapshotPurpose::SubscriptionInitial,
+                SessionPresentationSnapshotTransferPurpose::SubscriptionInitial
+            ) | (
+                ExpectedSnapshotPurpose::Replacement,
+                SessionPresentationSnapshotTransferPurpose::Replacement { .. }
+            )
+        );
+        if !purpose_matches {
+            return Err(ClientError::IdentityMismatch(
+                "presentation snapshot transfer has the wrong purpose",
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn receive_snapshot_transfer(
+    raw: &mut RawSubscription,
+    expected_session_id: &agl_ids::SessionId,
+    expected_daemon_instance_id: &agl_ids::DaemonInstanceId,
+    expected_purpose: ExpectedSnapshotPurpose,
+    first_manifest: Option<SessionPresentationSnapshotManifestEvent>,
+) -> Result<AssembledPresentationSnapshot, ClientError> {
+    let mut assembler = PresentationSnapshotAssembler::new(
+        expected_session_id,
+        expected_daemon_instance_id,
+        expected_purpose,
+    );
+    if let Some(manifest) = first_manifest {
+        assembler.manifest(manifest)?;
+    }
+    loop {
+        match raw.recv().await? {
+            DaemonEventKind::SessionPresentationSnapshotManifest(manifest) => {
+                assembler.manifest(manifest)?;
+            }
+            DaemonEventKind::SessionPresentationSnapshotChunk(chunk) => {
+                assembler.chunk(chunk)?;
+            }
+            DaemonEventKind::SessionPresentationSnapshotFinished(finished) => {
+                return assembler.finished(finished);
+            }
+            other => return Err(unexpected("presentation snapshot transfer frame", &other)),
+        }
+    }
 }
 
 impl PresentationSubscription {
@@ -615,6 +984,42 @@ impl PresentationSubscription {
             return Ok(None);
         }
         match self.raw.recv().await? {
+            DaemonEventKind::SessionPresentationSnapshotManifest(manifest) => {
+                if manifest.transfer.cursor.revision != self.next_revision {
+                    return Err(ClientError::SequenceGap {
+                        expected: self.next_revision,
+                        actual: manifest.transfer.cursor.revision,
+                    });
+                }
+                let assembled = receive_snapshot_transfer(
+                    &mut self.raw,
+                    &self.snapshot.session_id,
+                    &self.daemon_instance_id,
+                    ExpectedSnapshotPurpose::Replacement,
+                    Some(manifest),
+                )
+                .await?;
+                let SessionPresentationSnapshotTransferPurpose::Replacement { event_id } =
+                    assembled.purpose
+                else {
+                    return Err(ClientError::IdentityMismatch(
+                        "presentation snapshot replacement has the wrong purpose",
+                    ));
+                };
+                self.next_revision = self.next_revision.saturating_add(1);
+                self.raw.last_sequence = assembled.snapshot.cursor.revision;
+                self.snapshot = assembled.snapshot.clone();
+                Ok(Some(PresentationSubscriptionEvent::SnapshotReplaced {
+                    event_id,
+                    snapshot: Box::new(assembled.snapshot),
+                }))
+            }
+            DaemonEventKind::SessionPresentationSnapshotChunk(_)
+            | DaemonEventKind::SessionPresentationSnapshotFinished(_) => {
+                Err(ClientError::SnapshotTransferInvalid(
+                    "presentation snapshot transfer frame arrived before its manifest",
+                ))
+            }
             DaemonEventKind::SessionPresentationEvent(event) => {
                 if event.cursor.daemon_instance_id != self.daemon_instance_id {
                     return Err(ClientError::DaemonInstanceChanged);
@@ -630,6 +1035,16 @@ impl PresentationSubscription {
                 Ok(Some(PresentationSubscriptionEvent::Event(event)))
             }
             DaemonEventKind::SessionPresentationSubscriptionFinished(event) => {
+                if event.last_delivered_cursor.daemon_instance_id != self.daemon_instance_id {
+                    return Err(ClientError::DaemonInstanceChanged);
+                }
+                let expected = self.next_revision.saturating_sub(1);
+                if event.last_delivered_cursor.revision != expected {
+                    return Err(ClientError::SequenceGap {
+                        expected,
+                        actual: event.last_delivered_cursor.revision,
+                    });
+                }
                 self.finished = true;
                 self.raw.terminal = true;
                 Ok(Some(PresentationSubscriptionEvent::Finished(event)))
@@ -762,9 +1177,20 @@ impl ExecutionAttachment {
             match kind {
                 DaemonEventKind::ExecutionOutput(event)
                     if event.attachment_id == self.attachment_id
-                        && event.execution_id == self.execution_id
-                        && event.chunk.sequence > self.last_sequence =>
+                        && event.execution_id == self.execution_id =>
                 {
+                    let expected = self.last_sequence.saturating_add(1);
+                    // Execution cursors cover the complete durable execution
+                    // event sequence. Lifecycle, resize, and other metadata
+                    // can therefore occupy sequence values that have no PTY
+                    // output chunk. Output must be strictly monotonic, but it
+                    // is not necessarily contiguous.
+                    if event.chunk.sequence <= self.last_sequence {
+                        return Err(ClientError::SequenceGap {
+                            expected,
+                            actual: event.chunk.sequence,
+                        });
+                    }
                     self.last_sequence = event.chunk.sequence;
                     self.raw.last_sequence = event.chunk.sequence;
                     return Ok(Some(ExecutionAttachmentEvent::Output(event)));
@@ -773,6 +1199,14 @@ impl ExecutionAttachment {
                     if event.attachment_id == self.attachment_id
                         && event.execution_id == self.execution_id =>
                 {
+                    if event.last_delivered_sequence < self.last_sequence {
+                        return Err(ClientError::SequenceGap {
+                            expected: self.last_sequence,
+                            actual: event.last_delivered_sequence,
+                        });
+                    }
+                    self.last_sequence = event.last_delivered_sequence;
+                    self.raw.last_sequence = event.last_delivered_sequence;
                     self.finished = true;
                     self.raw.terminal = true;
                     return Ok(Some(ExecutionAttachmentEvent::Finished(event)));
@@ -788,12 +1222,16 @@ struct RawSubscription {
     events: mpsc::Receiver<DaemonEventKind>,
     failure: watch::Receiver<Option<ClientError>>,
     sender: mpsc::Sender<ConnectionCommand>,
+    cancellation: StreamCancellation,
     terminal: bool,
     last_sequence: u64,
 }
 
 impl RawSubscription {
     async fn recv(&mut self) -> Result<DaemonEventKind, ClientError> {
+        if let Some(error) = self.failure.borrow().clone() {
+            return Err(error);
+        }
         tokio::select! {
             biased;
             event = self.events.recv() => event.ok_or_else(|| {
@@ -802,7 +1240,7 @@ impl RawSubscription {
             changed = self.failure.changed() => {
                 changed.map_err(|_| ClientError::ConnectionClosed)?;
                 Err(self.failure.borrow().clone().unwrap_or(ClientError::ConnectionClosed))
-            }
+            },
         }
     }
 }
@@ -815,9 +1253,7 @@ impl Drop for RawSubscription {
         let _ = self.sender.try_send(ConnectionCommand::Send {
             request: DaemonRequest::new(
                 RequestId::generate(),
-                DaemonRequestKind::SubscriptionCancel(SubscriptionCancelRequest {
-                    subscription_request_id: self.request_id.clone(),
-                }),
+                self.cancellation.request(self.request_id.clone()),
             ),
             route: None,
         });
@@ -831,6 +1267,36 @@ enum ConnectionCommand {
     },
 }
 
+#[derive(Clone, Copy)]
+enum StreamCancellation {
+    Subscription,
+    ExecutionAttachment,
+}
+
+impl StreamCancellation {
+    fn request(self, stream_request_id: RequestId) -> DaemonRequestKind {
+        match self {
+            Self::Subscription => {
+                DaemonRequestKind::SubscriptionCancel(SubscriptionCancelRequest {
+                    subscription_request_id: stream_request_id,
+                })
+            }
+            Self::ExecutionAttachment => {
+                DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
+                    attachment_id: stream_request_id,
+                })
+            }
+        }
+    }
+}
+
+fn map_send_error(error: mpsc::error::TrySendError<ConnectionCommand>) -> ClientError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => ClientError::InputBackpressure,
+        mpsc::error::TrySendError::Closed(_) => ClientError::ConnectionClosed,
+    }
+}
+
 enum Route {
     OneShot {
         expected: Expected,
@@ -840,6 +1306,7 @@ enum Route {
         expected: Expected,
         events: mpsc::Sender<DaemonEventKind>,
         failure: watch::Sender<Option<ClientError>>,
+        last_sequence: u64,
     },
 }
 
@@ -866,50 +1333,53 @@ enum Expected {
     CommandCatalog,
     CommandSuggestions,
     ApplicationAction,
-    SessionPresentation,
+    PresentationSnapshotStream,
     SubscriptionCancelled,
-    UserShellAccepted,
+    HumanTerminalEnsured,
     RunStream,
     PresentationStream,
     ExecutionStream,
 }
 
 impl Expected {
-    fn for_request(kind: &DaemonRequestKind, stream: bool) -> Self {
-        match kind {
-            DaemonRequestKind::Hello(_) => Self::Hello,
-            DaemonRequestKind::SessionOpen(_) => Self::SessionOpened,
-            DaemonRequestKind::SessionClear(_) | DaemonRequestKind::SessionStatus(_) => {
+    fn for_request(kind: &DaemonRequestKind, stream: bool) -> Option<Self> {
+        Some(match kind {
+            DaemonRequestKind::Hello(_) if !stream => Self::Hello,
+            DaemonRequestKind::SessionOpen(_) if !stream => Self::SessionOpened,
+            DaemonRequestKind::SessionClear(_) | DaemonRequestKind::SessionStatus(_) if !stream => {
                 Self::SessionStatus
             }
-            DaemonRequestKind::SessionFinish(_) => Self::SessionFinished,
-            DaemonRequestKind::SessionList(_) => Self::SessionList,
-            DaemonRequestKind::SessionTranscript(_) => Self::SessionTranscript,
-            DaemonRequestKind::RunSubmit(_) => Self::RunAccepted,
-            DaemonRequestKind::RunStatus(_) | DaemonRequestKind::RunCancel(_) => Self::RunStatus,
-            DaemonRequestKind::RunTree(_) => Self::RunTree,
-            DaemonRequestKind::RunEvents(_) => Self::RunEvents,
+            DaemonRequestKind::SessionFinish(_) if !stream => Self::SessionFinished,
+            DaemonRequestKind::SessionList(_) if !stream => Self::SessionList,
+            DaemonRequestKind::SessionTranscript(_) if !stream => Self::SessionTranscript,
+            DaemonRequestKind::RunSubmit(_) if !stream => Self::RunAccepted,
+            DaemonRequestKind::RunStatus(_) | DaemonRequestKind::RunCancel(_) if !stream => {
+                Self::RunStatus
+            }
+            DaemonRequestKind::RunTree(_) if !stream => Self::RunTree,
+            DaemonRequestKind::RunEvents(_) if !stream => Self::RunEvents,
             DaemonRequestKind::RunSubscribe(_) if stream => Self::RunStream,
-            DaemonRequestKind::ExecutionList(_) => Self::ExecutionList,
-            DaemonRequestKind::ExecutionStatus(_) => Self::ExecutionStatus,
-            DaemonRequestKind::ExecutionRead(_) => Self::ExecutionRead,
-            DaemonRequestKind::ExecutionInput(_) => Self::ExecutionInput,
-            DaemonRequestKind::ExecutionResize(_) => Self::ExecutionResize,
-            DaemonRequestKind::ExecutionDetach(_) => Self::ExecutionDetach,
-            DaemonRequestKind::ExecutionKill(_) => Self::ExecutionKill,
-            DaemonRequestKind::ExecutionLeaseRenew(_) => Self::ExecutionLeaseRenew,
+            DaemonRequestKind::ExecutionList(_) if !stream => Self::ExecutionList,
+            DaemonRequestKind::ExecutionStatus(_) if !stream => Self::ExecutionStatus,
+            DaemonRequestKind::ExecutionRead(_) if !stream => Self::ExecutionRead,
+            DaemonRequestKind::ExecutionInput(_) if !stream => Self::ExecutionInput,
+            DaemonRequestKind::ExecutionResize(_) if !stream => Self::ExecutionResize,
+            DaemonRequestKind::ExecutionDetach(_) if !stream => Self::ExecutionDetach,
+            DaemonRequestKind::ExecutionKill(_) if !stream => Self::ExecutionKill,
+            DaemonRequestKind::ExecutionLeaseRenew(_) if !stream => Self::ExecutionLeaseRenew,
             DaemonRequestKind::ExecutionAttach(_) if stream => Self::ExecutionStream,
-            DaemonRequestKind::CommandCatalog(_) => Self::CommandCatalog,
-            DaemonRequestKind::CommandSuggestions(_) => Self::CommandSuggestions,
-            DaemonRequestKind::ApplicationAction(_) => Self::ApplicationAction,
-            DaemonRequestKind::SessionPresentation(_) => Self::SessionPresentation,
+            DaemonRequestKind::CommandCatalog(_) if !stream => Self::CommandCatalog,
+            DaemonRequestKind::CommandSuggestions(_) if !stream => Self::CommandSuggestions,
+            DaemonRequestKind::ApplicationAction(_) if !stream => Self::ApplicationAction,
+            DaemonRequestKind::SessionPresentation(_) if stream => Self::PresentationSnapshotStream,
             DaemonRequestKind::SessionPresentationSubscribe(_) if stream => {
                 Self::PresentationStream
             }
-            DaemonRequestKind::SubscriptionCancel(_) => Self::SubscriptionCancelled,
-            DaemonRequestKind::UserShellStart(_) => Self::UserShellAccepted,
-            _ => Self::RunEvents,
-        }
+            DaemonRequestKind::SubscriptionCancel(_) if !stream => Self::SubscriptionCancelled,
+            DaemonRequestKind::HumanTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
+            DaemonRequestKind::HumanHostTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
+            _ => return None,
+        })
     }
 
     fn accepts(self, event: &DaemonEventKind) -> bool {
@@ -944,22 +1414,29 @@ impl Expected {
                 Self::ApplicationAction => {
                     matches!(event, DaemonEventKind::ApplicationActionResult(_))
                 }
-                Self::SessionPresentation => {
-                    matches!(event, DaemonEventKind::SessionPresentation(_))
-                }
                 Self::SubscriptionCancelled => {
                     matches!(event, DaemonEventKind::SubscriptionCancelled(_))
                 }
-                Self::UserShellAccepted => matches!(event, DaemonEventKind::UserShellAccepted(_)),
+                Self::HumanTerminalEnsured => {
+                    matches!(event, DaemonEventKind::HumanTerminalEnsured(_))
+                }
                 Self::RunStream => matches!(
                     event,
                     DaemonEventKind::RunSubscriptionStarted(_)
                         | DaemonEventKind::RunEvent(_)
                         | DaemonEventKind::RunSubscriptionFinished(_)
                 ),
+                Self::PresentationSnapshotStream => matches!(
+                    event,
+                    DaemonEventKind::SessionPresentationSnapshotManifest(_)
+                        | DaemonEventKind::SessionPresentationSnapshotChunk(_)
+                        | DaemonEventKind::SessionPresentationSnapshotFinished(_)
+                ),
                 Self::PresentationStream => matches!(
                     event,
-                    DaemonEventKind::SessionPresentationSubscriptionStarted(_)
+                    DaemonEventKind::SessionPresentationSnapshotManifest(_)
+                        | DaemonEventKind::SessionPresentationSnapshotChunk(_)
+                        | DaemonEventKind::SessionPresentationSnapshotFinished(_)
                         | DaemonEventKind::SessionPresentationEvent(_)
                         | DaemonEventKind::SessionPresentationSubscriptionFinished(_)
                 ),
@@ -976,6 +1453,10 @@ impl Expected {
         matches!(event, DaemonEventKind::Error(_))
             || match self {
                 Self::RunStream => matches!(event, DaemonEventKind::RunSubscriptionFinished(_)),
+                Self::PresentationSnapshotStream => matches!(
+                    event,
+                    DaemonEventKind::SessionPresentationSnapshotFinished(_)
+                ),
                 Self::PresentationStream => matches!(
                     event,
                     DaemonEventKind::SessionPresentationSubscriptionFinished(_)
@@ -986,15 +1467,30 @@ impl Expected {
                 _ => true,
             }
     }
+
+    fn stream_cancellation(self) -> Option<StreamCancellation> {
+        match self {
+            Self::RunStream | Self::PresentationSnapshotStream | Self::PresentationStream => {
+                Some(StreamCancellation::Subscription)
+            }
+            Self::ExecutionStream => Some(StreamCancellation::ExecutionAttachment),
+            _ => None,
+        }
+    }
 }
 
-async fn connection_task(stream: UnixStream, mut commands: mpsc::Receiver<ConnectionCommand>) {
+async fn connection_task(
+    stream: UnixStream,
+    mut commands: mpsc::Receiver<ConnectionCommand>,
+    command_sender: mpsc::WeakSender<ConnectionCommand>,
+) {
     let mut framed = Framed::new(
         stream,
         LinesCodec::new_with_max_length(MAX_JSONL_FRAME_BYTES),
     );
     let mut routes = BTreeMap::<RequestId, Route>::new();
     let mut ignored_terminals = BTreeSet::<RequestId>::new();
+    let mut abandoned_streams = BTreeMap::<RequestId, Expected>::new();
     let failure = loop {
         tokio::select! {
             command = commands.recv() => {
@@ -1002,16 +1498,26 @@ async fn connection_task(stream: UnixStream, mut commands: mpsc::Receiver<Connec
                     break ClientError::ConnectionClosed;
                 };
                 if let Some(route) = route {
+                    if routes.len() >= CONNECTION_ROUTE_CAPACITY {
+                        fail_route(route, ClientError::InputBackpressure);
+                        continue;
+                    }
                     if routes.insert(request.request_id.clone(), route).is_some() {
                         break ClientError::IdentityMismatch("duplicate outstanding request ID");
                     }
                 } else {
+                    if ignored_terminals.len() >= IGNORED_TERMINAL_CAPACITY {
+                        break ClientError::InputBackpressure;
+                    }
                     ignored_terminals.insert(request.request_id.clone());
                 }
                 let line = match serde_json::to_string(&request) {
                     Ok(line) => line,
-                    Err(error) => break ClientError::Json(error.to_string()),
+                    Err(_) => break ClientError::InvalidProtocolFrame,
                 };
+                if line.len() > MAX_JSONL_FRAME_BYTES {
+                    break ClientError::FrameTooLarge;
+                }
                 if let Err(error) = framed.send(line).await {
                     break ClientError::Io(error.to_string());
                 }
@@ -1026,10 +1532,10 @@ async fn connection_task(stream: UnixStream, mut commands: mpsc::Receiver<Connec
                 };
                 let event: DaemonEvent = match serde_json::from_str(&line) {
                     Ok(event) => event,
-                    Err(error) => break ClientError::Json(error.to_string()),
+                    Err(_) => break ClientError::InvalidProtocolFrame,
                 };
                 if event.schema != EVENT_SCHEMA {
-                    break ClientError::SchemaMismatch { expected: EVENT_SCHEMA, actual: event.schema };
+                    break ClientError::SchemaMismatch { expected: EVENT_SCHEMA };
                 }
                 let Some(request_id) = event.request_id.clone() else {
                     break ClientError::IdentityMismatch("daemon event has no request identity");
@@ -1038,13 +1544,50 @@ async fn connection_task(stream: UnixStream, mut commands: mpsc::Receiver<Connec
                     if ignored_terminals.remove(&request_id) {
                         continue;
                     }
+                    if let Some(expected) = abandoned_streams.get(&request_id).copied() {
+                        if expected.is_terminal(&event.kind) {
+                            abandoned_streams.remove(&request_id);
+                        }
+                        continue;
+                    }
                     break ClientError::RequestMismatch { expected: request_id, actual: event.request_id };
                 };
-                dispatch_route(&mut routes, request_id, route, event.kind);
+                if let Some(abandoned) = dispatch_route(&mut routes, request_id, route, event.kind) {
+                    if abandoned_streams.len() >= ABANDONED_STREAM_CAPACITY {
+                        break ClientError::InputBackpressure;
+                    }
+                    abandoned_streams.insert(abandoned.request_id.clone(), abandoned.expected);
+                    best_effort_cancel_stream(&command_sender, abandoned);
+                }
             }
         }
     };
     fail_routes(routes, failure);
+}
+
+struct AbandonedStream {
+    request_id: RequestId,
+    expected: Expected,
+}
+
+fn best_effort_cancel_stream(
+    command_sender: &mpsc::WeakSender<ConnectionCommand>,
+    abandoned: AbandonedStream,
+) {
+    let Some(command_sender) = command_sender.upgrade() else {
+        return;
+    };
+    let cancellation = abandoned
+        .expected
+        .stream_cancellation()
+        .expect("an abandoned stream must define cancellation");
+    let _ = command_sender.try_send(ConnectionCommand::Send {
+        request: DaemonRequest::new(
+            RequestId::generate(),
+            cancellation.request(abandoned.request_id),
+        ),
+        route: None,
+    });
 }
 
 fn dispatch_route(
@@ -1052,26 +1595,29 @@ fn dispatch_route(
     request_id: RequestId,
     route: Route,
     event: DaemonEventKind,
-) {
+) -> Option<AbandonedStream> {
     match route {
         Route::OneShot { expected, reply } => {
             let result = route_result(expected, event);
             let _ = reply.send(result);
+            None
         }
         Route::Stream {
             expected,
             events,
             failure,
+            last_sequence,
         } => {
             if !expected.accepts(&event) {
                 let _ = failure.send(Some(unexpected("registered response family", &event)));
-                return;
+                return None;
             }
             if let DaemonEventKind::Error(error) = event {
                 let _ = failure.send(Some(protocol_error(error)));
-                return;
+                return None;
             }
             let terminal = expected.is_terminal(&event);
+            let delivered_sequence = stream_sequence(&event).unwrap_or(last_sequence);
             match events.try_send(event) {
                 Ok(()) if !terminal => {
                     routes.insert(
@@ -1080,18 +1626,49 @@ fn dispatch_route(
                             expected,
                             events,
                             failure,
+                            last_sequence: delivered_sequence,
                         },
                     );
+                    None
                 }
-                Ok(()) => {}
+                Ok(()) => None,
                 Err(_) => {
                     let _ = failure.send(Some(ClientError::SubscriptionLagged {
-                        request_id,
-                        last_sequence: 0,
+                        request_id: request_id.clone(),
+                        last_sequence,
                     }));
+                    Some(AbandonedStream {
+                        request_id,
+                        expected,
+                    })
                 }
             }
         }
+    }
+}
+
+fn stream_sequence(event: &DaemonEventKind) -> Option<u64> {
+    match event {
+        DaemonEventKind::RunSubscriptionStarted(event) => Some(event.after_sequence),
+        DaemonEventKind::RunEvent(event) => Some(event.sequence),
+        DaemonEventKind::RunSubscriptionFinished(event) => Some(event.last_sequence),
+        DaemonEventKind::SessionPresentationSnapshotManifest(event) => {
+            Some(event.transfer.cursor.revision)
+        }
+        DaemonEventKind::SessionPresentationSnapshotChunk(event) => {
+            Some(event.transfer.cursor.revision)
+        }
+        DaemonEventKind::SessionPresentationSnapshotFinished(event) => {
+            Some(event.transfer.cursor.revision)
+        }
+        DaemonEventKind::SessionPresentationEvent(event) => Some(event.cursor.revision),
+        DaemonEventKind::SessionPresentationSubscriptionFinished(event) => {
+            Some(event.last_delivered_cursor.revision)
+        }
+        DaemonEventKind::ExecutionAttachmentStarted(event) => Some(event.next_sequence),
+        DaemonEventKind::ExecutionOutput(event) => Some(event.chunk.sequence),
+        DaemonEventKind::ExecutionAttachmentFinished(event) => Some(event.last_delivered_sequence),
+        _ => None,
     }
 }
 
@@ -1110,13 +1687,17 @@ fn route_result(
 
 fn fail_routes(routes: BTreeMap<RequestId, Route>, error: ClientError) {
     for route in routes.into_values() {
-        match route {
-            Route::OneShot { reply, .. } => {
-                let _ = reply.send(Err(error.clone()));
-            }
-            Route::Stream { failure, .. } => {
-                let _ = failure.send(Some(error.clone()));
-            }
+        fail_route(route, error.clone());
+    }
+}
+
+fn fail_route(route: Route, error: ClientError) {
+    match route {
+        Route::OneShot { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        Route::Stream { failure, .. } => {
+            let _ = failure.send(Some(error));
         }
     }
 }
@@ -1153,16 +1734,21 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::CommandCatalog(_) => "command_catalog",
         DaemonEventKind::CommandSuggestions(_) => "command_suggestions",
         DaemonEventKind::ApplicationActionResult(_) => "application_action_result",
-        DaemonEventKind::SessionPresentation(_) => "session_presentation",
-        DaemonEventKind::SessionPresentationSubscriptionStarted(_) => {
-            "session_presentation_subscription_started"
+        DaemonEventKind::SessionPresentationSnapshotManifest(_) => {
+            "session_presentation_snapshot_manifest"
+        }
+        DaemonEventKind::SessionPresentationSnapshotChunk(_) => {
+            "session_presentation_snapshot_chunk"
+        }
+        DaemonEventKind::SessionPresentationSnapshotFinished(_) => {
+            "session_presentation_snapshot_finished"
         }
         DaemonEventKind::SessionPresentationEvent(_) => "session_presentation_event",
         DaemonEventKind::SessionPresentationSubscriptionFinished(_) => {
             "session_presentation_subscription_finished"
         }
         DaemonEventKind::SubscriptionCancelled(_) => "subscription_cancelled",
-        DaemonEventKind::UserShellAccepted(_) => "user_shell_accepted",
+        DaemonEventKind::HumanTerminalEnsured(_) => "human_terminal_ensured",
         DaemonEventKind::ExecutionList(_) => "execution_list",
         DaemonEventKind::ExecutionStatus(_) => "execution_status",
         DaemonEventKind::ExecutionRead(_) => "execution_read",
@@ -1215,6 +1801,65 @@ mod tests {
         server
     }
 
+    async fn send_snapshot_transfer(
+        server: &mut Framed<UnixStream, LinesCodec>,
+        request_id: &RequestId,
+        snapshot: &SessionPresentationSnapshot,
+        purpose: SessionPresentationSnapshotTransferPurpose,
+    ) {
+        let transfer =
+            SessionPresentationSnapshotTransfer::encode(RequestId::generate(), purpose, snapshot)
+                .unwrap();
+        let mut frames = Vec::with_capacity(transfer.chunks.len() + 2);
+        frames.push(DaemonEventKind::SessionPresentationSnapshotManifest(
+            transfer.manifest,
+        ));
+        frames.extend(
+            transfer
+                .chunks
+                .into_iter()
+                .map(DaemonEventKind::SessionPresentationSnapshotChunk),
+        );
+        frames.push(DaemonEventKind::SessionPresentationSnapshotFinished(
+            transfer.finished,
+        ));
+        for frame in frames {
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(Some(request_id.clone()), frame))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    fn run_stream_event(run_id: &RunId, sequence: u64) -> DaemonEventKind {
+        DaemonEventKind::RunEvent(Box::new(agl_events::SafeRuntimeEventEnvelope {
+            schema: agl_events::EVENT_SCHEMA.to_owned(),
+            event_id: agl_ids::EventId::generate(),
+            sequence,
+            occurred_at_unix_ms: sequence,
+            scope: agl_events::EventScope::builder(run_id.clone())
+                .build()
+                .unwrap(),
+            request_id: None,
+            caused_by: None,
+            payload: agl_events::SafeRuntimeEvent::TurnStarted {
+                user_input_bytes: 0,
+            },
+        }))
+    }
+
+    #[test]
+    fn peer_identity_check_fails_closed_for_another_uid() {
+        assert!(verify_peer_identity(1000, 1000).is_ok());
+        assert!(matches!(
+            verify_peer_identity(1001, 1000),
+            Err(ClientError::IdentityMismatch(_))
+        ));
+    }
+
     #[tokio::test]
     async fn dispatcher_routes_out_of_order_responses_by_request_identity() {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
@@ -1247,7 +1892,9 @@ mod tests {
                     .unwrap();
             }
         });
-        let client = AgentLibreClient::from_stream(client_stream).await.unwrap();
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
         let (sessions, executions) = tokio::join!(
             client.list_sessions(SessionListRequest::default()),
             client.execution_list(ExecutionListRequest {
@@ -1258,6 +1905,166 @@ mod tests {
         );
         assert!(sessions.unwrap().sessions.is_empty());
         assert!(executions.unwrap().executions.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execution_attachment_accepts_monotonic_output_with_metadata_sequence_gaps() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let execution_id = agl_ids::ExecutionId::generate();
+        let server_execution_id = execution_id.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            let attachment_id = request.request_id.clone();
+            assert!(matches!(
+                request.kind,
+                DaemonRequestKind::ExecutionAttach(ExecutionAttachRequest {
+                    ref execution_id,
+                    after_sequence: 0,
+                    writable: false,
+                }) if execution_id == &server_execution_id
+            ));
+            let status = ExecutionStatus {
+                execution_id: server_execution_id.clone(),
+                owner: ExecutionOwner::Session {
+                    session_id: agl_ids::SessionId::generate(),
+                    root_run_id: RunId::generate(),
+                },
+                state: ExecutionState::Running,
+                profile: ExecutionProfile::Workspace,
+                io: ExecutionIo::Pty,
+                cwd: std::path::PathBuf::from("/workspace"),
+                terminal_size: Some(TerminalSize::default()),
+                exit: None,
+                first_retained_sequence: Some(3),
+                last_sequence: 7,
+                retained_bytes: 2,
+                discarded_output_bytes: 0,
+                output_truncated: false,
+                output_expired: false,
+                started_at_unix_ms: Some(1),
+                finished_at_unix_ms: None,
+                error_code: None,
+            };
+            let events = [
+                DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
+                    attachment_id: attachment_id.clone(),
+                    status,
+                    writable: false,
+                    next_sequence: 0,
+                    lease_ttl_ms: None,
+                    heartbeat_interval_ms: None,
+                }),
+                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                    attachment_id: attachment_id.clone(),
+                    execution_id: server_execution_id.clone(),
+                    chunk: ExecutionOutputChunk {
+                        sequence: 3,
+                        channel: ExecutionChannel::Terminal,
+                        bytes: ProcessBytes::from_bytes(b"a"),
+                    },
+                    state: ExecutionState::Running,
+                }),
+                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                    attachment_id: attachment_id.clone(),
+                    execution_id: server_execution_id.clone(),
+                    chunk: ExecutionOutputChunk {
+                        sequence: 5,
+                        channel: ExecutionChannel::Terminal,
+                        bytes: ProcessBytes::from_bytes(b"b"),
+                    },
+                    state: ExecutionState::Running,
+                }),
+                DaemonEventKind::ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent {
+                    attachment_id,
+                    execution_id: server_execution_id,
+                    state: ExecutionState::Running,
+                    last_delivered_sequence: 7,
+                    reason: ExecutionAttachmentFinishReason::Detached,
+                }),
+            ];
+            for event in events {
+                server
+                    .send(
+                        serde_json::to_string(&DaemonEvent::new(
+                            Some(request.request_id.clone()),
+                            event,
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut attachment = client
+            .attach_execution(execution_id, 0, false)
+            .await
+            .unwrap();
+        for expected in [3, 5] {
+            assert!(matches!(
+                attachment.next().await.unwrap(),
+                Some(ExecutionAttachmentEvent::Output(event))
+                    if event.chunk.sequence == expected
+            ));
+        }
+        assert!(matches!(
+            attachment.next().await.unwrap(),
+            Some(ExecutionAttachmentEvent::Finished(event))
+                if event.last_delivered_sequence == 7
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outstanding_route_table_rejects_overflow_without_growing_unbounded() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            for _ in 0..CONNECTION_ROUTE_CAPACITY {
+                let _: DaemonRequest =
+                    serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), server.next())
+                    .await
+                    .is_err(),
+                "the route rejected by the client must not reach the daemon"
+            );
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut streams = Vec::with_capacity(CONNECTION_ROUTE_CAPACITY + 1);
+        for _ in 0..=CONNECTION_ROUTE_CAPACITY {
+            loop {
+                match client
+                    .stream(DaemonRequestKind::RunSubscribe(RunSubscribeRequest {
+                        run_id: RunId::generate(),
+                        after_sequence: 0,
+                    }))
+                    .await
+                {
+                    Ok(stream) => {
+                        streams.push(stream);
+                        break;
+                    }
+                    Err(ClientError::InputBackpressure) => tokio::task::yield_now().await,
+                    Err(error) => panic!("unexpected stream admission error: {error}"),
+                }
+            }
+        }
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), streams.last_mut().unwrap().recv())
+                .await
+                .expect("overflow route was not rejected")
+                .unwrap_err();
+        assert_eq!(error, ClientError::InputBackpressure);
         server.await.unwrap();
     }
 
@@ -1273,18 +2080,13 @@ mod tests {
                 serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
             let subscription_id = subscribe.request_id.clone();
             let snapshot = empty_snapshot(server_session, daemon_id);
-            server
-                .send(
-                    serde_json::to_string(&DaemonEvent::new(
-                        Some(subscription_id.clone()),
-                        DaemonEventKind::SessionPresentationSubscriptionStarted(
-                            SessionPresentationSubscriptionStartedEvent { snapshot },
-                        ),
-                    ))
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
+            send_snapshot_transfer(
+                &mut server,
+                &subscription_id,
+                &snapshot,
+                SessionPresentationSnapshotTransferPurpose::SubscriptionInitial,
+            )
+            .await;
             let cancel: DaemonRequest =
                 serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
             server
@@ -1314,7 +2116,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let client = AgentLibreClient::from_stream(client_stream).await.unwrap();
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
         let subscription = client
             .subscribe_presentation(SessionPresentationSubscribeRequest {
                 session_id: session_id.clone(),
@@ -1334,6 +2138,512 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn finite_presentation_reassembles_a_split_typed_page() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let daemon_id = agl_ids::DaemonInstanceId::generate();
+        let session_id = agl_ids::SessionId::generate();
+        let expected = snapshot_with_text(session_id.clone(), daemon_id.clone(), 11, 900_000);
+        let server_expected = expected.clone();
+        let server_session = session_id.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, daemon_id).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert!(matches!(
+                request.kind,
+                DaemonRequestKind::SessionPresentation(SessionPresentationRequest {
+                    ref session_id,
+                    page_cursor: Some(ref cursor),
+                }) if session_id == &server_session && cursor == "older-page"
+            ));
+            send_snapshot_transfer(
+                &mut server,
+                &request.request_id,
+                &server_expected,
+                SessionPresentationSnapshotTransferPurpose::Requested,
+            )
+            .await;
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let snapshot = client
+            .session_presentation(SessionPresentationRequest {
+                session_id,
+                page_cursor: Some("older-page".to_owned()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(snapshot, expected);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn snapshot_assembler_rejects_order_count_digest_identity_and_oversize() {
+        let daemon_id = agl_ids::DaemonInstanceId::generate();
+        let session_id = agl_ids::SessionId::generate();
+        let snapshot = snapshot_with_text(session_id.clone(), daemon_id.clone(), 4, 900_000);
+        let transfer = SessionPresentationSnapshotTransfer::encode(
+            RequestId::generate(),
+            SessionPresentationSnapshotTransferPurpose::Requested,
+            &snapshot,
+        )
+        .unwrap();
+
+        let mut out_of_order = PresentationSnapshotAssembler::new(
+            &session_id,
+            &daemon_id,
+            ExpectedSnapshotPurpose::Requested,
+        );
+        out_of_order.manifest(transfer.manifest.clone()).unwrap();
+        assert!(matches!(
+            out_of_order.chunk(transfer.chunks[1].clone()),
+            Err(ClientError::SnapshotChunkOutOfOrder {
+                expected: 0,
+                actual: 1
+            })
+        ));
+
+        let mut bad_count = transfer.manifest.clone();
+        bad_count.chunk_count = bad_count.chunk_count.saturating_add(1);
+        let mut count_assembler = PresentationSnapshotAssembler::new(
+            &session_id,
+            &daemon_id,
+            ExpectedSnapshotPurpose::Requested,
+        );
+        assert!(matches!(
+            count_assembler.manifest(bad_count),
+            Err(ClientError::SnapshotTransferInvalid(_))
+        ));
+
+        let mut identity_assembler = PresentationSnapshotAssembler::new(
+            &session_id,
+            &daemon_id,
+            ExpectedSnapshotPurpose::Requested,
+        );
+        identity_assembler
+            .manifest(transfer.manifest.clone())
+            .unwrap();
+        let mut foreign_chunk = transfer.chunks[0].clone();
+        foreign_chunk.transfer.transfer_id = RequestId::generate();
+        assert!(matches!(
+            identity_assembler.chunk(foreign_chunk),
+            Err(ClientError::IdentityMismatch(_))
+        ));
+
+        let wrong_digest = PresentationSnapshotDigest::from_bytes(b"wrong snapshot");
+        let mut digest_assembler = PresentationSnapshotAssembler::new(
+            &session_id,
+            &daemon_id,
+            ExpectedSnapshotPurpose::Requested,
+        );
+        let mut digest_manifest = transfer.manifest.clone();
+        digest_manifest.digest = wrong_digest.clone();
+        digest_assembler.manifest(digest_manifest).unwrap();
+        for chunk in transfer.chunks.clone() {
+            digest_assembler.chunk(chunk).unwrap();
+        }
+        let mut digest_finished = transfer.finished.clone();
+        digest_finished.digest = wrong_digest;
+        assert_eq!(
+            digest_assembler.finished(digest_finished).unwrap_err(),
+            ClientError::SnapshotDigestMismatch
+        );
+
+        let mut oversized = transfer.manifest;
+        oversized.decoded_bytes = u64::try_from(MAX_PRESENTATION_CONTENT_BYTES + 1).unwrap();
+        let mut oversized_assembler = PresentationSnapshotAssembler::new(
+            &session_id,
+            &daemon_id,
+            ExpectedSnapshotPurpose::Requested,
+        );
+        assert!(matches!(
+            oversized_assembler.manifest(oversized),
+            Err(ClientError::SnapshotTransferInvalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscription_reassembles_replacement_at_one_live_revision() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let daemon_id = agl_ids::DaemonInstanceId::generate();
+        let session_id = agl_ids::SessionId::generate();
+        let initial = empty_snapshot(session_id.clone(), daemon_id.clone());
+        let replacement = snapshot_with_text(session_id.clone(), daemon_id.clone(), 1, 900_000);
+        let replacement_for_server = replacement.clone();
+        let event_id = agl_ids::EventId::generate();
+        let server_event_id = event_id.clone();
+        let (release_server, keep_server_open) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, daemon_id).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            send_snapshot_transfer(
+                &mut server,
+                &request.request_id,
+                &initial,
+                SessionPresentationSnapshotTransferPurpose::SubscriptionInitial,
+            )
+            .await;
+            send_snapshot_transfer(
+                &mut server,
+                &request.request_id,
+                &replacement_for_server,
+                SessionPresentationSnapshotTransferPurpose::Replacement {
+                    event_id: server_event_id,
+                },
+            )
+            .await;
+            let _ = keep_server_open.await;
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut subscription = client
+            .subscribe_presentation(SessionPresentationSubscribeRequest {
+                session_id: session_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(subscription.snapshot.cursor.revision, 0);
+        assert!(matches!(
+            subscription.next().await.unwrap(),
+            Some(PresentationSubscriptionEvent::SnapshotReplaced {
+                event_id: received_event_id,
+                snapshot: received_snapshot,
+            }) if received_event_id == event_id && *received_snapshot == replacement
+        ));
+        assert_eq!(subscription.snapshot, replacement);
+        release_server.send(()).unwrap();
+        drop(subscription);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn saturated_subscription_is_cancelled_without_poisoning_other_routes() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let run_id = RunId::generate();
+        let server_run_id = run_id.clone();
+        let (cancel_seen, cancellation_observed) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let subscribe: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert!(matches!(
+                subscribe.kind,
+                DaemonRequestKind::RunSubscribe(RunSubscribeRequest { ref run_id, .. })
+                    if run_id == &server_run_id
+            ));
+            let subscription_id = subscribe.request_id;
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(subscription_id.clone()),
+                        DaemonEventKind::RunSubscriptionStarted(RunSubscriptionStartedEvent {
+                            run_id: server_run_id.clone(),
+                            after_sequence: 0,
+                            replay_boundary: 0,
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            for sequence in 1..=u64::try_from(SUBSCRIPTION_CAPACITY + 1).unwrap() {
+                server
+                    .send(
+                        serde_json::to_string(&DaemonEvent::new(
+                            Some(subscription_id.clone()),
+                            run_stream_event(&server_run_id, sequence),
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let cancel_line = tokio::time::timeout(Duration::from_secs(3), server.next())
+                .await
+                .expect("saturated stream did not request cancellation")
+                .expect("client closed before requesting stream cancellation")
+                .unwrap();
+            let cancel: DaemonRequest = serde_json::from_str(&cancel_line).unwrap();
+            assert!(matches!(
+                cancel.kind,
+                DaemonRequestKind::SubscriptionCancel(SubscriptionCancelRequest {
+                    ref subscription_request_id,
+                }) if subscription_request_id == &subscription_id
+            ));
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(cancel.request_id),
+                        DaemonEventKind::SubscriptionCancelled(SubscriptionCancelledEvent {
+                            subscription_request_id: subscription_id.clone(),
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // A synchronous daemon producer can already have another frame in
+            // flight when cancellation is acknowledged. It remains scoped to
+            // the abandoned stream and must not poison the multiplexed socket.
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(subscription_id),
+                        run_stream_event(
+                            &server_run_id,
+                            u64::try_from(SUBSCRIPTION_CAPACITY + 2).unwrap(),
+                        ),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            cancel_seen.send(()).unwrap();
+
+            let list: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert!(matches!(list.kind, DaemonRequestKind::SessionList(_)));
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(list.request_id),
+                        DaemonEventKind::SessionList(SessionListEvent {
+                            sessions: Vec::new(),
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut subscription = client
+            .subscribe_run(RunSubscribeRequest {
+                run_id,
+                after_sequence: 0,
+            })
+            .await
+            .unwrap();
+        let subscription_id = subscription.request_id().clone();
+        tokio::time::timeout(Duration::from_secs(3), cancellation_observed)
+            .await
+            .expect("client never observed stream saturation")
+            .unwrap();
+
+        assert!(matches!(
+            subscription.next().await.unwrap_err(),
+            ClientError::SubscriptionLagged {
+                request_id,
+                last_sequence,
+            } if request_id == subscription_id
+                && last_sequence == u64::try_from(SUBSCRIPTION_CAPACITY).unwrap()
+        ));
+        assert!(
+            client
+                .list_sessions(SessionListRequest::default())
+                .await
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn human_terminal_ensure_is_a_typed_one_shot_response() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let session_id = agl_ids::SessionId::generate();
+        let server_session = session_id.clone();
+        let expected_terminal = terminal(&session_id);
+        let server_terminal = expected_terminal.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            match request.kind {
+                DaemonRequestKind::HumanTerminalEnsure(ref ensure) => {
+                    assert_eq!(ensure.session_id, server_session);
+                    assert_eq!(ensure.shell_profile_id, "bash-managed");
+                }
+                ref other => panic!("unexpected request: {other:?}"),
+            }
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(request.request_id),
+                        DaemonEventKind::HumanTerminalEnsured(HumanTerminalEnsuredEvent {
+                            terminal: server_terminal,
+                            disposition: TerminalEnsureDisposition::Created,
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let ensured = client
+            .ensure_human_terminal(human_terminal_request(session_id))
+            .await
+            .unwrap();
+        assert_eq!(ensured.terminal, expected_terminal);
+        assert_eq!(ensured.disposition, TerminalEnsureDisposition::Created);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn human_host_terminal_ensure_uses_the_explicit_operator_request_family() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let session_id = agl_ids::SessionId::generate();
+        let server_session = session_id.clone();
+        let expected_terminal = terminal(&session_id);
+        let server_terminal = expected_terminal.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            match request.kind {
+                DaemonRequestKind::HumanHostTerminalEnsure(ref ensure) => {
+                    assert_eq!(ensure.terminal.session_id, server_session);
+                    assert_eq!(ensure.terminal.profile, ExecutionProfile::Host);
+                    assert!(ensure.confirm_host_authority);
+                }
+                ref other => panic!("unexpected request: {other:?}"),
+            }
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(request.request_id),
+                        DaemonEventKind::HumanTerminalEnsured(HumanTerminalEnsuredEvent {
+                            terminal: server_terminal,
+                            disposition: TerminalEnsureDisposition::Created,
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let ensured = client
+            .ensure_human_host_terminal(human_host_terminal_request(session_id))
+            .await
+            .unwrap();
+        assert_eq!(ensured.terminal, expected_terminal);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_host_terminal_is_rejected_before_it_reaches_the_socket() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let (release, wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let _server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let _ = wait.await;
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut request = human_host_terminal_request(agl_ids::SessionId::generate());
+        request.confirm_host_authority = false;
+
+        let error = client
+            .ensure_human_host_terminal(request)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::InvalidRequest(_)));
+        release.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_terminal_overlay_is_rejected_before_it_reaches_the_socket() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let (release, wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let _server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let _ = wait.await;
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut request = human_terminal_request(agl_ids::SessionId::generate());
+        request
+            .agl_env
+            .values
+            .insert("PATH".to_owned(), "/untrusted".to_owned());
+
+        let error = client.ensure_human_terminal(request).await.unwrap_err();
+        assert!(matches!(error, ClientError::InvalidRequest(_)));
+        release.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    fn human_terminal_request(session_id: agl_ids::SessionId) -> HumanTerminalEnsureRequest {
+        HumanTerminalEnsureRequest {
+            session_id,
+            client_submission_id: "terminal-create-1".to_owned(),
+            execution_context_revision: 1,
+            profile: ExecutionProfile::Workspace,
+            shell_profile_id: "bash-managed".to_owned(),
+            terminal_size: TerminalSize::default(),
+            agl_env: StructuredEnvironmentOverlay::default(),
+            host_startup: HostStartupPolicy::ManagedOnly,
+        }
+    }
+
+    fn human_host_terminal_request(
+        session_id: agl_ids::SessionId,
+    ) -> HumanHostTerminalEnsureRequest {
+        let mut terminal = human_terminal_request(session_id);
+        terminal.profile = ExecutionProfile::Host;
+        HumanHostTerminalEnsureRequest {
+            terminal,
+            confirm_host_authority: true,
+        }
+    }
+
+    fn terminal(session_id: &agl_ids::SessionId) -> TerminalSessionView {
+        TerminalSessionView {
+            terminal_id: agl_ids::TerminalSessionId::generate(),
+            execution_id: agl_ids::ExecutionId::generate(),
+            owner: TerminalOwnerView::Human {
+                session_id: session_id.clone(),
+            },
+            profile: ExecutionProfile::Workspace,
+            shell: ShellProfileView {
+                profile_id: "bash-managed".to_owned(),
+                program: "/bin/bash".to_owned(),
+                executable_digest: "sha256:aaaaaaaa".to_owned(),
+                config_digest: "sha256:bbbbbbbb".to_owned(),
+            },
+            workspace_root: "/workspace".to_owned(),
+            cwd: "/workspace".to_owned(),
+            initial_environment_digest: "sha256:cccccccc".to_owned(),
+            environment_names: vec!["PATH".to_owned()],
+            command_sequence: 0,
+            prompt_state: TerminalPromptState::Ready,
+            process_state: ExecutionState::Running,
+            exit: None,
+            writer: TerminalWriterView::Owner,
+            promoted: false,
+        }
+    }
+
     fn empty_snapshot(
         session_id: agl_ids::SessionId,
         daemon_instance_id: agl_ids::DaemonInstanceId,
@@ -1344,6 +2654,7 @@ mod tests {
                 daemon_instance_id,
                 revision: 0,
             },
+            older_page_cursor: None,
             header: SessionHeader {
                 session_id: session_id.clone(),
                 status: SessionPresentationStatus::Active,
@@ -1367,6 +2678,7 @@ mod tests {
             items: Vec::new(),
             active_run: None,
             queued_prompts: Vec::new(),
+            terminals: Vec::new(),
             executions: Vec::new(),
             command_context: CommandContext {
                 session_id: Some(session_id),
@@ -1377,5 +2689,21 @@ mod tests {
                 operation_mode: ProtocolToolMode::ReadOnly,
             },
         }
+    }
+
+    fn snapshot_with_text(
+        session_id: agl_ids::SessionId,
+        daemon_instance_id: agl_ids::DaemonInstanceId,
+        revision: u64,
+        text_bytes: usize,
+    ) -> SessionPresentationSnapshot {
+        let mut snapshot = empty_snapshot(session_id, daemon_instance_id);
+        snapshot.cursor.revision = revision;
+        snapshot.older_page_cursor = Some(format!("older-{revision}"));
+        snapshot.items.push(SessionPresentationItem::UserMessage {
+            message_id: agl_ids::MessageId::generate(),
+            content: agl_content::Content::text("x".repeat(text_bytes)).unwrap(),
+        });
+        snapshot
     }
 }

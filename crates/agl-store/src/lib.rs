@@ -15,6 +15,7 @@ mod permissions;
 mod runs;
 mod schema;
 mod status;
+mod terminals;
 mod types;
 mod util;
 
@@ -25,6 +26,7 @@ pub use migrations::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS, StoreMigration};
 #[cfg(test)]
 use path::database_path;
 pub use path::default_database_path;
+pub use terminals::AglTerminalRepository;
 pub use types::*;
 
 pub const DEFAULT_DATABASE_FILE: &str = "agentlibre.sqlite3";

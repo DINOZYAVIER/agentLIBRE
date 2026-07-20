@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_content::Content;
 use agl_events::{EventEnvelope, RuntimeEvent, RuntimeEventEnvelope};
-use agl_ids::{ExecutionId, MessageId, RunId, SessionId, StepId, TurnId};
-use agl_process::{ExecutionExit, ExecutionProfile, ExecutionState};
+use agl_ids::{MessageId, RunId, SessionId, TurnId};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +21,17 @@ pub struct SessionMetadata {
     pub local_inference_config_path: PathBuf,
     pub backend: String,
     pub execution_context: agl_process::ExecutionContextSnapshot,
+    pub runtime_selection: SessionRuntimeSelection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRuntimeSelection {
+    pub function_ref: Option<String>,
+    pub model_id: Option<String>,
+    pub operation_mode: String,
+    pub skill_ids: Vec<String>,
+    pub revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -35,6 +45,31 @@ pub enum AgentLibreSessionFinishReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionReplay {
     pub events: Vec<ChatSessionEvent>,
+}
+
+#[derive(Debug)]
+pub struct ChatSessionReplayRecord {
+    pub event: ChatSessionEvent,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub transcript_bytes: usize,
+}
+
+#[derive(Debug)]
+pub enum ChatSessionReverseRead {
+    Record(ChatSessionReplayRecord),
+    ScanLimitReached,
+    End,
+}
+
+#[derive(Debug)]
+pub struct ChatSessionReverseReader {
+    file: File,
+    session_id: SessionId,
+    transcript_jsonl: PathBuf,
+    transcript_len: u64,
+    next_offset: u64,
+    max_record_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,24 +105,6 @@ pub enum ChatSessionEvent {
         session_id: SessionId,
         message: String,
     },
-    UserShellStarted {
-        session_id: SessionId,
-        run_id: RunId,
-        step_id: StepId,
-        execution_id: ExecutionId,
-        command: String,
-        profile: ExecutionProfile,
-        cwd: PathBuf,
-        background: bool,
-    },
-    UserShellFinished {
-        session_id: SessionId,
-        execution_id: ExecutionId,
-        state: ExecutionState,
-        exit: Option<ExecutionExit>,
-        retained_after_sequence: u64,
-        output_truncated: bool,
-    },
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +115,166 @@ pub struct ChatSessionStore {
     transcript_jsonl: PathBuf,
     run_sequences: BTreeMap<RunId, u64>,
     event_ids: BTreeSet<agl_ids::EventId>,
+}
+
+const REVERSE_REPLAY_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+impl ChatSessionReverseReader {
+    pub fn transcript_len(&self) -> u64 {
+        self.transcript_len
+    }
+
+    pub fn next_offset(&self) -> u64 {
+        self.next_offset
+    }
+
+    pub fn set_end_offset(&mut self, end_offset: u64) -> Result<()> {
+        ensure!(
+            end_offset <= self.transcript_len,
+            "chat transcript reverse-read offset exceeds the captured transcript length"
+        );
+        if end_offset > 0 {
+            self.file
+                .seek(SeekFrom::Start(end_offset - 1))
+                .with_context(|| {
+                    format!(
+                        "failed to seek chat transcript {}",
+                        self.transcript_jsonl.display()
+                    )
+                })?;
+            let mut delimiter = [0_u8; 1];
+            self.file.read_exact(&mut delimiter).with_context(|| {
+                format!(
+                    "failed to read chat transcript {}",
+                    self.transcript_jsonl.display()
+                )
+            })?;
+            ensure!(
+                delimiter[0] == b'\n',
+                "chat transcript reverse-read offset is not a JSONL record boundary"
+            );
+        }
+        self.next_offset = end_offset;
+        Ok(())
+    }
+
+    pub fn next_record(&mut self, scan_limit_bytes: usize) -> Result<ChatSessionReverseRead> {
+        if self.next_offset == 0 {
+            return Ok(ChatSessionReverseRead::End);
+        }
+        if scan_limit_bytes == 0 {
+            return Ok(ChatSessionReverseRead::ScanLimitReached);
+        }
+
+        let record_end = self.next_offset;
+        let line_end = record_end - 1;
+        let max_record_search = self.max_record_bytes.saturating_add(1);
+        let search_limit = scan_limit_bytes.min(max_record_search);
+        let mut search_end = line_end;
+        let mut searched_bytes = 0usize;
+        let mut record_start = None;
+        let mut chunk = [0_u8; REVERSE_REPLAY_READ_CHUNK_BYTES];
+
+        while search_end > 0 && searched_bytes < search_limit {
+            let remaining = search_limit - searched_bytes;
+            let chunk_len = remaining
+                .min(REVERSE_REPLAY_READ_CHUNK_BYTES)
+                .min(usize::try_from(search_end).unwrap_or(usize::MAX));
+            let chunk_start = search_end - u64::try_from(chunk_len).expect("chunk length fits u64");
+            self.file
+                .seek(SeekFrom::Start(chunk_start))
+                .with_context(|| {
+                    format!(
+                        "failed to seek chat transcript {}",
+                        self.transcript_jsonl.display()
+                    )
+                })?;
+            self.file
+                .read_exact(&mut chunk[..chunk_len])
+                .with_context(|| {
+                    format!(
+                        "failed to read chat transcript {}",
+                        self.transcript_jsonl.display()
+                    )
+                })?;
+            searched_bytes += chunk_len;
+            if let Some(index) = chunk[..chunk_len].iter().rposition(|byte| *byte == b'\n') {
+                record_start =
+                    Some(chunk_start + u64::try_from(index + 1).expect("chunk position fits u64"));
+                break;
+            }
+            search_end = chunk_start;
+        }
+
+        let record_start = match record_start {
+            Some(record_start) => record_start,
+            None if search_end == 0 => 0,
+            None if searched_bytes >= max_record_search => {
+                bail!(
+                    "chat transcript {} contains a record larger than the {}-byte reverse-read limit",
+                    self.transcript_jsonl.display(),
+                    self.max_record_bytes
+                );
+            }
+            None => return Ok(ChatSessionReverseRead::ScanLimitReached),
+        };
+        let transcript_bytes = usize::try_from(record_end - record_start)
+            .context("chat transcript reverse-read span does not fit memory limits")?;
+        if transcript_bytes > scan_limit_bytes {
+            return Ok(ChatSessionReverseRead::ScanLimitReached);
+        }
+        let line_bytes = usize::try_from(line_end - record_start)
+            .context("chat transcript reverse-read record does not fit memory limits")?;
+        ensure!(
+            line_bytes > 0,
+            "chat transcript {} contains an empty record at byte offset {}",
+            self.transcript_jsonl.display(),
+            record_start
+        );
+        ensure!(
+            line_bytes <= self.max_record_bytes,
+            "chat transcript {} contains a record larger than the {}-byte reverse-read limit",
+            self.transcript_jsonl.display(),
+            self.max_record_bytes
+        );
+
+        let mut encoded = vec![0_u8; line_bytes];
+        self.file
+            .seek(SeekFrom::Start(record_start))
+            .with_context(|| {
+                format!(
+                    "failed to seek chat transcript {}",
+                    self.transcript_jsonl.display()
+                )
+            })?;
+        self.file.read_exact(&mut encoded).with_context(|| {
+            format!(
+                "failed to read chat transcript {}",
+                self.transcript_jsonl.display()
+            )
+        })?;
+        let event: ChatSessionEvent = serde_json::from_slice(&encoded).with_context(|| {
+            format!(
+                "failed to parse chat transcript {} record at byte offset {}",
+                self.transcript_jsonl.display(),
+                record_start
+            )
+        })?;
+        validate_session_event_shape(&event, &self.session_id).with_context(|| {
+            format!(
+                "invalid chat transcript {} record at byte offset {}",
+                self.transcript_jsonl.display(),
+                record_start
+            )
+        })?;
+        self.next_offset = record_start;
+        Ok(ChatSessionReverseRead::Record(ChatSessionReplayRecord {
+            event,
+            start_offset: record_start,
+            end_offset: record_end,
+            transcript_bytes,
+        }))
+    }
 }
 
 impl ChatSessionStore {
@@ -155,16 +332,68 @@ impl ChatSessionStore {
             .exists()
     }
 
+    pub fn open_reverse_replay(
+        sessions_root: impl AsRef<Path>,
+        session_id: SessionId,
+        max_record_bytes: usize,
+    ) -> Result<ChatSessionReverseReader> {
+        ensure!(
+            max_record_bytes > 0,
+            "chat transcript reverse-read record limit must be positive"
+        );
+        let session_dir = sessions_root.as_ref().join(session_id.as_str());
+        ensure!(
+            session_dir.join("session.json").is_file(),
+            "chat session metadata does not exist: {}",
+            session_dir.join("session.json").display()
+        );
+        let transcript_jsonl = session_dir.join("transcript.jsonl");
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&transcript_jsonl).with_context(|| {
+            format!(
+                "failed to open chat transcript {}",
+                transcript_jsonl.display()
+            )
+        })?;
+        let transcript_len = file
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", transcript_jsonl.display()))?
+            .len();
+        let mut reader = ChatSessionReverseReader {
+            file,
+            session_id,
+            transcript_jsonl,
+            transcript_len,
+            next_offset: 0,
+            max_record_bytes,
+        };
+        reader.set_end_offset(transcript_len).with_context(|| {
+            format!(
+                "chat transcript {} ends with an incomplete JSONL record",
+                reader.transcript_jsonl.display()
+            )
+        })?;
+        Ok(reader)
+    }
+
     pub fn start(
         sessions_root: impl AsRef<Path>,
         session_id: SessionId,
         local_inference_config_path: impl Into<PathBuf>,
         backend: impl Into<String>,
         execution_context: agl_process::ExecutionContextSnapshot,
+        runtime_selection: SessionRuntimeSelection,
     ) -> Result<Self> {
         execution_context
             .validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        validate_runtime_selection(&runtime_selection)?;
         let sessions_root = sessions_root.as_ref();
         std::fs::create_dir_all(sessions_root).with_context(|| {
             format!(
@@ -183,6 +412,7 @@ impl ChatSessionStore {
             local_inference_config_path: local_inference_config_path.into(),
             backend: backend.into(),
             execution_context,
+            runtime_selection,
         };
         write_new_json(&session_dir.join("session.json"), &metadata)?;
 
@@ -248,6 +478,32 @@ impl ChatSessionStore {
 
     pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
         &self.metadata.execution_context
+    }
+
+    pub fn runtime_selection(&self) -> &SessionRuntimeSelection {
+        &self.metadata.runtime_selection
+    }
+
+    pub fn update_runtime_selection(
+        &mut self,
+        expected_revision: u64,
+        mut next: SessionRuntimeSelection,
+    ) -> Result<&SessionRuntimeSelection> {
+        ensure!(
+            self.metadata.runtime_selection.revision == expected_revision,
+            "session runtime selection revision changed from expected {expected_revision} to {}",
+            self.metadata.runtime_selection.revision
+        );
+        next.revision = expected_revision
+            .checked_add(1)
+            .context("runtime selection revision overflow")?;
+        validate_runtime_selection(&next)?;
+        let mut metadata = self.metadata.clone();
+        metadata.updated_at_unix_ms = unix_millis();
+        metadata.runtime_selection = next;
+        replace_json(&self.session_dir.join("session.json"), &metadata)?;
+        self.metadata = metadata;
+        Ok(&self.metadata.runtime_selection)
     }
 
     pub fn compare_and_set_execution_context(
@@ -572,6 +828,11 @@ impl ChatSessionStore {
         self.append_transition_event_and_prompt(ChatSessionTransition::ClearContext)
     }
 
+    pub fn complete_cancelled_turn(&mut self) -> Result<()> {
+        self.apply(ChatSessionTransition::PromptForInput)?;
+        Ok(())
+    }
+
     pub fn finish(&mut self) -> Result<()> {
         self.finish_with_reason(AgentLibreSessionFinishReason::HostShutdown)
     }
@@ -582,51 +843,6 @@ impl ChatSessionStore {
 
     pub fn request_exit(&mut self) -> Result<()> {
         self.append_transition_event(ChatSessionTransition::ReadCommandExit)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn append_user_shell_started(
-        &mut self,
-        run_id: RunId,
-        step_id: StepId,
-        execution_id: ExecutionId,
-        command: String,
-        profile: ExecutionProfile,
-        cwd: PathBuf,
-        background: bool,
-    ) -> Result<()> {
-        ensure!(
-            !command.is_empty() && command.len() <= 16 * 1024 && !command.contains('\0'),
-            "user shell command is invalid"
-        );
-        self.append(&ChatSessionEvent::UserShellStarted {
-            session_id: self.session_id().clone(),
-            run_id,
-            step_id,
-            execution_id,
-            command,
-            profile,
-            cwd,
-            background,
-        })
-    }
-
-    pub fn append_user_shell_finished(
-        &mut self,
-        execution_id: ExecutionId,
-        state: ExecutionState,
-        exit: Option<ExecutionExit>,
-        retained_after_sequence: u64,
-        output_truncated: bool,
-    ) -> Result<()> {
-        self.append(&ChatSessionEvent::UserShellFinished {
-            session_id: self.session_id().clone(),
-            execution_id,
-            state,
-            exit,
-            retained_after_sequence,
-            output_truncated,
-        })
     }
 
     pub fn fail(&mut self, message: impl Into<String>) -> Result<()> {
@@ -793,6 +1009,34 @@ fn validate_session_event(
     run_sequences: &mut BTreeMap<RunId, u64>,
     event_ids: &mut BTreeSet<agl_ids::EventId>,
 ) -> Result<()> {
+    validate_session_event_shape(event, session_id)?;
+    match event {
+        ChatSessionEvent::Runtime { envelope } => {
+            ensure!(
+                event_ids.insert(envelope.event_id.clone()),
+                "runtime transcript contains duplicate event ID {}",
+                envelope.event_id
+            );
+            let run_id = envelope.scope.run_id().clone();
+            let previous = run_sequences.get(&run_id).copied().unwrap_or(0);
+            ensure!(
+                envelope.sequence > previous,
+                "runtime transcript run {} sequence {} does not follow {}",
+                run_id,
+                envelope.sequence,
+                previous
+            );
+            run_sequences.insert(run_id, envelope.sequence);
+        }
+        ChatSessionEvent::SessionStarted { .. }
+        | ChatSessionEvent::ContextCleared { .. }
+        | ChatSessionEvent::SessionFinished { .. }
+        | ChatSessionEvent::SessionFailed { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_session_event_shape(event: &ChatSessionEvent, session_id: &SessionId) -> Result<()> {
     match event {
         ChatSessionEvent::Runtime { envelope } => {
             ensure!(
@@ -819,21 +1063,6 @@ fn validate_session_event(
                 ),
                 "runtime transcript contains a non-transcript payload"
             );
-            ensure!(
-                event_ids.insert(envelope.event_id.clone()),
-                "runtime transcript contains duplicate event ID {}",
-                envelope.event_id
-            );
-            let run_id = envelope.scope.run_id().clone();
-            let previous = run_sequences.get(&run_id).copied().unwrap_or(0);
-            ensure!(
-                envelope.sequence > previous,
-                "runtime transcript run {} sequence {} does not follow {}",
-                run_id,
-                envelope.sequence,
-                previous
-            );
-            run_sequences.insert(run_id, envelope.sequence);
         }
         ChatSessionEvent::SessionStarted { session_id: actual }
         | ChatSessionEvent::ContextCleared { session_id: actual }
@@ -841,12 +1070,6 @@ fn validate_session_event(
             session_id: actual, ..
         }
         | ChatSessionEvent::SessionFailed {
-            session_id: actual, ..
-        }
-        | ChatSessionEvent::UserShellStarted {
-            session_id: actual, ..
-        }
-        | ChatSessionEvent::UserShellFinished {
             session_id: actual, ..
         } => ensure!(
             actual == session_id,
@@ -936,4 +1159,41 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
+}
+
+fn validate_runtime_selection(selection: &SessionRuntimeSelection) -> Result<()> {
+    ensure!(
+        selection.revision > 0,
+        "runtime selection revision must be positive"
+    );
+    ensure!(
+        matches!(
+            selection.operation_mode.as_str(),
+            "read-only" | "write" | "execute" | "approve" | "admin"
+        ),
+        "invalid session operation mode {}",
+        selection.operation_mode
+    );
+    ensure!(selection.skill_ids.len() <= 256, "too many selected skills");
+    for skill_id in &selection.skill_ids {
+        ensure!(
+            !skill_id.is_empty() && skill_id.len() <= 256 && skill_id.trim() == skill_id,
+            "invalid selected skill ID"
+        );
+    }
+    if let Some(model_id) = &selection.model_id {
+        ensure!(
+            !model_id.is_empty() && model_id.len() <= 256 && model_id.trim() == model_id,
+            "invalid selected model ID"
+        );
+    }
+    if let Some(function_ref) = &selection.function_ref {
+        ensure!(
+            !function_ref.is_empty()
+                && function_ref.len() <= 1024
+                && function_ref.trim() == function_ref,
+            "invalid function reference"
+        );
+    }
+    Ok(())
 }

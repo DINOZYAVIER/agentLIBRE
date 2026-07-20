@@ -36,7 +36,7 @@ termination_output_headroom_bytes = 1048576
 finished_retention_seconds = 604800
 
 [execution.shell]
-program = "/bin/sh"
+program = "bash"
 command_args = ["-c"]
 login_command_args = ["-l", "-c"]
 
@@ -323,7 +323,7 @@ pub struct AgentLibreShellExecutionConfig {
 impl Default for AgentLibreShellExecutionConfig {
     fn default() -> Self {
         Self {
-            program: PathBuf::from("/bin/sh"),
+            program: PathBuf::from("bash"),
             command_args: vec!["-c".to_owned()],
             login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),
         }

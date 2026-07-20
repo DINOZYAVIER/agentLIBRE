@@ -232,6 +232,26 @@ mod linux {
         let sibling_write_denied = OpenOptions::new().write(true).open(sibling_file).is_err();
         let runtime_read = fs::read(runtime_file).is_ok();
         let runtime_write_denied = OpenOptions::new().append(true).open(runtime_file).is_err();
+        let dev_null_write = OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .and_then(|mut null| null.write_all(b"sandbox-null-probe"))
+            .is_ok();
+        let thread_spawn = matches!(
+            std::thread::Builder::new()
+                .name("sandbox-probe".to_owned())
+                .spawn(|| 73)
+                .and_then(|thread| {
+                    thread
+                        .join()
+                        .map_err(|_| io::Error::other("sandbox probe thread panicked"))
+                }),
+            Ok(73)
+        );
+        let clone3_result =
+            unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null::<libc::c_void>(), 0) };
+        let clone3_unavailable =
+            clone3_result == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS);
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let network_denied =
             TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err();
@@ -249,6 +269,9 @@ mod linux {
                 "sibling_write_denied": sibling_write_denied,
                 "runtime_read": runtime_read,
                 "runtime_write_denied": runtime_write_denied,
+                "dev_null_write": dev_null_write,
+                "thread_spawn": thread_spawn,
+                "clone3_unavailable": clone3_unavailable,
                 "network_denied": network_denied,
                 "visible_pids": visible_pids,
             })

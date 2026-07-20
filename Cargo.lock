@@ -54,10 +54,12 @@ name = "agl-app"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-capabilities",
+ "agl-chat",
  "agl-content",
  "agl-ids",
  "agl-process",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -145,7 +147,6 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "fs2",
- "futures-util",
  "libc",
  "ratatui",
  "serde",
@@ -219,6 +220,7 @@ dependencies = [
  "agl-protocol",
  "agl-runtime",
  "agl-session",
+ "agl-skills",
  "agl-store",
  "agl-supervisor",
  "anyhow",
@@ -436,8 +438,10 @@ dependencies = [
  "agl-events",
  "agl-ids",
  "agl-process",
+ "base64",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1389,7 +1393,6 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags",
  "crossterm_winapi",
- "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",

@@ -214,7 +214,7 @@ fn next_phase(
         (RunningTurn, RecordToolMessage { .. }) => Some(RunningTurn),
         (RunningTurn, RecordAssistantAnswer { .. }) => Some(RecordingAssistantMessage),
         (RunningTurn, RecordAssistantStopMarker { .. }) => Some(RecordingAssistantMessage),
-        (RecordingAssistantMessage, PromptForInput) => Some(AwaitingInput),
+        (RunningTurn | RecordingAssistantMessage, PromptForInput) => Some(AwaitingInput),
         (AwaitingInput, ReadCommandExit) => Some(Finished),
         (AwaitingInput, FinishSession { .. }) => Some(Finished),
         (Started, FinishSession { .. }) => Some(Finished),

@@ -365,6 +365,7 @@ mod tests {
             kind: RunKind::Subagent,
             state: RunState::Failed,
             priority: 0,
+            concurrency_key: None,
             input: serde_json::json!({}),
             checkpoint: None,
             effective_policy_hash: Some(format!("sha256:{}", "a".repeat(64))),

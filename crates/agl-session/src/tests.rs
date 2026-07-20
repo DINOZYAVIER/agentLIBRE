@@ -150,6 +150,7 @@ fn start_session(root: impl AsRef<std::path::Path>, session_id: SessionId) -> Ch
         TEST_CONFIG_PATH,
         TEST_BACKEND,
         execution_context(),
+        runtime_selection(),
     )
     .unwrap()
 }
@@ -170,6 +171,16 @@ fn execution_context() -> agl_process::ExecutionContextSnapshot {
         },
         revision: 1,
         profile_metadata: "workspace".to_owned(),
+    }
+}
+
+fn runtime_selection() -> SessionRuntimeSelection {
+    SessionRuntimeSelection {
+        function_ref: None,
+        model_id: Some("test-model".to_owned()),
+        operation_mode: "read-only".to_owned(),
+        skill_ids: Vec::new(),
+        revision: 1,
     }
 }
 
@@ -488,6 +499,59 @@ fn replay_accepts_monotonic_runtime_sequence_gaps() {
 }
 
 #[test]
+fn reverse_replay_reader_bounds_each_scan_of_a_large_transcript() {
+    use std::io::Write as _;
+
+    let root = temp_root("bounded-reverse-replay");
+    let id = session_id();
+    let store = start_session(&root, id.clone());
+    let repeated = ChatSessionEvent::ContextCleared {
+        session_id: id.clone(),
+    };
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(store.transcript_jsonl())
+        .unwrap();
+    for _ in 0..25_000 {
+        serde_json::to_writer(&mut transcript, &repeated).unwrap();
+        transcript.write_all(b"\n").unwrap();
+    }
+    transcript.flush().unwrap();
+    drop(transcript);
+
+    let scan_limit = 4 * 1024;
+    let mut reader = ChatSessionStore::open_reverse_replay(&root, id.clone(), 1024).unwrap();
+    assert!(reader.transcript_len() > 1024 * 1024);
+    let captured_len = reader.transcript_len();
+    let mut consumed = 0usize;
+    let mut records = 0usize;
+    loop {
+        match reader.next_record(scan_limit - consumed).unwrap() {
+            ChatSessionReverseRead::Record(record) => {
+                consumed += record.transcript_bytes;
+                records += 1;
+            }
+            ChatSessionReverseRead::ScanLimitReached => break,
+            ChatSessionReverseRead::End => panic!("large transcript unexpectedly fit in one scan"),
+        }
+    }
+    assert!(records > 0);
+    assert!(consumed <= scan_limit);
+    assert!(u64::try_from(consumed).unwrap() < captured_len);
+
+    let continuation = reader.next_offset();
+    assert!(continuation > 0);
+    let mut resumed = ChatSessionStore::open_reverse_replay(&root, id, 1024).unwrap();
+    resumed.set_end_offset(continuation).unwrap();
+    let ChatSessionReverseRead::Record(next) = resumed.next_record(scan_limit).unwrap() else {
+        panic!("bounded reverse replay did not resume at its record boundary");
+    };
+    assert_eq!(next.end_offset, continuation);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn replay_rejects_runtime_envelope_from_another_session() {
     let root = temp_root("session-drift");
     let id = session_id();
@@ -565,6 +629,7 @@ fn start_refuses_existing_session_but_allows_precreated_run_directory() {
         TEST_CONFIG_PATH,
         TEST_BACKEND,
         execution_context(),
+        runtime_selection(),
     )
     .unwrap_err();
     assert!(format!("{err:#}").contains("chat session already exists"));

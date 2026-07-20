@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 14;
+pub const CURRENT_SCHEMA_VERSION: u32 = 16;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -516,6 +516,99 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             );
             CREATE INDEX execution_events_replay_idx
                 ON execution_events(execution_id, sequence);
+        "#,
+    },
+    StoreMigration {
+        version: 15,
+        name: "015_run_concurrency_keys",
+        sql: r#"
+            ALTER TABLE runs ADD COLUMN concurrency_key TEXT;
+            CREATE INDEX runs_concurrency_fifo_idx
+                ON runs(concurrency_key, state, priority DESC, created_at_ms)
+                WHERE concurrency_key IS NOT NULL;
+        "#,
+    },
+    StoreMigration {
+        version: 16,
+        name: "016_terminal_sessions",
+        sql: r#"
+            CREATE TABLE terminal_sessions (
+                terminal_id TEXT PRIMARY KEY,
+                execution_id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL CHECK (owner_kind IN (
+                    'human', 'main_agent', 'subagent', 'session_promoted'
+                )),
+                owner_session_id TEXT,
+                owner_root_run_id TEXT,
+                owner_run_id TEXT,
+                previous_owner_run_id TEXT,
+                profile TEXT NOT NULL CHECK (profile IN ('workspace', 'host')),
+                workspace_root BLOB NOT NULL CHECK (typeof(workspace_root) = 'blob'),
+                shell_kind TEXT NOT NULL CHECK (shell_kind IN ('bash', 'zsh')),
+                shell_program BLOB NOT NULL CHECK (typeof(shell_program) = 'blob'),
+                shell_argv_json TEXT NOT NULL,
+                shell_login_argv_json TEXT,
+                shell_environment_names_json TEXT NOT NULL,
+                shell_executable_digest TEXT NOT NULL,
+                shell_config_digest TEXT NOT NULL,
+                environment_digest TEXT NOT NULL,
+                command_sequence INTEGER NOT NULL CHECK (command_sequence >= 0),
+                prompt_kind TEXT NOT NULL CHECK (prompt_kind IN (
+                    'unknown', 'ready', 'command_running', 'foreground_program', 'degraded'
+                )),
+                prompt_sequence INTEGER CHECK (prompt_sequence > 0),
+                prompt_last_exit INTEGER CHECK (
+                    prompt_last_exit IS NULL OR prompt_last_exit BETWEEN 0 AND 255
+                ),
+                prompt_process_group INTEGER CHECK (prompt_process_group > 0),
+                integration_health TEXT NOT NULL CHECK (integration_health IN (
+                    'awaiting_first_prompt', 'trusted', 'degraded'
+                )),
+                cwd BLOB NOT NULL CHECK (typeof(cwd) = 'blob'),
+                state TEXT NOT NULL CHECK (state IN (
+                    'starting', 'running', 'stopping', 'exited', 'failed', 'outcome_unknown'
+                )),
+                slot_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                active_slot INTEGER NOT NULL CHECK (active_slot IN (0, 1)),
+                CHECK (
+                    (owner_kind IN ('human', 'main_agent') AND
+                        owner_session_id IS NOT NULL AND owner_session_id = session_id AND
+                        owner_root_run_id IS NULL AND
+                        owner_run_id IS NULL AND previous_owner_run_id IS NULL) OR
+                    (owner_kind = 'subagent' AND owner_session_id IS NULL AND
+                        owner_root_run_id IS NOT NULL AND owner_run_id IS NOT NULL AND
+                        previous_owner_run_id IS NULL) OR
+                    (owner_kind = 'session_promoted' AND
+                        owner_session_id IS NOT NULL AND owner_session_id = session_id AND
+                        owner_root_run_id IS NULL AND
+                        owner_run_id IS NULL AND previous_owner_run_id IS NOT NULL)
+                ),
+                CHECK (owner_kind = 'human' OR profile = 'workspace'),
+                CHECK (
+                    (integration_health = 'awaiting_first_prompt' AND prompt_kind = 'unknown') OR
+                    (integration_health = 'degraded' AND prompt_kind = 'degraded') OR
+                    (integration_health = 'trusted' AND prompt_kind != 'degraded')
+                ),
+                CHECK (
+                    (state IN ('exited', 'failed') AND active_slot = 0) OR
+                    (state NOT IN ('exited', 'failed') AND active_slot = 1)
+                ),
+                CHECK (
+                    (prompt_kind IN ('unknown', 'degraded') AND
+                        prompt_sequence IS NULL AND prompt_last_exit IS NULL AND
+                        prompt_process_group IS NULL) OR
+                    (prompt_kind = 'ready' AND prompt_sequence IS NOT NULL AND
+                        prompt_process_group IS NULL) OR
+                    (prompt_kind = 'command_running' AND prompt_sequence IS NOT NULL AND
+                        prompt_last_exit IS NULL AND prompt_process_group IS NULL) OR
+                    (prompt_kind = 'foreground_program' AND prompt_sequence IS NOT NULL AND
+                        prompt_last_exit IS NULL AND prompt_process_group IS NOT NULL)
+                )
+            );
+            CREATE UNIQUE INDEX terminal_sessions_active_slot_unique_idx
+                ON terminal_sessions(slot_key) WHERE active_slot = 1;
         "#,
     },
 ];

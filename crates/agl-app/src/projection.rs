@@ -1,12 +1,22 @@
+use std::collections::BTreeSet;
+
 use agl_capabilities::ToolAccessMode;
 use agl_content::Content;
 use agl_ids::{
-    DaemonInstanceId, EventId, ExecutionId, MessageId, RunId, SessionId, StepId, TurnId,
+    DaemonInstanceId, EventId, ExecutionId, MessageId, RunId, SessionId, StepId, TerminalSessionId,
+    TurnId,
 };
-use agl_process::{ExecutionExit, ExecutionOutputChunk, ExecutionProfile, ExecutionState};
+use agl_process::{ExecutionExit, ExecutionProfile, ExecutionState};
 use serde::{Deserialize, Serialize};
 
-use crate::CommandContext;
+use crate::{
+    ApplicationError, ApplicationErrorCode, CommandContext, MAX_QUEUED_PROMPTS_PER_SESSION,
+    MAX_TERMINAL_PATH_BYTES, MAX_TERMINALS_PER_SESSION, TerminalSessionView,
+};
+
+pub const MAX_PRESENTATION_ITEMS: usize = 2_000;
+pub const MAX_EXECUTION_VIEWS: usize = 2_000;
+pub const MAX_PRESENTATION_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,16 +102,6 @@ pub enum SessionPresentationItem {
         summary: String,
         state: ActionItemState,
     },
-    UserExecution {
-        execution_id: ExecutionId,
-        command: String,
-        profile: ExecutionProfile,
-        cwd: String,
-        state: ExecutionState,
-        exit: Option<ExecutionExit>,
-        output: Vec<ExecutionOutputChunk>,
-        output_truncated: bool,
-    },
     ContextBoundary {
         event_id: EventId,
         reason: String,
@@ -123,7 +123,6 @@ impl SessionPresentationItem {
             Self::AgentAction {
                 run_id, step_id, ..
             } => format!("{run_id}:{step_id}"),
-            Self::UserExecution { execution_id, .. } => execution_id.to_string(),
             Self::ContextBoundary { event_id, .. } | Self::Notice { event_id, .. } => {
                 event_id.to_string()
             }
@@ -148,12 +147,35 @@ pub struct QueuedPromptView {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UserExecutionView {
+pub struct ExecutionView {
     pub execution_id: ExecutionId,
     pub state: ExecutionState,
     pub profile: ExecutionProfile,
+    pub cwd: String,
+    pub exit: Option<ExecutionExit>,
     pub last_sequence: u64,
     pub output_truncated: bool,
+}
+
+impl ExecutionView {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.cwd.is_empty()
+            || self.cwd.len() > MAX_TERMINAL_PATH_BYTES
+            || self.cwd.contains('\0')
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "execution cwd must be nonempty bounded text without NUL",
+            ));
+        }
+        if self.state.is_live() && self.exit.is_some() {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "a live execution cannot carry an exit outcome",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -165,8 +187,75 @@ pub struct SessionPresentationSnapshot {
     pub items: Vec<SessionPresentationItem>,
     pub active_run: Option<ActiveRunView>,
     pub queued_prompts: Vec<QueuedPromptView>,
-    pub executions: Vec<UserExecutionView>,
+    pub terminals: Vec<TerminalSessionView>,
+    pub executions: Vec<ExecutionView>,
     pub command_context: CommandContext,
+}
+
+impl SessionPresentationSnapshot {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.header.session_id != self.session_id
+            || self
+                .command_context
+                .session_id
+                .as_ref()
+                .is_some_and(|id| id != &self.session_id)
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "snapshot session identities must agree",
+            ));
+        }
+        if self.items.len() > MAX_PRESENTATION_ITEMS
+            || self.queued_prompts.len() > MAX_QUEUED_PROMPTS_PER_SESSION
+            || self.terminals.len() > MAX_TERMINALS_PER_SESSION
+            || self.executions.len() > MAX_EXECUTION_VIEWS
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "snapshot exceeds a bounded collection limit",
+            ));
+        }
+
+        let mut terminal_ids = BTreeSet::new();
+        let mut terminal_execution_ids = BTreeSet::new();
+        for terminal in &self.terminals {
+            terminal.validate_for_session(&self.session_id)?;
+            if !terminal_ids.insert(&terminal.terminal_id)
+                || !terminal_execution_ids.insert(&terminal.execution_id)
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "snapshot terminal identities must be unique",
+                ));
+            }
+        }
+        let mut execution_ids = BTreeSet::new();
+        for execution in &self.executions {
+            execution.validate()?;
+            if !execution_ids.insert(&execution.execution_id) {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "snapshot execution identities must be unique",
+                ));
+            }
+        }
+        let encoded_bytes = serde_json::to_vec(self)
+            .map_err(|_| {
+                ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "session presentation snapshot could not be encoded",
+                )
+            })?
+            .len();
+        if encoded_bytes > MAX_PRESENTATION_CONTENT_BYTES {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "session presentation snapshot exceeds the 8 MiB content limit",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -174,6 +263,7 @@ pub struct SessionPresentationSnapshot {
 pub enum SessionPresentationEvent {
     SnapshotReplaced {
         snapshot: Box<SessionPresentationSnapshot>,
+        older_page_cursor: Option<String>,
     },
     HeaderChanged {
         header: SessionHeader,
@@ -201,12 +291,27 @@ pub enum SessionPresentationEvent {
         run_id: RunId,
         state: String,
     },
-    ExecutionOutput {
-        execution_id: ExecutionId,
-        chunk: ExecutionOutputChunk,
+    TerminalAdded {
+        terminal: TerminalSessionView,
+    },
+    TerminalChanged {
+        terminal: TerminalSessionView,
+    },
+    TerminalRemoved {
+        terminal_id: TerminalSessionId,
+    },
+    TerminalCommandStarted {
+        terminal_id: TerminalSessionId,
+        sequence: u64,
+    },
+    TerminalCommandFinished {
+        terminal_id: TerminalSessionId,
+        sequence: u64,
+        exit_status: i32,
+        cwd: String,
     },
     ExecutionStateChanged {
-        execution: UserExecutionView,
+        execution: ExecutionView,
     },
     CommandAvailabilityChanged,
     SessionFinished,

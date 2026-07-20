@@ -804,7 +804,11 @@ run_malformed_rejection_case() {
 }
 
 cd "$repo_root"
-cargo build -p agl-cli
+cargo build \
+  -p agl-cli \
+  -p agl-process \
+  --bin agl \
+  --bin agl-process-launcher
 agl_bin="$(smoke_abs_path "$agl_bin")"
 [[ -x "$agl_bin" ]] || fail "missing executable agl binary: $agl_bin"
 

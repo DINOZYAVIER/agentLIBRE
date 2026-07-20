@@ -4,8 +4,8 @@ mod error;
 mod options;
 
 pub use coordinator::{
-    IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
-    SupervisorHandle,
+    IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, RunSubscriptionPoll,
+    Supervisor, SupervisorHandle,
 };
 pub use driver::{
     DriverEffectError, DriverSnapshot, DurableRunDriver, DurableRunDriverFactory,

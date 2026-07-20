@@ -6,12 +6,12 @@ use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use crate::{
     AglStore, ChildRunAdmission, ChildRunDraft, DurableRunAdmission, DurableRunDraft,
-    DurableRunRecord, EffectDeliveryClass, IdempotencyStatus, RecoveryReport, Result, RunLease,
-    RunState, RunStepDraft, RunStepRecord, RunStepState, RunUsage, SafeRunStatus, StepLease,
-    StoreError,
+    DurableRunRecord, EffectDeliveryClass, IdempotencyStatus, RecoveryReport, Result,
+    RunConcurrencyKey, RunLease, RunState, RunStepDraft, RunStepRecord, RunStepState, RunUsage,
+    SafeRunStatus, StepLease, StoreError,
 };
 
-const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, input_json,
+const RUN_COLUMNS: &str = "id, session_id, turn_id, kind, state, priority, concurrency_key, input_json,
     checkpoint_json, effective_policy_hash, execution_context_json, budget_json, usage_json, lease_owner,
     lease_generation, lease_expires_at_ms, cancellation_requested_at_ms, attempts,
     not_before_ms, created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
@@ -460,6 +460,27 @@ impl AglStore {
         self.run(run_id)?.map(safe_status).transpose()
     }
 
+    pub fn safe_runs_for_concurrency_key(
+        &self,
+        key: &RunConcurrencyKey,
+        include_terminal: bool,
+    ) -> Result<Vec<SafeRunStatus>> {
+        let terminal_clause = if include_terminal {
+            ""
+        } else {
+            "AND state IN ('queued', 'waiting', 'running')"
+        };
+        let sql = format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE concurrency_key = ?1 {terminal_clause}
+             ORDER BY priority DESC, created_at_ms, id"
+        );
+        let mut statement = self.conn.prepare(&sql)?;
+        let rows = statement.query_map([key.as_str()], read_run_row)?;
+        rows.map(|row| decode_run(row?).and_then(safe_status))
+            .collect()
+    }
+
     pub fn claim_next_run(
         &self,
         owner: &str,
@@ -480,24 +501,27 @@ impl AglStore {
                        AND r.cancellation_requested_at_ms IS NULL
                        AND (r.not_before_ms IS NULL OR r.not_before_ms <= ?1)
                        AND (
-                           r.session_id IS NULL OR (
+                           r.concurrency_key IS NULL OR (
                                NOT EXISTS (
                                    SELECT 1 FROM runs active
-                                   WHERE active.session_id = r.session_id
+                                   WHERE active.concurrency_key = r.concurrency_key
                                      AND active.state = 'running'
                                )
                                AND NOT EXISTS (
                                    SELECT 1 FROM runs earlier
-                                   WHERE earlier.session_id = r.session_id
+                                   WHERE earlier.concurrency_key = r.concurrency_key
                                      AND earlier.state IN ('queued', 'waiting')
                                      AND (
-                                         earlier.created_at_ms < r.created_at_ms OR
-                                         (earlier.created_at_ms = r.created_at_ms AND earlier.rowid < r.rowid)
+                                         earlier.priority > r.priority OR
+                                         (earlier.priority = r.priority AND (
+                                             earlier.created_at_ms < r.created_at_ms OR
+                                             (earlier.created_at_ms = r.created_at_ms AND earlier.id < r.id)
+                                         ))
                                      )
                                )
                            )
                        )
-                     ORDER BY r.priority DESC, r.created_at_ms, r.rowid
+                     ORDER BY r.priority DESC, r.created_at_ms, r.id
                      LIMIT 1",
                     [now_ms],
                     |row| row.get(0),
@@ -514,12 +538,12 @@ impl AglStore {
                      lease_expires_at_ms = ?3, attempts = attempts + 1,
                      started_at_ms = COALESCE(started_at_ms, MAX(?1, COALESCE((
                          SELECT MAX(previous.finished_at_ms) FROM runs previous
-                         WHERE previous.session_id = runs.session_id
+                         WHERE previous.concurrency_key = runs.concurrency_key
                            AND previous.id != runs.id
                      ), ?1))),
                      updated_at_ms = MAX(?1, COALESCE((
                          SELECT MAX(previous.finished_at_ms) FROM runs previous
-                         WHERE previous.session_id = runs.session_id
+                         WHERE previous.concurrency_key = runs.concurrency_key
                            AND previous.id != runs.id
                      ), ?1))
                  WHERE id = ?4 AND state IN ('queued', 'waiting')
@@ -1080,13 +1104,13 @@ impl AglStore {
 fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Result<()> {
     tx.execute(
         "INSERT INTO runs
-         (id, session_id, turn_id, kind, state, priority, input_json, checkpoint_json,
-          effective_policy_hash, execution_context_json, budget_json, usage_json, lease_owner, lease_generation,
+         (id, session_id, turn_id, kind, state, priority, concurrency_key, input_json,
+          checkpoint_json, effective_policy_hash, execution_context_json, budget_json, usage_json, lease_owner, lease_generation,
           lease_expires_at_ms, cancellation_requested_at_ms, attempts, not_before_ms,
           created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
           terminal_result_json, error_code, error_message, root_run_id, depth)
-         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                 NULL, 0, NULL, NULL, 0, ?12, ?13, ?13, NULL, NULL, NULL, NULL, NULL,
+         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 NULL, 0, NULL, NULL, 0, ?13, ?14, ?14, NULL, NULL, NULL, NULL, NULL,
                  ?1, 0)",
         params![
             draft.run_id.as_str(),
@@ -1094,6 +1118,7 @@ fn insert_run(tx: &Transaction<'_>, draft: &DurableRunDraft, now_ms: i64) -> Res
             draft.turn_id.as_ref().map(TurnId::as_str),
             draft.kind.as_str(),
             draft.priority,
+            draft.concurrency_key.as_ref().map(RunConcurrencyKey::as_str),
             serde_json::to_string(&draft.input)?,
             draft
                 .checkpoint
@@ -1538,6 +1563,7 @@ struct RawRunRow {
     kind: String,
     state: String,
     priority: i32,
+    concurrency_key: Option<String>,
     input_json: String,
     checkpoint_json: Option<String>,
     effective_policy_hash: Option<String>,
@@ -1580,38 +1606,39 @@ fn read_run_row(row: &Row<'_>) -> rusqlite::Result<RawRunRow> {
         kind: row.get(3)?,
         state: row.get(4)?,
         priority: row.get(5)?,
-        input_json: row.get(6)?,
-        checkpoint_json: row.get(7)?,
-        effective_policy_hash: row.get(8)?,
-        execution_context_json: row.get(9)?,
-        budget_json: row.get(10)?,
-        usage_json: row.get(11)?,
-        lease_owner: row.get(12)?,
-        lease_generation: row.get(13)?,
-        lease_expires_at_ms: row.get(14)?,
-        cancellation_requested_at_ms: row.get(15)?,
-        attempts: row.get(16)?,
-        not_before_ms: row.get(17)?,
-        created_at_ms: row.get(18)?,
-        updated_at_ms: row.get(19)?,
-        started_at_ms: row.get(20)?,
-        finished_at_ms: row.get(21)?,
-        terminal_result_json: row.get(22)?,
-        error_code: row.get(23)?,
-        error_message: row.get(24)?,
-        parent_run_id: row.get(25)?,
-        root_run_id: row.get(26)?,
-        depth: row.get(27)?,
-        subagent_id: row.get(28)?,
-        spawned_by_step_id: row.get(29)?,
-        child_spec_digest: row.get(30)?,
-        model_profile_digest: row.get(31)?,
-        result_delivered_at_ms: row.get(32)?,
-        tree_usage_recorded_at_ms: row.get(33)?,
-        delegation_budget_json: row.get(34)?,
-        delegation_reserved_descendants: row.get(35)?,
-        delegation_reserved_output_tokens: row.get(36)?,
-        delegation_used_output_tokens: row.get(37)?,
+        concurrency_key: row.get(6)?,
+        input_json: row.get(7)?,
+        checkpoint_json: row.get(8)?,
+        effective_policy_hash: row.get(9)?,
+        execution_context_json: row.get(10)?,
+        budget_json: row.get(11)?,
+        usage_json: row.get(12)?,
+        lease_owner: row.get(13)?,
+        lease_generation: row.get(14)?,
+        lease_expires_at_ms: row.get(15)?,
+        cancellation_requested_at_ms: row.get(16)?,
+        attempts: row.get(17)?,
+        not_before_ms: row.get(18)?,
+        created_at_ms: row.get(19)?,
+        updated_at_ms: row.get(20)?,
+        started_at_ms: row.get(21)?,
+        finished_at_ms: row.get(22)?,
+        terminal_result_json: row.get(23)?,
+        error_code: row.get(24)?,
+        error_message: row.get(25)?,
+        parent_run_id: row.get(26)?,
+        root_run_id: row.get(27)?,
+        depth: row.get(28)?,
+        subagent_id: row.get(29)?,
+        spawned_by_step_id: row.get(30)?,
+        child_spec_digest: row.get(31)?,
+        model_profile_digest: row.get(32)?,
+        result_delivered_at_ms: row.get(33)?,
+        tree_usage_recorded_at_ms: row.get(34)?,
+        delegation_budget_json: row.get(35)?,
+        delegation_reserved_descendants: row.get(36)?,
+        delegation_reserved_output_tokens: row.get(37)?,
+        delegation_used_output_tokens: row.get(38)?,
     })
 }
 
@@ -1631,6 +1658,10 @@ fn decode_run(raw: RawRunRow) -> Result<DurableRunRecord> {
         kind: crate::RunKind::parse(&raw.kind)?,
         state: RunState::parse(&raw.state)?,
         priority: raw.priority,
+        concurrency_key: raw
+            .concurrency_key
+            .map(RunConcurrencyKey::parse)
+            .transpose()?,
         input: serde_json::from_str(&raw.input_json)?,
         checkpoint: raw
             .checkpoint_json
@@ -1706,6 +1737,7 @@ fn safe_status_with_state(run: DurableRunRecord, state: RunState) -> Result<Safe
         kind: run.kind,
         state,
         priority: run.priority,
+        concurrency_key: run.concurrency_key,
         usage: run.usage,
         cancellation_requested: run.cancellation_requested_at_ms.is_some(),
         attempts: run.attempts,

@@ -15,7 +15,7 @@ pub(super) const DISABLED_THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
 pub(super) const QWEN_ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
 pub(super) const QWEN_DISABLED_THINKING_PREFIX: &str =
     "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-const GEMMA_MODEL_HEADER: &str = "<|turn>model\n";
+pub(super) const GEMMA_MODEL_HEADER: &str = "<|turn>model\n";
 pub(super) const GEMMA_THOUGHT_CHANNEL_PREFIX: &str = "<|channel>thought\n<channel|>";
 pub(super) const GEMMA_THOUGHT_PREFIX: &str = "<|turn>model\n<|channel>thought\n<channel|>";
 
@@ -303,6 +303,20 @@ pub(super) fn strip_generated_assistant_prefix(content: &mut String) {
             content.drain(..prefix.len());
         }
     }
+    if let Some(stripped) = content.strip_prefix("Assistant:") {
+        *content = stripped.trim_start().to_string();
+    }
+}
+
+pub(super) fn generated_assistant_prefix_is_pending(content: &str) -> bool {
+    [
+        GEMMA_THOUGHT_PREFIX,
+        GEMMA_THOUGHT_CHANNEL_PREFIX,
+        GEMMA_MODEL_HEADER,
+        "Assistant:",
+    ]
+    .iter()
+    .any(|prefix| prefix.starts_with(content) && content.len() < prefix.len())
 }
 
 pub(super) fn source_index_after_normalized_prefix(

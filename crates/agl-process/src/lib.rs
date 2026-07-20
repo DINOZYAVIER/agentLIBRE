@@ -16,6 +16,7 @@ mod supervisor;
 #[allow(dead_code)]
 #[path = "supervisor_unsupported.rs"]
 mod supervisor_unsupported_contract;
+pub mod terminal;
 
 pub use bytes::{ProcessBytes, ProcessBytesEncoding};
 pub use config::{
@@ -30,16 +31,40 @@ pub use repository::{
 };
 pub use request::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,
-    ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest, ShellProfileSnapshot,
-    TerminalSize,
+    ExecutionLeaseOrigin, ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest,
+    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ShellProfileSnapshot, TerminalSize,
 };
 pub use spool::FileOutputSpool;
 pub use status::{
     ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionListFilter, ExecutionOutputChunk,
     ExecutionPrivateCommand, ExecutionReadResult, ExecutionState, ExecutionStatus, InputLease,
-    KillMode,
+    KillMode, ShellIntegrationReadResult,
 };
 pub use supervisor::{ProcessHandle, ProcessSupervisor};
+pub use terminal::command::{
+    AgentTerminalCommandQueue, QueuedTerminalCommand, TerminalCommandOutputRange,
+    TerminalCommandResult,
+};
+pub use terminal::environment::{
+    RejectTerminalSecrets, ResolvedTerminalEnvironment, TerminalEnvironmentDigest,
+    TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalSecretReference,
+    TerminalSecretResolver, TerminalSecretValue,
+};
+pub use terminal::history::{
+    EphemeralTerminalHistory, HumanShellHistoryStore, TerminalHistoryOwner, TerminalHistorySeed,
+};
+pub use terminal::registry::{
+    TerminalEnsureRequest, TerminalOwner, TerminalRecord, TerminalRegistry, TerminalState,
+};
+pub use terminal::repository::{
+    InMemoryTerminalRepository, StoredTerminalRecord, TerminalRepository, TerminalReservation,
+    terminal_slot_key, validate_terminal_replacement, validate_terminal_reservation,
+};
+pub use terminal::shell::{
+    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, HostStartupPolicy,
+    IntegrationBatch, ShellExit, ShellIntegrationEvent, ShellIntegrationHealth,
+    ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState,
+};
 
 #[doc(hidden)]
 pub use platform::launcher_main;
@@ -48,4 +73,16 @@ pub fn process_platform_diagnostics(
     launcher_path: impl AsRef<std::path::Path>,
 ) -> ProcessPlatformDiagnostics {
     platform::diagnostics(launcher_path.as_ref())
+}
+
+#[doc(hidden)]
+pub fn verify_process_launcher_identity(launcher_path: impl AsRef<std::path::Path>) -> Result<()> {
+    platform::verify_launcher_binary_identity(launcher_path.as_ref())
+}
+
+/// Returns the existing canonical Linux runtime roots admitted by the
+/// workspace sandbox. Aliases such as `/bin` and `/usr/bin` are deduplicated
+/// by filesystem identity after canonicalization.
+pub fn process_standard_runtime_roots() -> Result<Vec<std::path::PathBuf>> {
+    platform::standard_runtime_roots()
 }

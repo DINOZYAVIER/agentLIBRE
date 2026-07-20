@@ -2,7 +2,6 @@ use std::ffi::c_void;
 use std::ptr;
 
 use agl_config::InferenceRuntimeConfig;
-use agl_oven::RenderedModelRequest;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::super::{
@@ -10,7 +9,7 @@ use super::super::{
     generation::{LlamaCppGenerationControl, LlamaCppGenerationOutput},
     model::LlamaCppModel,
 };
-use super::{LlamaCppContextSlot, decode::*, native::*, prompt::*};
+use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, decode::*, native::*, prompt::*};
 use crate::InferenceFinishReason;
 
 const AGL_LLAMA_MTP_OK: i32 = 0;
@@ -19,24 +18,15 @@ impl LlamaCppContextSlot {
     pub(super) fn generate_with_mtp(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
+        request: LlamaCppGenerationRequest<'_>,
         prepared: PreparedPrompt,
-        max_output_tokens: u32,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
         let Some(mut mtp) = self.mtp.take() else {
             bail!("llama.cpp MTP state is missing");
         };
-        let result = self.generate_with_mtp_state(
-            model,
-            rendered,
-            prepared,
-            max_output_tokens,
-            control,
-            log,
-            &mut mtp,
-        );
+        let result = self.generate_with_mtp_state(model, request, prepared, control, log, &mut mtp);
         self.mtp = Some(mtp);
         result
     }
@@ -45,9 +35,8 @@ impl LlamaCppContextSlot {
     pub(super) fn generate_with_mtp_state(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
+        request: LlamaCppGenerationRequest<'_>,
         prepared: PreparedPrompt,
-        max_output_tokens: u32,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
         mtp: &mut MtpState,
@@ -58,6 +47,7 @@ impl LlamaCppContextSlot {
             history: prompt_history,
         } = prepared;
         let input_tokens = u64::try_from(prompt_tokens.len()).unwrap_or(u64::MAX);
+        let mut output = request.classifier();
         log.push_str("mtp_generation_mode = draft-mtp\n");
         log.push_str("mtp_sequence_mode = seq0-temporary\n");
 
@@ -110,22 +100,20 @@ impl LlamaCppContextSlot {
         mtp.begin(&self.cache.token_history)
             .context("failed to begin MTP speculation")?;
 
-        let mut content = String::new();
-        let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         let mut emitted = 0_u32;
         let mut pending_needs_flush = false;
         let mut stopped_on_eog = false;
         let mut tool_call_completed = false;
 
-        while emitted < max_output_tokens {
+        while emitted < request.max_output_tokens {
             control.ensure_running()?;
             if context_remaining(self.context.as_ptr()) < 2 {
                 finish_reason = InferenceFinishReason::Length;
                 break;
             }
 
-            let remaining_output = max_output_tokens - emitted;
+            let remaining_output = request.max_output_tokens - emitted;
             let can_use_draft = remaining_output
                 > u32::try_from(mtp.draft_tokens).context("MTP draft token count exceeds u32")?
                 && context_remaining(self.context.as_ptr())
@@ -182,24 +170,22 @@ impl LlamaCppContextSlot {
                     break;
                 }
 
-                let piece = token_to_piece(model.vocab(), id_last)?;
-                decoded_content.push_str(&piece);
+                let piece = token_to_piece_bytes(model.vocab(), id_last)?;
                 emitted += 1;
+                let action = output.push(&piece);
                 if tool_call_completed {
                     continue;
                 }
-                content.push_str(&piece);
-                strip_generated_assistant_prefix(&mut content);
-                if isolated_tool_call(&content).is_some() {
+                if action {
                     finish_reason = InferenceFinishReason::Stop;
                     tool_call_completed = true;
                     continue;
                 }
-                if trim_generated_continuation(&mut content) {
+                if output.stopped_on_continuation() {
                     finish_reason = InferenceFinishReason::Stop;
                     break;
                 }
-                if emitted >= max_output_tokens {
+                if emitted >= request.max_output_tokens {
                     finish_reason = InferenceFinishReason::Length;
                     break;
                 }
@@ -222,16 +208,18 @@ impl LlamaCppContextSlot {
 
         mtp.write_stats_log(log);
 
+        let response = output.finish();
+
         self.record_generated_assistant(
-            rendered,
+            request.rendered,
             prompt_messages,
             prompt_history,
-            &decoded_content,
-            &content,
+            &response.decoded_content,
+            &response.content,
         )?;
 
         Ok(LlamaCppGenerationOutput {
-            content,
+            content: response.content,
             finish_reason,
             input_tokens,
             output_tokens: u64::from(emitted),

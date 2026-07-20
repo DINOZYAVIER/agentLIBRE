@@ -1,14 +1,17 @@
+use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
 use agl_capabilities::ToolAccessMode;
-use agl_ids::{ExecutionId, SessionId};
-use agl_process::{ExecutionProfile, KillMode};
+use agl_ids::{ExecutionId, SessionId, TerminalSessionId};
+use agl_process::KillMode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{ApplicationError, ApplicationErrorCode};
 
 pub const MAX_COMMAND_DESCRIPTORS: usize = 256;
 pub const MAX_COMMAND_ARGUMENTS: usize = 64;
+pub const MAX_ACTION_STRING_BYTES: usize = 8 * 1024;
+pub const MAX_SELECTED_SKILLS: usize = 128;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CommandId(String);
@@ -100,6 +103,8 @@ pub struct CommandArgumentDescriptor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationActionKind {
+    ClientHelp,
+    ClientDisconnect,
     SessionNew,
     SessionResume,
     SessionStatus,
@@ -108,8 +113,8 @@ pub enum ApplicationActionKind {
     SkillsSelect,
     WorkspaceGet,
     WorkspaceSet,
-    WorkingDirectoryGet,
-    WorkingDirectorySet,
+    TerminalList,
+    TerminalPromote,
     ExecutionList,
     ExecutionAttach,
     ExecutionKill,
@@ -159,6 +164,51 @@ pub struct CommandCatalog {
     pub descriptors: Vec<CommandDescriptor>,
 }
 
+impl CommandCatalog {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.descriptors.len() > MAX_COMMAND_DESCRIPTORS {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "command catalog exceeds its descriptor bound",
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        for descriptor in &self.descriptors {
+            if descriptor.arguments.len() > MAX_COMMAND_ARGUMENTS
+                || descriptor.name.is_empty()
+                || descriptor.name.len() > 128
+                || !descriptor
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || !ids.insert(descriptor.id.as_str())
+                || !names.insert(descriptor.name.as_str())
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "command descriptors must be bounded with unique IDs and names",
+                ));
+            }
+            for alias in &descriptor.aliases {
+                if alias.is_empty()
+                    || alias.len() > 128
+                    || !alias.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+                    || !names.insert(alias.as_str())
+                {
+                    return Err(ApplicationError::new(
+                        ApplicationErrorCode::InvalidArguments,
+                        "command aliases must be bounded and globally unique",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandContext {
@@ -193,6 +243,27 @@ pub struct SessionLaunchOptions {
     pub skill_ids: Vec<String>,
 }
 
+impl SessionLaunchOptions {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.skill_ids.len() > MAX_SELECTED_SKILLS {
+            return invalid_action("session launch contains too many selected skills");
+        }
+        for (label, value) in [
+            ("workspace root", self.workspace_root.as_deref()),
+            ("function reference", self.function_ref.as_deref()),
+            ("model ID", self.model_id.as_deref()),
+        ] {
+            if let Some(value) = value {
+                validate_action_text(value, label)?;
+            }
+        }
+        for skill_id in &self.skill_ids {
+            validate_action_text(skill_id, "skill ID")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionSelector {
@@ -222,11 +293,13 @@ pub enum ApplicationAction {
     WorkspaceGet,
     WorkspaceSet {
         path: String,
+        confirm_terminate_terminals: bool,
     },
-    WorkingDirectoryGet,
-    WorkingDirectorySet {
-        path: String,
-        profile: ExecutionProfile,
+    TerminalList {
+        include_finished: bool,
+    },
+    TerminalPromote {
+        terminal_id: TerminalSessionId,
     },
     ExecutionList {
         include_finished: bool,
@@ -252,6 +325,59 @@ pub struct ApplicationActionRequest {
     pub session_id: Option<SessionId>,
     pub client_submission_id: String,
     pub action: ApplicationAction,
+}
+
+impl ApplicationActionRequest {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        validate_action_text(&self.client_submission_id, "client submission ID")?;
+        match &self.action {
+            ApplicationAction::SessionNew { launch } => launch.validate()?,
+            ApplicationAction::ModelSelect { model_id } => {
+                validate_action_text(model_id, "model ID")?
+            }
+            ApplicationAction::SkillsSelect { skill_ids } => {
+                if skill_ids.len() > MAX_SELECTED_SKILLS {
+                    return invalid_action("action contains too many selected skills");
+                }
+                for skill_id in skill_ids {
+                    validate_action_text(skill_id, "skill ID")?;
+                }
+            }
+            ApplicationAction::WorkspaceSet { path, .. } => {
+                validate_action_text(path, "workspace path")?
+            }
+            ApplicationAction::SessionResume { .. }
+            | ApplicationAction::SessionStatus
+            | ApplicationAction::OperationModeSelect { .. }
+            | ApplicationAction::WorkspaceGet
+            | ApplicationAction::TerminalList { .. }
+            | ApplicationAction::TerminalPromote { .. }
+            | ApplicationAction::ExecutionList { .. }
+            | ApplicationAction::ExecutionAttach { .. }
+            | ApplicationAction::ExecutionKill { .. }
+            | ApplicationAction::RuntimeContextReload
+            | ApplicationAction::SessionClear
+            | ApplicationAction::SessionExit { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+fn validate_action_text(value: &str, label: &str) -> Result<(), ApplicationError> {
+    if value.is_empty()
+        || value.len() > MAX_ACTION_STRING_BYTES
+        || value.contains(['\0', '\n', '\r'])
+    {
+        return invalid_action(format!("{label} must be nonempty bounded single-line text"));
+    }
+    Ok(())
+}
+
+fn invalid_action<T>(message: impl Into<String>) -> Result<T, ApplicationError> {
+    Err(ApplicationError::new(
+        ApplicationErrorCode::InvalidArguments,
+        message,
+    ))
 }
 
 fn argument(
@@ -321,6 +447,23 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
     };
     let mut descriptors = vec![
         descriptor(
+            "client.help",
+            "help",
+            "Search available commands",
+            CommandCategory::Client,
+            vec![argument(
+                "filter",
+                "filter",
+                CommandArgumentKind::String,
+                false,
+                false,
+                None,
+            )],
+            ApplicationActionKind::ClientHelp,
+            CommandConcurrency::SurfaceLocal,
+            CommandAvailability::Enabled,
+        ),
+        descriptor(
             "session.status",
             "status",
             "Show session status",
@@ -338,11 +481,7 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
             vec![],
             ApplicationActionKind::SessionNew,
             CommandConcurrency::TurnBoundaryMutation,
-            if context.active_or_queued_turns == 0 {
-                CommandAvailability::Enabled
-            } else {
-                turn_boundary()
-            },
+            CommandAvailability::Enabled,
         ),
         descriptor(
             "session.resume",
@@ -359,11 +498,7 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
             )],
             ApplicationActionKind::SessionResume,
             CommandConcurrency::TurnBoundaryMutation,
-            if context.active_or_queued_turns == 0 {
-                CommandAvailability::Enabled
-            } else {
-                turn_boundary()
-            },
+            CommandAvailability::Enabled,
         ),
         descriptor(
             "model.select",
@@ -430,43 +565,6 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
                 Some("paths"),
             )],
             ApplicationActionKind::WorkspaceSet,
-            CommandConcurrency::TurnBoundaryMutation,
-            turn_boundary(),
-        ),
-        descriptor(
-            "execution.cwd.get",
-            "pwd",
-            "Show logical working directory",
-            CommandCategory::Workspace,
-            vec![],
-            ApplicationActionKind::WorkingDirectoryGet,
-            CommandConcurrency::ReadOnly,
-            requires_session(),
-        ),
-        descriptor(
-            "execution.cwd.set",
-            "cd",
-            "Change logical working directory",
-            CommandCategory::Workspace,
-            vec![
-                argument(
-                    "host",
-                    "host profile",
-                    CommandArgumentKind::Boolean,
-                    false,
-                    false,
-                    None,
-                ),
-                argument(
-                    "path",
-                    "path",
-                    CommandArgumentKind::Path,
-                    true,
-                    false,
-                    Some("paths"),
-                ),
-            ],
-            ApplicationActionKind::WorkingDirectorySet,
             CommandConcurrency::TurnBoundaryMutation,
             turn_boundary(),
         ),
@@ -570,6 +668,16 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
             ApplicationActionKind::SessionExit,
             CommandConcurrency::SessionDestructive,
             requires_session(),
+        ),
+        descriptor(
+            "client.disconnect",
+            "disconnect",
+            "Disconnect this client without finishing the session",
+            CommandCategory::Client,
+            vec![],
+            ApplicationActionKind::ClientDisconnect,
+            CommandConcurrency::SurfaceLocal,
+            CommandAvailability::Enabled,
         ),
     ];
     descriptors.sort_by(|left, right| left.id.cmp(&right.id));

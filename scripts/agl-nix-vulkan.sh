@@ -75,7 +75,11 @@ diagnose() {
 
 build_local() {
   "$repo_root/scripts/build-llama-cpp.sh"
-  cargo build -p agl-cli
+  cargo build \
+    -p agl-cli \
+    -p agl-process \
+    --bin agl \
+    --bin agl-process-launcher
 }
 
 smoke_tools() {

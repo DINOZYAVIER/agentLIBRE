@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use agl_capabilities::{
@@ -20,8 +21,8 @@ use agl_functions::{
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    InferenceCancellation, InferenceRequest, InferenceResponse, LlamaCppDeviceKind,
-    llama_cpp_device_inventory,
+    InferenceCancellation, InferenceOutputSink, InferenceRequest, InferenceResponse,
+    LlamaCppDeviceKind, llama_cpp_device_inventory,
 };
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_models::{
@@ -109,6 +110,7 @@ pub(crate) struct SubagentSessionConfig {
 pub(crate) struct InferenceExecutionControl {
     pub cancellation: InferenceCancellation,
     pub deadline: Option<Instant>,
+    pub output_sink: Arc<dyn InferenceOutputSink>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -714,13 +716,96 @@ impl InferenceSession {
             request,
             cancellation: control.cancellation,
             deadline: control.deadline,
+            output_sink: control.output_sink,
         })
+    }
+
+    pub(crate) fn session_id(&self) -> &SessionId {
+        &self.session_id
     }
 
     pub fn clear_context(&self) -> Result<()> {
         self.inference_client
             .clear_context(&self.inference_config, &self.session_id)
             .context("failed to clear managed inference context")
+    }
+
+    pub(crate) fn selected_model_id(&self) -> Option<String> {
+        let bindings_path = agl_config::model_bindings_path(&self.config_dir);
+        agl_config::load_model_bindings_or_empty(bindings_path)
+            .ok()?
+            .models
+            .into_iter()
+            .find(|(_, binding)| binding.path == self.inference_config.backend.model)
+            .map(|(id, _)| id.to_string())
+    }
+
+    pub(crate) fn current_model_path(&self) -> PathBuf {
+        self.inference_config.backend.model.clone()
+    }
+
+    pub(crate) fn function_ref(&self) -> Option<String> {
+        self.function_ref.clone()
+    }
+
+    pub(crate) fn context_limit_tokens(&self) -> u32 {
+        self.inference_config.runtime.context_tokens
+    }
+
+    pub(crate) fn select_model(&mut self, model_id: &str, model_path: PathBuf) -> Result<()> {
+        ensure!(
+            model_path.is_file(),
+            "selected model is not an installed file"
+        );
+        let parsed_id = agl_config::ModelId::new(model_id.to_owned())?;
+        let bindings_path = agl_config::model_bindings_path(&self.config_dir);
+        let bindings = agl_config::load_model_bindings_or_empty(&bindings_path)?;
+        let binding = bindings
+            .models
+            .get(&parsed_id)
+            .with_context(|| format!("model `{model_id}` is not installed"))?;
+        ensure!(
+            binding.path == model_path,
+            "selected model path differs from its installed binding"
+        );
+        let mut next = self.inference_config.clone();
+        next.backend.model = model_path;
+        next.backend.multimodal_projector = None;
+        next.runtime.mtp.enabled = false;
+        next.runtime.mtp.draft_model = None;
+        next.validate()?;
+        self.inference_client
+            .release_context(&self.inference_config, &self.session_id)
+            .context("failed to release the previous model context")?;
+        self.inference_config = next;
+        Ok(())
+    }
+
+    pub(crate) fn select_operation_mode(&mut self, mode: ToolAccessMode) -> Result<()> {
+        let previous = self.tool_mode;
+        self.tool_mode = mode;
+        if let Err(error) = self.refresh_runtime_context(None) {
+            self.tool_mode = previous;
+            self.refresh_runtime_context(None)
+                .context("failed to restore runtime context after mode rejection")?;
+            return Err(error).context("selected operation mode is not admitted");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn select_skills(&mut self, skill_ids: Vec<String>) -> Result<()> {
+        let previous = std::mem::replace(&mut self.option_skills, skill_ids);
+        if let Err(error) = self.refresh_runtime_context(None) {
+            self.option_skills = previous;
+            self.refresh_runtime_context(None)
+                .context("failed to restore runtime context after skill rejection")?;
+            return Err(error).context("selected skills are not admitted");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn selected_skill_ids(&self) -> Vec<String> {
+        self.option_skills.clone()
     }
 
     pub fn release_context(&self) -> Result<()> {

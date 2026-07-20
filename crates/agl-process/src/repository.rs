@@ -234,6 +234,27 @@ impl InMemoryExecutionRepository {
     }
 
     #[cfg(test)]
+    pub(crate) fn admitted_request(&self, execution_id: &ExecutionId) -> Result<ExecutionRequest> {
+        self.inner
+            .lock()
+            .map_err(|_| {
+                ProcessError::new(
+                    ProcessErrorCode::Internal,
+                    "in-memory execution repository lock is poisoned",
+                )
+            })?
+            .records
+            .get(execution_id)
+            .map(|record| record.request.clone())
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::ExecutionNotFound,
+                    format!("execution `{execution_id}` was not found"),
+                )
+            })
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_next_output_after_commit(&self) {
         self.fail_output_after_commit
             .store(true, std::sync::atomic::Ordering::Release);

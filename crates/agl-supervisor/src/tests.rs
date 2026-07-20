@@ -410,6 +410,10 @@ fn subscriber_replays_without_gap_and_overflow_does_not_block_run() {
     wait_for_event_count(&handle, &draft.run_id, 1);
     let subscription = handle.subscribe(draft.run_id.clone(), 0).unwrap();
     assert_eq!(subscription.backlog.len(), 1);
+    assert_eq!(
+        subscription.recv_timeout(Duration::from_millis(1)).unwrap(),
+        RunSubscriptionPoll::Pending
+    );
     behavior.blocked.store(false, Ordering::Release);
     wait_for_state(&handle, &draft.run_id, RunState::Succeeded);
 
@@ -439,12 +443,14 @@ fn fast_options() -> SupervisorOptions {
 }
 
 fn turn_draft() -> DurableRunDraft {
+    let session_id = SessionId::generate();
     DurableRunDraft {
         run_id: RunId::generate(),
-        session_id: Some(SessionId::generate()),
+        session_id: Some(session_id.clone()),
         turn_id: Some(TurnId::generate()),
         kind: RunKind::Turn,
         priority: 0,
+        concurrency_key: Some(agl_store::RunConcurrencyKey::session(&session_id).unwrap()),
         input: json!({"text": "test"}),
         checkpoint: None,
         effective_policy_hash: None,

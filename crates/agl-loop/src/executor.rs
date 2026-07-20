@@ -4,6 +4,7 @@ use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_capabilities::{DispatchDenialCode, HookBatchRequest, HookBatchResult, HookEvent};
 use agl_content::Content;
 use agl_events::{EventDraft, EventScope, RuntimeEvent};
+use agl_ids::MessageId;
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,
@@ -168,19 +169,24 @@ enum ExecutorPhase {
     ModelResponseHook {
         request_index: usize,
         content: Content,
+        provisional_message_id: MessageId,
     },
     ParseModelResponse {
         content: Content,
+        provisional_message_id: MessageId,
     },
     ArtifactWriteHook {
         answer: String,
+        provisional_message_id: MessageId,
     },
     TurnFinishHook {
         answer: String,
+        provisional_message_id: MessageId,
     },
     ScheduleTranscript {
         output: TurnOutput,
         messages: Vec<TurnMessage>,
+        assistant_message_id: Option<MessageId>,
     },
     Terminal,
 }
@@ -232,12 +238,15 @@ enum HookContinuation {
     ModelResponse {
         request_index: usize,
         content: Content,
+        provisional_message_id: MessageId,
     },
     ArtifactWrite {
         answer: String,
+        provisional_message_id: MessageId,
     },
     TurnFinish {
         answer: String,
+        provisional_message_id: MessageId,
     },
 }
 
@@ -434,7 +443,11 @@ impl TurnExecutor {
                         visible_tools: self.checkpoint.state.input.visible_tools.clone(),
                     };
                     self.set_pending(
-                        |key| TurnEffect::ModelGeneration { key, request },
+                        |key| TurnEffect::ModelGeneration {
+                            key,
+                            provisional_message_id: MessageId::generate(),
+                            request,
+                        },
                         EffectContinuation::Model { request_index },
                     )?;
                     return Ok(());
@@ -442,6 +455,7 @@ impl TurnExecutor {
                 ExecutorPhase::ModelResponseHook {
                     request_index,
                     content,
+                    provisional_message_id,
                 } => {
                     let payload = model_response_payload(
                         &self.checkpoint.state,
@@ -454,54 +468,77 @@ impl TurnExecutor {
                         HookContinuation::ModelResponse {
                             request_index,
                             content: content.clone(),
+                            provisional_message_id: provisional_message_id.clone(),
                         },
                         events,
                     )? {
                         return Ok(());
                     }
-                    self.checkpoint.phase = ExecutorPhase::ParseModelResponse { content };
+                    self.checkpoint.phase = ExecutorPhase::ParseModelResponse {
+                        content,
+                        provisional_message_id,
+                    };
                 }
-                ExecutorPhase::ParseModelResponse { content } => {
-                    self.parse_model_response(content, events)?;
+                ExecutorPhase::ParseModelResponse {
+                    content,
+                    provisional_message_id,
+                } => {
+                    self.parse_model_response(content, provisional_message_id, events)?;
                     if self.checkpoint.pending.is_some() || self.checkpoint.terminal.is_some() {
                         return Ok(());
                     }
                 }
-                ExecutorPhase::ArtifactWriteHook { answer } => {
+                ExecutorPhase::ArtifactWriteHook {
+                    answer,
+                    provisional_message_id,
+                } => {
                     let payload = artifact_write_payload(&self.checkpoint.state, &answer);
                     if self.schedule_hook(
                         HookEvent::ArtifactWrite,
                         payload,
                         HookContinuation::ArtifactWrite {
                             answer: answer.clone(),
+                            provisional_message_id: provisional_message_id.clone(),
                         },
                         events,
                     )? {
                         return Ok(());
                     }
-                    self.checkpoint.phase = ExecutorPhase::TurnFinishHook { answer };
+                    self.checkpoint.phase = ExecutorPhase::TurnFinishHook {
+                        answer,
+                        provisional_message_id,
+                    };
                 }
-                ExecutorPhase::TurnFinishHook { answer } => {
+                ExecutorPhase::TurnFinishHook {
+                    answer,
+                    provisional_message_id,
+                } => {
                     let payload = turn_finish_payload(&self.checkpoint.state, answer.len());
                     if self.schedule_hook(
                         HookEvent::TurnFinish,
                         payload,
                         HookContinuation::TurnFinish {
                             answer: answer.clone(),
+                            provisional_message_id: provisional_message_id.clone(),
                         },
                         events,
                     )? {
                         return Ok(());
                     }
-                    self.schedule_answer_transcript(answer)?;
+                    self.schedule_answer_transcript(answer, provisional_message_id)?;
                 }
-                ExecutorPhase::ScheduleTranscript { output, messages } => {
+                ExecutorPhase::ScheduleTranscript {
+                    output,
+                    messages,
+                    assistant_message_id,
+                } => {
                     let continuation = EffectContinuation::Transcript {
                         output: output.clone(),
                     };
                     self.set_pending(
                         |key| TurnEffect::TranscriptAppend {
                             key,
+                            assistant_message_id,
                             messages,
                             output,
                         },
@@ -522,6 +559,13 @@ impl TurnExecutor {
         result: TurnEffectResult,
         events: &mut Vec<EventDraft<RuntimeEvent>>,
     ) -> Result<(), TurnExecutorError> {
+        let provisional_message_id = match &pending.effect {
+            TurnEffect::ModelGeneration {
+                provisional_message_id,
+                ..
+            } => Some(provisional_message_id.clone()),
+            _ => None,
+        };
         match (pending.continuation, result) {
             (
                 EffectContinuation::Hook { batch, next },
@@ -532,6 +576,9 @@ impl TurnExecutor {
                 TurnEffectResult::ModelGeneration { outcome, .. },
             ) => match outcome {
                 EffectOutcome::Succeeded(response) => {
+                    let provisional_message_id = provisional_message_id.expect(
+                        "model continuation was validated against a model generation effect",
+                    );
                     self.checkpoint.state.request_index += 1;
                     self.apply(
                         TurnTransition::ReceiveModelResponse {
@@ -543,6 +590,7 @@ impl TurnExecutor {
                     self.checkpoint.phase = ExecutorPhase::ModelResponseHook {
                         request_index,
                         content: response.content,
+                        provisional_message_id,
                     };
                     Ok(())
                 }
@@ -698,10 +746,23 @@ impl TurnExecutor {
             HookContinuation::ModelResponse {
                 request_index: _,
                 content,
-            } => ExecutorPhase::ParseModelResponse { content },
-            HookContinuation::ArtifactWrite { answer } => ExecutorPhase::TurnFinishHook { answer },
-            HookContinuation::TurnFinish { answer } => {
-                self.schedule_answer_transcript(answer)?;
+                provisional_message_id,
+            } => ExecutorPhase::ParseModelResponse {
+                content,
+                provisional_message_id,
+            },
+            HookContinuation::ArtifactWrite {
+                answer,
+                provisional_message_id,
+            } => ExecutorPhase::TurnFinishHook {
+                answer,
+                provisional_message_id,
+            },
+            HookContinuation::TurnFinish {
+                answer,
+                provisional_message_id,
+            } => {
+                self.schedule_answer_transcript(answer, provisional_message_id)?;
                 return Ok(());
             }
         };
@@ -765,6 +826,7 @@ impl TurnExecutor {
     fn parse_model_response(
         &mut self,
         content: Content,
+        provisional_message_id: MessageId,
         events: &mut Vec<EventDraft<RuntimeEvent>>,
     ) -> Result<(), TurnExecutorError> {
         let text = content.text_only().ok_or_else(|| {
@@ -781,7 +843,10 @@ impl TurnExecutor {
                     },
                     events,
                 )?;
-                self.checkpoint.phase = ExecutorPhase::ArtifactWriteHook { answer };
+                self.checkpoint.phase = ExecutorPhase::ArtifactWriteHook {
+                    answer,
+                    provisional_message_id,
+                };
             }
             ModelAction::ToolCall(tool_call) => self.handle_tool_call(tool_call, events)?,
             ModelAction::MalformedToolCall(malformed) => {
@@ -913,7 +978,11 @@ impl TurnExecutor {
         Ok(true)
     }
 
-    fn schedule_answer_transcript(&mut self, answer: String) -> Result<(), TurnExecutorError> {
+    fn schedule_answer_transcript(
+        &mut self,
+        answer: String,
+        provisional_message_id: MessageId,
+    ) -> Result<(), TurnExecutorError> {
         let mut messages = self.checkpoint.state.messages.clone();
         messages.push(TurnMessage::Assistant {
             content: Content::text(answer.clone())
@@ -922,6 +991,7 @@ impl TurnExecutor {
         self.checkpoint.phase = ExecutorPhase::ScheduleTranscript {
             output: TurnOutput::Answered { answer },
             messages,
+            assistant_message_id: Some(provisional_message_id),
         };
         Ok(())
     }
@@ -942,6 +1012,7 @@ impl TurnExecutor {
         self.checkpoint.phase = ExecutorPhase::ScheduleTranscript {
             output: TurnOutput::Stopped { reason, detail },
             messages: self.checkpoint.state.messages.clone(),
+            assistant_message_id: None,
         };
         Ok(())
     }

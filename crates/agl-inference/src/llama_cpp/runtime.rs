@@ -12,7 +12,7 @@ use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::context_slot::LlamaCppContextSlot;
+use super::context_slot::{LlamaCppContextSlot, LlamaCppGenerationRequest};
 use super::ffi;
 use super::generation::LlamaCppGenerationControl;
 use super::model::LlamaCppModel;
@@ -201,17 +201,25 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 )?;
                 context.generate_vision(
                     model,
-                    &prepared.rendered,
+                    LlamaCppGenerationRequest::new(
+                        &prepared.rendered,
+                        job.max_output_tokens(),
+                        &job.request().attempt_id,
+                        job.output_sink(),
+                    ),
                     &prepared.images,
-                    job.max_output_tokens(),
                     &control,
                     log,
                 )?
             } else {
                 context.generate(
                     model,
-                    &job.request().rendered,
-                    job.max_output_tokens(),
+                    LlamaCppGenerationRequest::new(
+                        &job.request().rendered,
+                        job.max_output_tokens(),
+                        &job.request().attempt_id,
+                        job.output_sink(),
+                    ),
                     &control,
                     log,
                 )?
