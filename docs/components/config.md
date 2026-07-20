@@ -80,7 +80,7 @@ finished_retention_seconds = 604800
 runtime_read_only_roots = ["/opt/project-runtime"]
 
 [execution.shell]
-program = "/bin/sh"
+program = "bash"
 command_args = ["-c"]
 login_command_args = ["-l", "-c"]
 
@@ -96,3 +96,24 @@ target and digest, exact argument vectors, and the matched environment-name
 allowlist. Resumed sessions therefore ignore names added to a later runtime
 config, while current values for already admitted names remain private and are
 never emitted in normal status/events. See [Processes](processes.md).
+
+For one-shot executions, `max_input_bytes` is a lifetime ceiling. For a
+persistent managed terminal it is both the maximum size of one write and the
+maximum pending input queue; successfully drained writes do not consume a
+terminal-lifetime budget. The private spool ceiling remains cumulative, so a
+terminal that produces unbounded output is still terminated safely.
+
+Persistent workspace shells inherit only the configured admitted environment
+names plus an explicit creation-time structured overlay. Values such as
+`CLAUDE_*` may be supplied as ordinary terminal-private variables when their
+names and sizes pass validation. Shell `export`/`unset` then affects only that
+PTY and its children; it is never copied back into Chat, another terminal, or
+an agent. Reserved `AGL_SHELL_INTEGRATION_*`/`AGL_TERMINAL_*` names and shell
+hook variables are rejected.
+
+Secret references are distinct from ordinary overlay values. The default
+runtime has no secret backend and rejects them. An admitted resolver can hand a
+resolved value to the Linux launcher through a sealed anonymous descriptor
+after durable execution admission; the value is not added to the protocol DTO,
+`ExecutionRequest`, execution repository, terminal fingerprint, logs, or debug
+formatting. Only the explicitly authorized child environment receives it.
