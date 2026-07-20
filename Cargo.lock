@@ -54,10 +54,12 @@ name = "agl-app"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-capabilities",
+ "agl-chat",
  "agl-content",
  "agl-ids",
  "agl-process",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -219,6 +221,7 @@ dependencies = [
  "agl-protocol",
  "agl-runtime",
  "agl-session",
+ "agl-skills",
  "agl-store",
  "agl-supervisor",
  "anyhow",
@@ -436,8 +439,10 @@ dependencies = [
  "agl-events",
  "agl-ids",
  "agl-process",
+ "base64",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]

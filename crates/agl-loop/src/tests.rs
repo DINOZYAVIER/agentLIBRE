@@ -237,6 +237,39 @@ fn answer_path_is_effect_driven_and_checkpoint_equivalent() {
 }
 
 #[test]
+fn pending_provisional_message_id_survives_checkpoint_retry() {
+    let mut executor = TurnExecutor::new(input());
+    let first = executor.next_effect().unwrap();
+    let TurnAdvanceState::Pending {
+        effect:
+            TurnEffect::ModelGeneration {
+                provisional_message_id: first_message_id,
+                ..
+            },
+    } = first.state
+    else {
+        panic!("first turn effect was not model generation");
+    };
+
+    let bytes = serde_json::to_vec(&executor.checkpoint()).unwrap();
+    let checkpoint: TurnCheckpoint = serde_json::from_slice(&bytes).unwrap();
+    let mut resumed = TurnExecutor::from_checkpoint(checkpoint).unwrap();
+    let retry = resumed.next_effect().unwrap();
+    let TurnAdvanceState::Pending {
+        effect:
+            TurnEffect::ModelGeneration {
+                provisional_message_id: retry_message_id,
+                ..
+            },
+    } = retry.state
+    else {
+        panic!("resumed turn effect was not model generation");
+    };
+
+    assert_eq!(retry_message_id, first_message_id);
+}
+
+#[test]
 fn tool_observation_loops_back_to_model_without_driver_policy() {
     let result = run_script(
         input()

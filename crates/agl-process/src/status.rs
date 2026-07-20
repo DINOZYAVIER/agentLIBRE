@@ -146,6 +146,22 @@ pub struct ExecutionReadResult {
     pub output_expired: bool,
 }
 
+/// Destructive bounded drain of the private managed-shell side channel. These
+/// bytes are never sourced from the PTY spool and must be passed only to the
+/// terminal registry's authenticated integration parser.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellIntegrationReadResult {
+    pub execution_id: ExecutionId,
+    pub bytes: ProcessBytes,
+    pub output_through_sequence: u64,
+    /// Kernel-observed foreground process group for the managed PTY. `None`
+    /// means the shell itself currently owns the foreground terminal.
+    pub foreground_process_group: Option<i32>,
+    pub channel_closed: bool,
+    pub degraded: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputLease {

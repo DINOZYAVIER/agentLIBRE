@@ -1,16 +1,20 @@
+mod chat_presentation;
 mod commands;
+mod history;
 mod projection;
 mod queue;
 mod service;
 mod suggestions;
-mod user_shell;
+mod terminals;
 
+pub use chat_presentation::*;
 pub use commands::*;
+pub use history::*;
 pub use projection::*;
 pub use queue::*;
 pub use service::*;
 pub use suggestions::*;
-pub use user_shell::*;
+pub use terminals::*;
 
 #[cfg(test)]
 mod tests;

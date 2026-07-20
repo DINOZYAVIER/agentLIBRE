@@ -4,11 +4,12 @@ use std::time::Instant;
 
 use agl_ids::{ExecutionId, RequestId, RunId};
 
+use crate::terminal::shell::ManagedShellStartup;
 use crate::{
     ExecutionCursor, ExecutionListFilter, ExecutionOwner, ExecutionPrivateCommand,
     ExecutionReadResult, ExecutionRepository, ExecutionRequest, ExecutionStatus, InputLease,
     KillMode, OutputSpool, ProcessBytes, ProcessError, ProcessErrorCode, ProcessSupervisorOptions,
-    Result, TerminalSize,
+    Result, ShellIntegrationReadResult, TerminalSize,
 };
 
 #[derive(Clone)]
@@ -48,6 +49,15 @@ impl ProcessHandle {
         _request: ExecutionRequest,
         _deadline: Option<Instant>,
         _cancelled: impl Fn() -> bool,
+    ) -> Result<ExecutionStatus> {
+        unsupported()
+    }
+
+    pub(crate) fn start_reserved_managed_terminal(
+        &self,
+        _execution_id: ExecutionId,
+        _request: ExecutionRequest,
+        _managed_startup: ManagedShellStartup,
     ) -> Result<ExecutionStatus> {
         unsupported()
     }
@@ -100,6 +110,23 @@ impl ProcessHandle {
         _cursor: ExecutionCursor,
         _maximum_bytes: usize,
     ) -> Result<ExecutionReadResult> {
+        unsupported()
+    }
+
+    pub fn read_shell_integration(
+        &self,
+        _execution_id: &ExecutionId,
+        _owner: &ExecutionOwner,
+        _maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
+        unsupported()
+    }
+
+    pub fn operator_read_shell_integration(
+        &self,
+        _execution_id: &ExecutionId,
+        _maximum_bytes: usize,
+    ) -> Result<ShellIntegrationReadResult> {
         unsupported()
     }
 
@@ -203,6 +230,27 @@ impl ProcessHandle {
         &self,
         _execution_id: &ExecutionId,
         _terminal_size: TerminalSize,
+    ) -> Result<()> {
+        unsupported()
+    }
+
+    pub fn interrupt_foreground(
+        &self,
+        _execution_id: &ExecutionId,
+        _owner: &ExecutionOwner,
+    ) -> Result<()> {
+        unsupported()
+    }
+
+    pub fn operator_interrupt_foreground(&self, _execution_id: &ExecutionId) -> Result<()> {
+        unsupported()
+    }
+
+    pub(crate) fn operator_handoff_managed_terminal(
+        &self,
+        _execution_id: &ExecutionId,
+        _owner: ExecutionOwner,
+        _interrupt_foreground: bool,
     ) -> Result<()> {
         unsupported()
     }

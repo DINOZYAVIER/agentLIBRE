@@ -1,18 +1,27 @@
 mod launcher;
 mod sandbox;
+mod shell_integration;
 mod wire;
+
+pub(crate) use sandbox::standard_runtime_roots;
+pub(crate) use shell_integration::{
+    create_shell_integration_reader, interrupt_terminal_foreground,
+    shell_integration_path_is_intact, terminal_foreground_process_group,
+};
 
 const SANDBOX_HOME: &str = "/.agl-private/home";
 const SANDBOX_TMP: &str = "/tmp";
 
-use std::fs::{self, OpenOptions};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek as _, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::terminal::environment::PrivateTerminalEnvironment;
 use crate::{ExecutionIo, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
 
 use super::{LauncherRequest, LauncherResponse};
@@ -28,11 +37,13 @@ pub(crate) struct LaunchedProcess {
 pub(crate) fn launch(
     launcher_path: &Path,
     request: &LauncherRequest,
+    private_environment: Option<PrivateTerminalEnvironment>,
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
     require_launcher(launcher_path)?;
     let cwd = open_working_directory(&request.request.cwd)?;
     let program = open_program(&request.request)?;
+    let private_environment = private_environment_transport(private_environment)?;
     let (parent_socket, child_socket) = wire::socket_pair()?;
     clear_close_on_exec(child_socket.as_raw_fd())?;
     let mut child = Command::new(launcher_path)
@@ -53,15 +64,17 @@ pub(crate) fn launch(
         })?;
     drop(child_socket);
 
-    if let Err(error) = wire::send_json_with_fds(
-        parent_socket.as_raw_fd(),
-        request,
-        &[cwd.as_raw_fd(), program.as_raw_fd()],
-    ) {
+    let mut descriptors = vec![cwd.as_raw_fd(), program.as_raw_fd()];
+    if let Some(private_environment) = &private_environment {
+        descriptors.push(private_environment.as_raw_fd());
+    }
+    if let Err(error) = wire::send_json_with_fds(parent_socket.as_raw_fd(), request, &descriptors) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(error);
     }
+    drop(descriptors);
+    drop(private_environment);
     if let Err(error) = wait_for_launcher_response(
         parent_socket.as_raw_fd(),
         Duration::from_millis(request.setup_timeout_ms),
@@ -137,6 +150,49 @@ pub(crate) fn launch(
         stderr,
         terminal,
     })
+}
+
+pub(super) fn private_environment_transport(
+    private_environment: Option<PrivateTerminalEnvironment>,
+) -> Result<Option<OwnedFd>> {
+    let Some(private_environment) = private_environment else {
+        return Ok(None);
+    };
+    if private_environment.is_empty() {
+        return Ok(None);
+    }
+
+    let descriptor = unsafe {
+        libc::memfd_create(
+            c"agl-private-terminal-environment".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if descriptor < 0 {
+        return Err(private_environment_transport_error(
+            "failed to create private terminal environment transport",
+        ));
+    }
+    let mut file = unsafe { File::from_raw_fd(descriptor) };
+    private_environment.write_launch_transport(&mut file)?;
+    drop(private_environment);
+    file.seek(SeekFrom::Start(0)).map_err(|_| {
+        private_environment_transport_error("failed to rewind private terminal environment")
+    })?;
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(private_environment_transport_error(
+            "failed to seal private terminal environment transport",
+        ));
+    }
+    Ok(Some(file.into()))
+}
+
+fn private_environment_transport_error(context: &str) -> ProcessError {
+    ProcessError::new(
+        ProcessErrorCode::LauncherProtocol,
+        format!("{context}: {}", std::io::Error::last_os_error()),
+    )
 }
 
 fn wait_for_launcher_response(

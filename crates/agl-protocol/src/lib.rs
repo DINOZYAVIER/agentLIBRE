@@ -14,7 +14,7 @@ pub use agl_process::{
     ExecutionPrivateCommand, ExecutionProfile, ExecutionReadResult, ExecutionState,
     ExecutionStatus, KillMode, ProcessBytes, ProcessBytesEncoding, TerminalSize,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v5alpha";
@@ -37,6 +37,23 @@ impl DaemonRequest {
             kind,
         }
     }
+
+    pub fn validate(&self) -> Result<(), SurfaceValidationError> {
+        if self.schema != REQUEST_SCHEMA {
+            return Err(SurfaceValidationError::new(
+                "daemon request schema does not match protocol v5alpha",
+            ));
+        }
+        self.kind.validate_surface()?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| SurfaceValidationError::new("daemon request is not encodable"))?;
+        if encoded.len() > MAX_JSONL_FRAME_BYTES {
+            return Err(SurfaceValidationError::new(
+                "daemon request exceeds the 1 MiB JSONL frame bound",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl<'de> Deserialize<'de> for DaemonRequest {
@@ -56,16 +73,23 @@ impl<'de> Deserialize<'de> for DaemonRequest {
         let wire = WireRequest::deserialize(deserializer)?;
         require_schema::<D::Error>(&wire.schema, REQUEST_SCHEMA)?;
         let kind = decode_tagged::<DaemonRequestKind, D::Error>(wire.kind, wire.payload)?;
-        Ok(Self {
+        let request = Self {
             schema: wire.schema,
             request_id: wire.request_id,
             kind,
-        })
+        };
+        request.validate().map_err(D::Error::custom)?;
+        Ok(request)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum DaemonRequestKind {
     Hello(HelloRequest),
     SessionOpen(SessionOpenRequest),
@@ -86,7 +110,8 @@ pub enum DaemonRequestKind {
     SessionPresentation(SessionPresentationRequest),
     SessionPresentationSubscribe(SessionPresentationSubscribeRequest),
     SubscriptionCancel(SubscriptionCancelRequest),
-    UserShellStart(UserShellStartRequest),
+    HumanTerminalEnsure(HumanTerminalEnsureRequest),
+    HumanHostTerminalEnsure(HumanHostTerminalEnsureRequest),
     ExecutionList(ExecutionListRequest),
     ExecutionStatus(ExecutionStatusRequest),
     ExecutionRead(ExecutionReadRequest),
@@ -118,6 +143,24 @@ impl DaemonEvent {
             kind,
         }
     }
+
+    pub fn validate(&self) -> Result<(), SurfaceValidationError> {
+        if self.schema != EVENT_SCHEMA {
+            return Err(SurfaceValidationError::new(
+                "daemon event schema does not match protocol v5alpha",
+            ));
+        }
+        validate_safe_metadata(&self.safe_metadata)?;
+        self.kind.validate_surface()?;
+        let encoded = serde_json::to_vec(self)
+            .map_err(|_| SurfaceValidationError::new("daemon event is not encodable"))?;
+        if encoded.len() > MAX_JSONL_FRAME_BYTES {
+            return Err(SurfaceValidationError::new(
+                "daemon event exceeds the 1 MiB JSONL frame bound",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl<'de> Deserialize<'de> for DaemonEvent {
@@ -140,12 +183,14 @@ impl<'de> Deserialize<'de> for DaemonEvent {
         let wire = WireEvent::deserialize(deserializer)?;
         require_schema::<D::Error>(&wire.schema, EVENT_SCHEMA)?;
         let kind = decode_tagged::<DaemonEventKind, D::Error>(wire.kind, wire.payload)?;
-        Ok(Self {
+        let event = Self {
             schema: wire.schema,
             request_id: wire.request_id,
             safe_metadata: wire.safe_metadata,
             kind,
-        })
+        };
+        event.validate().map_err(D::Error::custom)?;
+        Ok(event)
     }
 }
 
@@ -174,7 +219,12 @@ where
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum DaemonEventKind {
     Hello(HelloEvent),
     SessionOpened(SessionOpenedEvent),
@@ -192,12 +242,13 @@ pub enum DaemonEventKind {
     CommandCatalog(CommandCatalogEvent),
     CommandSuggestions(CommandSuggestionsEvent),
     ApplicationActionResult(ApplicationActionResultEvent),
-    SessionPresentation(SessionPresentationEvent),
-    SessionPresentationSubscriptionStarted(SessionPresentationSubscriptionStartedEvent),
+    SessionPresentationSnapshotManifest(SessionPresentationSnapshotManifestEvent),
+    SessionPresentationSnapshotChunk(SessionPresentationSnapshotChunkEvent),
+    SessionPresentationSnapshotFinished(SessionPresentationSnapshotFinishedEvent),
     SessionPresentationEvent(Box<SessionPresentationEventEnvelope>),
     SessionPresentationSubscriptionFinished(SessionPresentationSubscriptionFinishedEvent),
     SubscriptionCancelled(SubscriptionCancelledEvent),
-    UserShellAccepted(UserShellAcceptedEvent),
+    HumanTerminalEnsured(HumanTerminalEnsuredEvent),
     ExecutionList(ExecutionListEvent),
     ExecutionStatus(ExecutionStatusEvent),
     ExecutionRead(ExecutionReadEvent),
@@ -254,7 +305,7 @@ pub enum DaemonCapability {
     CommandSuggestions,
     ApplicationActions,
     SessionPresentation,
-    UserShell,
+    HumanTerminal,
     AssistantDeltas,
 }
 
@@ -425,6 +476,7 @@ pub struct RunStatusEvent {
     pub turn_id: Option<TurnId>,
     pub run_kind: ProtocolRunKind,
     pub state: ProtocolRunState,
+    pub concurrency_key: Option<String>,
     pub usage: RunUsageEvent,
     pub cancellation_requested: bool,
     pub attempts: u32,
@@ -460,6 +512,7 @@ pub struct RunTreeNodeEvent {
     pub turn_id: Option<TurnId>,
     pub run_kind: ProtocolRunKind,
     pub state: ProtocolRunState,
+    pub concurrency_key: Option<String>,
     pub usage: RunUsageEvent,
     pub cancellation_requested: bool,
     pub attempts: u32,
@@ -845,6 +898,22 @@ pub enum ProtocolErrorCode {
     Busy,
     Unsupported,
     RuntimeFailure,
+    InvalidArguments,
+    CommandUnavailable,
+    SessionBusy,
+    NotAuthorized,
+    AuthorizationRequired,
+    ConfirmationRequired,
+    StaleContextRevision,
+    TerminalOwnerMismatch,
+    WriterLeaseBusy,
+    ModelNotInstalled,
+    ModelContextTooSmall,
+    SkillNotAdmitted,
+    InputBackpressure,
+    ResyncRequired,
+    OutcomeUnknown,
+    Internal,
 }
 
 #[cfg(test)]
@@ -990,6 +1059,7 @@ mod tests {
                     turn_id: None,
                     run_kind: ProtocolRunKind::Subagent,
                     state: ProtocolRunState::Failed,
+                    concurrency_key: None,
                     usage: RunUsageEvent::default(),
                     cancellation_requested: false,
                     attempts: 1,

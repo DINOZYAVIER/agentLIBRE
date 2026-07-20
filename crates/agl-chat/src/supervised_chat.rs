@@ -151,6 +151,7 @@ impl SupervisedChat {
                 turn_id: Some(turn_id.clone()),
                 kind: RunKind::Turn,
                 priority: 0,
+                concurrency_key: Some(agl_store::RunConcurrencyKey::session(&self.session_id)?),
                 input: serde_json::to_value(ChatRunInput::Root {
                     content: Content::text(input)?,
                     request_id: None,

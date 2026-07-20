@@ -76,6 +76,7 @@ fn sandbox_contract(harness: &Harness) {
         "sibling_write_denied",
         "runtime_read",
         "runtime_write_denied",
+        "dev_null_write",
         "network_denied",
     ] {
         assert_eq!(report[field], true, "sandbox probe failed field {field}");
@@ -419,6 +420,7 @@ fn executable_and_host_contract(harness: &Harness) {
     );
     request.authorization.host_process_execution = true;
     request.grant_lease = Some(ExecutionGrantLease {
+        origin: agl_process::ExecutionLeaseOrigin::CapabilityGrant,
         grant_id: "native-smoke-host-grant".to_owned(),
         duration: "one_turn".to_owned(),
         scope_digest: "sha256:native-smoke".to_owned(),

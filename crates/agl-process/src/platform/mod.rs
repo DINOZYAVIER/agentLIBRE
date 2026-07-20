@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -12,6 +14,8 @@ use agl_ids::ExecutionId;
 use serde::{Deserialize, Serialize};
 
 use crate::ProcessPlatformDiagnostics;
+#[cfg(target_os = "linux")]
+use crate::terminal::environment::PrivateTerminalEnvironment;
 #[cfg(target_os = "linux")]
 use crate::{ExecutionIo, ExecutionRequest, Result};
 
@@ -58,6 +62,7 @@ pub(crate) fn launch(
     execution_id: &ExecutionId,
     request: &ExecutionRequest,
     directories: &LaunchDirectories,
+    private_environment: Option<PrivateTerminalEnvironment>,
     setup_timeout: Duration,
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
@@ -69,7 +74,43 @@ pub(crate) fn launch(
         private_tmp: directories.private_tmp.clone(),
         setup_timeout_ms: u64::try_from(setup_timeout.as_millis()).unwrap_or(u64::MAX),
     };
-    linux::launch(launcher_path, &wire, cancelled)
+    linux::launch(launcher_path, &wire, private_environment, cancelled)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_shell_integration_reader(path: &Path) -> Result<OwnedFd> {
+    linux::create_shell_integration_reader(path)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shell_integration_path_is_intact(path: &Path, reader: &OwnedFd) -> bool {
+    linux::shell_integration_path_is_intact(path, reader)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
+    linux::interrupt_terminal_foreground(terminal)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn terminal_foreground_process_group(
+    terminal: &OwnedFd,
+    shell_process_group: i32,
+) -> Result<Option<i32>> {
+    linux::terminal_foreground_process_group(terminal, shell_process_group)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
+    linux::standard_runtime_roots()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn standard_runtime_roots() -> crate::Result<Vec<std::path::PathBuf>> {
+    Err(crate::ProcessError::new(
+        crate::ProcessErrorCode::PlatformUnsupported,
+        "standard process runtime roots are available only on Linux",
+    ))
 }
 
 pub fn diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {

@@ -24,6 +24,47 @@ const STANDARD_RUNTIME_ROOTS: &[&str] = &[
     "/run/current-system/sw",
 ];
 
+pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
+    let mut roots = BTreeSet::new();
+    for candidate in STANDARD_RUNTIME_ROOTS {
+        let candidate = Path::new(candidate);
+        match fs::metadata(candidate) {
+            Ok(metadata) => {
+                if !metadata.is_dir() {
+                    return Err(ProcessError::new(
+                        ProcessErrorCode::SandboxUnavailable,
+                        format!(
+                            "standard Linux runtime root {} is not a directory",
+                            candidate.display()
+                        ),
+                    ));
+                }
+                let canonical = candidate.canonicalize().map_err(|error| {
+                    sandbox_io(
+                        &format!(
+                            "standard Linux runtime root {} cannot be canonicalized",
+                            candidate.display()
+                        ),
+                        error,
+                    )
+                })?;
+                roots.insert(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(sandbox_io(
+                    &format!(
+                        "standard Linux runtime root {} cannot be inspected",
+                        candidate.display()
+                    ),
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(roots.into_iter().collect())
+}
+
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
 const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
@@ -226,7 +267,7 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
             bind_mount_at(
                 Path::new(source),
                 &root.join(source.trim_start_matches('/')),
-                true,
+                false,
             )?;
         }
     }
@@ -383,17 +424,19 @@ fn bind_mount_at(source: &Path, target: &Path, read_only: bool) -> Result<()> {
         None,
         "failed to bind an admitted sandbox path",
     )?;
-    set_mount_attributes(target, read_only)
+    set_mount_attributes(target, read_only, metadata.file_type().is_char_device())
 }
 
-fn set_mount_attributes(target: &Path, read_only: bool) -> Result<()> {
+fn set_mount_attributes(target: &Path, read_only: bool, permits_device: bool) -> Result<()> {
     let descriptor = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(target)
         .map_err(|error| sandbox_io("failed to open an admitted mount", error))?;
     let attributes = MountAttr {
-        attr_set: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | (u64::from(read_only) * MOUNT_ATTR_RDONLY),
+        attr_set: MOUNT_ATTR_NOSUID
+            | (u64::from(!permits_device) * MOUNT_ATTR_NODEV)
+            | (u64::from(read_only) * MOUNT_ATTR_RDONLY),
         ..MountAttr::default()
     };
     let empty = CString::new("").expect("empty C string");
@@ -1040,5 +1083,19 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_runtime_roots_are_existing_canonical_directories_without_alias_duplicates() {
+        let roots = standard_runtime_roots().unwrap();
+        assert!(!roots.is_empty());
+        assert!(roots.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(roots.iter().all(|root| {
+            root.is_absolute()
+                && root.is_dir()
+                && root
+                    .canonicalize()
+                    .is_ok_and(|canonical| canonical == *root)
+        }));
     }
 }

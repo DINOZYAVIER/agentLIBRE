@@ -1,6 +1,7 @@
 mod decode;
 mod mtp;
 mod native;
+mod output;
 mod prompt;
 
 #[cfg(test)]
@@ -10,8 +11,11 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use agl_config::{InferenceRuntimeConfig, ResolvedInferenceConfig};
+use agl_ids::AttemptId;
 use agl_oven::{RenderedMessage, RenderedModelRequest};
 use anyhow::{Context, Result, ensure};
+
+use crate::InferenceOutputSink;
 
 use super::ffi;
 use super::generation::{
@@ -20,6 +24,35 @@ use super::generation::{
 use super::model::LlamaCppModel;
 use mtp::MtpState;
 use native::{ContextHandle, Sampler, map_cache_type, map_flash_attention};
+use output::IncrementalResponseClassifier;
+
+#[derive(Clone, Copy)]
+pub(crate) struct LlamaCppGenerationRequest<'a> {
+    rendered: &'a RenderedModelRequest,
+    max_output_tokens: u32,
+    attempt_id: &'a AttemptId,
+    output_sink: &'a dyn InferenceOutputSink,
+}
+
+impl<'a> LlamaCppGenerationRequest<'a> {
+    pub(crate) fn new(
+        rendered: &'a RenderedModelRequest,
+        max_output_tokens: u32,
+        attempt_id: &'a AttemptId,
+        output_sink: &'a dyn InferenceOutputSink,
+    ) -> Self {
+        Self {
+            rendered,
+            max_output_tokens,
+            attempt_id,
+            output_sink,
+        }
+    }
+
+    fn classifier(self) -> IncrementalResponseClassifier<'a> {
+        IncrementalResponseClassifier::new(self.attempt_id.clone(), self.output_sink)
+    }
+}
 pub struct LlamaCppContextSlot {
     runtime: InferenceRuntimeConfig,
     // Declaration order keeps sampler/speculative/draft context ahead of the
@@ -160,15 +193,14 @@ impl LlamaCppContextSlot {
     pub(crate) fn generate(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
-        max_output_tokens: u32,
+        request: LlamaCppGenerationRequest<'_>,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
         control.ensure_running()?;
         let draft_context = self.mtp.as_ref().map(MtpState::draft_context_ptr);
         let abort_guard = control.install_abort_callback(self.context.as_ptr(), draft_context);
-        let result = self.generate_inner(model, rendered, max_output_tokens, control, log);
+        let result = self.generate_inner(model, request, control, log);
         drop(abort_guard);
 
         if control.should_abort() {
@@ -184,9 +216,8 @@ impl LlamaCppContextSlot {
     pub(crate) fn generate_vision(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
+        request: LlamaCppGenerationRequest<'_>,
         images: &[&[u8]],
-        max_output_tokens: u32,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
@@ -196,8 +227,7 @@ impl LlamaCppContextSlot {
             "llama.cpp vision cannot use speculative MTP"
         );
         let abort_guard = control.install_abort_callback(self.context.as_ptr(), None);
-        let result =
-            self.generate_vision_inner(model, rendered, images, max_output_tokens, control, log);
+        let result = self.generate_vision_inner(model, request, images, control, log);
         drop(abort_guard);
 
         self.cache.cache_matches_transcript = false;

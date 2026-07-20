@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_client::{AgentLibreClient, ExecutionAttachment, ExecutionAttachmentEvent};
+use agl_ids::ExecutionId;
 use agl_process::ProcessPlatformDiagnostics;
 use agl_protocol::{
-    ExecutionAttachRequest, ExecutionChannel, ExecutionIo, ExecutionKillRequest,
-    ExecutionListRequest, ExecutionOwner, ExecutionReadRequest, ExecutionStatus,
-    ExecutionStatusRequest, KillMode, PROTOCOL_VERSION, ProcessBytes,
+    ExecutionChannel, ExecutionIo, ExecutionKillRequest, ExecutionListRequest, ExecutionOwner,
+    ExecutionReadRequest, ExecutionStatus, ExecutionStatusRequest, KillMode, PROTOCOL_VERSION,
+    ProcessBytes,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail};
@@ -17,6 +18,7 @@ use crate::args::{
     ProcessAttachOptions, ProcessCommand, ProcessDoctorOptions, ProcessKillOptions,
     ProcessListOptions, ProcessReadOptions, ProcessStatusOptions,
 };
+use crate::tui::terminal_filter::TerminalOutputFilter;
 
 const ATTACH_DETACH_BYTE: u8 = 0x1d;
 const ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -163,11 +165,11 @@ fn process_attach(options: ProcessAttachOptions, runtime: &AgentLibreRuntimeConf
     }
     let client = daemon_client(runtime)?;
     let mut attachment = client
-        .execution_attach(ExecutionAttachRequest {
-            execution_id: options.execution_id,
-            after_sequence: options.after_sequence,
-            writable: !options.read_only,
-        })
+        .attach_execution(
+            options.execution_id,
+            options.after_sequence,
+            !options.read_only,
+        )
         .context("failed to attach to daemon process execution")?;
     let terminal = TerminalGuard::enter().context("failed to enter raw terminal mode")?;
     let is_pty = attachment.started().status.io == ExecutionIo::Pty;
@@ -178,6 +180,7 @@ fn process_attach(options: ProcessAttachOptions, runtime: &AgentLibreRuntimeConf
     }
 
     let writable = attachment.started().writable;
+    let mut output_filter = TerminalOutputFilter::new(true);
     let mut stdin_open = true;
     let mut detaching = false;
     loop {
@@ -231,13 +234,19 @@ fn process_attach(options: ProcessAttachOptions, runtime: &AgentLibreRuntimeConf
         }
         match attachment.next_event()? {
             Some(ExecutionAttachmentEvent::Output(event)) => {
-                write_attached_chunk(&event.chunk)?;
+                write_attached_chunk(&mut output_filter, &event.chunk)?;
             }
             Some(ExecutionAttachmentEvent::Finished(event)) => {
+                let _ = output_filter.finish();
                 drop(terminal);
                 eprintln!(
-                    "attachment_finished execution_id={} state={:?} reason={:?} cursor={}",
-                    event.execution_id, event.state, event.reason, event.last_delivered_sequence
+                    "attachment_finished execution_id={} state={:?} reason={:?} cursor={} filtered_controls={} malformed_controls={}",
+                    event.execution_id,
+                    event.state,
+                    event.reason,
+                    event.last_delivered_sequence,
+                    output_filter.blocked_total(),
+                    output_filter.malformed_total(),
                 );
                 return Ok(());
             }
@@ -330,13 +339,17 @@ impl CliDaemonClient {
             .block_on(self.client.execution_kill(request))
     }
 
-    fn execution_attach(
+    fn attach_execution(
         &self,
-        request: ExecutionAttachRequest,
+        execution_id: ExecutionId,
+        after_sequence: u64,
+        writable: bool,
     ) -> Result<CliExecutionAttachment, agl_client::ClientError> {
-        let inner = self
-            .async_runtime
-            .block_on(self.client.execution_attach(request))?;
+        let inner = self.async_runtime.block_on(self.client.attach_execution(
+            execution_id,
+            after_sequence,
+            writable,
+        ))?;
         Ok(CliExecutionAttachment {
             async_runtime: std::sync::Arc::clone(&self.async_runtime),
             inner,
@@ -517,18 +530,22 @@ fn write_output_chunks(
 }
 
 #[cfg(unix)]
-fn write_attached_chunk(chunk: &agl_protocol::ExecutionOutputChunk) -> Result<()> {
+fn write_attached_chunk(
+    filter: &mut TerminalOutputFilter,
+    chunk: &agl_protocol::ExecutionOutputChunk,
+) -> Result<()> {
     let bytes = chunk
         .bytes
         .decode(65_536)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let filtered = filter.filter(&bytes).bytes;
     match chunk.channel {
         ExecutionChannel::Stderr => {
-            io::stderr().write_all(&bytes)?;
+            io::stderr().write_all(&filtered)?;
             io::stderr().flush()?;
         }
         ExecutionChannel::Stdout | ExecutionChannel::Terminal | ExecutionChannel::Lifecycle => {
-            io::stdout().write_all(&bytes)?;
+            io::stdout().write_all(&filtered)?;
             io::stdout().flush()?;
         }
     }

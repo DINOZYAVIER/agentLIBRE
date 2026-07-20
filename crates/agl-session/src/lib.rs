@@ -2,8 +2,9 @@ mod fsm;
 mod store;
 
 pub use store::{
-    AgentLibreSessionFinishReason, ChatSessionEvent, ChatSessionReplay, ChatSessionStore,
-    SessionCatalogEntry, SessionCatalogStatus, SessionMetadata,
+    AgentLibreSessionFinishReason, ChatSessionEvent, ChatSessionReplay, ChatSessionReplayRecord,
+    ChatSessionReverseRead, ChatSessionReverseReader, ChatSessionStore, SessionCatalogEntry,
+    SessionCatalogStatus, SessionMetadata, SessionRuntimeSelection,
 };
 
 #[cfg(test)]

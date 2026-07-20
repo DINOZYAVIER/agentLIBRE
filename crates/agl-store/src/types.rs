@@ -376,6 +376,52 @@ pub enum RunKind {
     Subagent,
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct RunConcurrencyKey(String);
+
+impl RunConcurrencyKey {
+    pub const MAX_BYTES: usize = 256;
+
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > Self::MAX_BYTES
+            || value.chars().any(char::is_control)
+            || value.trim() != value
+        {
+            return invalid_run_value(
+                "runs.concurrency_key",
+                &value,
+                "must be nonempty bounded UTF-8 without control or surrounding whitespace",
+            );
+        }
+        Ok(Self(value))
+    }
+
+    pub fn session(session_id: &SessionId) -> Result<Self> {
+        Self::parse(format!("session:{session_id}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for RunConcurrencyKey {
+    type Error = StoreError;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(value)
+    }
+}
+
+impl From<RunConcurrencyKey> for String {
+    fn from(value: RunConcurrencyKey) -> Self {
+        value.0
+    }
+}
+
 impl RunKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -573,6 +619,7 @@ pub struct DurableRunDraft {
     pub turn_id: Option<TurnId>,
     pub kind: RunKind,
     pub priority: i32,
+    pub concurrency_key: Option<RunConcurrencyKey>,
     pub input: serde_json::Value,
     pub checkpoint: Option<serde_json::Value>,
     pub effective_policy_hash: Option<String>,
@@ -589,6 +636,7 @@ pub struct DurableRunRecord {
     pub kind: RunKind,
     pub state: RunState,
     pub priority: i32,
+    pub concurrency_key: Option<RunConcurrencyKey>,
     pub input: serde_json::Value,
     pub checkpoint: Option<serde_json::Value>,
     pub effective_policy_hash: Option<String>,
@@ -638,6 +686,7 @@ pub struct SafeRunStatus {
     pub kind: RunKind,
     pub state: RunState,
     pub priority: i32,
+    pub concurrency_key: Option<RunConcurrencyKey>,
     pub usage: RunUsage,
     pub cancellation_requested: bool,
     pub attempts: u32,

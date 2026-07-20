@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use agl_ids::{RunId, SessionId};
+use agl_ids::{RunId, SessionId, TurnId};
 
-use crate::{ApplicationError, ApplicationErrorCode, PromptAdmission, PromptSubmission};
+use crate::{
+    ApplicationError, ApplicationErrorCode, PromptAdmission, PromptAdmissionState, PromptSubmission,
+};
 
 pub const MAX_QUEUED_PROMPTS_PER_SESSION: usize = 32;
 
@@ -23,6 +25,7 @@ impl PromptQueue {
         &mut self,
         submission: &PromptSubmission,
         run_id: RunId,
+        turn_id: TurnId,
     ) -> Result<PromptAdmission, ApplicationError> {
         let queue = self
             .sessions
@@ -39,11 +42,18 @@ impl PromptQueue {
         }
         let ordinal = u32::try_from(queue.queued.len() + usize::from(queue.active.is_some()) + 1)
             .unwrap_or(u32::MAX);
+        let queued = queue.active.is_some();
         let admission = PromptAdmission {
             session_id: submission.session_id.clone(),
             run_id,
+            turn_id,
             ordinal,
-            queued: queue.active.is_some(),
+            queued,
+            state: if queued {
+                PromptAdmissionState::Queued
+            } else {
+                PromptAdmissionState::Running
+            },
             replayed: false,
         };
         queue
@@ -63,9 +73,16 @@ impl PromptQueue {
             return None;
         }
         queue.active = None;
-        let next = queue.queued.pop_front();
-        if let Some(next) = &next {
+        let mut next = queue.queued.pop_front();
+        if let Some(next) = &mut next {
+            next.queued = false;
+            next.state = PromptAdmissionState::Running;
             queue.active = Some(next.run_id.clone());
+            for admission in queue.submissions.values_mut() {
+                if admission.run_id == next.run_id {
+                    *admission = next.clone();
+                }
+            }
         }
         next
     }

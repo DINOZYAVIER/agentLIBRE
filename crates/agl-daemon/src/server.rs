@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,15 +20,15 @@ use agl_protocol::{
     ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionInputAcceptedEvent,
     ExecutionLeaseRenewedEvent, ExecutionOutputEvent, ExecutionResizeAcceptedEvent,
     PresentationSubscriptionFinishReason, ProtocolError, ProtocolErrorCode,
-    RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
-    SessionPresentationSubscriptionFinishedEvent, SessionPresentationSubscriptionStartedEvent,
+    RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent, SessionPresentationSnapshotTransfer,
+    SessionPresentationSnapshotTransferPurpose, SessionPresentationSubscriptionFinishedEvent,
     SubscriptionCancelledEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt as _;
-use tokio::io::{AsyncWriteExt as _, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{UnixListener as TokioUnixListener, UnixStream as TokioUnixStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -38,7 +41,11 @@ use crate::{
 };
 
 const CONNECTION_WRITER_CAPACITY: usize = 128;
+const CONNECTION_TASK_CAPACITY: usize = 128;
+const CONNECTION_SUBSCRIPTION_CAPACITY: usize = 128;
+const CONNECTION_ATTACHMENT_CAPACITY: usize = 128;
 const EXECUTION_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const RUN_SUBSCRIPTION_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
@@ -332,24 +339,47 @@ fn unix_now() -> u64 {
 
 #[cfg(unix)]
 fn bind_listener(socket_path: &Path) -> Result<TokioUnixListener> {
+    if !socket_path.is_absolute() || socket_path.file_name().is_none() {
+        bail!("daemon socket path must be one absolute file path");
+    }
     let parent = socket_path
         .parent()
         .context("daemon socket path has no parent directory")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create daemon socket dir {}", parent.display()))?;
+    ensure_private_socket_parent(parent)?;
 
-    if socket_path.exists() {
-        match StdUnixStream::connect(socket_path) {
-            Ok(_) => bail!(
-                "daemon socket is already owned by a live process: {}",
-                socket_path.display()
-            ),
-            Err(_) => std::fs::remove_file(socket_path).with_context(|| {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.nlink() != 1
+            {
+                bail!(
+                    "daemon socket target must be one owned Unix socket: {}",
+                    socket_path.display()
+                );
+            }
+            match StdUnixStream::connect(socket_path) {
+                Ok(_) => bail!(
+                    "daemon socket is already owned by a live process: {}",
+                    socket_path.display()
+                ),
+                Err(_) => std::fs::remove_file(socket_path).with_context(|| {
+                    format!(
+                        "failed to remove stale daemon socket {}",
+                        socket_path.display()
+                    )
+                })?,
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
                 format!(
-                    "failed to remove stale daemon socket {}",
+                    "failed to inspect daemon socket target {}",
                     socket_path.display()
                 )
-            })?,
+            });
         }
     }
 
@@ -366,7 +396,79 @@ fn bind_listener(socket_path: &Path) -> Result<TokioUnixListener> {
             )
         },
     )?;
+    let metadata = std::fs::symlink_metadata(socket_path).with_context(|| {
+        format!(
+            "failed to verify daemon socket permissions {}",
+            socket_path.display()
+        )
+    })?;
+    if !metadata.file_type().is_socket()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+        bail!(
+            "daemon socket must be one owned private Unix socket: {}",
+            socket_path.display()
+        );
+    }
     TokioUnixListener::from_std(listener).context("failed to adopt daemon socket into Tokio")
+}
+
+#[cfg(unix)]
+fn ensure_private_socket_parent(parent: &Path) -> Result<()> {
+    if !parent.is_absolute() {
+        bail!("daemon socket parent must be absolute");
+    }
+    let created = match std::fs::symlink_metadata(parent) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(parent).with_context(|| {
+                format!("failed to create daemon socket dir {}", parent.display())
+            })?;
+            true
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect daemon socket dir {}", parent.display())
+            });
+        }
+    };
+    if created {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+            || format!("failed to restrict daemon socket dir {}", parent.display()),
+        )?;
+    }
+    let metadata = std::fs::symlink_metadata(parent)
+        .with_context(|| format!("failed to verify daemon socket dir {}", parent.display()))?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        bail!(
+            "daemon socket dir must be owned by the daemon UID with mode 0700 and no symlink: {}",
+            parent.display()
+        );
+    }
+    let canonical = parent.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize daemon socket dir {}",
+            parent.display()
+        )
+    })?;
+    if canonical != parent {
+        bail!(
+            "daemon socket dir must be canonical and contain no symlink components: {}",
+            parent.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -376,9 +478,33 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
         .peer_cred()
         .context("failed to read daemon peer credentials")?;
     let expected_uid = unsafe { libc::geteuid() };
-    if credentials.uid() != expected_uid {
+    let operator_uid = credentials.uid();
+    if operator_uid != expected_uid {
         bail!("private daemon connection peer UID does not match daemon UID");
     }
+    serve_authenticated_connection(stream, state, operator_uid).await
+}
+
+#[cfg(all(unix, test))]
+pub(crate) async fn serve_authenticated_test_connection<S>(
+    stream: S,
+    state: &SharedDaemonState,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_authenticated_connection(stream, state, unsafe { libc::geteuid() }).await
+}
+
+#[cfg(unix)]
+async fn serve_authenticated_connection<S>(
+    stream: S,
+    state: &SharedDaemonState,
+    operator_uid: u32,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (reader, writer) = tokio::io::split(stream);
     let (raw_event_sender, event_receiver) = mpsc::channel(CONNECTION_WRITER_CAPACITY);
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
@@ -415,18 +541,35 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                     kind: DaemonRequestKind::RunSubscribe(request),
                 }) => {
                     let _ = schema;
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    if let Err(error) = subscriptions.reserve(&request_id) {
+                        queue_event(
+                            &event_sender,
+                            DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
+                        )?;
+                        continue;
+                    }
                     let state = state.clone();
                     let sender = event_sender.clone();
                     let subscription_id = request_id.clone();
-                    let registry_id = request_id.clone();
+                    let task_request_id = request_id.clone();
                     let subscriptions_for_task = subscriptions.clone();
+                    let cancellation = Arc::new(AtomicBool::new(false));
+                    let task_cancellation = Arc::clone(&cancellation);
                     let application = state.application();
                     let refresh_state = state.clone();
                     let refresh_run_id = request.run_id.clone();
                     let handle = tasks.spawn(async move {
                         tokio::task::spawn_blocking(move || {
-                            if let Err(error) =
-                                stream_run_subscription(&sender, &state, request_id, request)
+                            if let Err(error) = stream_run_subscription(
+                                &sender,
+                                &state,
+                                task_request_id,
+                                request,
+                                &task_cancellation,
+                            )
                             {
                                 tracing::debug!(
                                     target: "agentlibre::daemon",
@@ -442,30 +585,95 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                         }
                         subscriptions_for_task.remove(&subscription_id);
                     });
-                    subscriptions.insert(registry_id, handle)?;
+                    subscriptions.install(&request_id, handle, Some(cancellation));
+                }
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::RunSubmit(request),
+                    ..
+                }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    let application = state.application();
+                    let sender = event_sender.clone();
+                    tasks.spawn(async move {
+                        let event = crate::surface::handle_prompt_submit_request(
+                            &application,
+                            request_id,
+                            request,
+                        )
+                        .await;
+                        let _ = queue_event(&sender, event);
+                    });
+                }
+                Ok(DaemonRequest {
+                    request_id,
+                    kind: DaemonRequestKind::SessionPresentation(request),
+                    ..
+                }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    if let Err(error) = subscriptions.reserve(&request_id) {
+                        queue_event(
+                            &event_sender,
+                            DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
+                        )?;
+                        continue;
+                    }
+                    let application = state.application();
+                    let sender = event_sender.clone();
+                    let subscription_id = request_id.clone();
+                    let task_request_id = request_id.clone();
+                    let subscriptions_for_task = subscriptions.clone();
+                    let handle = tasks.spawn(async move {
+                        if let Err(error) = stream_presentation_page(
+                            &sender,
+                            &application,
+                            task_request_id,
+                            request,
+                        )
+                        .await
+                        {
+                            tracing::debug!(target: "agentlibre::daemon", error = %error, "presentation page transfer ended");
+                        }
+                        subscriptions_for_task.remove(&subscription_id);
+                    });
+                    subscriptions.install(&request_id, handle, None);
                 }
                 Ok(DaemonRequest {
                     request_id,
                     kind: DaemonRequestKind::SessionPresentationSubscribe(request),
                     ..
                 }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    if let Err(error) = subscriptions.reserve(&request_id) {
+                        queue_event(
+                            &event_sender,
+                            DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
+                        )?;
+                        continue;
+                    }
                     let application = state.application();
                     let sender = event_sender.clone();
                     let subscription_id = request_id.clone();
-                    let registry_id = request_id.clone();
+                    let task_request_id = request_id.clone();
                     let subscriptions_for_task = subscriptions.clone();
                     let handle = tasks.spawn(async move {
                         if let Err(error) = stream_presentation_subscription(
                             &sender,
                             &application,
-                            request_id,
+                            task_request_id,
                             request,
                         ).await {
                             tracing::debug!(target: "agentlibre::daemon", error = %error, "presentation subscription ended");
                         }
                         subscriptions_for_task.remove(&subscription_id);
                     });
-                    subscriptions.insert(registry_id, handle)?;
+                    subscriptions.install(&request_id, handle, None);
                 }
                 Ok(DaemonRequest {
                     schema,
@@ -473,6 +681,9 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                     kind: DaemonRequestKind::ExecutionAttach(request),
                 }) => {
                     let _ = schema;
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
                     let state = state.clone();
                     let sender = event_sender.clone();
                     let attachments = attachments.clone();
@@ -535,13 +746,38 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                 }
                 Ok(DaemonRequest {
                     request_id,
+                    kind: DaemonRequestKind::HumanHostTerminalEnsure(request),
+                    ..
+                }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    let state = state.clone();
+                    let application = state.application();
+                    let sender = event_sender.clone();
+                    tasks.spawn(async move {
+                        let event = crate::surface::handle_human_host_terminal_request(
+                            &state,
+                            &application,
+                            request_id,
+                            request,
+                            operator_uid,
+                        )
+                        .await;
+                        let _ = queue_event(&sender, event);
+                    });
+                }
+                Ok(DaemonRequest {
+                    request_id,
                     kind: kind @ (DaemonRequestKind::CommandCatalog(_)
                     | DaemonRequestKind::CommandSuggestions(_)
                     | DaemonRequestKind::ApplicationAction(_)
-                    | DaemonRequestKind::SessionPresentation(_)
-                    | DaemonRequestKind::UserShellStart(_)),
+                    | DaemonRequestKind::HumanTerminalEnsure(_)),
                     ..
                 }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
                     let application = state.application();
                     let sender = event_sender.clone();
                     tasks.spawn(async move {
@@ -549,7 +785,7 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                             &application,
                             request_id,
                             kind,
-                            expected_uid,
+                            operator_uid,
                         ).await;
                         let _ = queue_event(&sender, event);
                     });
@@ -579,13 +815,24 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
                     execution_detach_event(state, &attachments, request_id, request),
                 )?,
                 Ok(request) => {
+                    if reject_connection_task_overflow(
+                        &tasks,
+                        &event_sender,
+                        &request.request_id,
+                    )? {
+                        continue;
+                    }
                     let state = state.clone();
+                    let application = state.application();
                     let sender = event_sender.clone();
                     tasks.spawn(async move {
-                        let event = tokio::task::spawn_blocking(move || state.handle_request(request)).await;
-                        if let Ok(event) = event {
-                            let _ = queue_event(&sender, event);
+                        let event = state.handle_request_async(request).await;
+                        if let DaemonEventKind::SessionFinished(finished) = &event.kind {
+                            let _ = application
+                                .finish_session_projection(&finished.session_id)
+                                .await;
                         }
+                        let _ = queue_event(&sender, event);
                     });
                 }
                 Err(err) => {
@@ -605,6 +852,7 @@ pub async fn serve_connection(stream: TokioUnixStream, state: &SharedDaemonState
             }
         }
     };
+    subscriptions.cancel_all();
     tasks.abort_all();
     attachments.release_all(state);
     drop(event_sender);
@@ -645,18 +893,22 @@ impl ConnectionAttachments {
         attachment_id: agl_ids::RequestId,
         attachment: ConnectionAttachment,
     ) -> std::result::Result<(), ProtocolError> {
-        let replaced = self
-            .inner
-            .lock()
-            .map_err(attachment_lock_error)?
-            .insert(attachment_id, attachment);
-        if replaced.is_some() {
+        let mut attachments = self.inner.lock().map_err(attachment_lock_error)?;
+        if attachments.contains_key(&attachment_id) {
             return Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "duplicate execution attachment request ID",
                 false,
             ));
         }
+        if attachments.len() >= CONNECTION_ATTACHMENT_CAPACITY {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::InputBackpressure,
+                "connection reached its bounded execution attachment limit",
+                true,
+            ));
+        }
+        attachments.insert(attachment_id, attachment);
         Ok(())
     }
 
@@ -688,24 +940,77 @@ impl ConnectionAttachments {
 #[cfg(unix)]
 #[derive(Clone, Default)]
 struct ConnectionSubscriptions {
-    inner: Arc<Mutex<BTreeMap<agl_ids::RequestId, tokio::task::AbortHandle>>>,
+    inner: Arc<Mutex<BTreeMap<agl_ids::RequestId, Option<ConnectionSubscriptionTask>>>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct ConnectionSubscriptionTask {
+    handle: tokio::task::AbortHandle,
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+#[cfg(unix)]
+impl ConnectionSubscriptionTask {
+    fn cancel(self) {
+        if let Some(cancellation) = self.cancellation {
+            cancellation.store(true, Ordering::Release);
+        }
+        self.handle.abort();
+    }
 }
 
 #[cfg(unix)]
 impl ConnectionSubscriptions {
-    fn insert(
+    fn reserve(&self, request_id: &agl_ids::RequestId) -> std::result::Result<(), ProtocolError> {
+        let mut subscriptions = self.inner.lock().map_err(|_| {
+            ProtocolError::new(
+                ProtocolErrorCode::Internal,
+                "connection subscription registry is poisoned",
+                false,
+            )
+        })?;
+        if subscriptions.contains_key(request_id) {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::InvalidRequest,
+                "duplicate subscription request ID on one connection",
+                false,
+            ));
+        }
+        if subscriptions.len() >= CONNECTION_SUBSCRIPTION_CAPACITY {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::InputBackpressure,
+                "connection reached its bounded subscription limit",
+                true,
+            ));
+        }
+        subscriptions.insert(request_id.clone(), None);
+        Ok(())
+    }
+
+    fn install(
         &self,
-        request_id: agl_ids::RequestId,
+        request_id: &agl_ids::RequestId,
         handle: tokio::task::AbortHandle,
-    ) -> Result<()> {
-        let mut subscriptions = self
+        cancellation: Option<Arc<AtomicBool>>,
+    ) {
+        let task = ConnectionSubscriptionTask {
+            handle,
+            cancellation,
+        };
+        let installed = self
             .inner
             .lock()
-            .map_err(|_| anyhow::anyhow!("connection subscription registry is poisoned"))?;
-        if subscriptions.insert(request_id, handle).is_some() {
-            bail!("duplicate subscription request ID on one connection");
+            .ok()
+            .and_then(|mut subscriptions| {
+                subscriptions
+                    .get_mut(request_id)
+                    .map(|slot| *slot = Some(task.clone()))
+            })
+            .is_some();
+        if !installed {
+            task.cancel();
         }
-        Ok(())
     }
 
     fn remove(&self, request_id: &agl_ids::RequestId) {
@@ -723,9 +1028,48 @@ impl ConnectionSubscriptions {
         else {
             return false;
         };
-        handle.abort();
+        if let Some(task) = handle {
+            task.cancel();
+        }
         true
     }
+
+    fn cancel_all(&self) {
+        let subscriptions = match self.inner.lock() {
+            Ok(mut subscriptions) => std::mem::take(&mut *subscriptions),
+            Err(_) => return,
+        };
+        for task in subscriptions.into_values().flatten() {
+            task.cancel();
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn stream_presentation_page(
+    sender: &ConnectionEventSender,
+    application: &agl_app::ApplicationService,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::SessionPresentationRequest,
+) -> Result<()> {
+    let page = match application
+        .snapshot_page(&request.session_id, request.page_cursor)
+        .await
+    {
+        Ok(page) => page,
+        Err(error) => return queue_application_error(sender, request_id, error),
+    };
+    let snapshot =
+        match crate::surface::presentation_snapshot(page.snapshot, page.older_page_cursor) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return queue_application_error(sender, request_id, error),
+        };
+    queue_presentation_snapshot_transfer(
+        sender,
+        request_id,
+        SessionPresentationSnapshotTransferPurpose::Requested,
+        &snapshot,
+    )
 }
 
 #[cfg(unix)]
@@ -752,23 +1096,97 @@ async fn stream_presentation_subscription(
             );
         }
     };
-    let snapshot = crate::surface::presentation_snapshot(subscription.snapshot.clone())
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let snapshot = match crate::surface::presentation_snapshot(
+        subscription.snapshot.clone(),
+        subscription.older_page_cursor.clone(),
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return queue_application_error(sender, request_id, error),
+    };
+    let already_finished =
+        snapshot.header.status == agl_protocol::SessionPresentationStatus::Finished;
     let mut last_cursor = snapshot.cursor.clone();
-    queue_event(
+    queue_presentation_snapshot_transfer(
         sender,
-        DaemonEvent::new(
-            Some(request_id.clone()),
-            DaemonEventKind::SessionPresentationSubscriptionStarted(
-                SessionPresentationSubscriptionStartedEvent { snapshot },
-            ),
-        ),
+        request_id.clone(),
+        SessionPresentationSnapshotTransferPurpose::SubscriptionInitial,
+        &snapshot,
     )?;
+    if already_finished {
+        return queue_event(
+            sender,
+            DaemonEvent::new(
+                Some(request_id),
+                DaemonEventKind::SessionPresentationSubscriptionFinished(
+                    SessionPresentationSubscriptionFinishedEvent {
+                        session_id: request.session_id,
+                        last_delivered_cursor: last_cursor,
+                        reason: PresentationSubscriptionFinishReason::SessionFinished,
+                    },
+                ),
+            ),
+        );
+    }
     loop {
         match subscription.next().await {
             Ok(event) => {
-                let event = crate::surface::presentation_event(event)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let agl_app::SessionPresentationEventEnvelope {
+                    event_id,
+                    session_id,
+                    cursor,
+                    event,
+                } = event;
+                let event = match event {
+                    agl_app::SessionPresentationEvent::SnapshotReplaced {
+                        snapshot,
+                        older_page_cursor,
+                    } => {
+                        let snapshot = match crate::surface::presentation_snapshot(
+                            *snapshot,
+                            older_page_cursor,
+                        ) {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                return queue_application_error(sender, request_id, error);
+                            }
+                        };
+                        if snapshot.session_id != session_id
+                            || snapshot.cursor.daemon_instance_id != cursor.daemon_instance_id
+                            || snapshot.cursor.revision != cursor.revision
+                        {
+                            return queue_application_error(
+                                sender,
+                                request_id,
+                                agl_app::ApplicationError::new(
+                                    agl_app::ApplicationErrorCode::Internal,
+                                    "replacement snapshot identity does not match its live event",
+                                ),
+                            );
+                        }
+                        last_cursor = snapshot.cursor.clone();
+                        queue_presentation_snapshot_transfer(
+                            sender,
+                            request_id.clone(),
+                            SessionPresentationSnapshotTransferPurpose::Replacement { event_id },
+                            &snapshot,
+                        )?;
+                        continue;
+                    }
+                    event => event,
+                };
+                let session_finished =
+                    matches!(&event, agl_app::SessionPresentationEvent::SessionFinished);
+                let event = match crate::surface::presentation_event(
+                    agl_app::SessionPresentationEventEnvelope {
+                        event_id,
+                        session_id,
+                        cursor,
+                        event,
+                    },
+                ) {
+                    Ok(event) => event,
+                    Err(error) => return queue_application_error(sender, request_id, error),
+                };
                 last_cursor = event.cursor.clone();
                 queue_event(
                     sender,
@@ -777,6 +1195,21 @@ async fn stream_presentation_subscription(
                         DaemonEventKind::SessionPresentationEvent(Box::new(event)),
                     ),
                 )?;
+                if session_finished {
+                    return queue_event(
+                        sender,
+                        DaemonEvent::new(
+                            Some(request_id),
+                            DaemonEventKind::SessionPresentationSubscriptionFinished(
+                                SessionPresentationSubscriptionFinishedEvent {
+                                    session_id: request.session_id,
+                                    last_delivered_cursor: last_cursor,
+                                    reason: PresentationSubscriptionFinishReason::SessionFinished,
+                                },
+                            ),
+                        ),
+                    );
+                }
             }
             Err(error) => {
                 let reason = if error.code == agl_app::ApplicationErrorCode::ResyncRequired {
@@ -800,6 +1233,73 @@ async fn stream_presentation_subscription(
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn queue_presentation_snapshot_transfer(
+    sender: &ConnectionEventSender,
+    request_id: agl_ids::RequestId,
+    purpose: SessionPresentationSnapshotTransferPurpose,
+    snapshot: &agl_protocol::SessionPresentationSnapshot,
+) -> Result<()> {
+    let transfer = match SessionPresentationSnapshotTransfer::encode(
+        agl_ids::RequestId::generate(),
+        purpose,
+        snapshot,
+    ) {
+        Ok(transfer) => transfer,
+        Err(_) => {
+            return queue_event(
+                sender,
+                DaemonEvent::new(
+                    Some(request_id),
+                    DaemonEventKind::Error(ProtocolError::new(
+                        ProtocolErrorCode::Internal,
+                        "session presentation snapshot could not be transferred safely",
+                        false,
+                    )),
+                ),
+            );
+        }
+    };
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id.clone()),
+            DaemonEventKind::SessionPresentationSnapshotManifest(transfer.manifest),
+        ),
+    )?;
+    for chunk in transfer.chunks {
+        queue_event(
+            sender,
+            DaemonEvent::new(
+                Some(request_id.clone()),
+                DaemonEventKind::SessionPresentationSnapshotChunk(chunk),
+            ),
+        )?;
+    }
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id),
+            DaemonEventKind::SessionPresentationSnapshotFinished(transfer.finished),
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn queue_application_error(
+    sender: &ConnectionEventSender,
+    request_id: agl_ids::RequestId,
+    error: agl_app::ApplicationError,
+) -> Result<()> {
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id),
+            DaemonEventKind::Error(crate::surface::protocol_error(error)),
+        ),
+    )
 }
 
 #[cfg(unix)]
@@ -1211,6 +1711,7 @@ fn stream_run_subscription(
     state: &SharedDaemonState,
     request_id: agl_ids::RequestId,
     request: agl_protocol::RunSubscribeRequest,
+    cancellation: &AtomicBool,
 ) -> Result<()> {
     let subscription = match state.subscribe_run(request.run_id.clone(), request.after_sequence) {
         Ok(subscription) => subscription,
@@ -1248,18 +1749,18 @@ fn stream_run_subscription(
         )?;
     }
     loop {
-        match subscription.recv() {
-            Ok(Some(event)) => {
+        if cancellation.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match subscription.recv_timeout(RUN_SUBSCRIPTION_CANCEL_POLL_INTERVAL) {
+            Ok(agl_supervisor::RunSubscriptionPoll::Event(event)) => {
                 last_sequence = event.sequence;
                 queue_event(
                     sender,
-                    DaemonEvent::new(
-                        Some(request_id.clone()),
-                        DaemonEventKind::RunEvent(Box::new(event)),
-                    ),
+                    DaemonEvent::new(Some(request_id.clone()), DaemonEventKind::RunEvent(event)),
                 )?;
             }
-            Ok(None) => {
+            Ok(agl_supervisor::RunSubscriptionPoll::Complete) => {
                 let outcome = state
                     .run_outcome(request.run_id.clone())
                     .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -1278,6 +1779,7 @@ fn stream_run_subscription(
                     ),
                 );
             }
+            Ok(agl_supervisor::RunSubscriptionPoll::Pending) => {}
             Err(error) => {
                 let mut protocol =
                     ProtocolError::new(ProtocolErrorCode::Busy, error.to_string(), true);
@@ -1301,7 +1803,53 @@ struct ConnectionEventSender {
 }
 
 #[cfg(unix)]
+fn reject_connection_task_overflow(
+    tasks: &JoinSet<()>,
+    sender: &ConnectionEventSender,
+    request_id: &agl_ids::RequestId,
+) -> Result<bool> {
+    if tasks.len() < CONNECTION_TASK_CAPACITY {
+        return Ok(false);
+    }
+    queue_event(
+        sender,
+        DaemonEvent::new(
+            Some(request_id.clone()),
+            DaemonEventKind::Error(ProtocolError::new(
+                ProtocolErrorCode::InputBackpressure,
+                "connection reached its bounded concurrent request limit",
+                true,
+            )),
+        ),
+    )?;
+    Ok(true)
+}
+
+#[cfg(unix)]
 fn queue_event(sender: &ConnectionEventSender, event: DaemonEvent) -> Result<()> {
+    let event = match event.validate() {
+        Ok(()) => event,
+        Err(error) if !matches!(&event.kind, DaemonEventKind::Error(_)) => {
+            tracing::warn!(
+                target: "agentlibre::daemon",
+                validation_error = %error,
+                "daemon response was replaced because it exceeded protocol bounds"
+            );
+            DaemonEvent::new(
+                event.request_id,
+                DaemonEventKind::Error(ProtocolError::new(
+                    ProtocolErrorCode::Internal,
+                    "daemon response exceeded its bounded wire representation",
+                    false,
+                )),
+            )
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "daemon protocol error response is not wire-safe: {error}"
+            ));
+        }
+    };
     sender.events.try_send(event).map_err(|error| {
         // A full bounded queue means the peer is no longer consuming events at
         // the rate required by the live protocol. Close every clone of this
@@ -1321,11 +1869,13 @@ fn queue_event(sender: &ConnectionEventSender, event: DaemonEvent) -> Result<()>
 }
 
 #[cfg(unix)]
-async fn run_connection_writer(
-    mut writer: WriteHalf<TokioUnixStream>,
+async fn run_connection_writer<W>(
+    mut writer: W,
     mut events: mpsc::Receiver<DaemonEvent>,
     shutdown: watch::Sender<bool>,
-) {
+) where
+    W: AsyncWrite + Unpin,
+{
     while let Some(event) = events.recv().await {
         let line = match serde_json::to_vec(&event) {
             Ok(line) if line.len() <= agl_protocol::MAX_JSONL_FRAME_BYTES => line,
@@ -1351,7 +1901,79 @@ async fn run_connection_writer(
 }
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{
+    DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _,
+};
+
+#[cfg(all(test, unix))]
+mod socket_bind_security_tests {
+    use super::*;
+
+    fn private_test_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agl-daemon-{label}-{}-{}",
+            std::process::id(),
+            agl_ids::RequestId::generate()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn manual_bind_parent_is_created_owned_and_mode_0700() {
+        let root = private_test_root("socket-parent-created");
+        let parent = root.join("daemon");
+
+        ensure_private_socket_parent(&parent).unwrap();
+
+        let metadata = std::fs::symlink_metadata(&parent).unwrap();
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_bind_rejects_public_symlinked_and_non_directory_parents() {
+        let root = private_test_root("socket-parent-rejected");
+        let public = root.join("public");
+        std::fs::create_dir(&public).unwrap();
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_socket_parent(&public).is_err());
+
+        let private = root.join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&private, &alias).unwrap();
+        assert!(ensure_private_socket_parent(&alias).is_err());
+
+        let file = root.join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(ensure_private_socket_parent(&file).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_bind_never_removes_a_non_socket_stale_target() {
+        let root = private_test_root("socket-target-rejected");
+        let parent = root.join("daemon");
+        ensure_private_socket_parent(&parent).unwrap();
+        let target = parent.join("agl.sock");
+        std::fs::write(&target, b"operator data").unwrap();
+
+        let error = match bind_listener(&target) {
+            Ok(_) => panic!("regular target must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("owned Unix socket"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"operator data");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[cfg(all(test, unix))]
 mod connection_writer_tests {
@@ -1377,5 +1999,172 @@ mod connection_writer_tests {
 
         assert!(error.to_string().contains("slow peer disconnected"));
         assert!(*shutdown_receiver.borrow());
+    }
+
+    #[tokio::test]
+    async fn oversized_response_becomes_typed_error_without_closing_connection() {
+        let (events, mut receiver) = mpsc::channel(2);
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let sender = ConnectionEventSender { events, shutdown };
+        let request_id = agl_ids::RequestId::generate();
+        let summaries = (0..2_000)
+            .map(|_| agl_protocol::SessionSummary {
+                session_id: agl_ids::SessionId::generate(),
+                title: Some("x".repeat(1_024)),
+                status: agl_protocol::SessionStatus::Open,
+                updated_at_unix_ms: 0,
+            })
+            .collect();
+
+        queue_event(
+            &sender,
+            DaemonEvent::new(
+                Some(request_id.clone()),
+                DaemonEventKind::SessionList(agl_protocol::SessionListEvent {
+                    sessions: summaries,
+                }),
+            ),
+        )
+        .unwrap();
+        queue_event(&sender, test_event()).unwrap();
+
+        let oversized = receiver.recv().await.unwrap();
+        assert_eq!(oversized.request_id.as_ref(), Some(&request_id));
+        let DaemonEventKind::Error(error) = oversized.kind else {
+            panic!("expected typed protocol error");
+        };
+        assert_eq!(error.code, ProtocolErrorCode::Internal);
+        assert!(!error.retryable);
+        assert!(matches!(
+            receiver.recv().await.unwrap().kind,
+            DaemonEventKind::SessionList(_)
+        ));
+        assert!(!*shutdown_receiver.borrow());
+    }
+
+    #[tokio::test]
+    async fn bounded_connection_tasks_reject_excess_work_without_spawning_it() {
+        let mut tasks = JoinSet::new();
+        for _ in 0..CONNECTION_TASK_CAPACITY {
+            tasks.spawn(std::future::pending::<()>());
+        }
+        let (events, mut receiver) = mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let sender = ConnectionEventSender { events, shutdown };
+        let request_id = agl_ids::RequestId::generate();
+
+        assert!(reject_connection_task_overflow(&tasks, &sender, &request_id).unwrap());
+        let event = receiver.recv().await.unwrap();
+        assert_eq!(event.request_id.as_ref(), Some(&request_id));
+        let DaemonEventKind::Error(error) = event.kind else {
+            panic!("expected bounded task rejection");
+        };
+        assert_eq!(error.code, ProtocolErrorCode::InputBackpressure);
+        assert!(error.retryable);
+        assert_eq!(tasks.len(), CONNECTION_TASK_CAPACITY);
+        tasks.abort_all();
+    }
+
+    #[tokio::test]
+    async fn subscriptions_are_reserved_before_spawn_and_bounded_per_connection() {
+        let subscriptions = ConnectionSubscriptions::default();
+        let first = agl_ids::RequestId::generate();
+        subscriptions.reserve(&first).unwrap();
+
+        let duplicate = subscriptions.reserve(&first).unwrap_err();
+        assert_eq!(duplicate.code, ProtocolErrorCode::InvalidRequest);
+
+        for _ in 1..CONNECTION_SUBSCRIPTION_CAPACITY {
+            subscriptions
+                .reserve(&agl_ids::RequestId::generate())
+                .unwrap();
+        }
+        let overflow = subscriptions
+            .reserve(&agl_ids::RequestId::generate())
+            .unwrap_err();
+        assert_eq!(overflow.code, ProtocolErrorCode::InputBackpressure);
+        assert!(overflow.retryable);
+
+        assert!(subscriptions.cancel(&first));
+        assert!(!subscriptions.cancel(&first));
+
+        let cancellable = agl_ids::RequestId::generate();
+        subscriptions.reserve(&cancellable).unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let mut tasks = JoinSet::new();
+        let handle = tasks.spawn(std::future::pending::<()>());
+        subscriptions.install(&cancellable, handle, Some(Arc::clone(&cancellation)));
+        assert!(subscriptions.cancel(&cancellable));
+        assert!(cancellation.load(Ordering::Acquire));
+        assert!(tasks.join_next().await.unwrap().unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn attachments_reject_duplicates_without_replacing_and_are_bounded() {
+        let attachments = ConnectionAttachments::default();
+        let first_id = agl_ids::RequestId::generate();
+        let first_execution_id = agl_ids::ExecutionId::generate();
+        let first = ConnectionAttachment {
+            execution_id: first_execution_id.clone(),
+            lease: InputLease {
+                attachment_id: first_id.clone(),
+                writable: true,
+            },
+            cursor: 7,
+        };
+        attachments.insert(first_id.clone(), first).unwrap();
+
+        let replacement_execution_id = agl_ids::ExecutionId::generate();
+        let duplicate = attachments
+            .insert(
+                first_id.clone(),
+                ConnectionAttachment {
+                    execution_id: replacement_execution_id,
+                    lease: InputLease {
+                        attachment_id: first_id.clone(),
+                        writable: false,
+                    },
+                    cursor: 99,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(duplicate.code, ProtocolErrorCode::InvalidRequest);
+        let retained = attachments.get(&first_id).unwrap();
+        assert_eq!(retained.execution_id, first_execution_id);
+        assert_eq!(retained.cursor, 7);
+        assert!(retained.lease.writable);
+
+        for _ in 1..CONNECTION_ATTACHMENT_CAPACITY {
+            let attachment_id = agl_ids::RequestId::generate();
+            attachments
+                .insert(
+                    attachment_id.clone(),
+                    ConnectionAttachment {
+                        execution_id: agl_ids::ExecutionId::generate(),
+                        lease: InputLease {
+                            attachment_id,
+                            writable: false,
+                        },
+                        cursor: 0,
+                    },
+                )
+                .unwrap();
+        }
+        let overflow_id = agl_ids::RequestId::generate();
+        let overflow = attachments
+            .insert(
+                overflow_id.clone(),
+                ConnectionAttachment {
+                    execution_id: agl_ids::ExecutionId::generate(),
+                    lease: InputLease {
+                        attachment_id: overflow_id,
+                        writable: false,
+                    },
+                    cursor: 0,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(overflow.code, ProtocolErrorCode::InputBackpressure);
+        assert!(overflow.retryable);
     }
 }

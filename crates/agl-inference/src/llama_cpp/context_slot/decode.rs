@@ -9,19 +9,19 @@ use super::super::{
     generation::{LlamaCppGenerationControl, LlamaCppGenerationOutput},
     model::LlamaCppModel,
 };
-use super::{LlamaCppContextSlot, native::*, prompt::*};
+use super::output::IncrementalResponseClassifier;
+use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, native::*, prompt::*};
 use crate::InferenceFinishReason;
 
 impl LlamaCppContextSlot {
     pub(super) fn generate_inner(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
-        max_output_tokens: u32,
+        request: LlamaCppGenerationRequest<'_>,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
-        let prepared = self.prepare_prompt_append(model, rendered, log)?;
+        let prepared = self.prepare_prompt_append(model, request.rendered, log)?;
 
         ensure!(
             !prepared.tokens.is_empty(),
@@ -34,14 +34,7 @@ impl LlamaCppContextSlot {
             "llama.cpp prompt exceeds remaining context"
         );
         if self.mtp.is_some() {
-            return self.generate_with_mtp(
-                model,
-                rendered,
-                prepared,
-                max_output_tokens,
-                control,
-                log,
-            );
+            return self.generate_with_mtp(model, request, prepared, control, log);
         }
         let PreparedPrompt {
             tokens: mut prompt_tokens,
@@ -61,11 +54,12 @@ impl LlamaCppContextSlot {
 
         self.generate_after_prefill(
             model,
-            rendered,
+            request.rendered,
             prompt_messages,
             prompt_history,
             input_tokens,
-            max_output_tokens,
+            request.max_output_tokens,
+            request.classifier(),
             control,
         )
     }
@@ -73,9 +67,8 @@ impl LlamaCppContextSlot {
     pub(super) fn generate_vision_inner(
         &mut self,
         model: &LlamaCppModel,
-        rendered: &RenderedModelRequest,
+        request: LlamaCppGenerationRequest<'_>,
         images: &[&[u8]],
-        max_output_tokens: u32,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
@@ -83,7 +76,7 @@ impl LlamaCppContextSlot {
             self.cache.rendered_message_history_len == 0 && self.cache.token_history.is_empty(),
             "llama.cpp vision requires a fresh context"
         );
-        let prepared = self.prepare_prompt_append(model, rendered, log)?;
+        let prepared = self.prepare_prompt_append(model, request.rendered, log)?;
         let PreparedPrompt {
             messages: prompt_messages,
             history: prompt_history,
@@ -109,11 +102,12 @@ impl LlamaCppContextSlot {
 
         self.generate_after_prefill(
             model,
-            rendered,
+            request.rendered,
             prompt_messages,
             prompt_history,
             u64::try_from(input_tokens).unwrap_or(u64::MAX),
-            max_output_tokens,
+            request.max_output_tokens,
+            request.classifier(),
             control,
         )
     }
@@ -127,10 +121,9 @@ impl LlamaCppContextSlot {
         prompt_history: PreparedPromptHistory,
         input_tokens: u64,
         max_output_tokens: u32,
+        mut output: IncrementalResponseClassifier<'_>,
         control: &LlamaCppGenerationControl<'_>,
     ) -> Result<LlamaCppGenerationOutput> {
-        let mut content = String::new();
-        let mut decoded_content = String::new();
         let mut finish_reason = InferenceFinishReason::Length;
         let mut output_tokens = 0_u64;
         for _ in 0..max_output_tokens {
@@ -147,35 +140,34 @@ impl LlamaCppContextSlot {
                 break;
             }
 
-            let piece = token_to_piece(model.vocab(), token)?;
+            let piece = token_to_piece_bytes(model.vocab(), token)?;
             let mut next_token = [token];
             decode_tokens(self.context.as_ptr(), &mut next_token)
                 .context("failed to decode generated token")?;
             self.cache.token_history.push(token);
             output_tokens = output_tokens.saturating_add(1);
-            decoded_content.push_str(&piece);
-            content.push_str(&piece);
-            strip_generated_assistant_prefix(&mut content);
-            if isolated_tool_call(&content).is_some() {
+            if output.push(&piece) {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
             }
-            if trim_generated_continuation(&mut content) {
+            if output.stopped_on_continuation() {
                 finish_reason = InferenceFinishReason::Stop;
                 break;
             }
         }
 
+        let response = output.finish();
+
         self.record_generated_assistant(
             rendered,
             prompt_messages,
             prompt_history,
-            &decoded_content,
-            &content,
+            &response.decoded_content,
+            &response.content,
         )?;
 
         Ok(LlamaCppGenerationOutput {
-            content,
+            content: response.content,
             finish_reason,
             input_tokens,
             output_tokens,
@@ -286,7 +278,10 @@ pub(super) fn prefill_chunk_count(token_count: usize, batch_size: usize) -> Resu
     })
 }
 
-pub(super) fn token_to_piece(vocab: *const c_void, token: ffi::llama_token) -> Result<String> {
+pub(super) fn token_to_piece_bytes(
+    vocab: *const c_void,
+    token: ffi::llama_token,
+) -> Result<Vec<u8>> {
     let mut buf = vec![0_i8; 256];
     let len = unsafe {
         ffi::llama_token_to_piece(vocab, token, buf.as_mut_ptr(), buf.len() as i32, 0, false)
@@ -298,18 +293,14 @@ pub(super) fn token_to_piece(vocab: *const c_void, token: ffi::llama_token) -> R
             ffi::llama_token_to_piece(vocab, token, buf.as_mut_ptr(), buf.len() as i32, 0, false)
         };
         ensure!(len >= 0, "llama.cpp token_to_piece failed");
-        return piece_buf_to_string(&buf, len);
+        return piece_buf_to_bytes(&buf, len);
     }
-    piece_buf_to_string(&buf, len)
+    piece_buf_to_bytes(&buf, len)
 }
 
-pub(super) fn piece_buf_to_string(buf: &[i8], len: i32) -> Result<String> {
+pub(super) fn piece_buf_to_bytes(buf: &[i8], len: i32) -> Result<Vec<u8>> {
     let len = usize::try_from(len).context("invalid llama.cpp piece length")?;
-    let bytes = buf[..len]
-        .iter()
-        .map(|value| *value as u8)
-        .collect::<Vec<_>>();
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+    Ok(buf[..len].iter().map(|value| *value as u8).collect())
 }
 
 pub(super) fn trim_generated_continuation(content: &mut String) -> bool {

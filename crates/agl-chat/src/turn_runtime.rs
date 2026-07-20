@@ -10,8 +10,8 @@ use agl_events::{
     CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeEventWriter, SafeRuntimeEventEnvelope,
 };
-use agl_ids::{AttemptId, ExecutionScope, RequestId, RunId, SessionId, StepId, TurnId};
-use agl_inference::InferenceCancellation;
+use agl_ids::{AttemptId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_inference::{InferenceCancellation, InferenceOutputSink};
 use agl_loop::{
     HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, ModelRequest,
     ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
@@ -22,6 +22,11 @@ use anyhow::{Context, Result, ensure};
 
 use crate::session::{InferenceExecutionControl, InferenceSession};
 use crate::tools::{ChatToolRuntimeConfig, chat_tool_runtime};
+use crate::{
+    ModelAttemptOutcome, NoopTurnPresentationSink, PresentationDelivery, ToolActionOutcome,
+    TurnPresentationEvent, TurnPresentationOutcome, TurnPresentationSink,
+    presentation::InferencePresentationSink,
+};
 
 struct CapabilityCancellation(InferenceCancellation);
 
@@ -40,7 +45,10 @@ struct ChatProcessExecutionContext {
 }
 
 impl ChatProcessExecutionContext {
-    fn owner_for_scope(&self, scope: &ExecutionScope) -> Result<agl_process::ExecutionOwner> {
+    fn admission_identity(
+        &self,
+        scope: &ExecutionScope,
+    ) -> Result<(agl_process::ExecutionOwner, SessionId)> {
         let store = agl_store::AglStore::open_current_read_only_at(&self.store_root)
             .context("failed to open execution owner store")?;
         let run = store
@@ -53,20 +61,35 @@ impl ChatProcessExecutionContext {
                         && run.session_id.as_ref() == Some(session_id),
                     "process invocation session does not match its owning chat session"
                 );
-                Ok(agl_process::ExecutionOwner::Session {
-                    session_id: session_id.clone(),
-                    root_run_id: run.root_run_id,
-                })
+                Ok((
+                    agl_process::ExecutionOwner::Session {
+                        session_id: session_id.clone(),
+                        root_run_id: run.root_run_id,
+                    },
+                    session_id.clone(),
+                ))
             }
             None => {
                 ensure!(
                     scope.session_id().is_none() && run.session_id.is_none(),
                     "run-owned process invocation unexpectedly carries session authority"
                 );
-                Ok(agl_process::ExecutionOwner::Run {
-                    run_id: scope.run_id().clone(),
-                    root_run_id: run.root_run_id,
-                })
+                let root_run = store
+                    .run(&run.root_run_id)?
+                    .with_context(|| format!("root run {} does not exist", run.root_run_id))?;
+                let durable_session_id = root_run.session_id.with_context(|| {
+                    format!(
+                        "root run {} has no durable session for subagent terminal ownership",
+                        run.root_run_id
+                    )
+                })?;
+                Ok((
+                    agl_process::ExecutionOwner::Run {
+                        run_id: scope.run_id().clone(),
+                        root_run_id: run.root_run_id,
+                    },
+                    durable_session_id,
+                ))
             }
         }
     }
@@ -81,9 +104,11 @@ impl ChatProcessExecutionContext {
 
 impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
     fn load(&self, scope: &ExecutionScope) -> Result<agl_tools::ProcessExecutionAdmission> {
+        let (owner, durable_session_id) = self.admission_identity(scope)?;
         Ok(agl_tools::ProcessExecutionAdmission {
             snapshot: self.snapshot()?,
-            owner: self.owner_for_scope(scope)?,
+            owner,
+            durable_session_id,
         })
     }
 
@@ -93,7 +118,7 @@ impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
         expected_revision: u64,
         next: agl_process::ExecutionContextSnapshot,
     ) -> Result<agl_tools::ProcessExecutionAdmission> {
-        let owner = self.owner_for_scope(scope)?;
+        let (owner, durable_session_id) = self.admission_identity(scope)?;
         let current = self.snapshot()?;
         ensure!(
             current.revision == expected_revision,
@@ -124,11 +149,14 @@ impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
         Ok(agl_tools::ProcessExecutionAdmission {
             snapshot: persisted,
             owner,
+            durable_session_id,
         })
     }
 }
 
 static PROCESS_HANDLES: OnceLock<Mutex<BTreeMap<PathBuf, agl_process::ProcessHandle>>> =
+    OnceLock::new();
+static TERMINAL_REGISTRIES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<agl_process::TerminalRegistry>>>> =
     OnceLock::new();
 
 pub struct ChatTurnRuntime {
@@ -148,6 +176,9 @@ pub struct ChatTurnRuntime {
     generated_requests: usize,
     model_input_tokens: u64,
     model_output_tokens: u64,
+    presentation_sink: Arc<dyn TurnPresentationSink>,
+    presentation_attempt_id: Option<AttemptId>,
+    presentation_message_id: Option<agl_ids::MessageId>,
 }
 
 impl ChatTurnRuntime {
@@ -201,7 +232,53 @@ impl ChatTurnRuntime {
             generated_requests: 0,
             model_input_tokens: 0,
             model_output_tokens: 0,
+            presentation_sink: Arc::new(NoopTurnPresentationSink),
+            presentation_attempt_id: None,
+            presentation_message_id: None,
         })
+    }
+
+    pub(crate) fn set_presentation_sink(&mut self, sink: Arc<dyn TurnPresentationSink>) {
+        self.presentation_sink = sink;
+    }
+
+    pub(crate) fn publish_turn_finished(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        outcome: TurnPresentationOutcome,
+    ) {
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::TurnFinished {
+                session_id: self.session.session_id().clone(),
+                run_id,
+                turn_id,
+                attempt_id: self.presentation_attempt_id.clone(),
+                provisional_message_id: self.presentation_message_id.clone(),
+                outcome,
+            });
+    }
+
+    pub(crate) fn publish_final_assistant_message(
+        &self,
+        message_id: MessageId,
+        content: agl_content::Content,
+    ) {
+        let Some(scope) = self.event_scope.as_ref() else {
+            return;
+        };
+        let Some(turn_id) = scope.turn_id().cloned() else {
+            return;
+        };
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::AssistantMessageFinal {
+                session_id: self.session.session_id().clone(),
+                run_id: scope.run_id().clone(),
+                turn_id,
+                attempt_id: self.presentation_attempt_id.clone(),
+                message_id,
+                content,
+            });
     }
 
     pub fn session(&self) -> &InferenceSession {
@@ -283,6 +360,8 @@ impl ChatTurnRuntime {
         self.request_id = None;
         self.runtime_events.clear();
         self.attempt_ids.clear();
+        self.presentation_attempt_id = None;
+        self.presentation_message_id = None;
     }
 
     pub fn begin_turn(
@@ -350,6 +429,8 @@ impl ChatTurnRuntime {
         self.generated_requests = 0;
         self.runtime_events.clear();
         self.attempt_ids.clear();
+        self.presentation_attempt_id = None;
+        self.presentation_message_id = None;
         if durable_event_sequence.is_none() {
             self.append_runtime_event(capability_policy_resolved_event(
                 self.active_effective_capabilities
@@ -461,6 +542,25 @@ impl ChatTurnRuntime {
         self.core_tools.root()
     }
 
+    pub fn preflight_workspace_root(&self, workspace_root: impl AsRef<Path>) -> Result<()> {
+        ensure!(
+            self.active_effective_capabilities.is_none(),
+            "cannot change workspace root during an active turn"
+        );
+        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
+            .context("failed to validate core filesystem tool root")?;
+        let mut session = self.session.clone();
+        session.set_workspace_root_and_refresh(workspace_root.as_ref())?;
+        build_chat_tool_runtime(
+            &session,
+            &core_tools,
+            workspace_root.as_ref(),
+            &self.process_tools,
+            &self.execution_context_state,
+        )?;
+        Ok(())
+    }
+
     pub fn set_workspace_root(&mut self, workspace_root: impl AsRef<Path>) -> Result<()> {
         ensure!(
             self.active_effective_capabilities.is_none(),
@@ -501,7 +601,7 @@ impl ChatTurnRuntime {
         self.rebuild_tool_runtime()
     }
 
-    fn rebuild_tool_runtime(&mut self) -> Result<()> {
+    pub(crate) fn rebuild_tool_runtime(&mut self) -> Result<()> {
         self.tool_runtime = build_chat_tool_runtime(
             &self.session,
             &self.core_tools,
@@ -611,34 +711,78 @@ impl ChatTurnRuntime {
     pub(crate) fn execute_model(
         &mut self,
         request: ModelRequest,
+        provisional_message_id: MessageId,
         cancellation: InferenceCancellation,
         deadline: Option<Instant>,
     ) -> Result<ModelResponse> {
         self.generated_requests += 1;
-        let (session_id, request_id) = inference_correlation(
+        let (scope_session_id, request_id) = inference_correlation(
             self.event_scope.as_ref(),
             self.request_id.as_ref(),
             &request,
         )?;
         let attempt_id = AttemptId::generate();
         self.attempt_ids.push(attempt_id.clone());
-        let response = self.session.generate(
-            request,
+        self.presentation_attempt_id = Some(attempt_id.clone());
+        self.presentation_message_id = Some(provisional_message_id.clone());
+        let presentation_session_id = self.session.session_id().clone();
+        let run_id = request.run_id.clone();
+        let turn_id = request.turn_id.clone();
+        let started_delivery =
+            self.presentation_sink
+                .try_publish(TurnPresentationEvent::ModelAttemptStarted {
+                    session_id: presentation_session_id.clone(),
+                    run_id: run_id.clone(),
+                    turn_id: turn_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    provisional_message_id: provisional_message_id.clone(),
+                });
+        let output_sink: Arc<dyn InferenceOutputSink> = Arc::new(InferencePresentationSink::new(
+            Arc::clone(&self.presentation_sink),
+            presentation_session_id,
+            run_id.clone(),
+            turn_id.clone(),
             attempt_id.clone(),
-            session_id,
-            request_id,
-            self.active_effective_capabilities
-                .as_ref()
-                .context("turn capability snapshot is not initialized")?,
-            InferenceExecutionControl {
-                cancellation,
-                deadline,
-            },
-        )?;
-        ensure!(
-            response.attempt_id == attempt_id,
-            "inference response attempt ID does not match the admitted attempt"
-        );
+            provisional_message_id.clone(),
+            started_delivery == PresentationDelivery::Delivered,
+        ));
+        let response = self
+            .session
+            .generate(
+                request,
+                attempt_id.clone(),
+                scope_session_id,
+                request_id,
+                self.active_effective_capabilities
+                    .as_ref()
+                    .context("turn capability snapshot is not initialized")?,
+                InferenceExecutionControl {
+                    cancellation,
+                    deadline,
+                    output_sink,
+                },
+            )
+            .and_then(|response| {
+                ensure!(
+                    response.attempt_id == attempt_id,
+                    "inference response attempt ID does not match the admitted attempt"
+                );
+                Ok(response)
+            });
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::ModelAttemptFinished {
+                session_id: self.session.session_id().clone(),
+                run_id,
+                turn_id,
+                attempt_id: attempt_id.clone(),
+                provisional_message_id,
+                outcome: if response.is_ok() {
+                    ModelAttemptOutcome::Completed
+                } else {
+                    ModelAttemptOutcome::Failed
+                },
+            });
+        let response = response?;
         self.model_input_tokens = self
             .model_input_tokens
             .saturating_add(response.metadata.input_tokens);
@@ -651,6 +795,46 @@ impl ChatTurnRuntime {
     }
 
     pub(crate) fn execute_capability(
+        &mut self,
+        request: ToolDispatchRequest,
+        step_id: Option<&StepId>,
+        cancellation: InferenceCancellation,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ToolDispatchResponse> {
+        let run_id = request.run_id.clone();
+        let turn_id = request.turn_id.clone();
+        let capability_id = request.capability_id.clone();
+        let presentation_step_id = step_id.cloned().unwrap_or_else(StepId::generate);
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::ToolActionStarted {
+                session_id: self.session.session_id().clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: self.presentation_attempt_id.clone(),
+                provisional_message_id: self.presentation_message_id.clone(),
+                step_id: presentation_step_id.clone(),
+                capability_id: capability_id.clone(),
+            });
+        let result = self.execute_capability_inner(request, step_id, cancellation, deadline);
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::ToolActionFinished {
+                session_id: self.session.session_id().clone(),
+                run_id,
+                turn_id,
+                attempt_id: self.presentation_attempt_id.clone(),
+                provisional_message_id: self.presentation_message_id.clone(),
+                step_id: presentation_step_id,
+                capability_id,
+                outcome: if result.is_ok() {
+                    ToolActionOutcome::Succeeded
+                } else {
+                    ToolActionOutcome::Failed
+                },
+            });
+        result
+    }
+
+    fn execute_capability_inner(
         &mut self,
         request: ToolDispatchRequest,
         step_id: Option<&StepId>,
@@ -827,8 +1011,10 @@ fn build_process_tools(
     context: Arc<dyn agl_tools::ProcessExecutionContext>,
 ) -> Result<agl_tools::ProcessTools> {
     let process = shared_process_handle(runtime)?;
+    let terminals = shared_terminal_registry(runtime)?;
     agl_tools::ProcessTools::new(
         process,
+        terminals,
         context,
         agl_tools::ProcessToolRuntimeConfig {
             base_environment: runtime.execution.admitted_environment()?,
@@ -879,6 +1065,31 @@ pub fn shared_process_handle(
     let handle = supervisor.handle();
     handles.insert(key, handle.clone());
     Ok(handle)
+}
+
+pub fn shared_terminal_registry(
+    runtime: &agl_runtime::AgentLibreRuntimeConfig,
+) -> Result<Arc<agl_process::TerminalRegistry>> {
+    let key = runtime.paths.store_root();
+    let process = shared_process_handle(runtime)?;
+    let registries = TERMINAL_REGISTRIES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut registries = registries
+        .lock()
+        .map_err(|error| anyhow::anyhow!("terminal runtime registry is poisoned: {error}"))?;
+    if let Some(registry) = registries.get(&key) {
+        return Ok(Arc::clone(registry));
+    }
+    let repository = Arc::new(agl_store::AglTerminalRepository::open_at(&key)?);
+    let registry = Arc::new(
+        agl_process::TerminalRegistry::new(
+            process,
+            Arc::new(agl_process::RejectTerminalSecrets),
+            repository,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    );
+    registries.insert(key, Arc::clone(&registry));
+    Ok(registry)
 }
 
 fn process_launcher_path() -> Result<PathBuf> {
