@@ -1737,7 +1737,7 @@ async fn handle_submission(
                         columns: columns.max(1),
                         rows: rows.max(1),
                     },
-                    agl_env: StructuredEnvironmentOverlay::default(),
+                    agl_env: current_terminal_environment(),
                     host_startup: HostStartupPolicy::ManagedOnly,
                 })
                 .await
@@ -1967,7 +1967,7 @@ fn host_terminal_request(
             profile: ExecutionProfile::Host,
             shell_profile_id,
             terminal_size,
-            agl_env: StructuredEnvironmentOverlay::default(),
+            agl_env: current_terminal_environment(),
             host_startup: startup,
         },
         confirm_host_authority: true,
@@ -1979,6 +1979,30 @@ fn current_terminal_size() -> TerminalSize {
     TerminalSize {
         columns: columns.max(1),
         rows: rows.max(1),
+    }
+}
+
+fn current_terminal_environment() -> StructuredEnvironmentOverlay {
+    let terminal_name = std::env::var("TERM").ok();
+    terminal_environment_for(terminal_name.as_deref())
+}
+
+fn terminal_environment_for(terminal_name: Option<&str>) -> StructuredEnvironmentOverlay {
+    const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
+    const MAX_TERMINAL_NAME_BYTES: usize = 128;
+
+    let terminal_name = terminal_name
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= MAX_TERMINAL_NAME_BYTES
+                && name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+' | b'.')
+                })
+        })
+        .unwrap_or(DEFAULT_TERMINAL_NAME);
+    StructuredEnvironmentOverlay {
+        values: BTreeMap::from([("TERM".to_owned(), terminal_name.to_owned())]),
+        ..StructuredEnvironmentOverlay::default()
     }
 }
 
@@ -4307,6 +4331,21 @@ mod tests {
     }
 
     #[test]
+    fn terminal_environment_uses_a_bounded_physical_terminal_name() {
+        let overlay = terminal_environment_for(Some("tmux-256color"));
+        assert_eq!(overlay.values["TERM"], "tmux-256color");
+        assert!(overlay.inherited_names.is_empty());
+        assert!(overlay.secret_refs.is_empty());
+
+        for invalid in ["", "../../host", "xterm\nINJECTED=value"] {
+            assert_eq!(
+                terminal_environment_for(Some(invalid)).values["TERM"],
+                "xterm-256color"
+            );
+        }
+    }
+
+    #[test]
     fn operation_mode_parser_uses_the_canonical_catalog_spelling() {
         assert_eq!(
             parse_protocol_tool_mode("read-only").unwrap(),
@@ -4566,10 +4605,7 @@ mod tests {
         assert!(request.confirm_host_authority);
         assert_eq!(request.terminal.execution_context_revision, 41);
         assert_eq!(request.terminal.shell_profile_id, "bash-managed");
-        assert_eq!(
-            request.terminal.agl_env,
-            StructuredEnvironmentOverlay::default()
-        );
+        assert_eq!(request.terminal.agl_env, current_terminal_environment());
         assert!(
             request
                 .terminal
