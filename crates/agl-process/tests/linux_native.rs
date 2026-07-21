@@ -77,6 +77,8 @@ fn sandbox_contract(harness: &Harness) {
         "runtime_read",
         "runtime_write_denied",
         "dev_null_write",
+        "thread_spawn",
+        "clone3_unavailable",
         "network_denied",
     ] {
         assert_eq!(report[field], true, "sandbox probe failed field {field}");
@@ -265,6 +267,22 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
     harness.wait(&started.execution_id);
     let output = harness.output(&started.execution_id);
     assert!(contains(&output.terminal, b"resized=100x40"));
+
+    let mut redraw = harness.request(vec!["resize-wait".to_owned()], ExecutionIo::Pty);
+    redraw.terminal_size = Some(TerminalSize::default());
+    let started = harness.handle.start(redraw).unwrap();
+    wait_for_output(harness, &started.execution_id, b"initial=80x24", Some(true));
+    harness
+        .handle
+        .resize(
+            &started.execution_id,
+            &harness.owner,
+            TerminalSize::default(),
+        )
+        .unwrap();
+    harness.wait(&started.execution_id);
+    let output = harness.output(&started.execution_id);
+    assert!(contains(&output.terminal, b"resized=80x24"));
 
     let mut interactive = harness.request(vec!["signal-eof".to_owned()], ExecutionIo::Pty);
     interactive.close_stdin_after_initial = false;

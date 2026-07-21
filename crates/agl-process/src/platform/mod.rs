@@ -93,6 +93,11 @@ pub(crate) fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn notify_terminal_resize(terminal: &OwnedFd) -> Result<()> {
+    linux::notify_terminal_resize(terminal)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn terminal_foreground_process_group(
     terminal: &OwnedFd,
     shell_process_group: i32,

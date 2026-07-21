@@ -1866,6 +1866,19 @@ impl Reactor {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        let mut previous_dimensions = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+        let dimensions_unchanged = unsafe {
+            libc::ioctl(
+                terminal.as_raw_fd(),
+                libc::TIOCGWINSZ,
+                previous_dimensions.as_mut_ptr(),
+            ) == 0
+                && {
+                    let previous_dimensions = previous_dimensions.assume_init();
+                    previous_dimensions.ws_row == dimensions.ws_row
+                        && previous_dimensions.ws_col == dimensions.ws_col
+                }
+        };
         if unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ, &dimensions) } != 0 {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidTerminalSize,
@@ -1874,6 +1887,9 @@ impl Reactor {
                     std::io::Error::last_os_error()
                 ),
             ));
+        }
+        if dimensions_unchanged {
+            platform::notify_terminal_resize(terminal)?;
         }
         self.repository.update_terminal_size(
             execution_id,

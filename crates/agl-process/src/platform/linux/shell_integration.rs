@@ -72,12 +72,20 @@ pub(crate) fn shell_integration_path_is_intact(path: &Path, reader: &OwnedFd) ->
 }
 
 pub(crate) fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
+    signal_terminal_foreground(terminal, libc::SIGINT, "interrupt")
+}
+
+pub(crate) fn notify_terminal_resize(terminal: &OwnedFd) -> Result<()> {
+    signal_terminal_foreground(terminal, libc::SIGWINCH, "redraw")
+}
+
+fn signal_terminal_foreground(terminal: &OwnedFd, signal: libc::c_int, action: &str) -> Result<()> {
     let process_group = read_terminal_foreground_process_group(terminal)?;
-    if unsafe { libc::kill(-process_group, libc::SIGINT) } != 0 {
+    if unsafe { libc::kill(-process_group, signal) } != 0 {
         let error = std::io::Error::last_os_error();
         return Err(ProcessError::new(
             ProcessErrorCode::StateConflict,
-            format!("failed to interrupt terminal foreground process group: {error}"),
+            format!("failed to {action} terminal foreground process group: {error}"),
         ));
     }
     Ok(())

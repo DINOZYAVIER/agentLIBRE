@@ -23,6 +23,7 @@ const STANDARD_RUNTIME_ROOTS: &[&str] = &[
     "/nix/store",
     "/run/current-system/sw",
 ];
+const PRIVATE_DEVICE_PATHS: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
 pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
     let mut roots = BTreeSet::new();
@@ -84,6 +85,7 @@ const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
 const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 const LANDLOCK_READ_ACCESS: u64 =
     LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+const LANDLOCK_DEVICE_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE;
 const LANDLOCK_WRITE_ACCESS: u64 = LANDLOCK_READ_ACCESS
     | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REMOVE_DIR
@@ -262,7 +264,7 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
         Some("mode=0755,size=1048576"),
         "failed to create private /dev",
     )?;
-    for source in ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"] {
+    for source in PRIVATE_DEVICE_PATHS {
         if Path::new(source).exists() {
             bind_mount_at(
                 Path::new(source),
@@ -585,6 +587,12 @@ fn apply_landlock(request: &LauncherRequest) -> Result<()> {
     ] {
         add_landlock_path(ruleset.as_raw_fd(), path, LANDLOCK_WRITE_ACCESS)?;
     }
+    for path in PRIVATE_DEVICE_PATHS {
+        let path = Path::new(path);
+        if path.exists() {
+            add_landlock_path(ruleset.as_raw_fd(), path, LANDLOCK_DEVICE_ACCESS)?;
+        }
+    }
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(last_os_error(
             ProcessErrorCode::SandboxUnavailable,
@@ -727,7 +735,8 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
         }
     }
 
-    let errno = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let permission_denied = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let unsupported = SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
     let mut filters = vec![
         stmt(BPF_LD_W_ABS, ARCH_OFFSET),
         jump(BPF_JMP_JEQ_K, AUDIT_ARCH, 1, 0),
@@ -747,8 +756,14 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
             0,
             1,
         ),
-        stmt(BPF_RET_K, errno),
+        stmt(BPF_RET_K, permission_denied),
         stmt(BPF_RET_K, SECCOMP_RET_ALLOW),
+        // clone3 stores its flags behind a userspace pointer, which classic
+        // seccomp BPF cannot inspect. Keep it unavailable, but report ENOSYS so
+        // libc can safely fall back to clone, whose namespace flags are
+        // filtered above. Returning EPERM here breaks ordinary thread creation.
+        jump(BPF_JMP_JEQ_K, libc::SYS_clone3 as u32, 0, 1),
+        stmt(BPF_RET_K, unsupported),
     ];
     let mut denied = vec![
         libc::SYS_unshare,
@@ -762,7 +777,6 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
         libc::SYS_keyctl,
         libc::SYS_add_key,
         libc::SYS_request_key,
-        libc::SYS_clone3,
         libc::SYS_fsopen,
         libc::SYS_fsconfig,
         libc::SYS_fsmount,
@@ -787,7 +801,7 @@ fn apply_seccomp(networkless: bool) -> Result<()> {
     }
     for syscall in denied {
         filters.push(jump(BPF_JMP_JEQ_K, syscall as u32, 0, 1));
-        filters.push(stmt(BPF_RET_K, errno));
+        filters.push(stmt(BPF_RET_K, permission_denied));
     }
     filters.push(stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
     let program = libc::sock_fprog {

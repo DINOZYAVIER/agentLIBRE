@@ -5,7 +5,7 @@ mod wire;
 
 pub(crate) use sandbox::standard_runtime_roots;
 pub(crate) use shell_integration::{
-    create_shell_integration_reader, interrupt_terminal_foreground,
+    create_shell_integration_reader, interrupt_terminal_foreground, notify_terminal_resize,
     shell_integration_path_is_intact, terminal_foreground_process_group,
 };
 
