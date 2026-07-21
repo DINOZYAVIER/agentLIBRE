@@ -143,6 +143,7 @@ agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_dir "$dry_run" "$workspace_root" "workspace root"
 agl_systemd_require_executable "$dry_run" "$binary"
 agl_systemd_require_file "$dry_run" "$config" "config file"
+agl_systemd_prepare_private_socket_parent "$dry_run" "$socket"
 
 unit_dir="$config_home/systemd/user"
 unit_file="$unit_dir/$unit"
