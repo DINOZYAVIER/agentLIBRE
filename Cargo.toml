@@ -82,7 +82,7 @@ ashpd = { version = "0.13.12", default-features = false, features = ["documents"
 cc = "1.2.67"
 clap = { version = "4.6.2", features = ["derive"] }
 clap_complete = "4.6.7"
-crossterm = { version = "0.28.1", features = ["event-stream"] }
+crossterm = "0.28.1"
 directories = "6.0.0"
 futures-util = { version = "0.3.32", features = ["sink"] }
 fs2 = "0.4.3"

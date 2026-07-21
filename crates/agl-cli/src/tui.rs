@@ -28,13 +28,12 @@ use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context as _, Result, bail};
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use fs2::FileExt as _;
-use futures_util::StreamExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -68,6 +67,63 @@ const MAX_LIVE_ASSISTANT_DELTA_BYTES: usize = 1024 * 1024;
 const MAX_PICKER_ENTRIES: usize = 256;
 const MAX_PICKER_PAGES: usize = 8;
 const CHAT_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+const CHAT_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+struct ChatInput {
+    receiver: mpsc::UnboundedReceiver<io::Result<Event>>,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ChatInput {
+    fn new() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let thread = std::thread::Builder::new()
+            .name("agl-chat-input".to_owned())
+            .spawn(move || {
+                while !thread_shutdown.load(Ordering::Acquire) {
+                    match crossterm::event::poll(CHAT_INPUT_POLL_INTERVAL) {
+                        Ok(true) => match crossterm::event::read() {
+                            Ok(event) => {
+                                if sender.send(Ok(event)).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = sender.send(Err(error));
+                                break;
+                            }
+                        },
+                        Ok(false) => {}
+                        Err(error) => {
+                            let _ = sender.send(Err(error));
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            receiver,
+            shutdown,
+            thread: Some(thread),
+        })
+    }
+
+    async fn next(&mut self) -> Option<io::Result<Event>> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for ChatInput {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ComposerMode {
@@ -853,7 +909,6 @@ async fn run_interactive_async(
         history,
     };
     let (async_sender, mut async_events) = mpsc::channel(UI_EVENT_CAPACITY);
-    let mut input = Some(EventStream::new());
     let mut pending_terminal: Option<Box<TerminalViewRequest>> = None;
     let mut terminal_stream = None;
     let mut interrupt_signal =
@@ -882,6 +937,7 @@ async fn run_interactive_async(
         },
     )
     .context("failed to initialize terminal UI")?;
+    let mut input = Some(ChatInput::new().context("failed to start Chat input reader")?);
 
     let result = loop {
         if let Some(terminal_request) = pending_terminal.take() {
@@ -910,8 +966,17 @@ async fn run_interactive_async(
             if let Some(stream) = terminal_stream.as_mut() {
                 stream.filter.set_visible(false);
             }
-            input = Some(EventStream::new());
+            // Reconcile the inline viewport before restarting Crossterm's
+            // asynchronous reader. On Unix, inline resize asks the terminal
+            // for its cursor position through the same global reader.
+            terminal
+                .autoresize()
+                .context("failed to resize restored Chat view")?;
             terminal.clear().context("failed to restore Chat view")?;
+            terminal
+                .draw(|frame| draw(frame, &state))
+                .context("failed to redraw restored Chat view")?;
+            input = Some(ChatInput::new().context("failed to restart Chat input reader")?);
         }
         tokio::select! {
             _ = render_tick.tick() => {
@@ -998,7 +1063,16 @@ async fn run_interactive_async(
                             state.composer.insert_paste(&text);
                         }
                     }
-                    Event::Resize(_, _) => terminal.autoresize()?,
+                    Event::Resize(_, _) => {
+                        drop(input.take());
+                        terminal.autoresize()?;
+                        terminal
+                            .draw(|frame| draw(frame, &state))
+                            .context("failed to render resized Chat view")?;
+                        input = Some(
+                            ChatInput::new().context("failed to restart Chat input reader")?
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -1083,24 +1157,36 @@ async fn run_interactive_async(
                 if signal.is_none() {
                     bail!("SIGTSTP signal stream ended");
                 }
+                // ChatInput joins its polling thread on drop, so synchronous
+                // inline-viewport cursor queries cannot race it after SIGCONT.
+                drop(input.take());
                 terminal_mode.suspend();
                 if unsafe { libc::raise(libc::SIGSTOP) } != 0 {
                     bail!("failed to suspend the interactive process");
                 }
                 terminal_mode.resume()?;
-                drop(input.take());
                 resubscribe_presentation(&client, &mut state, &mut presentation).await?;
+                terminal.autoresize().context("failed to resize Chat after SIGCONT")?;
                 terminal.clear().context("failed to redraw Chat after SIGCONT")?;
-                input = Some(EventStream::new());
+                terminal
+                    .draw(|frame| draw(frame, &state))
+                    .context("failed to render Chat after SIGCONT")?;
+                input = Some(ChatInput::new().context("failed to restart Chat input reader")?);
             }
             signal = resize_signal.recv() => {
                 if signal.is_none() {
                     bail!("SIGWINCH signal stream ended");
                 }
+                drop(input.take());
                 terminal.autoresize()?;
+                terminal
+                    .draw(|frame| draw(frame, &state))
+                    .context("failed to render resized Chat view")?;
+                input = Some(ChatInput::new().context("failed to restart Chat input reader")?);
             }
         }
     };
+    drop(input.take());
     drop(terminal);
     drop(terminal_mode);
     result
