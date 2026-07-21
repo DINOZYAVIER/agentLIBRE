@@ -3,21 +3,56 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-const BUILD_ID_DOMAIN: &[u8] = b"agl-process-build-identity-v1\0";
-const BUILD_INPUTS: [&str; 3] = ["Cargo.toml", "build.rs", "src"];
+const BUILD_ID_DOMAIN: &[u8] = b"agl-process-build-identity-v2\0";
+const BUILD_INPUTS: [&str; 7] = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/agl-ids/Cargo.toml",
+    "crates/agl-ids/src",
+    "crates/agl-process/Cargo.toml",
+    "crates/agl-process/build.rs",
+    "crates/agl-process/src",
+];
+const BUILD_ENV_INPUTS: [&str; 6] = [
+    "TARGET",
+    "PROFILE",
+    "CARGO_CFG_TARGET_ARCH",
+    "CARGO_CFG_TARGET_OS",
+    "CARGO_CFG_TARGET_ENV",
+    "CARGO_CFG_TARGET_FEATURE",
+];
 
 fn main() {
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
             .expect("Cargo must provide CARGO_MANIFEST_DIR to agl-process/build.rs"),
     );
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("agl-process must remain below the workspace crates directory");
     let mut inputs = Vec::new();
 
     for relative in BUILD_INPUTS {
-        println!("cargo:rerun-if-changed={relative}");
-        collect_regular_files(&manifest_dir, &manifest_dir.join(relative), &mut inputs);
+        let path = workspace_root.join(relative);
+        println!("cargo:rerun-if-changed={}", path.display());
+        collect_regular_files(workspace_root, &path, &mut inputs);
     }
     inputs.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut environment = BUILD_ENV_INPUTS
+        .into_iter()
+        .map(|name| {
+            println!("cargo:rerun-if-env-changed={name}");
+            (name.to_owned(), std::env::var(name).unwrap_or_default())
+        })
+        .collect::<Vec<_>>();
+    environment.extend(
+        std::env::vars()
+            .filter(|(name, _)| name.starts_with("CARGO_FEATURE_"))
+            .inspect(|(name, _)| println!("cargo:rerun-if-env-changed={name}")),
+    );
+    environment.sort();
 
     let mut digest = Sha256::new();
     digest.update(BUILD_ID_DOMAIN);
@@ -27,6 +62,10 @@ fn main() {
         });
         hash_framed(&mut digest, relative.as_bytes());
         hash_framed(&mut digest, &contents);
+    }
+    for (name, value) in environment {
+        hash_framed(&mut digest, name.as_bytes());
+        hash_framed(&mut digest, value.as_bytes());
     }
 
     let build_id = lowercase_hex(&digest.finalize());

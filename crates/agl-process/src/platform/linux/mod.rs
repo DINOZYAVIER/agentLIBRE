@@ -14,8 +14,11 @@ const SANDBOX_TMP: &str = "/tmp";
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek as _, SeekFrom};
+#[cfg(feature = "native-test-fixtures")]
+use std::os::fd::RawFd;
 use std::os::fd::{AsRawFd, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt};
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +27,16 @@ use std::time::{Duration, Instant};
 use crate::terminal::environment::PrivateTerminalEnvironment;
 use crate::{ExecutionIo, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
 
-use super::{LauncherRequest, LauncherResponse};
+use super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
+
+const LAUNCHER_PARENT_PID_ENV: &str = "AGL_PROCESS_LAUNCH_PARENT_PID";
+
+#[cfg(feature = "native-test-fixtures")]
+const PRE_EXEC_READY_FD_ENV: &str = "AGL_PROCESS_TEST_PRE_EXEC_READY_FD";
+#[cfg(feature = "native-test-fixtures")]
+const PRE_EXEC_RELEASE_FD_ENV: &str = "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_FD";
+#[cfg(feature = "native-test-fixtures")]
+const PRE_EXEC_RELEASE_WRITER_FD_ENV: &str = "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_WRITER_FD";
 
 pub(crate) struct LaunchedProcess {
     pub child: Child,
@@ -46,22 +58,38 @@ pub(crate) fn launch(
     let private_environment = private_environment_transport(private_environment)?;
     let (parent_socket, child_socket) = wire::socket_pair()?;
     clear_close_on_exec(child_socket.as_raw_fd())?;
-    let mut child = Command::new(launcher_path)
+    let expected_parent = unsafe { libc::getpid() };
+    #[cfg(feature = "native-test-fixtures")]
+    let pre_exec_barrier = pre_exec_test_barrier()?;
+    let mut command = Command::new(launcher_path);
+    command
         .env_clear()
         .env(
             "AGL_PROCESS_LAUNCH_FD",
             child_socket.as_raw_fd().to_string(),
         )
+        .env(LAUNCHER_PARENT_PID_ENV, expected_parent.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            ProcessError::new(
-                ProcessErrorCode::LauncherUnavailable,
-                format!("failed to start the process launcher: {error}"),
-            )
-        })?;
+        .stderr(Stdio::null());
+    // SAFETY: after fork this closure performs only raw close/write/read,
+    // prctl, and getppid syscalls. All environment parsing and formatting is
+    // completed in the parent before Command::spawn invokes the closure.
+    unsafe {
+        command.pre_exec(move || {
+            #[cfg(feature = "native-test-fixtures")]
+            if let Some(barrier) = pre_exec_barrier {
+                barrier.wait_for_parent_exit()?;
+            }
+            arm_parent_death_before_exec(expected_parent)
+        });
+    }
+    let mut child = command.spawn().map_err(|error| {
+        ProcessError::new(
+            ProcessErrorCode::LauncherUnavailable,
+            format!("failed to start the process launcher: {error}"),
+        )
+    })?;
     drop(child_socket);
 
     let mut descriptors = vec![cwd.as_raw_fd(), program.as_raw_fd()];
@@ -293,30 +321,40 @@ fn open_working_directory(path: &Path) -> Result<OwnedFd> {
 }
 
 pub(crate) fn diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
-    if let Err(error) = require_launcher(launcher_path) {
-        return unavailable_diagnostics(error);
-    }
+    read_launcher_diagnostics(launcher_path).unwrap_or_else(unavailable_diagnostics)
+}
+
+pub(crate) fn verify_launcher_identity(launcher_path: &Path) -> Result<()> {
+    read_launcher_diagnostics(launcher_path).map(|_| ())
+}
+
+fn read_launcher_diagnostics(launcher_path: &Path) -> Result<ProcessPlatformDiagnostics> {
+    require_launcher(launcher_path)?;
     let output = Command::new(launcher_path)
         .env_clear()
         .env("AGL_PROCESS_LAUNCH_DOCTOR", "1")
-        .output();
-    match output {
-        Ok(output) => match serde_json::from_slice::<ProcessPlatformDiagnostics>(&output.stdout) {
-            Ok(diagnostics) if output.status.success() == diagnostics.supported => diagnostics,
-            Ok(_) => unavailable_diagnostics(ProcessError::new(
-                ProcessErrorCode::LauncherProtocol,
-                "launcher diagnostics status disagrees with its supported field",
-            )),
-            Err(error) => unavailable_diagnostics(ProcessError::new(
+        .output()
+        .map_err(|error| {
+            ProcessError::new(
+                ProcessErrorCode::LauncherUnavailable,
+                format!("failed to run launcher diagnostics: {error}"),
+            )
+        })?;
+    let envelope =
+        serde_json::from_slice::<LauncherDiagnosticsEnvelope>(&output.stdout).map_err(|error| {
+            ProcessError::new(
                 ProcessErrorCode::LauncherProtocol,
                 format!("launcher diagnostics were invalid: {error}"),
-            )),
-        },
-        Err(error) => unavailable_diagnostics(ProcessError::new(
-            ProcessErrorCode::LauncherUnavailable,
-            format!("failed to run launcher diagnostics: {error}"),
-        )),
+            )
+        })?;
+    envelope.validate_identity()?;
+    if output.status.success() != envelope.diagnostics.supported {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "launcher diagnostics status disagrees with its supported field",
+        ));
     }
+    Ok(envelope.diagnostics)
 }
 
 pub(crate) fn launcher_main() -> i32 {
@@ -340,6 +378,109 @@ fn require_launcher(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn arm_parent_death_before_exec(expected_parent: libc::pid_t) -> std::io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::getppid() } != expected_parent {
+        return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native-test-fixtures")]
+#[derive(Clone, Copy)]
+struct PreExecTestBarrier {
+    ready: RawFd,
+    release: RawFd,
+    release_writer: RawFd,
+}
+
+#[cfg(feature = "native-test-fixtures")]
+impl PreExecTestBarrier {
+    fn wait_for_parent_exit(self) -> std::io::Result<()> {
+        if unsafe { libc::close(self.release_writer) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let byte = [1u8];
+        loop {
+            let written = unsafe { libc::write(self.ready, byte.as_ptr().cast(), byte.len()) };
+            if written == 1 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if written < 0 && error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(if written < 0 {
+                error
+            } else {
+                std::io::Error::from_raw_os_error(libc::EIO)
+            });
+        }
+        loop {
+            let mut release = [0u8];
+            let read = unsafe { libc::read(self.release, release.as_mut_ptr().cast(), 1) };
+            if read >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error);
+            }
+        }
+        unsafe {
+            libc::close(self.ready);
+            libc::close(self.release);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "native-test-fixtures")]
+fn pre_exec_test_barrier() -> Result<Option<PreExecTestBarrier>> {
+    let values = [
+        std::env::var_os(PRE_EXEC_READY_FD_ENV),
+        std::env::var_os(PRE_EXEC_RELEASE_FD_ENV),
+        std::env::var_os(PRE_EXEC_RELEASE_WRITER_FD_ENV),
+    ];
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if values.iter().any(Option::is_none) {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "native pre-exec barrier descriptors must be supplied together",
+        ));
+    }
+    let mut descriptors = values.into_iter().map(|value| {
+        value
+            .and_then(|value| value.to_str().and_then(|value| value.parse::<RawFd>().ok()))
+            .filter(|descriptor| *descriptor >= 0)
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::LauncherProtocol,
+                    "native pre-exec barrier descriptor is invalid",
+                )
+            })
+    });
+    let barrier = PreExecTestBarrier {
+        ready: descriptors.next().expect("three barrier values")?,
+        release: descriptors.next().expect("three barrier values")?,
+        release_writer: descriptors.next().expect("three barrier values")?,
+    };
+    if barrier.ready == barrier.release
+        || barrier.ready == barrier.release_writer
+        || barrier.release == barrier.release_writer
+    {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "native pre-exec barrier descriptors must be distinct",
+        ));
+    }
+    Ok(Some(barrier))
 }
 
 fn clear_close_on_exec(fd: libc::c_int) -> Result<()> {
@@ -507,5 +648,32 @@ mod tests {
         stale.as_object_mut().unwrap().remove("build_id").unwrap();
 
         assert!(serde_json::from_value::<LauncherResponse>(stale).is_err());
+    }
+
+    #[test]
+    fn matching_protocol_with_mismatched_diagnostics_build_is_rejected() {
+        let diagnostics = unavailable_diagnostics(ProcessError::new(
+            ProcessErrorCode::PlatformUnsupported,
+            "test diagnostics",
+        ));
+        let mut envelope = LauncherDiagnosticsEnvelope::current(diagnostics);
+        envelope.build_id = "sha256:stale-launcher-build".to_owned();
+
+        let error = envelope.validate_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+        assert!(error.message().contains("build identity mismatch"));
+    }
+
+    #[test]
+    fn stale_launcher_diagnostics_without_a_build_id_are_not_deserializable() {
+        let diagnostics = unavailable_diagnostics(ProcessError::new(
+            ProcessErrorCode::PlatformUnsupported,
+            "test diagnostics",
+        ));
+        let mut stale =
+            serde_json::to_value(LauncherDiagnosticsEnvelope::current(diagnostics)).unwrap();
+        stale.as_object_mut().unwrap().remove("build_id").unwrap();
+
+        assert!(serde_json::from_value::<LauncherDiagnosticsEnvelope>(stale).is_err());
     }
 }

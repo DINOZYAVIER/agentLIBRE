@@ -64,6 +64,15 @@ struct LauncherResponse {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LauncherDiagnosticsEnvelope {
+    protocol_version: String,
+    build_id: String,
+    diagnostics: ProcessPlatformDiagnostics,
+}
+
+#[cfg(target_os = "linux")]
 impl LauncherRequest {
     fn validate_launcher_identity(&self) -> Result<()> {
         validate_launcher_identity(&self.protocol_version, &self.build_id)
@@ -73,6 +82,21 @@ impl LauncherRequest {
 #[cfg(target_os = "linux")]
 impl LauncherResponse {
     fn validate_launcher_identity(&self) -> Result<()> {
+        validate_launcher_identity(&self.protocol_version, &self.build_id)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LauncherDiagnosticsEnvelope {
+    fn current(diagnostics: ProcessPlatformDiagnostics) -> Self {
+        Self {
+            protocol_version: LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: LAUNCHER_BUILD_ID.to_owned(),
+            diagnostics,
+        }
+    }
+
+    fn validate_identity(&self) -> Result<()> {
         validate_launcher_identity(&self.protocol_version, &self.build_id)
     }
 }
@@ -169,14 +193,31 @@ pub fn diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
     platform_diagnostics(launcher_path)
 }
 
+pub(crate) fn verify_launcher_binary_identity(launcher_path: &Path) -> crate::Result<()> {
+    platform_verify_launcher_binary_identity(launcher_path)
+}
+
 #[cfg(target_os = "linux")]
 fn platform_diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
     linux::diagnostics(launcher_path)
 }
 
+#[cfg(target_os = "linux")]
+fn platform_verify_launcher_binary_identity(launcher_path: &Path) -> crate::Result<()> {
+    linux::verify_launcher_identity(launcher_path)
+}
+
 #[cfg(not(target_os = "linux"))]
 fn platform_diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
     unsupported::diagnostics(launcher_path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_verify_launcher_binary_identity(_launcher_path: &Path) -> crate::Result<()> {
+    Err(crate::ProcessError::new(
+        crate::ProcessErrorCode::PlatformUnsupported,
+        "process launcher identity verification is supported only on Linux",
+    ))
 }
 
 #[doc(hidden)]

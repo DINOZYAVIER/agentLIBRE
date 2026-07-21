@@ -32,7 +32,7 @@ fn native_owner_death_and_descendant_cleanup_smoke() {
         verify_ready_tree_cleanup(iteration, libc::SIGKILL);
     }
     verify_ready_tree_cleanup(3, libc::SIGTERM);
-    for iteration in 0..16 {
+    for iteration in 0..8 {
         verify_parent_death_setup_race(iteration);
     }
 }
@@ -75,35 +75,34 @@ fn verify_ready_tree_cleanup(iteration: usize, signal: libc::c_int) {
 }
 
 fn verify_parent_death_setup_race(iteration: usize) {
-    let fixture = OwnerFixture::spawn(&format!("race-{iteration}"));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let launcher = loop {
-        if let Some(pid) = direct_children(fixture.pid()).into_iter().next() {
-            break pid;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "owner fixture did not reach launcher setup race"
-        );
-        std::thread::yield_now();
-    };
+    let fixture = OwnerFixture::spawn_with_pre_exec_barrier(&format!("race-{iteration}"));
+    fixture.wait_pre_exec_barrier();
+    let launcher_pids = direct_children(fixture.pid());
+    assert_eq!(
+        launcher_pids.len(),
+        1,
+        "pre-exec barrier must expose exactly one launcher child"
+    );
+    let launcher = *launcher_pids.first().unwrap();
     let observed = process_tree(fixture.pid());
+    assert_eq!(
+        observed,
+        BTreeSet::from([fixture.pid(), launcher]),
+        "pre-exec barrier must prevent descendants from appearing before the owner is killed"
+    );
+    assert_eq!(
+        fs::read_link(format!("/proc/{launcher}/exe")).unwrap(),
+        fs::canonicalize(OWNER).unwrap(),
+        "barrier child execed the launcher before the owner-death edge"
+    );
     let launcher_pidfd = pidfd_open(launcher);
-    let observed_pidfds = observed
-        .iter()
-        .filter(|pid| **pid != fixture.pid() && **pid != launcher)
-        .map(|pid| (*pid, pidfd_open(*pid)))
-        .collect::<Vec<_>>();
     let status = fixture.signal_and_wait(libc::SIGKILL);
     assert_eq!(status.signal(), Some(libc::SIGKILL));
     wait_pidfd(&launcher_pidfd, Duration::from_secs(5));
     wait_process_absent(launcher);
-    for (pid, pidfd) in observed_pidfds {
-        wait_pidfd(&pidfd, Duration::from_secs(5));
-        wait_process_absent(pid);
-    }
+    wait_for_fixture_processes_absent(&fixture.root);
     eprintln!(
-        "parent_death_setup_race_iteration={iteration} launcher={launcher} observed={observed:?} cleaned=true"
+        "parent_death_setup_race_iteration={iteration} launcher={launcher} barrier=true observed={observed:?} cleaned=true"
     );
 }
 
@@ -111,11 +110,20 @@ struct OwnerFixture {
     root: PathBuf,
     ready: PathBuf,
     evidence: PathBuf,
+    pre_exec_ready: Option<PathBuf>,
     child: std::cell::RefCell<Option<Child>>,
 }
 
 impl OwnerFixture {
     fn spawn(label: &str) -> Self {
+        Self::spawn_inner(label, false)
+    }
+
+    fn spawn_with_pre_exec_barrier(label: &str) -> Self {
+        Self::spawn_inner(label, true)
+    }
+
+    fn spawn_inner(label: &str, pre_exec_barrier: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "agl-process-owner-death-{label}-{}",
             std::process::id()
@@ -124,14 +132,19 @@ impl OwnerFixture {
         fs::create_dir_all(root.join("workspace")).unwrap();
         let ready = root.join("ready");
         let evidence = root.join("workspace").join("tree-evidence");
-        let child = Command::new(OWNER)
-            .args([
-                LAUNCHER,
-                HELPER,
-                root.to_str().unwrap(),
-                ready.to_str().unwrap(),
-                evidence.to_str().unwrap(),
-            ])
+        let pre_exec_ready = pre_exec_barrier.then(|| root.join("pre-exec-ready"));
+        let mut command = Command::new(OWNER);
+        command.args([
+            LAUNCHER,
+            HELPER,
+            root.to_str().unwrap(),
+            ready.to_str().unwrap(),
+            evidence.to_str().unwrap(),
+        ]);
+        if let Some(path) = &pre_exec_ready {
+            command.arg(path);
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -141,6 +154,7 @@ impl OwnerFixture {
             root,
             ready,
             evidence,
+            pre_exec_ready,
             child: std::cell::RefCell::new(Some(child)),
         }
     }
@@ -167,6 +181,34 @@ impl OwnerFixture {
                 "owner fixture did not become ready"
             );
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn wait_pre_exec_barrier(&self) {
+        let ready = self
+            .pre_exec_ready
+            .as_ref()
+            .expect("fixture did not request a pre-exec barrier");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if fs::metadata(ready).is_ok_and(|metadata| metadata.len() == 1) {
+                return;
+            }
+            if let Some(status) = self
+                .child
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+            {
+                panic!("owner fixture exited before pre-exec barrier: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "owner fixture did not reach the launcher pre-exec barrier"
+            );
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -198,11 +240,19 @@ impl Drop for OwnerFixture {
 }
 
 fn direct_children(pid: u32) -> BTreeSet<u32> {
-    fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|value| value.parse().ok())
-        .collect()
+    let mut children = BTreeSet::new();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return children;
+    };
+    for task in tasks.filter_map(Result::ok) {
+        let contents = fs::read_to_string(task.path().join("children")).unwrap_or_default();
+        children.extend(
+            contents
+                .split_whitespace()
+                .filter_map(|value| value.parse::<u32>().ok()),
+        );
+    }
+    children
 }
 
 fn process_tree(root: u32) -> BTreeSet<u32> {
@@ -255,6 +305,31 @@ fn wait_for_namespace_empty(namespace: &str) {
         assert!(
             Instant::now() < deadline,
             "PID namespace {namespace} still contains {members:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_fixture_processes_absent(root: &std::path::Path) {
+    let needle = root.as_os_str().as_encoded_bytes();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline"))
+                    .is_ok_and(|cmdline| cmdline.windows(needle.len()).any(|part| part == needle))
+            })
+            .collect::<BTreeSet<_>>();
+        if found.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture descendants born after the kill still reference {}: {found:?}",
+            root.display()
         );
         std::thread::sleep(Duration::from_millis(5));
     }

@@ -51,6 +51,12 @@ cargo test \
   --exact \
   --nocapture
 
+# The CLI crate depends on the production agl-process feature set. Rebuild the
+# stable sibling path without native fixtures so its build identity matches the
+# library linked into the CLI integration test; the fixture helper remains at
+# its already-built path.
+cargo build -p agl-process --bin agl-process-launcher
+
 cargo test \
   -p agl-cli \
   --test process_pty_native \

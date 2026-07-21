@@ -1,7 +1,9 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::BTreeMap;
-    use std::fs;
+    use std::fs::{self, File, OpenOptions};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::fs::OpenOptionsExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,9 +29,10 @@ mod linux {
         arm_parent_death()?;
         install_shutdown_handlers();
         let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-        if arguments.len() != 5 {
+        if !(5..=6).contains(&arguments.len()) {
             return Err(
-                "usage: agl-process-owner-fixture LAUNCHER HELPER ROOT READY EVIDENCE".into(),
+                "usage: agl-process-owner-fixture LAUNCHER HELPER ROOT READY EVIDENCE [PRE_EXEC_READY]"
+                    .into(),
             );
         }
         let launcher = canonical(&arguments[0])?;
@@ -39,6 +42,10 @@ mod linux {
         let evidence = PathBuf::from(&arguments[4]);
         fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
+        let _pre_exec_barrier = arguments
+            .get(5)
+            .map(|path| PreExecBarrier::install(Path::new(path)))
+            .transpose()?;
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace)?;
         let workspace = workspace.canonicalize()?;
@@ -118,6 +125,50 @@ mod linux {
 
     fn canonical(value: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         Ok(Path::new(value).canonicalize()?)
+    }
+
+    struct PreExecBarrier {
+        _ready: File,
+        _release: OwnedFd,
+        _release_writer: OwnedFd,
+    }
+
+    impl PreExecBarrier {
+        fn install(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+            let ready = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(path)?;
+            let mut descriptors = [-1; 2];
+            if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let release = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+            let release_writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+            // SAFETY: the owner fixture is still single-threaded. The process
+            // supervisor and its launch thread are started only after all
+            // three test-only descriptor variables have been installed.
+            unsafe {
+                std::env::set_var(
+                    "AGL_PROCESS_TEST_PRE_EXEC_READY_FD",
+                    ready.as_raw_fd().to_string(),
+                );
+                std::env::set_var(
+                    "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_FD",
+                    release.as_raw_fd().to_string(),
+                );
+                std::env::set_var(
+                    "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_WRITER_FD",
+                    release_writer.as_raw_fd().to_string(),
+                );
+            }
+            Ok(Self {
+                _ready: ready,
+                _release: release,
+                _release_writer: release_writer,
+            })
+        }
     }
 
     fn arm_parent_death() -> Result<(), Box<dyn std::error::Error>> {

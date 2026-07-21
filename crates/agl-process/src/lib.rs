@@ -75,6 +75,11 @@ pub fn process_platform_diagnostics(
     platform::diagnostics(launcher_path.as_ref())
 }
 
+#[doc(hidden)]
+pub fn verify_process_launcher_identity(launcher_path: impl AsRef<std::path::Path>) -> Result<()> {
+    platform::verify_launcher_binary_identity(launcher_path.as_ref())
+}
+
 /// Returns the existing canonical Linux runtime roots admitted by the
 /// workspace sandbox. Aliases such as `/bin` and `/usr/bin` are deduplicated
 /// by filesystem identity after canonicalization.

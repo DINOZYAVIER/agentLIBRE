@@ -15,7 +15,7 @@ use crate::{
     Result, TerminalSize,
 };
 
-use super::super::{LauncherRequest, LauncherResponse};
+use super::super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
 use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error, sandbox, wire};
 
 static FORWARDED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -35,8 +35,10 @@ pub(super) fn main() -> i32 {
 
 fn doctor_main() -> i32 {
     let diagnostics = sandbox::diagnostics();
-    match serde_json::to_writer(std::io::stdout(), &diagnostics) {
-        Ok(()) if diagnostics.supported => 0,
+    let supported = diagnostics.supported;
+    let envelope = LauncherDiagnosticsEnvelope::current(diagnostics);
+    match serde_json::to_writer(std::io::stdout(), &envelope) {
+        Ok(()) if supported => 0,
         Ok(()) => 1,
         Err(error) => {
             eprintln!("failed to render process diagnostics: {error}");
@@ -46,7 +48,7 @@ fn doctor_main() -> i32 {
 }
 
 fn launch_main() -> Result<i32> {
-    let expected_parent = unsafe { libc::getppid() };
+    let expected_parent = parse_expected_parent_pid()?;
     configure_parent_death(expected_parent)?;
     let control_fd = parse_control_fd()?;
     let (request, mut descriptors): (LauncherRequest, Vec<OwnedFd>) =
@@ -91,6 +93,11 @@ fn launch_main() -> Result<i32> {
         return send_failure_and_return(control_fd, error);
     }
 
+    let expected_namespace_parent = unsafe { libc::getpid() };
+    let (namespace_parent_liveness, namespace_parent_lifetime) = match pipe_pair() {
+        Ok(pipe) => pipe,
+        Err(error) => return send_failure_and_return(control_fd, error),
+    };
     let namespace_pid = unsafe { libc::fork() };
     if namespace_pid < 0 {
         return send_failure_and_return(
@@ -103,13 +110,17 @@ fn launch_main() -> Result<i32> {
     }
     if namespace_pid == 0 {
         unsafe { libc::close(control_fd) };
+        drop(namespace_parent_lifetime);
         drop(exec_read);
         io.close_supervisor_side();
-        let parent = unsafe { libc::getppid() };
-        if let Err(error) = configure_parent_death(parent) {
+        if let Err(error) = configure_namespace_parent_death(
+            expected_namespace_parent,
+            namespace_parent_liveness.as_raw_fd(),
+        ) {
             write_exec_failure(exec_write.as_raw_fd(), &error);
             unsafe { libc::_exit(125) }
         }
+        drop(namespace_parent_liveness);
         let status = namespace_init(
             &request,
             &mut io,
@@ -121,11 +132,12 @@ fn launch_main() -> Result<i32> {
         unsafe { libc::_exit(mirror_wait_status(status)) }
     }
 
+    drop(namespace_parent_liveness);
     drop(private_environment);
     drop(exec_write);
     io.close_target_side();
     let setup = await_exec_handshake(&exec_read, Duration::from_millis(request.setup_timeout_ms));
-    match setup {
+    let result = match setup {
         Ok(()) => {
             let response = LauncherResponse {
                 protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
@@ -146,7 +158,9 @@ fn launch_main() -> Result<i32> {
             let _ = wait_for_pid(namespace_pid);
             send_failure_and_return(control_fd, error)
         }
-    }
+    };
+    drop(namespace_parent_lifetime);
+    result
 }
 
 fn namespace_init(
@@ -755,6 +769,25 @@ fn parse_control_fd() -> Result<RawFd> {
     })
 }
 
+fn parse_expected_parent_pid() -> Result<libc::pid_t> {
+    let value = std::env::var(super::LAUNCHER_PARENT_PID_ENV).map_err(|_| {
+        ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "launcher parent identity is missing",
+        )
+    })?;
+    value
+        .parse::<libc::pid_t>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::LauncherProtocol,
+                "launcher parent identity is invalid",
+            )
+        })
+}
+
 fn configure_parent_death(expected_parent: libc::pid_t) -> Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
         return Err(last_os_error(
@@ -769,6 +802,49 @@ fn configure_parent_death(expected_parent: libc::pid_t) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn configure_namespace_parent_death(
+    expected_parent: libc::pid_t,
+    parent_liveness: RawFd,
+) -> Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        return Err(last_os_error(
+            ProcessErrorCode::SandboxUnavailable,
+            "failed to arm namespace parent-death protection",
+        ));
+    }
+
+    // The namespace init is the first child after CLONE_NEWPID, so its parent
+    // lives outside the child's PID namespace and getppid() is always zero.
+    // The pipe was created by expected_parent before fork; only that process
+    // retains the writer. HUP therefore proves that the original parent died
+    // before PR_SET_PDEATHSIG was armed, without relying on a namespace-local
+    // PID that cannot represent the parent.
+    let mut poll = libc::pollfd {
+        fd: parent_liveness,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+        if ready == 0 {
+            return Ok(());
+        }
+        if ready > 0 {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SpawnFailed,
+                format!("namespace parent {expected_parent} changed during parent-death setup"),
+            ));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SpawnFailed,
+                format!("failed to verify namespace parent liveness: {error}"),
+            ));
+        }
+    }
 }
 
 extern "C" fn forward_signal(signal: libc::c_int) {
@@ -973,6 +1049,26 @@ mod tests {
         stale.as_object_mut().unwrap().remove("build_id").unwrap();
 
         assert!(serde_json::from_value::<LauncherRequest>(stale).is_err());
+    }
+
+    #[test]
+    fn namespace_parent_liveness_pipe_accepts_only_a_live_original_writer() {
+        let (live_reader, live_writer) = pipe_pair().unwrap();
+        configure_namespace_parent_death(unsafe { libc::getpid() }, live_reader.as_raw_fd())
+            .unwrap();
+        drop(live_writer);
+
+        let (dead_reader, dead_writer) = pipe_pair().unwrap();
+        drop(dead_writer);
+        let error =
+            configure_namespace_parent_death(unsafe { libc::getpid() }, dead_reader.as_raw_fd())
+                .unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::SpawnFailed);
+        assert!(
+            error
+                .message()
+                .contains("changed during parent-death setup")
+        );
     }
 
     #[test]

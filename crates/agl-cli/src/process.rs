@@ -596,6 +596,13 @@ fn process_launcher_path() -> Result<PathBuf> {
     Ok(directory.join("agl-process-launcher"))
 }
 
+pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
+    let launcher = process_launcher_path()?;
+    agl_process::verify_process_launcher_identity(&launcher)
+        .map_err(anyhow::Error::from)
+        .context("process launcher identity verification failed")
+}
+
 fn unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
