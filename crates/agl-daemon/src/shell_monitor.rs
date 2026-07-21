@@ -188,16 +188,20 @@ fn close_integration(
         .integration_closed(&spec.terminal_id)
         .ok()
         .flatten();
-    let integration_notice = fallback_notice.or(closed_notice);
+    let integration_notice =
+        fallback_notice
+            .or(closed_notice)
+            .unwrap_or_else(|| ShellIntegrationNotice {
+                code: "shell_integration_degraded",
+                message: "private shell integration channel closed".to_owned(),
+            });
     let mut presentation = Vec::new();
     if let Some(projection) = project_terminal(connection, &spec.terminal_id, None, true)
         && let Some(terminal) = projection.terminal
     {
         presentation.push(SessionPresentationEvent::TerminalChanged { terminal });
     }
-    if let Some(notice) = integration_notice {
-        presentation.push(integration_notice_event(notice));
-    }
+    presentation.push(integration_notice_event(integration_notice));
     publish_all(&connection.application, &spec.session_id, presentation);
 }
 

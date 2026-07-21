@@ -926,7 +926,7 @@ impl TerminalRegistry {
         status: ExecutionStatus,
     ) -> Result<TerminalRecord> {
         let mut state = self.lock()?;
-        let (mut record, slot) = {
+        let (mut record, slot, mut integration) = {
             let entry = state
                 .terminals
                 .get(terminal_id)
@@ -937,11 +937,27 @@ impl TerminalRegistry {
                     "process status does not belong to the requested terminal",
                 ));
             }
-            (entry.record.clone(), entry.slot.clone())
+            if !entry.record.state.is_live() {
+                return Ok(entry.record.clone());
+            }
+            (
+                entry.record.clone(),
+                entry.slot.clone(),
+                entry.integration.clone(),
+            )
         };
         record.state = merge_terminal_state(record.state, terminal_state(status.state));
         if record.integration_health != ShellIntegrationHealth::Trusted {
             record.cwd = status.cwd;
+        }
+        if !record.state.is_live() {
+            if let Some(integration) = integration.as_mut() {
+                integration.channel_closed();
+                sync_integration_projection(&mut record, integration);
+            } else {
+                record.prompt_state = TerminalPromptState::Degraded;
+                record.integration_health = ShellIntegrationHealth::Degraded;
+            }
         }
         let active_slot = record.state.is_live() || record.state == TerminalState::OutcomeUnknown;
         let record = replace_terminal_record(
@@ -952,11 +968,14 @@ impl TerminalRegistry {
             slot,
             active_slot,
         )?;
-        state
+        let entry = state
             .terminals
             .get_mut(terminal_id)
-            .expect("terminal was durably replaced above")
-            .output_sequence = status.last_sequence;
+            .expect("terminal was durably replaced above");
+        entry.output_sequence = status.last_sequence;
+        if !record.state.is_live() {
+            entry.integration = integration;
+        }
         Ok(record)
     }
 
@@ -3701,6 +3720,60 @@ mod tests {
             degraded
         );
         std::fs::remove_dir_all(&degraded.workspace_root).unwrap();
+    }
+
+    #[test]
+    fn final_refresh_degrades_integration_before_the_record_becomes_immutable() {
+        let starter = Arc::new(FakeStarter::default());
+        let repository = Arc::new(crate::InMemoryTerminalRepository::new());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            repository.clone(),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let terminal = registry
+            .ensure_terminal(ensure_request(SessionId::generate(), context, shell))
+            .unwrap();
+
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let trusted = registry.record(&terminal.terminal_id).unwrap();
+        assert!(trusted.prompt_state.is_trusted_ready());
+        assert_eq!(trusted.integration_health, ShellIntegrationHealth::Trusted);
+
+        starter.set_state(&terminal.execution_id, ExecutionState::Cancelled);
+        let final_status = starter.status(&terminal.execution_id).unwrap();
+        let final_record = registry.refresh(&terminal.terminal_id).unwrap();
+
+        assert_eq!(final_record.state, TerminalState::Failed);
+        assert_eq!(final_record.prompt_state, TerminalPromptState::Degraded);
+        assert_eq!(
+            final_record.integration_health,
+            ShellIntegrationHealth::Degraded
+        );
+        let durable = repository.record(&terminal.terminal_id).unwrap();
+        assert_eq!(durable.record, final_record);
+        assert!(!durable.active_slot);
+        assert_eq!(
+            registry
+                .integration_closed(&terminal.terminal_id)
+                .expect("already-closed final integration must be idempotent"),
+            None
+        );
+        assert_eq!(
+            registry
+                .persist_execution_status(&terminal.terminal_id, final_status)
+                .expect("a concurrent stale refresh must observe the immutable final record"),
+            final_record
+        );
+        assert_eq!(
+            registry.record(&terminal.terminal_id).unwrap(),
+            final_record
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
