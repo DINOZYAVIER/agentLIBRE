@@ -440,6 +440,12 @@ impl AgentLibreClient {
             }
             other => return Err(unexpected("execution_attachment_started", &other)),
         };
+        if started.next_sequence != after_sequence {
+            return Err(ClientError::SequenceGap {
+                expected: after_sequence,
+                actual: started.next_sequence,
+            });
+        }
         let heartbeat = started.heartbeat_interval_ms.map(|milliseconds| {
             let period = Duration::from_millis(milliseconds);
             let mut interval = tokio::time::interval_at(Instant::now() + period, period);
@@ -1174,7 +1180,12 @@ impl ExecutionAttachment {
                         && event.execution_id == self.execution_id =>
                 {
                     let expected = self.last_sequence.saturating_add(1);
-                    if event.chunk.sequence != expected {
+                    // Execution cursors cover the complete durable execution
+                    // event sequence. Lifecycle, resize, and other metadata
+                    // can therefore occupy sequence values that have no PTY
+                    // output chunk. Output must be strictly monotonic, but it
+                    // is not necessarily contiguous.
+                    if event.chunk.sequence <= self.last_sequence {
                         return Err(ClientError::SequenceGap {
                             expected,
                             actual: event.chunk.sequence,
@@ -1188,12 +1199,14 @@ impl ExecutionAttachment {
                     if event.attachment_id == self.attachment_id
                         && event.execution_id == self.execution_id =>
                 {
-                    if event.last_delivered_sequence != self.last_sequence {
+                    if event.last_delivered_sequence < self.last_sequence {
                         return Err(ClientError::SequenceGap {
                             expected: self.last_sequence,
                             actual: event.last_delivered_sequence,
                         });
                     }
+                    self.last_sequence = event.last_delivered_sequence;
+                    self.raw.last_sequence = event.last_delivered_sequence;
                     self.finished = true;
                     self.raw.terminal = true;
                     return Ok(Some(ExecutionAttachmentEvent::Finished(event)));
@@ -1892,6 +1905,119 @@ mod tests {
         );
         assert!(sessions.unwrap().sessions.is_empty());
         assert!(executions.unwrap().executions.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execution_attachment_accepts_monotonic_output_with_metadata_sequence_gaps() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let execution_id = agl_ids::ExecutionId::generate();
+        let server_execution_id = execution_id.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            let attachment_id = request.request_id.clone();
+            assert!(matches!(
+                request.kind,
+                DaemonRequestKind::ExecutionAttach(ExecutionAttachRequest {
+                    ref execution_id,
+                    after_sequence: 0,
+                    writable: false,
+                }) if execution_id == &server_execution_id
+            ));
+            let status = ExecutionStatus {
+                execution_id: server_execution_id.clone(),
+                owner: ExecutionOwner::Session {
+                    session_id: agl_ids::SessionId::generate(),
+                    root_run_id: RunId::generate(),
+                },
+                state: ExecutionState::Running,
+                profile: ExecutionProfile::Workspace,
+                io: ExecutionIo::Pty,
+                cwd: std::path::PathBuf::from("/workspace"),
+                terminal_size: Some(TerminalSize::default()),
+                exit: None,
+                first_retained_sequence: Some(3),
+                last_sequence: 7,
+                retained_bytes: 2,
+                discarded_output_bytes: 0,
+                output_truncated: false,
+                output_expired: false,
+                started_at_unix_ms: Some(1),
+                finished_at_unix_ms: None,
+                error_code: None,
+            };
+            let events = [
+                DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
+                    attachment_id: attachment_id.clone(),
+                    status,
+                    writable: false,
+                    next_sequence: 0,
+                    lease_ttl_ms: None,
+                    heartbeat_interval_ms: None,
+                }),
+                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                    attachment_id: attachment_id.clone(),
+                    execution_id: server_execution_id.clone(),
+                    chunk: ExecutionOutputChunk {
+                        sequence: 3,
+                        channel: ExecutionChannel::Terminal,
+                        bytes: ProcessBytes::from_bytes(b"a"),
+                    },
+                    state: ExecutionState::Running,
+                }),
+                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
+                    attachment_id: attachment_id.clone(),
+                    execution_id: server_execution_id.clone(),
+                    chunk: ExecutionOutputChunk {
+                        sequence: 5,
+                        channel: ExecutionChannel::Terminal,
+                        bytes: ProcessBytes::from_bytes(b"b"),
+                    },
+                    state: ExecutionState::Running,
+                }),
+                DaemonEventKind::ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent {
+                    attachment_id,
+                    execution_id: server_execution_id,
+                    state: ExecutionState::Running,
+                    last_delivered_sequence: 7,
+                    reason: ExecutionAttachmentFinishReason::Detached,
+                }),
+            ];
+            for event in events {
+                server
+                    .send(
+                        serde_json::to_string(&DaemonEvent::new(
+                            Some(request.request_id.clone()),
+                            event,
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let mut attachment = client
+            .attach_execution(execution_id, 0, false)
+            .await
+            .unwrap();
+        for expected in [3, 5] {
+            assert!(matches!(
+                attachment.next().await.unwrap(),
+                Some(ExecutionAttachmentEvent::Output(event))
+                    if event.chunk.sequence == expected
+            ));
+        }
+        assert!(matches!(
+            attachment.next().await.unwrap(),
+            Some(ExecutionAttachmentEvent::Finished(event))
+                if event.last_delivered_sequence == 7
+        ));
         server.await.unwrap();
     }
 
