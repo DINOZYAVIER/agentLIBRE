@@ -1014,6 +1014,8 @@ mod tests {
 
     fn launcher_request(workspace_root: PathBuf, program: PathBuf) -> LauncherRequest {
         LauncherRequest {
+            protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
             execution_id: ExecutionId::generate(),
             request: ExecutionRequest {
                 owner: ExecutionOwner::Run {

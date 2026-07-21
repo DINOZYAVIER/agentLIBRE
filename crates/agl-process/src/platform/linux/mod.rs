@@ -93,6 +93,11 @@ pub(crate) fn launch(
                 return Err(error);
             }
         };
+    if let Err(error) = response.validate_launcher_identity() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     if !response.ok {
         let _ = child.wait();
         return Err(ProcessError::new(
@@ -432,5 +437,75 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(error.code(), ProcessErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn mismatched_launcher_response_payload_is_rejected_on_the_private_wire() {
+        let (sender, receiver) = wire::socket_pair().unwrap();
+        let response = LauncherResponse {
+            protocol_version: "agl-process-launcher.future/test".to_owned(),
+            build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
+            ok: false,
+            io: None,
+            error_code: None,
+            message: None,
+        };
+        wire::send_json_with_fds(sender.as_raw_fd(), &response, &[]).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(receiver.as_raw_fd(), 0).unwrap();
+
+        assert!(descriptors.is_empty());
+        let error = response.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+        assert!(error.message().contains("protocol mismatch"));
+    }
+
+    #[test]
+    fn matching_protocol_with_mismatched_launcher_build_is_rejected_on_the_private_wire() {
+        let (sender, receiver) = wire::socket_pair().unwrap();
+        let response = LauncherResponse {
+            protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: "sha256:stale-launcher-build".to_owned(),
+            ok: false,
+            io: None,
+            error_code: None,
+            message: None,
+        };
+        wire::send_json_with_fds(sender.as_raw_fd(), &response, &[]).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(receiver.as_raw_fd(), 0).unwrap();
+
+        assert!(descriptors.is_empty());
+        let error = response.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+        assert!(error.message().contains("build identity mismatch"));
+    }
+
+    #[test]
+    fn stale_launcher_response_without_a_version_is_not_deserializable() {
+        let stale = serde_json::json!({
+            "ok": false,
+            "io": null,
+            "error_code": "launcher_protocol",
+            "message": "stale launcher"
+        });
+
+        assert!(serde_json::from_value::<LauncherResponse>(stale).is_err());
+    }
+
+    #[test]
+    fn stale_launcher_response_without_a_build_id_is_not_deserializable() {
+        let mut stale = serde_json::to_value(LauncherResponse {
+            protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
+            ok: false,
+            io: None,
+            error_code: None,
+            message: None,
+        })
+        .unwrap();
+        stale.as_object_mut().unwrap().remove("build_id").unwrap();
+
+        assert!(serde_json::from_value::<LauncherResponse>(stale).is_err());
     }
 }

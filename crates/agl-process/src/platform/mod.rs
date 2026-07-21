@@ -17,12 +17,18 @@ use crate::ProcessPlatformDiagnostics;
 #[cfg(target_os = "linux")]
 use crate::terminal::environment::PrivateTerminalEnvironment;
 #[cfg(target_os = "linux")]
-use crate::{ExecutionIo, ExecutionRequest, Result};
+use crate::{ExecutionIo, ExecutionRequest, ProcessError, ProcessErrorCode, Result};
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
+
+#[cfg(target_os = "linux")]
+const LAUNCHER_PROTOCOL_VERSION: &str =
+    concat!("agl-process-launcher.v1/", env!("CARGO_PKG_VERSION"));
+#[cfg(target_os = "linux")]
+const LAUNCHER_BUILD_ID: &str = env!("AGL_PROCESS_BUILD_ID");
 
 #[cfg(target_os = "linux")]
 pub(crate) struct LaunchDirectories {
@@ -35,6 +41,8 @@ pub(crate) struct LaunchDirectories {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LauncherRequest {
+    protocol_version: String,
+    build_id: String,
     execution_id: ExecutionId,
     request: ExecutionRequest,
     execution_root: PathBuf,
@@ -47,10 +55,47 @@ struct LauncherRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LauncherResponse {
+    protocol_version: String,
+    build_id: String,
     ok: bool,
     io: Option<ExecutionIo>,
     error_code: Option<String>,
     message: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl LauncherRequest {
+    fn validate_launcher_identity(&self) -> Result<()> {
+        validate_launcher_identity(&self.protocol_version, &self.build_id)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LauncherResponse {
+    fn validate_launcher_identity(&self) -> Result<()> {
+        validate_launcher_identity(&self.protocol_version, &self.build_id)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_launcher_identity(protocol_version: &str, build_id: &str) -> Result<()> {
+    if protocol_version != LAUNCHER_PROTOCOL_VERSION {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            format!(
+                "process launcher protocol mismatch: expected {LAUNCHER_PROTOCOL_VERSION}, received {protocol_version}"
+            ),
+        ));
+    }
+    if build_id != LAUNCHER_BUILD_ID {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            format!(
+                "process launcher build identity mismatch: expected {LAUNCHER_BUILD_ID}, received {build_id}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -67,6 +112,8 @@ pub(crate) fn launch(
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
     let wire = LauncherRequest {
+        protocol_version: LAUNCHER_PROTOCOL_VERSION.to_owned(),
+        build_id: LAUNCHER_BUILD_ID.to_owned(),
         execution_id: execution_id.clone(),
         request: request.clone(),
         execution_root: directories.execution_root.clone(),

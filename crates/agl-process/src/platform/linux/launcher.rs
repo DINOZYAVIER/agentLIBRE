@@ -51,6 +51,9 @@ fn launch_main() -> Result<i32> {
     let control_fd = parse_control_fd()?;
     let (request, mut descriptors): (LauncherRequest, Vec<OwnedFd>) =
         wire::receive_json_with_fds(control_fd, 3)?;
+    if let Err(error) = request.validate_launcher_identity() {
+        return send_failure_and_return(control_fd, error);
+    }
     if !(2..=3).contains(&descriptors.len()) {
         return send_failure_and_return(
             control_fd,
@@ -125,6 +128,8 @@ fn launch_main() -> Result<i32> {
     match setup {
         Ok(()) => {
             let response = LauncherResponse {
+                protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+                build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
                 ok: true,
                 io: Some(request.request.io),
                 error_code: None,
@@ -708,6 +713,8 @@ fn write_exec_failure(fd: RawFd, error: &ProcessError) {
 
 fn send_failure_and_return(control_fd: RawFd, error: ProcessError) -> Result<i32> {
     let response = LauncherResponse {
+        protocol_version: super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+        build_id: super::super::LAUNCHER_BUILD_ID.to_owned(),
         ok: false,
         io: None,
         error_code: Some(error.code().as_str().to_owned()),
@@ -903,6 +910,72 @@ mod tests {
     const HELPER_TEST: &str = "platform::linux::launcher::tests::private_environment_exec_helper";
 
     #[test]
+    fn mismatched_launcher_request_returns_a_typed_protocol_failure_without_launching() {
+        let mut request = exec_request();
+        request.protocol_version = "agl-process-launcher.future/test".to_owned();
+        let error = request.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+
+        let (launcher, supervisor) = wire::socket_pair().unwrap();
+        let status = send_failure_and_return(launcher.as_raw_fd(), error).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(supervisor.as_raw_fd(), 0).unwrap();
+
+        assert_eq!(status, exit_status(125));
+        assert!(descriptors.is_empty());
+        response.validate_launcher_identity().unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.io, None);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(ProcessErrorCode::LauncherProtocol.as_str())
+        );
+    }
+
+    #[test]
+    fn matching_protocol_with_mismatched_launcher_request_build_returns_a_typed_failure() {
+        let mut request = exec_request();
+        request.build_id = "sha256:stale-supervisor-build".to_owned();
+        let error = request.validate_launcher_identity().unwrap_err();
+        assert_eq!(error.code(), ProcessErrorCode::LauncherProtocol);
+        assert!(error.message().contains("build identity mismatch"));
+
+        let (launcher, supervisor) = wire::socket_pair().unwrap();
+        let status = send_failure_and_return(launcher.as_raw_fd(), error).unwrap();
+        let (response, descriptors) =
+            wire::receive_json_with_fds::<LauncherResponse>(supervisor.as_raw_fd(), 0).unwrap();
+
+        assert_eq!(status, exit_status(125));
+        assert!(descriptors.is_empty());
+        response.validate_launcher_identity().unwrap();
+        assert!(!response.ok);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(ProcessErrorCode::LauncherProtocol.as_str())
+        );
+    }
+
+    #[test]
+    fn stale_launcher_request_without_a_version_is_not_deserializable() {
+        let mut stale = serde_json::to_value(exec_request()).unwrap();
+        stale
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol_version")
+            .unwrap();
+
+        assert!(serde_json::from_value::<LauncherRequest>(stale).is_err());
+    }
+
+    #[test]
+    fn stale_launcher_request_without_a_build_id_is_not_deserializable() {
+        let mut stale = serde_json::to_value(exec_request()).unwrap();
+        stale.as_object_mut().unwrap().remove("build_id").unwrap();
+
+        assert!(serde_json::from_value::<LauncherRequest>(stale).is_err());
+    }
+
+    #[test]
     fn final_exec_child_receives_private_environment_outside_the_launcher_dto() {
         struct Secret;
         impl TerminalSecretResolver for Secret {
@@ -1008,6 +1081,8 @@ mod tests {
         let cwd = std::env::temp_dir().canonicalize().unwrap();
         let run_id = RunId::generate();
         let request = LauncherRequest {
+            protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
+            build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
             execution_id: agl_ids::ExecutionId::generate(),
             request: crate::ExecutionRequest {
                 owner: ExecutionOwner::Session {
