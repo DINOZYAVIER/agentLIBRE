@@ -2162,7 +2162,7 @@ async fn run_terminal_passthrough_inner(
     };
     writeln!(
         stdout,
-        "\r! agentLIBRE Terminal · {} · {} · {} · Esc then ! returns to Chat\r",
+        "\r! agentLIBRE Terminal · {} · {} · {} · ! Enter at prompt · Esc then ! in foreground → Chat\r",
         terminal_owner_label(&terminal_view.owner),
         terminal_authority_label(terminal_view.profile),
         if stream.writable {
