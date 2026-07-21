@@ -569,7 +569,7 @@ run_read_list_search_case() {
   printf '%s\n' 'AGL067_SEARCH_MARKER first fixture' >"$CASE_WORKSPACE/facts.txt"
   printf '%s\n' 'AGL067_SEARCH_MARKER nested fixture' >"$CASE_WORKSPACE/nested/more.txt"
   local list_call search_call prompt
-  list_call="$(tool_call_block fs.list '{"path":".","recursive":true,"max_entries":20}')"
+  list_call="$(tool_call_block fs.list '{"path":".","recursive":true,"page_size":20}')"
   search_call="$(tool_call_block fs.search '{"path":".","pattern":"AGL067_SEARCH_MARKER","max_matches":10}')"
   prompt="This is an agentLIBRE filesystem regression test. Your first response must be only this exact tool call:
 $list_call
@@ -833,7 +833,7 @@ run_write_edit_case
 run_bad_path_case \
   "bad-path-parent" \
   "fs.list" \
-  '{"path":"..","recursive":false,"max_entries":20}' \
+  '{"path":"..","recursive":false,"page_size":20}' \
   ".." \
   "parent traversal"
 run_bad_path_case \

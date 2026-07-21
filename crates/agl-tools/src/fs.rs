@@ -1,5 +1,10 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+mod list;
+
+use list::{ListArgs, ListQueryRegistry};
 
 use crate::{ToolCatalog, ToolCatalogError, parse_action_args as parse_args};
 use agl_capabilities::{
@@ -20,8 +25,6 @@ pub const FS_EDIT_TOOL_ID: &str = "fs.edit";
 
 const DEFAULT_READ_LINES: usize = 200;
 const MAX_READ_LINES: usize = 500;
-const DEFAULT_LIST_ENTRIES: usize = 100;
-const MAX_LIST_ENTRIES: usize = 500;
 const DEFAULT_SEARCH_MATCHES: usize = 50;
 const MAX_SEARCH_MATCHES: usize = 200;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
@@ -29,6 +32,7 @@ const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct CoreTools {
     root: PathBuf,
+    list_queries: Arc<Mutex<ListQueryRegistry>>,
 }
 
 impl CoreTools {
@@ -44,7 +48,10 @@ impl CoreTools {
             "tool root is not a directory: {}",
             root.display()
         );
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            list_queries: Arc::new(Mutex::new(ListQueryRegistry::default())),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -52,9 +59,13 @@ impl CoreTools {
     }
 
     pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
+        self.dispatch_for_run("direct", name, arguments)
+    }
+
+    fn dispatch_for_run(&self, run_id: &str, name: &str, arguments: Value) -> Result<Value> {
         match name {
             FS_READ_TOOL_ID => self.read(arguments),
-            FS_LIST_TOOL_ID => self.list(arguments),
+            FS_LIST_TOOL_ID => self.list(run_id, arguments),
             FS_SEARCH_TOOL_ID => self.search(arguments),
             FS_EDIT_TOOL_ID => self.edit(arguments),
             _ => bail!("unknown core tool `{name}`"),
@@ -94,26 +105,9 @@ impl CoreTools {
         }))
     }
 
-    fn list(&self, arguments: Value) -> Result<Value> {
+    fn list(&self, run_id: &str, arguments: Value) -> Result<Value> {
         let args = parse_args::<ListArgs>(FS_LIST_TOOL_ID, arguments)?;
-        let path = self.resolve_existing_path(&args.path, PathKind::Directory, true)?;
-        let max_entries = args
-            .max_entries
-            .unwrap_or(DEFAULT_LIST_ENTRIES)
-            .min(MAX_LIST_ENTRIES);
-        let recursive = args.recursive.unwrap_or(false);
-        let mut entries = Vec::new();
-        self.collect_entries(&path, recursive, max_entries, &mut entries)?;
-        let truncated = entries.len() >= max_entries;
-
-        Ok(json!({
-            "tool": FS_LIST_TOOL_ID,
-            "status": "ok",
-            "path": self.display_path(&path),
-            "entry_count": entries.len(),
-            "truncated": truncated,
-            "entries": entries,
-        }))
+        list::list_page(self, run_id, args)
     }
 
     fn search(&self, arguments: Value) -> Result<Value> {
@@ -225,37 +219,6 @@ impl CoreTools {
         Ok(())
     }
 
-    fn collect_entries(
-        &self,
-        path: &Path,
-        recursive: bool,
-        max_entries: usize,
-        entries: &mut Vec<Value>,
-    ) -> Result<()> {
-        if entries.len() >= max_entries {
-            return Ok(());
-        }
-        for entry in sorted_dir_entries(path)? {
-            if entries.len() >= max_entries {
-                break;
-            }
-            let file_type = entry
-                .file_type()
-                .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
-            if file_type.is_symlink() || entry.file_name() == ".git" {
-                continue;
-            }
-            entries.push(json!({
-                "path": self.display_path(&entry.path()),
-                "kind": if file_type.is_dir() { "directory" } else { "file" },
-            }));
-            if recursive && file_type.is_dir() {
-                self.collect_entries(&entry.path(), recursive, max_entries, entries)?;
-            }
-        }
-        Ok(())
-    }
-
     fn collect_matches(
         &self,
         path: &Path,
@@ -346,7 +309,12 @@ impl ActionHandler for CoreTools {
         context: ActionDispatchContext,
     ) -> std::result::Result<ActionResult, ActionHandlerError> {
         let invocation = context.into_invocation();
-        let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+        let run_id = invocation.scope.run_id().as_str().to_string();
+        let data = self.dispatch_for_run(
+            &run_id,
+            invocation.capability_id.as_str(),
+            invocation.arguments,
+        )?;
         Ok(ActionResult::new(data))
     }
 }
@@ -464,14 +432,6 @@ struct ReadArgs {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ListArgs {
-    path: String,
-    recursive: Option<bool>,
-    max_entries: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct SearchArgs {
     pattern: String,
     path: Option<String>,
@@ -560,6 +520,245 @@ mod tests {
         assert_eq!(output["entry_count"], 1);
         assert_eq!(output["entries"][0]["path"], "README.MD");
         assert_eq!(output["entries"][0]["kind"], "file");
+        assert_eq!(output["outcome"]["state"], "complete");
+        assert!(output.get("truncated").is_none());
+    }
+
+    #[test]
+    fn list_uses_deterministic_consumable_pagination() {
+        let root = temp_root("list-pages");
+        for name in ["e.txt", "c.txt", "a.txt", "d.txt", "b.txt"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let tools = CoreTools::new(&root).unwrap();
+
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 2}))
+            .unwrap();
+        assert_eq!(first["entries"][0]["path"], "a.txt");
+        assert_eq!(first["entries"][1]["path"], "b.txt");
+        assert_eq!(first["outcome"]["state"], "truncated");
+        assert_eq!(first["outcome"]["reason"], "page_boundary");
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+
+        let second = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 2, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(second["entries"][0]["path"], "c.txt");
+        assert_eq!(second["entries"][1]["path"], "d.txt");
+        assert_eq!(second["outcome"]["state"], "truncated");
+        let next_cursor = second["outcome"]["next_cursor"].as_str().unwrap();
+        assert!(
+            tools
+                .dispatch(
+                    FS_LIST_TOOL_ID,
+                    json!({"path": ".", "page_size": 2, "cursor": cursor}),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cursor_stale")
+        );
+
+        let third = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 2, "cursor": next_cursor}),
+            )
+            .unwrap();
+        assert_eq!(third["entries"][0]["path"], "e.txt");
+        assert_eq!(third["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_filters_kind_glob_target_and_ascii_case_without_pruning_traversal() {
+        let root = temp_root("list-filter");
+        fs::create_dir_all(root.join("src/deep")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("src/deep/MOD.RS"), "").unwrap();
+        fs::write(root.join("src/deep/readme.md"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({
+                    "path": ".",
+                    "recursive": true,
+                    "page_size": 10,
+                    "kind": "file",
+                    "name_glob": "src/**/*.rs",
+                    "match_on": "relative_path",
+                    "case": "ascii_insensitive"
+                }),
+            )
+            .unwrap();
+        let paths = output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["src/deep/MOD.RS"]);
+        assert_eq!(output["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_cursor_binds_every_query_field_and_directory_identity() {
+        let root = temp_root("list-stale");
+        fs::write(root.join("a"), "").unwrap();
+        fs::write(root.join("b"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mismatch = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({
+                    "path": ".",
+                    "page_size": 1,
+                    "cursor": cursor,
+                    "kind": "file"
+                }),
+            )
+            .unwrap_err();
+        assert!(format!("{mismatch:#}").contains("cursor_query_mismatch"));
+        let continued = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(continued["entries"][0]["path"], "b");
+        assert_eq!(continued["outcome"]["state"], "complete");
+
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+        fs::write(root.join("c"), "").unwrap();
+        let stale = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{stale:#}").contains("cursor_stale"));
+    }
+
+    #[test]
+    fn list_wrong_run_cannot_consume_a_cursor_and_file_content_changes_are_allowed() {
+        let root = temp_root("list-run-binding");
+        fs::write(root.join("a"), "before").unwrap();
+        fs::write(root.join("b"), "before").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch_for_run(
+                "run-a",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1}),
+            )
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+
+        let wrong_run = tools
+            .dispatch_for_run(
+                "run-b",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{wrong_run:#}").contains("cursor_stale"));
+
+        fs::write(
+            root.join("a"),
+            "content changed without changing the listing",
+        )
+        .unwrap();
+        let continued = tools
+            .dispatch_for_run(
+                "run-a",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(continued["entries"][0]["path"], "b");
+        assert_eq!(continued["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_deleted_query_root_reports_cursor_stale() {
+        let root = temp_root("list-deleted-root");
+        fs::create_dir_all(root.join("listed")).unwrap();
+        fs::write(root.join("listed/a"), "").unwrap();
+        fs::write(root.join("listed/b"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "listed", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+        fs::remove_dir_all(root.join("listed")).unwrap();
+
+        let error = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": "listed", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cursor_stale"));
+    }
+
+    #[test]
+    fn list_rejects_obsolete_shape_and_a_fifth_active_query() {
+        let root = temp_root("list-capacity");
+        let tools = CoreTools::new(&root).unwrap();
+        assert!(
+            tools
+                .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "max_entries": 20}),)
+                .is_err()
+        );
+        for index in 0..5 {
+            let directory = root.join(format!("d{index}"));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("a"), "").unwrap();
+            fs::write(directory.join("b"), "").unwrap();
+        }
+        for index in 0..4 {
+            let output = tools
+                .dispatch(
+                    FS_LIST_TOOL_ID,
+                    json!({"path": format!("d{index}"), "page_size": 1}),
+                )
+                .unwrap();
+            assert_eq!(output["outcome"]["state"], "truncated");
+        }
+        let error = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "d4", "page_size": 1}))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cursor_capacity"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_non_utf8_name_cannot_produce_a_complete_claim() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let root = temp_root("list-non-utf8");
+        let name = std::ffi::OsString::from_vec(vec![b'f', 0xff]);
+        fs::write(root.join(name), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let error = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "."}))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("non_utf8_path"));
     }
 
     #[test]
