@@ -7,7 +7,9 @@ Usage:
   scripts/uninstall-agl-cargo.sh [options]
 
 Validates and previews removal of an agentLIBRE runtime bundle installed by
-scripts/install-agl-cargo.sh. Nothing is removed unless --apply is supplied.
+scripts/install-agl-cargo.sh. Nothing is stopped or removed unless --apply is
+supplied. Apply stops the standard agentLIBRE user service and socket before
+removing the validated bundle.
 
 Options:
   --root PATH   Uninstall below PATH instead of the resolved explicit root.
@@ -333,15 +335,142 @@ scan_runtime_processes() {
   shopt -u nullglob
 }
 
-block_reasons=()
+systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
+standard_service_unit="agentlibre-daemon.service"
+standard_socket_unit="agentlibre-daemon.socket"
+standard_service_file="$systemd_user_dir/$standard_service_unit"
+standard_socket_file="$systemd_user_dir/$standard_socket_unit"
+standard_systemd_units=("$standard_socket_unit" "$standard_service_unit")
+systemd_user_manager=0
 if command -v systemctl >/dev/null 2>&1; then
-  for unit in agentlibre-daemon.service agentlibre-daemon.socket; do
-    if systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
-      block_reasons+=("active systemd user unit: $unit")
+  systemd_user_manager=1
+elif [[ -e "$standard_service_file" || -L "$standard_service_file" ||
+        -e "$standard_socket_file" || -L "$standard_socket_file" ]]; then
+  fail "cannot safely reconcile preserved standard agentLIBRE units because systemctl is unavailable"
+fi
+
+query_standard_unit() {
+  local unit="$1"
+  local load_name="$2"
+  local active_name="$3"
+  local fragment_name="$4"
+  local dropins_name="$5"
+  local exec_start_name="$6"
+  local -n load_output="$load_name"
+  local -n active_output="$active_name"
+  local -n fragment_output="$fragment_name"
+  local -n dropins_output="$dropins_name"
+  local -n exec_start_output="$exec_start_name"
+  local details
+  local key
+  local value
+  local status=0
+  load_output=""
+  active_output=""
+  fragment_output=""
+  dropins_output=""
+  exec_start_output=""
+  details="$(systemctl --user show "$unit" \
+    -p LoadState -p ActiveState -p FragmentPath -p DropInPaths -p ExecStart 2>&1)" || status=$?
+  (( status == 0 )) || fail "cannot query standard agentLIBRE user unit $unit: $details"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      LoadState) load_output="$value" ;;
+      ActiveState) active_output="$value" ;;
+      FragmentPath) fragment_output="$value" ;;
+      DropInPaths) dropins_output="$value" ;;
+      ExecStart) exec_start_output="$value" ;;
+    esac
+  done <<<"$details"
+  [[ -n "$load_output" && -n "$active_output" ]] ||
+    fail "systemd returned incomplete state for standard agentLIBRE user unit: $unit"
+}
+
+require_standard_unit_file() {
+  local path="$1"
+  local label="$2"
+  local mode
+  [[ -f "$path" && ! -L "$path" && "$(stat -c '%u' -- "$path")" == "$current_uid" ]] ||
+    fail "$label is not a regular current-UID unit file: $path"
+  mode="$(stat -c '%a' -- "$path")"
+  (( (8#$mode & 0022) == 0 )) || fail "$label is group/other-writable: $path"
+}
+
+require_standard_unit_association() {
+  local service_load
+  local service_active
+  local service_fragment
+  local service_dropins
+  local service_exec_start
+  local socket_load
+  local socket_active
+  local socket_fragment
+  local socket_dropins
+  local socket_exec_start
+  query_standard_unit "$standard_service_unit" \
+    service_load service_active service_fragment service_dropins service_exec_start
+  query_standard_unit "$standard_socket_unit" \
+    socket_load socket_active socket_fragment socket_dropins socket_exec_start
+  [[ "$service_load" == loaded && "$socket_load" == loaded ]] ||
+    fail "active standard agentLIBRE unit pair is incomplete"
+  require_standard_unit_file "$standard_service_file" "standard daemon service"
+  require_standard_unit_file "$standard_socket_file" "standard daemon socket"
+  [[ "$service_fragment" == "$standard_service_file" && -z "$service_dropins" ]] ||
+    fail "loaded daemon service is customized or outside this install: $standard_service_unit"
+  [[ "$socket_fragment" == "$standard_socket_file" && -z "$socket_dropins" ]] ||
+    fail "loaded daemon socket is customized or outside this install: $standard_socket_unit"
+  grep -Fqx "Requires=$standard_socket_unit" "$standard_service_file" ||
+    fail "standard daemon service does not require $standard_socket_unit"
+  service_exec_prefix="{ path=$installed_agl ; argv[]=$installed_agl serve --systemd-activation "
+  [[ "$service_exec_start" == "$service_exec_prefix"* ]] ||
+    fail "effective standard daemon service does not execute this managed agl install"
+  grep -Fqx "Service=$standard_service_unit" "$standard_socket_file" ||
+    fail "standard daemon socket does not activate $standard_service_unit"
+  grep -Fqx "Accept=no" "$standard_socket_file" ||
+    fail "standard daemon socket is not a single managed listener"
+}
+
+collect_active_standard_units() {
+  local output_name="$1"
+  local -n output="$output_name"
+  local active
+  local dropins
+  local fragment
+  local exec_start
+  local load
+  local unit
+  (( systemd_user_manager == 1 )) || return 0
+  for unit in "${standard_systemd_units[@]}"; do
+    query_standard_unit "$unit" load active fragment dropins exec_start
+    if [[ "$load" != not-found && "$active" != inactive && "$active" != failed ]]; then
+      output+=("$unit")
     fi
   done
+}
+
+ensure_standard_units_stopped() {
+  local phase="$1"
+  local -a to_stop=()
+  local -a remaining=()
+  collect_active_standard_units to_stop
+  if (( ${#to_stop[@]} > 0 )); then
+    require_standard_unit_association
+    echo "stopping standard agentLIBRE user units ($phase)"
+    systemctl --user stop "${to_stop[@]}" ||
+      fail "failed to stop standard agentLIBRE user units; runtime remains installed"
+  fi
+  collect_active_standard_units remaining
+  (( ${#remaining[@]} == 0 )) ||
+    fail "standard agentLIBRE user units remained active after stop: ${remaining[*]}"
+}
+
+active_standard_units=()
+collect_active_standard_units active_standard_units
+if (( ${#active_standard_units[@]} > 0 )); then
+  require_standard_unit_association
 fi
-scan_runtime_processes block_reasons
+initial_runtime_processes=()
+scan_runtime_processes initial_runtime_processes
 
 echo "agentLIBRE managed runtime uninstall plan"
 echo "  root: $cargo_root"
@@ -357,43 +486,74 @@ echo "  remove: $generations_dir"
 echo "  remove: $runtime_dir"
 echo "  remove: $runtime_lock"
 echo "  preserve: user configuration, state, models, and systemd unit files"
-if (( ${#block_reasons[@]} > 0 )); then
-  for reason in "${block_reasons[@]}"; do
-    echo "  blocked: $reason"
+if (( ${#active_standard_units[@]} > 0 )); then
+  for unit in "${active_standard_units[@]}"; do
+    echo "  stop before removal: systemd user unit $unit"
   done
-  echo "  stop standard units with: systemctl --user stop agentlibre-daemon.socket agentlibre-daemon.service"
-  echo "  stop the listed process or unit before applying this plan"
+fi
+if (( ${#initial_runtime_processes[@]} > 0 )); then
+  for reason in "${initial_runtime_processes[@]}"; do
+    echo "  active now: $reason"
+  done
 fi
 
 if (( apply == 0 )); then
-  echo "preview only; rerun with --apply to remove this exact managed bundle"
+  echo "preview only; rerun with --apply to stop standard units and remove this exact managed bundle"
   exit 0
 fi
-(( ${#block_reasons[@]} == 0 )) || fail "refusing to uninstall a runtime bundle that is active"
 
+ensure_standard_units_stopped "before removal"
+
+post_stop_block_reasons=()
+scan_runtime_processes post_stop_block_reasons
+if (( ${#post_stop_block_reasons[@]} > 0 )); then
+  for reason in "${post_stop_block_reasons[@]}"; do
+    echo "  blocked after standard unit stop: $reason" >&2
+  done
+  fail "refusing to uninstall while a managed runtime process remains active"
+fi
+
+surface_detached=0
+deletion_started=0
+restore_detached_surface() {
+  local status=$?
+  if (( status != 0 && surface_detached == 1 && deletion_started == 0 )); then
+    [[ -e "$current_link" || -L "$current_link" ]] || ln -s -- "$current_target" "$current_link" || true
+    [[ -e "$installed_agl" || -L "$installed_agl" ]] || ln -s -- "$agl_link_target" "$installed_agl" || true
+    [[ -e "$installed_launcher" || -L "$installed_launcher" ]] ||
+      ln -s -- "$launcher_link_target" "$installed_launcher" || true
+    if [[ -L "$current_link" && "$(readlink -- "$current_link")" == "$current_target" &&
+          -L "$installed_agl" && "$(readlink -- "$installed_agl")" == "$agl_link_target" &&
+          -L "$installed_launcher" && "$(readlink -- "$installed_launcher")" == "$launcher_link_target" ]]; then
+      echo "restored managed runtime links after uninstall was interrupted" >&2
+    else
+      echo "could not safely restore managed runtime links after uninstall failure" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap restore_detached_surface EXIT
+
+surface_detached=1
 rm -f -- "$installed_agl" "$installed_launcher" "$current_link"
+ensure_standard_units_stopped "after detaching managed links"
 late_block_reasons=()
 scan_runtime_processes late_block_reasons
 if (( ${#late_block_reasons[@]} > 0 )); then
-  ln -s -- "$current_target" "$current_link"
-  ln -s -- "$agl_link_target" "$installed_agl"
-  ln -s -- "$launcher_link_target" "$installed_launcher"
   for reason in "${late_block_reasons[@]}"; do
     echo "blocked after detaching public links: $reason" >&2
   done
-  fail "runtime became active during uninstall; restored the managed links"
+  fail "runtime became active during uninstall"
 fi
 for generation in "${generation_paths[@]}"; do
   find -P "$generation" -type d -exec chmod u+rwx -- {} +
+  deletion_started=1
   rm -rf -- "$generation"
 done
 rmdir -- "$generations_dir"
 rmdir -- "$runtime_dir"
 rm -f -- "$runtime_lock"
+surface_detached=0
+trap - EXIT
 
 echo "removed managed agentLIBRE runtime bundle from $cargo_root"
-systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
-if [[ -f "$systemd_user_dir/agentlibre-daemon.socket" ]]; then
-  echo "preserved agentlibre-daemon.socket remains stopped"
-  echo "after reinstalling, start it with: systemctl --user start agentlibre-daemon.socket"
-fi
