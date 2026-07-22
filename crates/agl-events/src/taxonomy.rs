@@ -44,6 +44,7 @@ pub enum HookBatchOutcomeEvent {
 #[serde(rename_all = "snake_case")]
 pub enum TurnFinishStatus {
     Answered,
+    IncompleteOutput,
     Stopped,
     Failed,
     Cancelled,
@@ -51,7 +52,15 @@ pub enum TurnFinishStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum IncompleteOutputReasonEvent {
+    ModelLength,
+    ContentByteLimit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InferenceFinishStatus {
     Succeeded,
+    IncompleteOutput,
     Failed,
 }

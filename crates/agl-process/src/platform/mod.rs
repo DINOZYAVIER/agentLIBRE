@@ -26,7 +26,7 @@ mod unsupported;
 
 #[cfg(target_os = "linux")]
 const LAUNCHER_PROTOCOL_VERSION: &str =
-    concat!("agl-process-launcher.v1/", env!("CARGO_PKG_VERSION"));
+    concat!("agl-process-launcher.v2/", env!("CARGO_PKG_VERSION"));
 #[cfg(target_os = "linux")]
 const LAUNCHER_BUILD_ID: &str = env!("AGL_PROCESS_BUILD_ID");
 
@@ -48,6 +48,8 @@ struct LauncherRequest {
     execution_root: PathBuf,
     private_home: PathBuf,
     private_tmp: PathBuf,
+    has_private_environment: bool,
+    has_shell_integration: bool,
     setup_timeout_ms: u64,
 }
 
@@ -126,15 +128,20 @@ fn validate_launcher_identity(protocol_version: &str, build_id: &str) -> Result<
 pub(crate) use linux::LaunchedProcess;
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn launch(
     launcher_path: &Path,
     execution_id: &ExecutionId,
     request: &ExecutionRequest,
     directories: &LaunchDirectories,
     private_environment: Option<PrivateTerminalEnvironment>,
+    shell_integration_relay: Option<OwnedFd>,
     setup_timeout: Duration,
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
+    let has_private_environment = private_environment
+        .as_ref()
+        .is_some_and(|environment| !environment.is_empty());
     let wire = LauncherRequest {
         protocol_version: LAUNCHER_PROTOCOL_VERSION.to_owned(),
         build_id: LAUNCHER_BUILD_ID.to_owned(),
@@ -143,19 +150,62 @@ pub(crate) fn launch(
         execution_root: directories.execution_root.clone(),
         private_home: directories.private_home.clone(),
         private_tmp: directories.private_tmp.clone(),
+        has_private_environment,
+        has_shell_integration: shell_integration_relay.is_some(),
         setup_timeout_ms: u64::try_from(setup_timeout.as_millis()).unwrap_or(u64::MAX),
     };
-    linux::launch(launcher_path, &wire, private_environment, cancelled)
+    linux::launch(
+        launcher_path,
+        &wire,
+        private_environment,
+        shell_integration_relay,
+        cancelled,
+    )
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn create_shell_integration_reader(path: &Path) -> Result<OwnedFd> {
-    linux::create_shell_integration_reader(path)
+pub(crate) use linux::{ShellIntegrationReceive, ShellIntegrationSocketPair};
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_shell_integration_transport(
+    event_path: &Path,
+    control_path: &Path,
+) -> Result<ShellIntegrationSocketPair> {
+    linux::create_shell_integration_transport(event_path, control_path)
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn shell_integration_path_is_intact(path: &Path, reader: &OwnedFd) -> bool {
-    linux::shell_integration_path_is_intact(path, reader)
+pub(crate) fn receive_shell_integration_event(
+    socket: &OwnedFd,
+    maximum_frame_bytes: usize,
+) -> Result<ShellIntegrationReceive> {
+    linux::receive_shell_integration_event(socket, maximum_frame_bytes)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn send_shell_integration_control(
+    socket: &OwnedFd,
+    frame: &[u8],
+    timeout: Duration,
+) -> Result<()> {
+    linux::send_shell_integration_control(socket, frame, timeout)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn run_shell_integration_relay(
+    socket: OwnedFd,
+    terminal_slave: std::os::fd::RawFd,
+    event_path: &Path,
+    control_path: &Path,
+    maximum_frame_bytes: usize,
+) -> i32 {
+    linux::run_shell_integration_relay(
+        socket,
+        terminal_slave,
+        event_path,
+        control_path,
+        maximum_frame_bytes,
+    )
 }
 
 #[cfg(target_os = "linux")]

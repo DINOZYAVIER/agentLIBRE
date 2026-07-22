@@ -3,26 +3,37 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
+use agl_app::{
+    ContinueActionView, ContinueUnavailableReason, IncompleteAssistantItemView,
+    SessionPresentationItem,
+};
+use agl_chat::{
+    ChatInferenceJob, ChatRunInput, InferenceClient, InferenceClientHandle, InferenceOptions,
+    ToolAccessMode,
+};
 use agl_config::ResolvedInferenceConfig;
 use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetKind};
-use agl_ids::{ExecutionId, RequestId, RunId, SessionId};
+use agl_ids::{ExecutionId, MessageId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::{
-    InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
+    InferenceFinishReason, InferenceOutputEvent, InferenceProductStage, InferenceProgressUnit,
+    InferenceResponse, InferenceResponseMetadata, InferenceStageEvent, ModelManagerStatus,
+    OutputDelivery, WorkerRuntimeStatusHandle,
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionListRequest, ExecutionReadRequest, ExecutionStatusRequest, HelloRequest,
-    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
+    InferenceInventoryRequest, InferenceStatusRequest, PROTOCOL_VERSION, ProtocolErrorCode,
+    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
     RunBudgetRequest, RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest,
     RunTreeRequest, SessionFinishReason, SessionFinishRequest, SessionListRequest,
-    SessionOpenRequest, SessionStatus, SessionStatusRequest,
+    SessionOpenRequest, SessionStatus, SessionStatusRequest, SetupSmokeSessionOpenRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
     AgentLibreWorkspaceConfig,
 };
-use agl_store::RunState;
+use agl_session::ChatSessionStore;
+use agl_store::{AglStore, RunState};
 use anyhow::Context;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -96,7 +107,18 @@ impl Drop for TestRuntime {
 struct InferenceControl {
     calls: AtomicUsize,
     blocked: AtomicBool,
+    finish_with_length: AtomicBool,
+    emit_scripted_progress: AtomicBool,
     requests: Mutex<Vec<agl_inference::InferenceRequest>>,
+    configs: Mutex<Vec<ResolvedInferenceConfig>>,
+}
+
+struct InferenceUnblockGuard(Arc<InferenceControl>);
+
+impl Drop for InferenceUnblockGuard {
+    fn drop(&mut self) {
+        self.0.blocked.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Clone)]
@@ -149,10 +171,19 @@ impl InferenceClient for ScriptedDelegationClient {
     fn status(&self) -> anyhow::Result<ModelManagerStatus> {
         Ok(ModelManagerStatus::default())
     }
+
+    fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
+        Ok(Vec::new())
+    }
 }
 
 impl InferenceClient for ControlledInferenceClient {
     fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
+        self.control
+            .configs
+            .lock()
+            .unwrap()
+            .push(job.config.clone());
         self.control
             .requests
             .lock()
@@ -165,10 +196,80 @@ impl InferenceClient for ControlledInferenceClient {
         if job.cancellation.is_cancelled() {
             return Err(agl_inference::ModelManagerError::Cancelled.into());
         }
+        let emit_scripted_progress = self.control.emit_scripted_progress.load(Ordering::Acquire);
+        if emit_scripted_progress {
+            let terminal_stage = if self.control.finish_with_length.load(Ordering::Acquire) {
+                InferenceProductStage::Incomplete
+            } else {
+                InferenceProductStage::Completed
+            };
+            let stages = [
+                (InferenceProductStage::Queued, None, None, None),
+                (InferenceProductStage::Admission, None, None, None),
+                (InferenceProductStage::ModelLoad, None, None, None),
+                (InferenceProductStage::ContextRebuild, None, None, None),
+                (
+                    InferenceProductStage::Prefill,
+                    Some(4),
+                    Some(4),
+                    Some(InferenceProgressUnit::Tokens),
+                ),
+                (
+                    InferenceProductStage::Generation,
+                    Some(1),
+                    Some(2),
+                    Some(InferenceProgressUnit::Tokens),
+                ),
+                (
+                    InferenceProductStage::Generation,
+                    Some(2),
+                    Some(2),
+                    Some(InferenceProgressUnit::Tokens),
+                ),
+                (InferenceProductStage::OutputParse, None, None, None),
+                (terminal_stage, None, None, None),
+            ];
+            for (index, (stage, completed, total, unit)) in stages.into_iter().enumerate() {
+                assert_eq!(
+                    job.output_sink
+                        .try_emit(InferenceOutputEvent::Stage(InferenceStageEvent {
+                            attempt_id: job.request.attempt_id.clone(),
+                            stage_sequence: u64::try_from(index).unwrap() + 1,
+                            stage,
+                            completed,
+                            total,
+                            unit,
+                        },)),
+                    OutputDelivery::Delivered
+                );
+            }
+            for (sequence, text) in ["durable ", "answer ☃\n\nVerification: fake inference."]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    job.output_sink.try_emit(InferenceOutputEvent::TextDelta {
+                        attempt_id: job.request.attempt_id.clone(),
+                        sequence: u64::try_from(sequence).unwrap() + 1,
+                        text: text.to_owned(),
+                    }),
+                    OutputDelivery::Delivered
+                );
+            }
+        }
         Ok(InferenceResponse {
             attempt_id: job.request.attempt_id,
-            content: "durable answer\n\nVerification: fake inference.".to_string(),
-            finish_reason: InferenceFinishReason::Stop,
+            content: if emit_scripted_progress {
+                "durable answer ☃\n\nVerification: fake inference."
+            } else {
+                "durable answer\n\nVerification: fake inference."
+            }
+            .to_string(),
+            finish_reason: if self.control.finish_with_length.load(Ordering::Acquire) {
+                InferenceFinishReason::Length
+            } else {
+                InferenceFinishReason::Stop
+            },
             metadata: InferenceResponseMetadata {
                 model_state: Some("daemon-test".to_string()),
                 selected_device: None,
@@ -198,6 +299,10 @@ impl InferenceClient for ControlledInferenceClient {
     fn status(&self) -> anyhow::Result<ModelManagerStatus> {
         Ok(ModelManagerStatus::default())
     }
+
+    fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
+        Ok(Vec::new())
+    }
 }
 
 fn daemon(test: &TestRuntime, control: Arc<InferenceControl>) -> DaemonState {
@@ -205,6 +310,7 @@ fn daemon(test: &TestRuntime, control: Arc<InferenceControl>) -> DaemonState {
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient { control }),
+        WorkerRuntimeStatusHandle::default(),
     )
 }
 
@@ -238,6 +344,7 @@ async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::new(InferenceControl::default()),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
     let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
@@ -333,6 +440,139 @@ fn resume_of_an_already_loaded_session_is_idempotent() {
     }
 }
 
+#[test]
+fn setup_smoke_session_uses_inline_staged_state_without_publishing_it() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    let mut state = daemon(&test, Arc::clone(&control));
+    let root = test.runtime.paths.config_dir.parent().unwrap();
+    let workspace = root.join("workspace");
+    let function_root = workspace.join(".agl/functions/setup-smoke");
+    std::fs::create_dir_all(&function_root).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+schema: agentfunction/v1
+id: setup-smoke
+title: Setup smoke
+model:
+  config: inference.toml
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 32
+skills:
+  use: []
+subagents:
+  use: []
+doctor:
+  smoke_prompt: "Reply with setup smoke ready."
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Run the setup smoke.\n").unwrap();
+    std::fs::write(
+        function_root.join("inference.toml"),
+        r#"[backend]
+kind = "llama_cpp"
+model_id = "setup-smoke-model"
+
+[runtime]
+mode = "fixed"
+gpu_layers = 0
+context_tokens = 4096
+threads = 2
+batch_size = 128
+ubatch_size = 64
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+    )
+    .unwrap();
+    let staged_model = root.join("staged-model.gguf");
+    std::fs::write(&staged_model, b"test model fixture").unwrap();
+    let published_bindings_path = agl_config::model_bindings_path(&test.runtime.paths.config_dir);
+    agl_config::write_model_bindings(
+        &published_bindings_path,
+        &agl_config::ModelBindings::empty(),
+    )
+    .unwrap();
+
+    let event = state.handle_request(request(DaemonRequestKind::SetupSmokeSessionOpen(
+        SetupSmokeSessionOpenRequest {
+            workspace_root: workspace.to_string_lossy().into_owned(),
+            function_ref: "setup-smoke".to_owned(),
+            staged_bindings: agl_config::ModelBindings {
+                version: 1,
+                models: std::collections::BTreeMap::from([(
+                    agl_config::ModelId::new("setup-smoke-model").unwrap(),
+                    agl_config::ModelBinding {
+                        path: staged_model.clone(),
+                    },
+                )]),
+            },
+            runtime_plan: agl_protocol::SetupSmokeRuntimePlan {
+                profile_id: "setup-cpu".to_owned(),
+                selected_device: None,
+                runtime: agl_config::InferenceRuntimeConfig {
+                    gpu_layers: 0,
+                    context_tokens: 4_096,
+                    threads: 2,
+                    device: None,
+                    batch_size: Some(128),
+                    ubatch_size: Some(64),
+                    flash_attention: Some(agl_config::RuntimeSwitch::Off),
+                    cache_type_k: None,
+                    cache_type_v: None,
+                    mmap: Some(true),
+                    kv_unified: Some(true),
+                    mtp: agl_config::MtpRuntimeConfig::default(),
+                },
+                smoke_timeout_seconds: 30,
+                expected_speed: "test".to_owned(),
+            },
+            max_output_tokens: 32,
+        },
+    )));
+    let session_id = match event.kind {
+        DaemonEventKind::SessionOpened(opened) => {
+            assert!(!opened.resumed);
+            opened.session_id
+        }
+        other => panic!("unexpected setup smoke open event: {other:?}"),
+    };
+    let snapshot = state.application_snapshot(&session_id).unwrap();
+    assert_eq!(snapshot.header.operation_mode, ToolAccessMode::ReadOnly);
+    assert!(snapshot.header.selected_skills.is_empty());
+    assert!(!ChatSessionStore::exists(
+        test.runtime.paths.sessions_root(),
+        &session_id
+    ));
+
+    let accepted = submit(
+        &mut state,
+        &session_id,
+        "Run the bounded smoke.",
+        Some("setup-smoke-submit"),
+    );
+    wait_for_calls(&control, 1);
+    let outcome = wait_for_terminal(&state, &accepted.run_id);
+    assert_eq!(outcome.status.state, RunState::Succeeded);
+    assert_eq!(
+        control.configs.lock().unwrap()[0].backend.model,
+        staged_model
+    );
+    assert!(
+        agl_config::load_model_bindings(&published_bindings_path)
+            .unwrap()
+            .models
+            .is_empty(),
+        "daemon setup smoke must not publish staged bindings"
+    );
+}
+
 fn submit(
     state: &mut DaemonState,
     session_id: &SessionId,
@@ -354,7 +594,9 @@ fn submit(
 }
 
 fn wait_for_calls(control: &InferenceControl, expected: usize) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // The workspace CI runs several native-heavy test binaries concurrently;
+    // keep this functional assertion independent from scheduler latency.
+    let deadline = Instant::now() + Duration::from_secs(10);
     while control.calls.load(Ordering::Acquire) < expected {
         assert!(Instant::now() < deadline, "inference did not start");
         std::thread::sleep(Duration::from_millis(2));
@@ -376,6 +618,373 @@ fn wait_for_terminal(state: &DaemonState, run_id: &RunId) -> agl_supervisor::Run
     }
 }
 
+fn incomplete_item_identity(state: &DaemonState, session_id: &SessionId) -> (MessageId, u64) {
+    let snapshot = state.application_snapshot(session_id).unwrap();
+    let message_id = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SessionPresentationItem::IncompleteAssistant { item } => Some(item.message_id.clone()),
+            _ => None,
+        })
+        .expect("length-finished run must project an incomplete assistant item");
+    (message_id, snapshot.header.execution_context_revision)
+}
+
+fn continue_incomplete(
+    state: &mut DaemonState,
+    session_id: &SessionId,
+    message_id: &MessageId,
+    execution_context_revision: u64,
+    client_submission_id: &str,
+) -> agl_app::PromptAdmission {
+    let result = state
+        .application_invoke(agl_app::ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id: client_submission_id.to_owned(),
+            action: agl_app::ApplicationAction::IncompleteTurnContinue {
+                message_id: message_id.clone(),
+                expected_execution_context_revision: execution_context_revision,
+            },
+        })
+        .unwrap();
+    let agl_app::ApplicationActionResult::IncompleteTurnContinued { admission } = result else {
+        panic!("unexpected continuation result: {result:?}");
+    };
+    admission
+}
+
+#[test]
+fn incomplete_continue_replays_same_run_after_reconnect_and_daemon_restart() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.finish_with_length.store(true, Ordering::Release);
+    let mut state = daemon(&test, Arc::clone(&control));
+    let session_id = open_session(&mut state);
+    let source = submit(&mut state, &session_id, "bounded answer", None);
+    assert_eq!(
+        wait_for_terminal(&state, &source.run_id).status.state,
+        RunState::Incomplete
+    );
+    let (message_id, execution_context_revision) = incomplete_item_identity(&state, &session_id);
+
+    let first = continue_incomplete(
+        &mut state,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-reconnect-restart",
+    );
+    let retry_after_reconnect = continue_incomplete(
+        &mut state,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-reconnect-restart",
+    );
+    assert_eq!(retry_after_reconnect.run_id, first.run_id);
+    assert_eq!(retry_after_reconnect.turn_id, first.turn_id);
+    assert!(retry_after_reconnect.replayed);
+    let competing = state
+        .application_invoke(agl_app::ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id: "continue-competing-claim".to_owned(),
+            action: agl_app::ApplicationAction::IncompleteTurnContinue {
+                message_id: message_id.clone(),
+                expected_execution_context_revision: execution_context_revision,
+            },
+        })
+        .unwrap_err();
+    assert_eq!(
+        competing.code,
+        agl_app::ApplicationErrorCode::ContinuationAlreadyClaimed
+    );
+    wait_for_terminal(&state, &first.run_id);
+    drop(state);
+
+    let mut restarted = daemon(&test, control);
+    let opened = restarted.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: Some(session_id.clone()),
+            new_session: false,
+            workspace_root: None,
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+    assert!(
+        matches!(
+            opened.kind,
+            DaemonEventKind::SessionOpened(ref event)
+                if event.session_id == session_id && event.resumed
+        ),
+        "unexpected restart open event: {:?}",
+        opened.kind
+    );
+    let retry_after_restart = continue_incomplete(
+        &mut restarted,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-reconnect-restart",
+    );
+    assert_eq!(retry_after_restart.run_id, first.run_id);
+    assert_eq!(retry_after_restart.turn_id, first.turn_id);
+    assert!(retry_after_restart.replayed);
+}
+
+#[test]
+fn daemon_resume_reconciles_a_synced_claim_without_an_admitted_run() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.finish_with_length.store(true, Ordering::Release);
+    let mut state = daemon(&test, Arc::clone(&control));
+    let session_id = open_session(&mut state);
+    let source = submit(&mut state, &session_id, "crash window", None);
+    assert_eq!(
+        wait_for_terminal(&state, &source.run_id).status.state,
+        RunState::Incomplete
+    );
+    let (message_id, execution_context_revision) = incomplete_item_identity(&state, &session_id);
+    let continuation_run_id = RunId::generate();
+    let continuation_turn_id = TurnId::generate();
+    let continuation_request_id = RequestId::generate();
+    let mut transcript =
+        ChatSessionStore::open(test.runtime.paths.sessions_root(), session_id.clone()).unwrap();
+    transcript
+        .append_incomplete_continuation_claim(
+            message_id.clone(),
+            "continue-prepared-before-crash".to_owned(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            continuation_request_id.clone(),
+        )
+        .unwrap();
+    let store = AglStore::open_current_read_only_at(test.runtime.paths.store_root()).unwrap();
+    assert!(
+        store
+            .safe_run_status(&continuation_run_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+    drop(state);
+
+    let mut restarted = daemon(&test, control);
+    let opened = restarted.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: Some(session_id.clone()),
+            new_session: false,
+            workspace_root: None,
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        },
+    )));
+    assert!(matches!(opened.kind, DaemonEventKind::SessionOpened(_)));
+    let store = AglStore::open_current_read_only_at(test.runtime.paths.store_root()).unwrap();
+    let recovered = store
+        .safe_run_status(&continuation_run_id)
+        .unwrap()
+        .expect("session resume must reconcile its prepared continuation claim");
+    assert_eq!(recovered.session_id.as_ref(), Some(&session_id));
+    assert_eq!(recovered.turn_id.as_ref(), Some(&continuation_turn_id));
+    let record = store.run(&continuation_run_id).unwrap().unwrap();
+    let input: ChatRunInput = serde_json::from_value(record.input).unwrap();
+    assert!(matches!(
+        input,
+        ChatRunInput::Continuation {
+            request_id: Some(actual),
+            ..
+        } if actual == continuation_request_id
+    ));
+    drop(store);
+
+    let replay = continue_incomplete(
+        &mut restarted,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-prepared-before-crash",
+    );
+    assert_eq!(replay.run_id, continuation_run_id);
+    assert_eq!(replay.turn_id, continuation_turn_id);
+    assert!(replay.replayed);
+    wait_for_terminal(&restarted, &replay.run_id);
+}
+
+#[test]
+fn incomplete_continue_revalidates_context_and_policy_before_durable_claim() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.finish_with_length.store(true, Ordering::Release);
+    let mut state = daemon(&test, Arc::clone(&control));
+    let session_id = open_session(&mut state);
+    let source = submit(&mut state, &session_id, "race continuation admission", None);
+    assert_eq!(
+        wait_for_terminal(&state, &source.run_id).status.state,
+        RunState::Incomplete
+    );
+    let (message_id, execution_context_revision) = incomplete_item_identity(&state, &session_id);
+
+    state.set_execution_context_revision_for_test(&session_id, execution_context_revision + 1);
+    let stale = state
+        .application_invoke(agl_app::ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id: "continue-after-restored-guards".to_owned(),
+            action: agl_app::ApplicationAction::IncompleteTurnContinue {
+                message_id: message_id.clone(),
+                expected_execution_context_revision: execution_context_revision,
+            },
+        })
+        .unwrap_err();
+    assert_eq!(
+        stale.code,
+        agl_app::ApplicationErrorCode::StaleContinuationContext
+    );
+    let snapshot = state.application_snapshot(&session_id).unwrap();
+    assert!(snapshot.items.iter().any(|item| matches!(
+        item,
+        SessionPresentationItem::IncompleteAssistant {
+            item: IncompleteAssistantItemView {
+                message_id: actual,
+                continue_action: ContinueActionView::Unavailable {
+                    reason: ContinueUnavailableReason::StaleContext,
+                },
+                ..
+            }
+        } if actual == &message_id
+    )));
+    state.set_execution_context_revision_for_test(&session_id, execution_context_revision);
+
+    state
+        .select_chat_service_mode_for_test(&session_id, agl_chat::ToolAccessMode::Write)
+        .unwrap();
+    let denied = state
+        .application_invoke(agl_app::ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id: "continue-after-restored-guards".to_owned(),
+            action: agl_app::ApplicationAction::IncompleteTurnContinue {
+                message_id: message_id.clone(),
+                expected_execution_context_revision: execution_context_revision,
+            },
+        })
+        .unwrap_err();
+    assert_eq!(denied.code, agl_app::ApplicationErrorCode::NotAuthorized);
+    let snapshot = state.application_snapshot(&session_id).unwrap();
+    assert!(snapshot.items.iter().any(|item| matches!(
+        item,
+        SessionPresentationItem::IncompleteAssistant {
+            item: IncompleteAssistantItemView {
+                message_id: actual,
+                continue_action: ContinueActionView::Unavailable {
+                    reason: ContinueUnavailableReason::PolicyDenied,
+                },
+                ..
+            }
+        } if actual == &message_id
+    )));
+
+    let transcript =
+        ChatSessionStore::open(test.runtime.paths.sessions_root(), session_id.clone()).unwrap();
+    let replay = transcript.read_replay().unwrap();
+    assert!(!replay.events.iter().any(|event| matches!(
+        event,
+        agl_session::ChatSessionEvent::IncompleteContinuationClaimed { .. }
+    )));
+
+    state
+        .select_chat_service_mode_for_test(&session_id, agl_chat::ToolAccessMode::ReadOnly)
+        .unwrap();
+    let snapshot = state.application_snapshot(&session_id).unwrap();
+    assert!(snapshot.items.iter().any(|item| matches!(
+        item,
+        SessionPresentationItem::IncompleteAssistant {
+            item: IncompleteAssistantItemView {
+                message_id: actual,
+                continue_action: ContinueActionView::Available,
+                ..
+            }
+        } if actual == &message_id
+    )));
+
+    control.finish_with_length.store(false, Ordering::Release);
+    let continued = continue_incomplete(
+        &mut state,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-after-restored-guards",
+    );
+    let outcome = wait_for_terminal(&state, &continued.run_id);
+    assert_eq!(outcome.status.state, RunState::Succeeded);
+}
+
+#[test]
+fn incomplete_continue_joins_fifo_behind_prompts_already_queued() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control.finish_with_length.store(true, Ordering::Release);
+    let mut state = daemon(&test, Arc::clone(&control));
+    let session_id = open_session(&mut state);
+    let source = submit(&mut state, &session_id, "bounded source", None);
+    assert_eq!(
+        wait_for_terminal(&state, &source.run_id).status.state,
+        RunState::Incomplete
+    );
+    let (message_id, execution_context_revision) = incomplete_item_identity(&state, &session_id);
+
+    control.finish_with_length.store(false, Ordering::Release);
+    control.blocked.store(true, Ordering::Release);
+    let unblock = InferenceUnblockGuard(Arc::clone(&control));
+    let active = submit(&mut state, &session_id, "active prompt", None);
+    wait_for_calls(&control, 2);
+    let queued_before_continue = submit(&mut state, &session_id, "already queued prompt", None);
+    std::thread::sleep(Duration::from_millis(2));
+    let continuation = continue_incomplete(
+        &mut state,
+        &session_id,
+        &message_id,
+        execution_context_revision,
+        "continue-after-queued-prompt",
+    );
+
+    let key = agl_store::RunConcurrencyKey::session(&session_id).unwrap();
+    let store = AglStore::open_current_read_only_at(test.runtime.paths.store_root()).unwrap();
+    let ordered = store.safe_runs_for_concurrency_key(&key, false).unwrap();
+    let ordered_ids = ordered
+        .iter()
+        .map(|status| status.run_id.clone())
+        .collect::<Vec<_>>();
+    drop(unblock);
+
+    assert_eq!(
+        ordered_ids,
+        vec![
+            active.run_id.clone(),
+            queued_before_continue.run_id.clone(),
+            continuation.run_id.clone(),
+        ]
+    );
+    assert!(continuation.queued);
+    assert_eq!(continuation.ordinal, 3);
+    assert_eq!(
+        wait_for_terminal(&state, &active.run_id).status.state,
+        RunState::Succeeded
+    );
+    assert_eq!(
+        wait_for_terminal(&state, &queued_before_continue.run_id)
+            .status
+            .state,
+        RunState::Succeeded
+    );
+    assert_eq!(
+        wait_for_terminal(&state, &continuation.run_id).status.state,
+        RunState::Succeeded
+    );
+}
+
 #[test]
 fn hello_declares_strict_run_capabilities() {
     let test = TestRuntime::new();
@@ -395,8 +1004,53 @@ fn hello_declares_strict_run_capabilities() {
             assert!(hello.capabilities.contains(&DaemonCapability::RunCancel));
             assert!(hello.capabilities.contains(&DaemonCapability::RunReplay));
             assert!(hello.capabilities.contains(&DaemonCapability::RunSubscribe));
+            assert!(
+                hello
+                    .capabilities
+                    .contains(&DaemonCapability::InferenceInventory)
+            );
+            assert!(
+                hello
+                    .capabilities
+                    .contains(&DaemonCapability::InferenceStatus)
+            );
         }
         other => panic!("unexpected hello event: {other:?}"),
+    }
+}
+
+#[test]
+fn inference_inventory_uses_the_daemon_owned_inference_client() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+
+    let event = state.handle_request(request(DaemonRequestKind::InferenceInventory(
+        InferenceInventoryRequest::default(),
+    )));
+    match event.kind {
+        DaemonEventKind::InferenceInventory(inventory) => assert!(inventory.devices.is_empty()),
+        other => panic!("unexpected inventory event: {other:?}"),
+    }
+}
+
+#[test]
+fn inference_status_uses_the_captured_worker_status_handle() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+
+    let event = state.handle_request(request(DaemonRequestKind::InferenceStatus(
+        InferenceStatusRequest::default(),
+    )));
+    match event.kind {
+        DaemonEventKind::InferenceStatus(status) => {
+            assert!(!status.worker_build_id.is_empty());
+            assert_eq!(status.worker_state, ProtocolInferenceWorkerState::Cold);
+            assert_eq!(status.worker_pid, None);
+            assert_eq!(status.launch_generation, None);
+            assert_eq!(status.reserved_bytes, 0);
+            assert_eq!(status.cooldown_not_before_unix_ms, None);
+        }
+        other => panic!("unexpected inference status event: {other:?}"),
     }
 }
 
@@ -470,6 +1124,7 @@ Return the daemon child verdict.
                 "Daemon parent answer".to_string(),
             ])),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let opened = state.handle_request(request(DaemonRequestKind::SessionOpen(
         SessionOpenRequest {
@@ -513,6 +1168,105 @@ Return the daemon child verdict.
                 && status.terminal_result.is_none()
                 && status.error_message.is_none()
     ));
+}
+
+#[test]
+fn oversized_activity_budget_is_rejected_before_root_run_persistence() {
+    let mut test = TestRuntime::new();
+    let workspace = test
+        .runtime
+        .paths
+        .config_dir
+        .parent()
+        .unwrap()
+        .join("activity-capacity-workspace");
+    let function_root = workspace.join(".agl/functions/wide-coordinator");
+    std::fs::create_dir_all(function_root.join("subagents")).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+schema: agentfunction/v1
+id: wide-coordinator
+title: Wide Coordinator
+subagents:
+  use:
+    - reviewer
+delegation:
+  max_depth: 9
+  max_children_per_run: 64
+  max_descendants: 50
+  max_total_output_tokens: 512
+  timeout_seconds: 30
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Delegate bounded work.\n").unwrap();
+    std::fs::write(
+        function_root.join("subagents/reviewer.md"),
+        r#"---
+schema: agentlibre/subagent/v1
+id: reviewer
+title: Reviewer
+description: Reviews bounded work.
+model:
+  inherit: true
+tools:
+  mode: read-only
+  allow: []
+  deny: []
+subagents:
+  use: []
+limits:
+  max_model_attempts: 1
+  max_output_tokens: 32
+  max_capability_calls: 1
+  timeout_seconds: 10
+---
+
+Return a verdict.
+"#,
+    )
+    .unwrap();
+    test.inference.function_ref = Some("wide-coordinator".to_owned());
+    test.inference.workspace_root = Some(workspace.clone());
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let opened = state.handle_request(request(DaemonRequestKind::SessionOpen(
+        SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: Some(workspace.display().to_string()),
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::Execute,
+        },
+    )));
+    let session_id = match opened.kind {
+        DaemonEventKind::SessionOpened(opened) => opened.session_id,
+        other => panic!("unexpected session event: {other:?}"),
+    };
+
+    let event = state.handle_request(request(DaemonRequestKind::RunSubmit(RunSubmitRequest {
+        session_id: session_id.clone(),
+        content: agl_content::Content::text("Do not persist this run").unwrap(),
+        client_submission_id: "activity-capacity-rejected".to_owned(),
+        budget: RunBudgetRequest::default(),
+    })));
+    assert!(matches!(
+        event.kind,
+        DaemonEventKind::Error(ref error)
+            if error.code == ProtocolErrorCode::ActivityCapacityExceeded && !error.retryable
+    ));
+
+    let key = agl_store::RunConcurrencyKey::session(&session_id).unwrap();
+    let store = AglStore::open_current_read_only_at(test.runtime.paths.store_root()).unwrap();
+    assert!(
+        store
+            .safe_runs_for_concurrency_key(&key, true)
+            .unwrap()
+            .is_empty(),
+        "activity-capacity rejection must happen before durable run persistence"
+    );
 }
 
 #[test]
@@ -1093,6 +1847,7 @@ async fn human_host_terminal_survives_disconnect_and_finish_ends_its_authority()
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::new(InferenceControl::default()),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let application = state.application();
     let opened = application
@@ -1347,6 +2102,7 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
         InferenceClientHandle::new(ControlledInferenceClient {
             control: Arc::clone(&control),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let application = state.application();
     let opened = application
@@ -1490,10 +2246,10 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
             terminal.terminal_id == ensured.terminal.terminal_id
                 && terminal.command_sequence == 2
                 && terminal.prompt_state == agl_app::TerminalPromptState::Ready
-                && terminal.cwd == child.to_string_lossy()
+                && terminal.cwd.text == child.to_string_lossy()
         });
         if terminal_ready
-            && snapshot.header.cwd == child.to_string_lossy()
+            && snapshot.header.cwd.text == child.to_string_lossy()
             && snapshot.header.execution_context_revision
                 > opened.snapshot.header.execution_context_revision
         {
@@ -1532,35 +2288,172 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
     );
 
     const HUMAN_PTY_SENTINEL: &str = "AGL_HUMAN_PTY_CONTEXT_SENTINEL_148";
-    let sentinel_command = format!("printf '{HUMAN_PTY_SENTINEL}\\n'\n");
-    process
-        .operator_write(
+    let sentinel_command = format!("printf '{HUMAN_PTY_SENTINEL}\\n'");
+    let ready = application.snapshot(&opened.session_id).await.unwrap();
+    let ready_terminal = ready
+        .terminals
+        .iter()
+        .find(|terminal| terminal.terminal_id == ensured.terminal.terminal_id)
+        .unwrap();
+    let sentinel_accepted = application
+        .submit_human_terminal_command(agl_app::HumanTerminalCommandSubmit {
+            session_id: opened.session_id.clone(),
+            terminal_id: ensured.terminal.terminal_id.clone(),
+            client_submission_id: "typed-human-sentinel".to_owned(),
+            writer_lease_id: lease.writer_lease_id().unwrap().clone(),
+            expected_command_sequence: ready_terminal.command_sequence,
+            expected_prompt_generation: ready_terminal.prompt_generation.unwrap(),
+            command: sentinel_command.clone(),
+        })
+        .await
+        .unwrap();
+    let sentinel_deadline = Instant::now() + Duration::from_secs(5);
+    let sentinel_card = loop {
+        let snapshot = application.snapshot(&opened.session_id).await.unwrap();
+        let card = snapshot.human_commands.iter().find(|card| {
+            card.terminal_id == sentinel_accepted.terminal_id
+                && card.command_sequence == sentinel_accepted.command_sequence
+        });
+        let terminal_ready = snapshot.terminals.iter().any(|terminal| {
+            terminal.terminal_id == ensured.terminal.terminal_id
+                && terminal.command_sequence == sentinel_accepted.command_sequence
+                && terminal.prompt_state == agl_app::TerminalPromptState::Ready
+        });
+        if let Some(card) = card
+            && terminal_ready
+            && card.state == agl_app::HumanCommandCardState::Exited
+            && card.exit_status == Some(0)
+        {
+            break card.clone();
+        }
+        if Instant::now() >= sentinel_deadline {
+            let raw = process
+                .operator_read(
+                    &ensured.terminal.execution_id,
+                    agl_process::ExecutionCursor { after_sequence: 0 },
+                    64 * 1024,
+                )
+                .unwrap();
+            panic!(
+                "typed private Human command card did not complete: cards={:?} terminals={:?} raw={raw:?}",
+                snapshot.human_commands, snapshot.terminals
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(sentinel_card.exit_status, Some(0));
+    assert!(sentinel_card.output.as_str().contains(HUMAN_PTY_SENTINEL));
+    assert!(!sentinel_card.truncated);
+
+    const FILTERED_OUTPUT_SENTINEL: &str = "AGL_FILTERED_OSC52_SENTINEL_148";
+    let filtered_command = format!(
+        "printf '\\033]52;c;{FILTERED_OUTPUT_SENTINEL}\\007'; printf '%0300000d\\n' 0; false"
+    );
+    let ready = application.snapshot(&opened.session_id).await.unwrap();
+    let ready_terminal = ready
+        .terminals
+        .iter()
+        .find(|terminal| terminal.terminal_id == ensured.terminal.terminal_id)
+        .unwrap();
+    let filtered_accepted = application
+        .submit_human_terminal_command(agl_app::HumanTerminalCommandSubmit {
+            session_id: opened.session_id.clone(),
+            terminal_id: ensured.terminal.terminal_id.clone(),
+            client_submission_id: "typed-human-filtered-large-failure".to_owned(),
+            writer_lease_id: lease.writer_lease_id().unwrap().clone(),
+            expected_command_sequence: ready_terminal.command_sequence,
+            expected_prompt_generation: ready_terminal.prompt_generation.unwrap(),
+            command: filtered_command.clone(),
+        })
+        .await
+        .unwrap();
+    let filtered_deadline = Instant::now() + Duration::from_secs(10);
+    let filtered_card = loop {
+        let snapshot = application.snapshot(&opened.session_id).await.unwrap();
+        let card = snapshot.human_commands.iter().find(|card| {
+            card.terminal_id == filtered_accepted.terminal_id
+                && card.command_sequence == filtered_accepted.command_sequence
+        });
+        let terminal_ready = snapshot.terminals.iter().any(|terminal| {
+            terminal.terminal_id == ensured.terminal.terminal_id
+                && terminal.command_sequence == filtered_accepted.command_sequence
+                && terminal.prompt_state == agl_app::TerminalPromptState::Ready
+        });
+        if let Some(card) = card
+            && terminal_ready
+            && card.state == agl_app::HumanCommandCardState::Exited
+            && card.exit_status == Some(1)
+        {
+            break card.clone();
+        }
+        assert!(
+            Instant::now() < filtered_deadline,
+            "large filtered nonzero Human command card did not complete"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(filtered_card.exit_status, Some(1));
+    assert!(filtered_card.truncated);
+    assert!(filtered_card.filtered_effects > 0);
+    assert!(filtered_card.output.as_str().len() <= agl_app::MAX_HUMAN_COMMAND_OUTPUT_BYTES);
+
+    const REJECTED_RACE_SENTINEL: &str = "AGL_REJECTED_RAW_RACE_SENTINEL_148";
+    let ready = application.snapshot(&opened.session_id).await.unwrap();
+    let ready_terminal = ready
+        .terminals
+        .iter()
+        .find(|terminal| terminal.terminal_id == ensured.terminal.terminal_id)
+        .unwrap()
+        .clone();
+    state
+        .operator_write_attached_input(
             &ensured.terminal.execution_id,
             lease.clone(),
-            agl_process::ProcessBytes::from_bytes(sentinel_command.as_bytes()),
+            agl_process::ProcessBytes::from_bytes(b"sleep 0.25\n"),
             false,
         )
         .unwrap();
-    let sentinel_deadline = Instant::now() + Duration::from_secs(5);
+    let rejected = application
+        .submit_human_terminal_command(agl_app::HumanTerminalCommandSubmit {
+            session_id: opened.session_id.clone(),
+            terminal_id: ensured.terminal.terminal_id.clone(),
+            client_submission_id: "typed-human-lost-raw-race".to_owned(),
+            writer_lease_id: lease.writer_lease_id().unwrap().clone(),
+            expected_command_sequence: ready_terminal.command_sequence,
+            expected_prompt_generation: ready_terminal.prompt_generation.unwrap(),
+            command: format!("printf '{REJECTED_RACE_SENTINEL}\\n'"),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected.code,
+        agl_app::ApplicationErrorCode::InvalidArguments
+    );
+    // The monitor may observe the raw command boundary before this submit is
+    // evaluated. Both the pending-input and already-busy snapshots must reject
+    // the typed transaction; the sentinel assertion below is authoritative.
+    let race_deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let snapshot = application.snapshot(&opened.session_id).await.unwrap();
         if snapshot.terminals.iter().any(|terminal| {
             terminal.terminal_id == ensured.terminal.terminal_id
-                && terminal.command_sequence == 3
+                && terminal.command_sequence == ready_terminal.command_sequence + 1
                 && terminal.prompt_state == agl_app::TerminalPromptState::Ready
         }) {
             break;
         }
         assert!(
-            Instant::now() < sentinel_deadline,
-            "private Human PTY sentinel command did not complete"
+            Instant::now() < race_deadline,
+            "raw race winner did not recover a trusted prompt"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let terminal_output = process
+    let post_race_output = process
         .operator_read(
             &ensured.terminal.execution_id,
-            agl_process::ExecutionCursor { after_sequence: 0 },
+            agl_process::ExecutionCursor {
+                after_sequence: filtered_card.output_end.after_sequence,
+            },
             64 * 1024,
         )
         .unwrap()
@@ -1568,23 +2461,62 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
         .into_iter()
         .flat_map(|chunk| chunk.bytes.decode(64 * 1024).unwrap())
         .collect::<Vec<_>>();
-    assert!(String::from_utf8_lossy(&terminal_output).contains(HUMAN_PTY_SENTINEL));
+    assert!(!String::from_utf8_lossy(&post_race_output).contains(REJECTED_RACE_SENTINEL));
 
+    control.blocked.store(true, Ordering::Release);
+    let unblock = InferenceUnblockGuard(Arc::clone(&control));
     application
         .submit_prompt(agl_app::PromptSubmission {
             session_id: opened.session_id.clone(),
-            client_submission_id: "human-pty-context-isolation".to_owned(),
+            client_submission_id: "human-pty-context-isolation-current".to_owned(),
             content: agl_content::Content::text("answer without consulting my terminal").unwrap(),
             budget: agl_app::PromptBudget::default(),
         })
         .await
         .unwrap();
     wait_for_calls(&control, 1);
-    let model_request = control.requests.lock().unwrap().first().cloned().unwrap();
-    let encoded_model_request = serde_json::to_string(&model_request).unwrap();
-    assert!(encoded_model_request.contains("answer without consulting my terminal"));
-    assert!(!encoded_model_request.contains(HUMAN_PTY_SENTINEL));
-    assert!(!encoded_model_request.contains(sentinel_command.trim()));
+    application
+        .submit_prompt(agl_app::PromptSubmission {
+            session_id: opened.session_id.clone(),
+            client_submission_id: "human-pty-context-isolation-queued".to_owned(),
+            content: agl_content::Content::text("now answer the queued question too").unwrap(),
+            budget: agl_app::PromptBudget::default(),
+        })
+        .await
+        .unwrap();
+    control.blocked.store(false, Ordering::Release);
+    wait_for_calls(&control, 2);
+    drop(unblock);
+    let model_requests = control.requests.lock().unwrap().clone();
+    assert_eq!(model_requests.len(), 2);
+    for model_request in &model_requests {
+        let encoded_model_request = serde_json::to_string(model_request).unwrap();
+        assert!(!encoded_model_request.contains(HUMAN_PTY_SENTINEL));
+        assert!(!encoded_model_request.contains(FILTERED_OUTPUT_SENTINEL));
+        assert!(!encoded_model_request.contains(REJECTED_RACE_SENTINEL));
+        assert!(!encoded_model_request.contains(&sentinel_command));
+        assert!(!encoded_model_request.contains(&filtered_command));
+    }
+
+    let transcript = state
+        .handle_request_async(DaemonRequest::new(
+            RequestId::generate(),
+            DaemonRequestKind::SessionTranscript(agl_protocol::SessionTranscriptRequest {
+                session_id: opened.session_id.clone(),
+                include_content: true,
+            }),
+        ))
+        .await;
+    let transcript = match transcript.kind {
+        DaemonEventKind::SessionTranscript(transcript) => transcript,
+        other => panic!("unexpected transcript response: {other:?}"),
+    };
+    let encoded_transcript = serde_json::to_string(&transcript).unwrap();
+    assert!(!encoded_transcript.contains(HUMAN_PTY_SENTINEL));
+    assert!(!encoded_transcript.contains(FILTERED_OUTPUT_SENTINEL));
+    assert!(!encoded_transcript.contains(REJECTED_RACE_SENTINEL));
+    assert!(!encoded_transcript.contains(&sentinel_command));
+    assert!(!encoded_transcript.contains(&filtered_command));
 
     let history = agl_process::HumanShellHistoryStore::with_defaults(
         test.runtime.paths.state_dir.join("terminal-history"),
@@ -1592,13 +2524,29 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
     .unwrap()
     .load(&workspace)
     .unwrap();
-    assert_eq!(
-        history.commands(),
-        [
-            "command -v ls",
-            "cd monitor-child",
-            "printf 'AGL_HUMAN_PTY_CONTEXT_SENTINEL_148\\n'"
-        ]
+    assert!(
+        history
+            .commands()
+            .iter()
+            .any(|command| command == &sentinel_command)
+    );
+    assert!(
+        history
+            .commands()
+            .iter()
+            .any(|command| command == &filtered_command)
+    );
+    assert!(
+        history
+            .commands()
+            .iter()
+            .any(|command| command == "sleep 0.25")
+    );
+    assert!(
+        !history
+            .commands()
+            .iter()
+            .any(|command| command.contains(REJECTED_RACE_SENTINEL))
     );
 
     let mut saw_started = false;
@@ -1626,7 +2574,9 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
                 sequence: 2,
                 exit_status: 0,
                 ref cwd,
-            } if terminal_id == ensured.terminal.terminal_id && cwd == &child.to_string_lossy() => {
+            } if terminal_id == ensured.terminal.terminal_id
+                && cwd.text == child.to_string_lossy() =>
+            {
                 saw_finished = true;
             }
             agl_app::SessionPresentationEvent::TerminalChanged { terminal }
@@ -1635,7 +2585,7 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
                 saw_terminal_changed = true;
             }
             agl_app::SessionPresentationEvent::HeaderChanged { header }
-                if header.cwd == child.to_string_lossy() =>
+                if header.cwd.text == child.to_string_lossy() =>
             {
                 saw_header_changed = true;
             }
@@ -1820,6 +2770,21 @@ async fn connect_headless_client(
 }
 
 #[cfg(target_os = "linux")]
+fn encode_headless_presentation_event(event: &agl_client::PresentationSubscriptionEvent) -> String {
+    match event {
+        agl_client::PresentationSubscriptionEvent::SnapshotReplaced { snapshot, .. } => {
+            serde_json::to_string(snapshot).unwrap()
+        }
+        agl_client::PresentationSubscriptionEvent::Event(envelope) => {
+            serde_json::to_string(envelope).unwrap()
+        }
+        agl_client::PresentationSubscriptionEvent::Finished(finished) => {
+            serde_json::to_string(finished).unwrap()
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn assert_authoritative_session_finish(
     mut subscription: agl_client::PresentationSubscription,
     expected_session_id: &SessionId,
@@ -1872,6 +2837,10 @@ async fn assert_authoritative_session_finish(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exit() {
     let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    control
+        .emit_scripted_progress
+        .store(true, Ordering::Release);
     let workspace = test
         .runtime
         .paths
@@ -1884,8 +2853,9 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
         test.runtime.clone(),
         test.inference.clone(),
         InferenceClientHandle::new(ControlledInferenceClient {
-            control: Arc::new(InferenceControl::default()),
+            control: Arc::clone(&control),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let process = state.process_handle().unwrap();
 
@@ -1902,7 +2872,7 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
         .await
         .unwrap();
     let session_id = opened.session_id;
-    let first_subscription = first_client
+    let mut first_subscription = first_client
         .subscribe_presentation(agl_protocol::SessionPresentationSubscribeRequest {
             session_id: session_id.clone(),
         })
@@ -1955,7 +2925,406 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
             .is_live()
     );
 
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    let ready_terminal = loop {
+        let snapshot = state.application().snapshot(&session_id).await.unwrap();
+        if let Some(terminal) = snapshot.terminals.iter().find(|terminal| {
+            terminal.execution_id == execution_id
+                && terminal.prompt_state == agl_app::TerminalPromptState::Ready
+        }) {
+            break terminal.clone();
+        }
+        assert!(
+            Instant::now() < ready_deadline,
+            "headless Human terminal did not reach a trusted prompt"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let mut attachment = first_client
+        .attach_execution(execution_id.clone(), 0, true)
+        .await
+        .unwrap();
+    let competing = second_client
+        .attach_execution(execution_id.clone(), 0, true)
+        .await;
+    match competing {
+        Err(agl_client::ClientError::Protocol {
+            code: ProtocolErrorCode::Busy,
+            ..
+        }) => {}
+        Err(error) => panic!("unexpected competing writer error: {error:?}"),
+        Ok(_) => panic!("a second client acquired the Human terminal writer lease"),
+    }
+    const RECONNECT_CARD_SENTINEL: &str = "AGL_RECONNECT_CARD_SENTINEL_148";
+    const PRIVATE_ENV_SENTINEL: &str = "AGL_PRIVATE_ENV_SENTINEL_148";
+    const PRIVATE_CWD_SENTINEL: &str = "private-cwd-sentinel-148";
+    let private_cwd = workspace.join(PRIVATE_CWD_SENTINEL);
+    std::fs::create_dir(&private_cwd).unwrap();
+    let private_command = format!(
+        "export AGL_PRIVATE_TEST_VALUE='{PRIVATE_ENV_SENTINEL}'; cd '{PRIVATE_CWD_SENTINEL}'; printf '{RECONNECT_CARD_SENTINEL}\\n'"
+    );
+    let command_request = agl_protocol::HumanTerminalCommandSubmitRequest {
+        session_id: session_id.clone(),
+        terminal_id: ready_terminal.terminal_id.clone(),
+        client_submission_id: "headless-reconnect-card".to_owned(),
+        writer_lease_id: attachment.writer_lease_id().unwrap().clone(),
+        expected_command_sequence: ready_terminal.command_sequence,
+        expected_prompt_generation: ready_terminal.prompt_generation.unwrap(),
+        command: private_command.clone(),
+    };
+    assert!(!format!("{command_request:?}").contains(&private_command));
+    let foreign_writer = second_client
+        .submit_human_terminal_command(command_request.clone())
+        .await;
+    assert!(matches!(
+        foreign_writer,
+        Err(agl_client::ClientError::Protocol {
+            code: ProtocolErrorCode::WriterLeaseBusy,
+            ..
+        })
+    ));
+    let accepted = first_client
+        .submit_human_terminal_command(command_request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        first_client
+            .submit_human_terminal_command(command_request.clone())
+            .await
+            .unwrap(),
+        accepted,
+        "an uncertain retry must preserve the exact accepted command identity"
+    );
+    let card_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = state.application().snapshot(&session_id).await.unwrap();
+        if snapshot.human_commands.iter().any(|card| {
+            card.terminal_id == accepted.terminal_id
+                && card.command_sequence == accepted.command_sequence
+                && card.state == agl_app::HumanCommandCardState::Exited
+                && card.exit_status == Some(0)
+                && card.output.as_str().contains(RECONNECT_CARD_SENTINEL)
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < card_deadline,
+            "headless typed command did not produce its private card"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    control.finish_with_length.store(true, Ordering::Release);
+    let incomplete = first_client
+        .submit_prompt(RunSubmitRequest {
+            session_id: session_id.clone(),
+            content: agl_content::Content::text("headless incomplete answer").unwrap(),
+            client_submission_id: "headless-incomplete-prompt".to_owned(),
+            budget: RunBudgetRequest::default(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        process
+            .operator_status(&execution_id)
+            .unwrap()
+            .state
+            .is_live(),
+        "prompt submission must leave the peer Human terminal live"
+    );
+
+    let first_run_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut inference_queued = false;
+    let mut inference_admitted = false;
+    let mut inference_cache = false;
+    let mut inference_prefill = false;
+    let mut inference_generation = false;
+    let mut saw_incomplete_item = false;
+    let mut streamed_utf8 = String::new();
+    while !(inference_queued
+        && inference_admitted
+        && inference_cache
+        && inference_prefill
+        && inference_generation
+        && saw_incomplete_item
+        && streamed_utf8.contains('☃'))
+    {
+        let event = tokio::time::timeout_at(first_run_deadline, first_subscription.next())
+            .await
+            .expect("headless presentation did not expose the incomplete run")
+            .unwrap()
+            .expect("headless presentation ended during the incomplete run");
+        let encoded = encode_headless_presentation_event(&event);
+        assert!(!encoded.contains(&private_command));
+        match event {
+            agl_client::PresentationSubscriptionEvent::Event(envelope) => match envelope.event {
+                agl_protocol::SessionPresentationEventPayload::AssistantTextDelta {
+                    run_id,
+                    text,
+                    ..
+                } if run_id == incomplete.run_id => streamed_utf8.push_str(&text),
+                agl_protocol::SessionPresentationEventPayload::ItemUpsert {
+                    item: agl_protocol::SessionPresentationItem::IncompleteAssistant { ref item },
+                } if item.source_run_id == incomplete.run_id => saw_incomplete_item = true,
+                agl_protocol::SessionPresentationEventPayload::ActivityGraphDelta { batch } => {
+                    for node in batch
+                        .upserts
+                        .into_iter()
+                        .filter(|node| node.run_id == incomplete.run_id)
+                    {
+                        if let agl_protocol::ActivityDetailView::Inference(detail) = node.detail {
+                            use agl_protocol::InferenceProductStageView as Stage;
+                            match detail.stage {
+                                Stage::Queued => inference_queued = true,
+                                Stage::Admission => inference_admitted = true,
+                                Stage::ModelLoad
+                                | Stage::ModelReuse
+                                | Stage::ContextReuse
+                                | Stage::ContextRebuild => inference_cache = true,
+                                Stage::Prefill => inference_prefill = true,
+                                Stage::Generation => inference_generation = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            agl_client::PresentationSubscriptionEvent::SnapshotReplaced { .. } => {}
+            agl_client::PresentationSubscriptionEvent::Finished(finished) => {
+                panic!("headless presentation finished unexpectedly: {finished:?}")
+            }
+        }
+    }
+    assert_eq!(
+        streamed_utf8,
+        "durable answer ☃\n\nVerification: fake inference."
+    );
+    let incomplete_status = loop {
+        let status = first_client
+            .run_status(incomplete.run_id.clone())
+            .await
+            .unwrap();
+        if status.state == ProtocolRunState::Incomplete {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now() < first_run_deadline,
+            "length-stopped run did not become incomplete: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(incomplete_status.state, ProtocolRunState::Incomplete);
+    let incomplete_snapshot = state.application().snapshot(&session_id).await.unwrap();
+    let incomplete_item = incomplete_snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            agl_app::SessionPresentationItem::IncompleteAssistant { item }
+                if item.source_run_id == incomplete.run_id =>
+            {
+                Some(item.clone())
+            }
+            _ => None,
+        })
+        .expect("length stop must install an incomplete assistant item");
+
+    control.finish_with_length.store(false, Ordering::Release);
+    let continued = first_client
+        .application_action(agl_protocol::ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id: "headless-explicit-continue".to_owned(),
+            action: agl_protocol::ApplicationAction::IncompleteTurnContinue {
+                message_id: incomplete_item.message_id.clone(),
+                expected_execution_context_revision: incomplete_snapshot
+                    .header
+                    .execution_context_revision,
+            },
+        })
+        .await
+        .unwrap();
+    let continued = match continued.result {
+        agl_protocol::ApplicationActionResult::IncompleteTurnContinued { admission } => admission,
+        other => panic!("unexpected Continue result: {other:?}"),
+    };
+    let continuation_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut continued_utf8 = String::new();
+    let mut saw_final = false;
+    while !(continued_utf8.contains('☃') && saw_final) {
+        let event = tokio::time::timeout_at(continuation_deadline, first_subscription.next())
+            .await
+            .expect("headless presentation did not expose the continuation")
+            .unwrap()
+            .expect("headless presentation ended during the continuation");
+        let encoded = encode_headless_presentation_event(&event);
+        assert!(!encoded.contains(&private_command));
+        if let agl_client::PresentationSubscriptionEvent::Event(envelope) = event {
+            match envelope.event {
+                agl_protocol::SessionPresentationEventPayload::AssistantTextDelta {
+                    run_id,
+                    text,
+                    ..
+                } if run_id == continued.run_id => continued_utf8.push_str(&text),
+                agl_protocol::SessionPresentationEventPayload::ItemUpsert {
+                    item:
+                        agl_protocol::SessionPresentationItem::AssistantMessage {
+                            ref content,
+                            state: agl_protocol::AssistantItemState::Final,
+                            ..
+                        },
+                } if content.text_only().is_some_and(|text| text.contains('☃')) => {
+                    saw_final = true
+                }
+                _ => {}
+            }
+        }
+    }
+    let continued_status = loop {
+        let status = first_client
+            .run_status(continued.run_id.clone())
+            .await
+            .unwrap();
+        if status.state == ProtocolRunState::Succeeded {
+            break status;
+        }
+        assert!(
+            tokio::time::Instant::now() < continuation_deadline,
+            "continued run did not succeed: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(continued_status.state, ProtocolRunState::Succeeded);
+
+    let model_requests = control.requests.lock().unwrap().clone();
+    assert_eq!(model_requests.len(), 2);
+    for request in model_requests {
+        let encoded = serde_json::to_string(&request).unwrap();
+        for private in [
+            private_command.as_str(),
+            RECONNECT_CARD_SENTINEL,
+            PRIVATE_ENV_SENTINEL,
+            PRIVATE_CWD_SENTINEL,
+            private_cwd.to_string_lossy().as_ref(),
+        ] {
+            assert!(
+                !encoded.contains(private),
+                "model request leaked private Human terminal state: {private}"
+            );
+        }
+    }
+    let transcript = first_client
+        .read_transcript(agl_protocol::SessionTranscriptRequest {
+            session_id: session_id.clone(),
+            include_content: true,
+        })
+        .await
+        .unwrap();
+    let transcript = serde_json::to_string(&transcript).unwrap();
+    assert!(!transcript.contains(&private_command));
+    assert!(!transcript.contains(RECONNECT_CARD_SENTINEL));
+    assert!(!transcript.contains(PRIVATE_ENV_SENTINEL));
+    assert!(!transcript.contains(PRIVATE_CWD_SENTINEL));
+    let durable_chat_items = state
+        .application()
+        .snapshot(&session_id)
+        .await
+        .unwrap()
+        .items;
+    let durable_chat_items = serde_json::to_string(&durable_chat_items).unwrap();
+    assert!(!durable_chat_items.contains(&private_command));
+    assert!(!durable_chat_items.contains(RECONNECT_CARD_SENTINEL));
+    assert!(!durable_chat_items.contains(PRIVATE_ENV_SENTINEL));
+    assert!(!durable_chat_items.contains(PRIVATE_CWD_SENTINEL));
+    let private_history = agl_process::HumanShellHistoryStore::with_defaults(
+        test.runtime.paths.state_dir.join("terminal-history"),
+    )
+    .unwrap()
+    .load(&workspace)
+    .unwrap();
+    assert!(
+        private_history
+            .commands()
+            .iter()
+            .any(|command| command == &private_command),
+        "privacy assertion must exercise a command that really entered private history"
+    );
+
+    let stale_writer_lease_id = command_request.writer_lease_id.clone();
+    attachment.detach().await.unwrap();
+    let detach_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let detached = tokio::time::timeout_at(detach_deadline, attachment.next())
+            .await
+            .expect("Human terminal attachment did not finish after detach")
+            .unwrap();
+        match detached {
+            Some(agl_client::ExecutionAttachmentEvent::Output(_)) => {}
+            Some(agl_client::ExecutionAttachmentEvent::Finished(_)) => break,
+            None => panic!("Human terminal attachment ended without a finish event"),
+        }
+    }
+    drop(attachment);
+
+    let stale_writer = first_client
+        .submit_human_terminal_command(command_request.clone())
+        .await;
+    assert!(matches!(
+        stale_writer,
+        Err(agl_client::ClientError::Protocol {
+            code: ProtocolErrorCode::WriterLeaseBusy,
+            ..
+        })
+    ));
+    let mut replacement_attachment = first_client
+        .attach_execution(execution_id.clone(), accepted.output_after_sequence, true)
+        .await
+        .unwrap();
+    assert_ne!(
+        replacement_attachment.writer_lease_id().unwrap(),
+        &stale_writer_lease_id,
+        "writer takeover must mint a distinct authority"
+    );
+    let mismatched_terminal = first_client
+        .submit_human_terminal_command(agl_protocol::HumanTerminalCommandSubmitRequest {
+            terminal_id: agl_ids::TerminalSessionId::generate(),
+            writer_lease_id: replacement_attachment.writer_lease_id().unwrap().clone(),
+            client_submission_id: "mismatched-terminal-writer".to_owned(),
+            command: "printf 'must-not-run\\n'".to_owned(),
+            ..command_request.clone()
+        })
+        .await;
+    assert!(matches!(
+        mismatched_terminal,
+        Err(agl_client::ClientError::Protocol {
+            code: ProtocolErrorCode::NotFound,
+            ..
+        })
+    ));
+    replacement_attachment.detach().await.unwrap();
+    let replacement_detach_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let event =
+            tokio::time::timeout_at(replacement_detach_deadline, replacement_attachment.next())
+                .await
+                .expect("replacement attachment did not finish")
+                .unwrap();
+        match event {
+            Some(agl_client::ExecutionAttachmentEvent::Output(_)) => {}
+            Some(agl_client::ExecutionAttachmentEvent::Finished(_)) => break,
+            None => panic!("replacement attachment ended without a finish event"),
+        }
+    }
+    drop(replacement_attachment);
+
     drop(first_subscription);
+    let status_after_subscription_cancel = first_client
+        .session_status(SessionStatusRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(status_after_subscription_cancel.session_id, session_id);
+    assert_eq!(status_after_subscription_cancel.status, SessionStatus::Open);
     drop(first_client);
     tokio::time::timeout(Duration::from_secs(3), first_server)
         .await
@@ -1991,6 +3360,7 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
         })
         .await
         .unwrap();
+    assert!(reconnected_subscription.snapshot.cursor.revision > 0);
     assert!(
         reconnected_subscription
             .snapshot
@@ -1998,6 +3368,58 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
             .iter()
             .any(|terminal| terminal.execution_id == execution_id)
     );
+    assert!(
+        reconnected_subscription
+            .snapshot
+            .human_commands
+            .iter()
+            .any(|card| {
+                card.terminal_id == accepted.terminal_id
+                    && card.command_sequence == accepted.command_sequence
+                    && card.state == agl_protocol::HumanCommandCardState::Exited
+                    && card.exit_status == Some(0)
+                    && card.output.as_str().contains(RECONNECT_CARD_SENTINEL)
+            })
+    );
+    assert!(
+        reconnected_subscription
+            .snapshot
+            .activity
+            .as_ref()
+            .is_some_and(|graph| graph.nodes.iter().any(|node| {
+                node.run_id == continued.run_id
+                    && matches!(
+                        &node.detail,
+                        agl_protocol::ActivityDetailView::Inference(detail)
+                            if detail.stage == agl_protocol::InferenceProductStageView::Completed
+                    )
+            })),
+        "reconnected snapshot must retain the current completed activity graph"
+    );
+
+    let mut cursor_attachment = reconnected_client
+        .attach_execution(execution_id.clone(), accepted.output_after_sequence, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_attachment.started.next_sequence,
+        accepted.output_after_sequence
+    );
+    assert!(cursor_attachment.writer_lease_id().is_none());
+    cursor_attachment.detach().await.unwrap();
+    let cursor_detach_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let event = tokio::time::timeout_at(cursor_detach_deadline, cursor_attachment.next())
+            .await
+            .expect("explicit-cursor attachment did not finish")
+            .unwrap();
+        match event {
+            Some(agl_client::ExecutionAttachmentEvent::Output(_)) => {}
+            Some(agl_client::ExecutionAttachmentEvent::Finished(_)) => break,
+            None => panic!("explicit-cursor attachment ended without a finish event"),
+        }
+    }
+    drop(cursor_attachment);
 
     let exited = second_client
         .application_action(agl_protocol::ApplicationActionRequest {
@@ -2056,6 +3478,7 @@ async fn server_run_submit_uses_the_shared_prompt_projection() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let application = state.application();
     let opened = application
@@ -2164,6 +3587,7 @@ fn cron_tick_admits_supervised_work_and_notifies_only_after_terminal() {
         InferenceClientHandle::new(ControlledInferenceClient {
             control: control.clone(),
         }),
+        WorkerRuntimeStatusHandle::default(),
     );
     let store = agl_store::AglStore::open_current_at(test.runtime.paths.store_root()).unwrap();
     let repository = CronRepository::new(&store);

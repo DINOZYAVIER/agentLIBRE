@@ -115,6 +115,7 @@ define_id!(MessageId, "msg_");
 define_id!(ExecutionId, "exec_");
 define_id!(DaemonInstanceId, "daemon_");
 define_id!(TerminalSessionId, "term_");
+define_id!(WriterLeaseId, "lease_");
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct ExecutionScope {
@@ -285,6 +286,7 @@ mod tests {
         assert_id_format!(ExecutionId, "exec_");
         assert_id_format!(DaemonInstanceId, "daemon_");
         assert_id_format!(TerminalSessionId, "term_");
+        assert_id_format!(WriterLeaseId, "lease_");
     }
 
     #[test]

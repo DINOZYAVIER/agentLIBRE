@@ -17,10 +17,10 @@ pub use hook::{
     HookMessage, HookResult, HookResultSummary, HookStatus, TurnHookBatch,
 };
 pub use input::{TurnInput, VisibleTool};
-pub use output::{StopDetail, StopReason, TurnOutput};
+pub use output::{IncompleteOutputReason, StopDetail, StopReason, TurnOutput};
 pub use state::TurnState;
 pub use tool::{ToolDispatchRequest, ToolDispatchResponse};
-pub use transcript::{ModelRequest, ModelResponse, TurnMessage};
+pub use transcript::{ModelRequest, ModelResponse, ModelResponseOutcome, TurnMessage};
 
 #[cfg(test)]
 mod tests;

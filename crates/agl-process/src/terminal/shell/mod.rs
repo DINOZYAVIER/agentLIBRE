@@ -22,8 +22,10 @@ use crate::{
 
 pub(crate) use integration::ShellIntegrationToken;
 pub use integration::{
-    BoundedShellIntegration, IntegrationBatch, ShellExit, ShellIntegrationEvent,
-    ShellIntegrationHealth, ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState,
+    BoundedShellIntegration, CommandBoundary, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES,
+    ShellExit, ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth,
+    ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState, TypedCommandAbortReason,
+    TypedCommandTransactionId,
 };
 
 const PRIVATE_HOME_IN_SANDBOX: &str = "/.agl-private/home";
@@ -112,8 +114,11 @@ pub(crate) struct ManagedShellStartup {
 }
 
 pub(crate) struct ManagedShellIntegrationTransport {
-    pub reader: OwnedFd,
-    pub fifo_path: PathBuf,
+    pub supervisor_socket: OwnedFd,
+    pub relay_socket: Option<OwnedFd>,
+    pub event_fifo_guard: OwnedFd,
+    pub event_fifo_path: PathBuf,
+    pub control_fifo_path: PathBuf,
 }
 
 impl Debug for ManagedShellStartup {
@@ -147,10 +152,12 @@ impl ManagedShellStartup {
         };
         let seed_host = private.join("history.seed");
         let seed_visible = visible_home.join("history.seed");
-        let integration_host = private.join("integration.fifo");
-        let integration_visible = visible_home.join("integration.fifo");
-        let integration_reader =
-            crate::platform::create_shell_integration_reader(&integration_host)?;
+        let event_host = private.join("integration.events.fifo");
+        let event_visible = visible_home.join("integration.events.fifo");
+        let control_host = private.join("integration.controls.fifo");
+        let control_visible = visible_home.join("integration.controls.fifo");
+        let integration =
+            crate::platform::create_shell_integration_transport(&event_host, &control_host)?;
         let (startup_name, startup, history, args, extra_environment) = match self.shell.kind {
             AdmittedShellKind::Bash => {
                 let name = "bashrc";
@@ -159,7 +166,8 @@ impl ManagedShellStartup {
                     &self.host_startup,
                     &seed_visible,
                     &startup_visible,
-                    &integration_visible,
+                    &event_visible,
+                    &control_visible,
                     &self.integration_token,
                 );
                 let args = vec![
@@ -183,7 +191,8 @@ impl ManagedShellStartup {
                     &self.host_startup,
                     &seed_visible,
                     &startup_visible,
-                    &integration_visible,
+                    &event_visible,
+                    &control_visible,
                     &self.integration_token,
                 );
                 let args = vec!["-d".to_owned(), "-i".to_owned()];
@@ -213,8 +222,11 @@ impl ManagedShellStartup {
         request.validate()?;
         Ok((
             ManagedShellIntegrationTransport {
-                reader: integration_reader,
-                fifo_path: integration_host,
+                supervisor_socket: integration.supervisor,
+                relay_socket: Some(integration.relay),
+                event_fifo_guard: integration.event_guard,
+                event_fifo_path: event_host,
+                control_fifo_path: control_host,
             },
             self.private_environment,
         ))
@@ -381,14 +393,16 @@ mod tests {
             &policy,
             Path::new("/private/history.seed"),
             Path::new("/private/bashrc"),
-            Path::new("/private/integration.fifo"),
+            Path::new("/private/integration.events.fifo"),
+            Path::new("/private/integration.controls.fifo"),
             &token,
         );
         let zsh = zsh::render_startup(
             &policy,
             Path::new("/private/history.seed"),
             Path::new("/private/.zshrc"),
-            Path::new("/private/integration.fifo"),
+            Path::new("/private/integration.events.fifo"),
+            Path::new("/private/integration.controls.fifo"),
             &token,
         );
         assert!(bash.contains("source '/tmp/user'\\''s bashrc'"));
@@ -397,6 +411,7 @@ mod tests {
         assert_eq!(zsh.matches("HISTFILE=/dev/null").count(), 2);
         assert_eq!(bash.matches("set -m").count(), 2);
         assert_eq!(zsh.matches("MONITOR").count(), 2);
+        assert!(bash.contains("bind 'set enable-bracketed-paste on'"));
     }
 
     #[test]
@@ -443,7 +458,7 @@ mod tests {
             private_environment: PrivateTerminalEnvironment::default(),
         };
         let mut request = request(&workspace, &shell);
-        let (integration_reader, private_environment) =
+        let (integration_transport, private_environment) =
             startup.materialize(&mut request, &directories).unwrap();
         assert!(private_environment.is_empty());
 
@@ -464,7 +479,7 @@ mod tests {
             );
         }
         assert!(
-            fs::metadata(managed.join("integration.fifo"))
+            fs::metadata(managed.join("integration.events.fifo"))
                 .unwrap()
                 .file_type()
                 .is_fifo()
@@ -472,8 +487,9 @@ mod tests {
         let rc = fs::read_to_string(managed.join("bashrc")).unwrap();
         assert!(!rc.contains(".bashrc"));
         assert!(rc.contains("history -r '/.agl-private/home/agl-terminal/history.seed'"));
-        assert!(rc.contains("'/.agl-private/home/agl-terminal/integration.fifo'"));
-        drop(integration_reader);
+        assert!(rc.contains("'/.agl-private/home/agl-terminal/integration.events.fifo'"));
+        assert!(rc.contains("'/.agl-private/home/agl-terminal/integration.controls.fifo'"));
+        drop(integration_transport);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -507,8 +523,11 @@ mod tests {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let root = root.canonicalize().unwrap();
-        let fifo = root.join("integration.fifo");
-        let reader = crate::platform::create_shell_integration_reader(&fifo).unwrap();
+        let event_fifo = root.join("integration.events.fifo");
+        let control_fifo = root.join("integration.controls.fifo");
+        let transport =
+            crate::platform::create_shell_integration_transport(&event_fifo, &control_fifo)
+                .unwrap();
         let token = ShellIntegrationToken::generate().unwrap();
         let seed = root.join("history.seed");
         write_private_file(&seed, b"").unwrap();
@@ -521,20 +540,82 @@ mod tests {
                 &HostStartupPolicy::ManagedOnly,
                 &seed,
                 &startup,
-                &fifo,
+                &event_fifo,
+                &control_fifo,
                 &token,
             ),
             AdmittedShellKind::Zsh => zsh::render_startup(
                 &HostStartupPolicy::ManagedOnly,
                 &seed,
                 &startup,
-                &fifo,
+                &event_fifo,
+                &control_fifo,
                 &token,
             ),
         };
         write_private_file(&startup, script.as_bytes()).unwrap();
 
         let (mut master, slave) = open_test_pty();
+        let relay_slave = slave.try_clone().unwrap();
+        let relay_event_fifo = event_fifo.clone();
+        let relay_control_fifo = control_fifo.clone();
+        let relay = std::thread::spawn(move || {
+            crate::platform::run_shell_integration_relay(
+                transport.relay,
+                relay_slave.as_raw_fd(),
+                &relay_event_fifo,
+                &relay_control_fifo,
+                MAX_SHELL_INTEGRATION_FRAME_BYTES,
+            )
+        });
+        let monitor_token = token.clone();
+        let monitor = std::thread::spawn(move || {
+            let mut integration = BoundedShellIntegration::new(monitor_token);
+            let mut events = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                match crate::platform::receive_shell_integration_event(
+                    &transport.supervisor,
+                    MAX_SHELL_INTEGRATION_FRAME_BYTES,
+                )
+                .unwrap()
+                {
+                    crate::platform::ShellIntegrationReceive::Empty => {
+                        if Instant::now() >= deadline {
+                            panic!("managed {kind:?} integration monitor timed out");
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    crate::platform::ShellIntegrationReceive::Closed => break,
+                    crate::platform::ShellIntegrationReceive::Event(frame) => {
+                        let batch = integration.push_packet(&frame);
+                        assert_eq!(batch.notice, None, "{kind:?} emitted an invalid frame");
+                        if let Some(ShellIntegrationEvent::PromptReady {
+                            sequence,
+                            input_pending,
+                            ..
+                        }) = batch.events.first()
+                        {
+                            let shell_sequence = integration.last_shell_sequence().unwrap();
+                            let control = integration
+                                .encode_control(&ShellIntegrationControl::PromptReadyAck {
+                                    event_sequence: shell_sequence,
+                                    prompt_generation: (!*input_pending).then_some(*sequence),
+                                })
+                                .unwrap();
+                            crate::platform::send_shell_integration_control(
+                                &transport.supervisor,
+                                &control,
+                                Duration::from_secs(1),
+                            )
+                            .unwrap();
+                        }
+                        events.extend(batch.events);
+                    }
+                }
+            }
+            (integration, events)
+        });
         let slave_stdout = slave.try_clone().unwrap();
         let slave_stderr = slave.try_clone().unwrap();
         let mut command = Command::new(executable);
@@ -614,9 +695,10 @@ mod tests {
         }
 
         let child_probe = format!(
-            "{} -c 'for __fd in /proc/self/fd/*; do __target=$(readlink \"$__fd\" 2>/dev/null); case \"$__target\" in *integration.fifo*) printf \"__AGL_%s__=%s\\n\" FD_LEAK \"$__target\";; esac; done; if [[ -n ${{__agl_integration_token+x}} ]]; then printf \"__AGL_%s__\\n\" TOKEN_ENV_LEAK; fi'",
+            "{} -c 'for __fd in /proc/self/fd/*; do __target=$(readlink \"$__fd\" 2>/dev/null); case \"$__target\" in *integration.*.fifo*) printf \"__AGL_%s__=%s\\n\" FD_LEAK \"$__target\";; esac; done; if [[ -n ${{__agl_integration_token+x}} ]]; then printf \"__AGL_%s__\\n\" TOKEN_ENV_LEAK; fi'",
             shell_quote(executable)
         );
+        let long_command = format!(": '{}'", "x".repeat(9 * 1024));
         let commands = format!(
             "false\n\
              printf '__AGL_%s__=%s\\n' STATUS \"$?\"\n\
@@ -625,9 +707,10 @@ mod tests {
                printf '__AGL_%s__\\n' MULTI\n\
              fi\n\
              {child_probe}\n\
-             printf 'AGL1\\0%s\\0%s\\0prompt_ready\\0%s\\0%s\\0' fake 1 /pty-spoof -\n\
+             {long_command}\n\
+             printf 'AGL2\\0%s\\0%s\\0prompt_ready\\0%s\\0%s\\0%s\\0' fake 1 /pty-spoof - 0\n\
              rm -f -- {}; printf '__AGL_%s__\\n' ALIVE_AFTER_CHANNEL_LOSS\n",
-            shell_quote(&fifo),
+            shell_quote(&event_fifo),
         );
         master.write_all(commands.as_bytes()).unwrap();
         master.write_all(b"exit\n").unwrap();
@@ -696,27 +779,19 @@ mod tests {
         );
         assert!(!startup.exists());
         assert!(!seed.exists());
-        assert!(!crate::platform::shell_integration_path_is_intact(
-            &fifo, &reader
-        ));
-
-        let integration_bytes = drain_nonblocking(reader.as_raw_fd());
-        let mut integration = BoundedShellIntegration::new(token);
-        let batch = integration.push(&integration_bytes);
-        assert_eq!(batch.notice, None, "{kind:?} emitted an invalid frame");
-        let starts = batch
-            .events
+        let relay_status = relay.join().unwrap();
+        assert_eq!(
+            relay_status, 125,
+            "relay must reject the replaced FIFO path"
+        );
+        let (mut integration, events) = monitor.join().unwrap();
+        let starts = events
             .iter()
             .filter_map(|event| match event {
                 ShellIntegrationEvent::CommandStarted { command, .. } => Some(command),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            starts.len(),
-            8,
-            "unexpected {kind:?} command events: {starts:?}"
-        );
         assert_eq!(
             starts
                 .iter()
@@ -727,12 +802,19 @@ mod tests {
         assert_eq!(
             starts
                 .iter()
+                .filter(|command| command.as_str() == long_command)
+                .count(),
+            1,
+            "managed {kind:?} hook truncated a command above the former 8 KiB limit"
+        );
+        assert_eq!(
+            starts
+                .iter()
                 .filter(|command| command.contains("if true;") && command.contains("MULTI"))
                 .count(),
             1
         );
-        let false_position = batch
-            .events
+        let false_position = events
             .iter()
             .position(|event| {
                 matches!(
@@ -743,14 +825,14 @@ mod tests {
             })
             .unwrap();
         assert!(matches!(
-            batch.events.get(false_position + 1),
+            events.get(false_position + 1),
             Some(ShellIntegrationEvent::CommandFinished {
                 exit: ShellExit::Code { code: 1 },
                 ..
             })
         ));
         assert!(matches!(
-            batch.events.get(false_position + 2),
+            events.get(false_position + 2),
             Some(ShellIntegrationEvent::PromptReady {
                 last_exit: Some(1),
                 ..
@@ -763,8 +845,6 @@ mod tests {
             integration.state().health(),
             ShellIntegrationHealth::Degraded
         );
-
-        drop(reader);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -795,30 +875,6 @@ mod tests {
             0
         );
         unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
-    }
-
-    fn drain_nonblocking(descriptor: i32) -> Vec<u8> {
-        let mut output = Vec::new();
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            let read = unsafe { libc::read(descriptor, buffer.as_mut_ptr().cast(), buffer.len()) };
-            if read > 0 {
-                output.extend_from_slice(&buffer[..read as usize]);
-                continue;
-            }
-            if read == 0 {
-                break;
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                break;
-            }
-            panic!("failed to drain private integration FIFO: {error}");
-        }
-        output
     }
 
     fn drain_test_pty(descriptor: i32, output: &mut Vec<u8>) -> bool {

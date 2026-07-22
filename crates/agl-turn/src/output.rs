@@ -6,10 +6,30 @@ pub enum TurnOutput {
     Answered {
         answer: String,
     },
+    Incomplete {
+        partial: String,
+        reason: IncompleteOutputReason,
+    },
     Stopped {
         reason: StopReason,
         detail: Option<StopDetail>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteOutputReason {
+    ModelLength,
+    ContentByteLimit,
+}
+
+impl IncompleteOutputReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelLength => "model_length",
+            Self::ContentByteLimit => "content_byte_limit",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -165,6 +165,16 @@ impl AglStore {
     }
 
     fn apply_migration(&self, migration: &StoreMigration) -> Result<()> {
+        // SQLite rewrites foreign-key declarations in dependent tables when a
+        // referenced table is renamed while foreign-key enforcement is on.
+        // Migration 17 intentionally performs the documented table-rebuild
+        // sequence for `runs`; enforcement must therefore be disabled before
+        // its transaction begins so those declarations continue to name the
+        // replacement `runs` table rather than the temporary `runs_v16` table.
+        let rebuilds_referenced_runs_table = migration.version == 17;
+        if rebuilds_referenced_runs_table {
+            self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        }
         let batch = format!(
             r#"
             BEGIN;
@@ -177,7 +187,25 @@ impl AglStore {
             sql = migration.sql,
             version = migration.version
         );
-        self.conn.execute_batch(&batch)?;
+        let migration_result = self.conn.execute_batch(&batch);
+        if migration_result.is_err() {
+            let _ = self.conn.execute_batch("ROLLBACK;");
+        }
+        if rebuilds_referenced_runs_table {
+            self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            let enabled = self
+                .conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))?
+                != 0;
+            if !enabled {
+                return Err(StoreError::InvalidValue {
+                    field: "store migration",
+                    value: migration.name.to_owned(),
+                    reason: "foreign-key enforcement was not restored",
+                });
+            }
+        }
+        migration_result?;
         Ok(())
     }
 

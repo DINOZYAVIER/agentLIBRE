@@ -7,7 +7,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::{InferenceResponse, InferenceResponseMetadata};
+use crate::output::PublicInferenceOutputBroker;
+use crate::{
+    InferenceDeviceInfo, InferenceFinishReason, InferenceOutputSink, InferenceProductStage,
+    InferenceResponse, InferenceResponseMetadata,
+};
 use agl_config::ResolvedInferenceConfig;
 use serde::Serialize;
 
@@ -25,10 +29,11 @@ pub trait ModelRuntime: Send + 'static {
     type Model: 'static;
     type Context: 'static;
 
+    fn device_inventory(&mut self) -> Result<Vec<InferenceDeviceInfo>, RuntimeFailure>;
+
     fn load_model(
         &mut self,
-        key: &ModelKey,
-        config: &ResolvedInferenceConfig,
+        job: &InferenceJob,
     ) -> Result<RuntimeOperation<Self::Model>, RuntimeFailure>;
 
     fn create_context(
@@ -48,6 +53,17 @@ pub trait ModelRuntime: Send + 'static {
         &mut self,
         model: &mut Self::Model,
         context: &mut Self::Context,
+    ) -> Result<RuntimeOperation<()>, RuntimeFailure>;
+
+    fn release_context(
+        &mut self,
+        model: &mut Self::Model,
+        context: &mut Self::Context,
+    ) -> Result<RuntimeOperation<()>, RuntimeFailure>;
+
+    fn release_model(
+        &mut self,
+        model: &mut Self::Model,
     ) -> Result<RuntimeOperation<()>, RuntimeFailure>;
 }
 
@@ -74,8 +90,12 @@ impl ModelManager {
             .name("agl-model-manager".to_string())
             .spawn(move || {
                 let mut availability = AvailabilityGuard::new(Arc::clone(&worker_queue));
-                Worker::new(runtime, worker_options, worker_status).run(worker_queue);
-                availability.finish();
+                if Worker::new(runtime, worker_options, worker_status)
+                    .run(worker_queue)
+                    .is_ok()
+                {
+                    availability.finish();
+                }
             })
             .map_err(|_| ModelManagerError::ManagerUnavailable)?;
         Ok(Self {
@@ -118,13 +138,34 @@ struct HandleInner {
 }
 
 impl ModelManagerHandle {
-    pub fn generate(&self, job: InferenceJob) -> Result<InferenceResponse, ModelManagerError> {
+    pub fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>, ModelManagerError> {
+        let (reply, receiver) = mpsc::channel();
+        let id = self
+            .inner
+            .queue
+            .enqueue(Command::DeviceInventory { reply })?;
+        let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
+        let result = receiver
+            .recv()
+            .map_err(|_| ModelManagerError::ManagerUnavailable)?;
+        guard.disarm();
+        result
+    }
+
+    pub fn generate(&self, mut job: InferenceJob) -> Result<InferenceResponse, ModelManagerError> {
         check_job_gate(&job)?;
         let cancellation = job.cancellation().clone();
         let deadline = job.deadline();
+        let stages = Arc::new(PublicInferenceOutputBroker::new(
+            job.request().attempt_id.clone(),
+            job.output_sink_handle(),
+        ));
+        let broker_sink: Arc<dyn InferenceOutputSink> = stages.clone();
+        job.replace_output_sink(broker_sink);
         let (reply, receiver) = mpsc::channel();
         let id = self.inner.queue.enqueue(Command::Generate {
             job: Box::new(job),
+            stages,
             reply,
         })?;
         let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
@@ -245,8 +286,12 @@ impl Drop for AvailabilityGuard {
 }
 
 enum Command {
+    DeviceInventory {
+        reply: mpsc::Sender<Result<Vec<InferenceDeviceInfo>, ModelManagerError>>,
+    },
     Generate {
         job: Box<InferenceJob>,
+        stages: Arc<PublicInferenceOutputBroker>,
         reply: mpsc::Sender<Result<InferenceResponse, ModelManagerError>>,
     },
     ClearContext {
@@ -267,27 +312,49 @@ impl QueueCommand for Command {
     fn cancellation(&self) -> Option<&super::InferenceCancellation> {
         match self {
             Self::Generate { job, .. } => Some(job.cancellation()),
-            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+            Self::DeviceInventory { .. }
+            | Self::ClearContext { .. }
+            | Self::ReleaseContext { .. } => None,
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
         match self {
             Self::Generate { job, .. } => job.deadline(),
-            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+            Self::DeviceInventory { .. }
+            | Self::ClearContext { .. }
+            | Self::ReleaseContext { .. } => None,
         }
     }
 
     fn active_scope(&self) -> Option<super::InferenceJobScope> {
         match self {
             Self::Generate { job, .. } => Some(job.scope()),
-            Self::ClearContext { .. } | Self::ReleaseContext { .. } => None,
+            Self::DeviceInventory { .. }
+            | Self::ClearContext { .. }
+            | Self::ReleaseContext { .. } => None,
+        }
+    }
+
+    fn on_queued(&self) {
+        if let Self::Generate { stages, .. } = self {
+            stages.emit_host_stage(InferenceProductStage::Queued);
+        }
+    }
+
+    fn on_active(&self) {
+        if let Self::Generate { stages, .. } = self {
+            stages.emit_host_stage(InferenceProductStage::Admission);
         }
     }
 
     fn complete(self, error: ModelManagerError) {
         match self {
-            Self::Generate { reply, .. } => {
+            Self::DeviceInventory { reply } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Generate { stages, reply, .. } => {
+                emit_terminal_stage(&stages, &Err(error.clone()));
                 let _ = reply.send(Err(error));
             }
             Self::ClearContext { reply, .. } | Self::ReleaseContext { reply, .. } => {
@@ -295,6 +362,30 @@ impl QueueCommand for Command {
             }
         }
     }
+}
+
+fn emit_terminal_stage(
+    stages: &PublicInferenceOutputBroker,
+    result: &Result<InferenceResponse, ModelManagerError>,
+) {
+    let stage = match result {
+        Ok(response) => match response.finish_reason {
+            InferenceFinishReason::Stop => InferenceProductStage::Completed,
+            InferenceFinishReason::Length | InferenceFinishReason::ContentByteLimit => {
+                InferenceProductStage::Incomplete
+            }
+        },
+        Err(ModelManagerError::Cancelled) => InferenceProductStage::Cancelled,
+        Err(ModelManagerError::BackendLost { .. })
+            if stages
+                .last_public_stage()
+                .is_some_and(InferenceProductStage::is_worker_owned) =>
+        {
+            InferenceProductStage::BackendLost
+        }
+        Err(_) => InferenceProductStage::Failed,
+    };
+    stages.emit_host_stage(stage);
 }
 
 struct Worker<R: ModelRuntime> {
@@ -335,13 +426,24 @@ impl<R: ModelRuntime> Worker<R> {
         }
     }
 
-    fn run(mut self, queue: Arc<PendingQueue<Command>>) {
+    fn run(mut self, queue: Arc<PendingQueue<Command>>) -> Result<(), ModelManagerError> {
         while let Some(active) = queue.pop() {
             let id = active.id;
-            self.prune_expired_contexts();
+            active.command.on_active();
+            if let Err(error) = self.prune_expired_contexts() {
+                queue.complete_active(id);
+                active.command.complete(error);
+                continue;
+            }
             match active.command {
-                Command::Generate { job, reply } => {
+                Command::DeviceInventory { reply } => {
+                    let result = self.device_inventory();
+                    queue.complete_active(id);
+                    let _ = reply.send(result);
+                }
+                Command::Generate { job, stages, reply } => {
                     let result = self.process_job(*job);
+                    emit_terminal_stage(&stages, &result);
                     queue.complete_active(id);
                     let _ = reply.send(result);
                 }
@@ -351,14 +453,36 @@ impl<R: ModelRuntime> Worker<R> {
                     let _ = reply.send(result);
                 }
                 Command::ReleaseContext { key, reply } => {
-                    self.release_context(&key);
+                    let result = self.release_context(&key);
                     queue.complete_active(id);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(result);
                 }
             }
         }
-        self.models.clear();
+        self.release_all()?;
         self.refresh_resource_status();
+        Ok(())
+    }
+
+    fn device_inventory(&mut self) -> Result<Vec<InferenceDeviceInfo>, ModelManagerError> {
+        match self.runtime.device_inventory() {
+            Ok(devices) => Ok(devices),
+            Err(error) if error.is_backend_lost() => {
+                let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                    ModelManagerError::BackendLost {
+                        message: error.message().to_string(),
+                    }
+                });
+                self.discard_generation();
+                Err(outcome)
+            }
+            Err(error) if error.is_resource_admission() => {
+                Err(resource_admission_error(&error).expect("resource failure was classified"))
+            }
+            Err(error) => Err(ModelManagerError::DeviceInventoryFailed {
+                message: error.message().to_string(),
+            }),
+        }
     }
 
     fn process_job(
@@ -413,7 +537,15 @@ impl<R: ModelRuntime> Worker<R> {
         {
             let mut status = lock_status(&self.status);
             match &result {
-                Ok(_) => status.completed_jobs = status.completed_jobs.saturating_add(1),
+                Ok(response) => match response.finish_reason {
+                    crate::InferenceFinishReason::Stop => {
+                        status.completed_jobs = status.completed_jobs.saturating_add(1);
+                    }
+                    crate::InferenceFinishReason::Length
+                    | crate::InferenceFinishReason::ContentByteLimit => {
+                        status.incomplete_jobs = status.incomplete_jobs.saturating_add(1);
+                    }
+                },
                 Err(ModelManagerError::Cancelled) => {
                     status.cancellations = status.cancellations.saturating_add(1);
                 }
@@ -434,9 +566,22 @@ impl<R: ModelRuntime> Worker<R> {
     ) -> Result<(ModelGeneration, bool), ModelManagerError> {
         check_job_gate(job)?;
         let model_loaded = self.ensure_model(job, log)?;
-        check_job_gate(job)?;
+        if let Err(error) = check_job_gate(job) {
+            if model_loaded {
+                self.release_model_resource(job.model_key(), Some(log), false)?;
+            }
+            return Err(error);
+        }
         let context_loaded = self.ensure_context(job, log)?;
-        check_job_gate(job)?;
+        if let Err(error) = check_job_gate(job) {
+            if context_loaded {
+                self.release_context_resource(job.context_key(), Some(log), false)?;
+            }
+            if model_loaded {
+                self.release_model_resource(job.model_key(), Some(log), false)?;
+            }
+            return Err(error);
+        }
 
         let model_key = job.model_key().clone();
         let context_key = job.context_key().clone();
@@ -453,14 +598,26 @@ impl<R: ModelRuntime> Worker<R> {
                 .generate(&mut entry.model, &mut context.context, job)
         };
 
+        if let Err(error) = &generation
+            && error.is_backend_lost()
+        {
+            append_operation_log(log, "generation", error.log());
+            let outcome =
+                resource_admission_error(error).unwrap_or_else(|| ModelManagerError::BackendLost {
+                    message: error.message().to_string(),
+                });
+            self.discard_generation();
+            return Err(outcome);
+        }
+
         if job.cancellation().is_cancelled() {
             append_generation_log(log, &generation);
-            self.invalidate_context(&model_key, &context_key);
+            self.invalidate_context(&model_key, &context_key, log)?;
             return Err(ModelManagerError::Cancelled);
         }
         if job.deadline_exceeded() {
             append_generation_log(log, &generation);
-            self.invalidate_context(&model_key, &context_key);
+            self.invalidate_context(&model_key, &context_key, log)?;
             return Err(ModelManagerError::DeadlineExceeded);
         }
         let generation = match generation {
@@ -470,8 +627,10 @@ impl<R: ModelRuntime> Worker<R> {
             }
             Err(error) => {
                 append_operation_log(log, "generation", error.log());
-                self.invalidate_context(&model_key, &context_key);
-                return Err(if error.is_multimodal_encode() {
+                self.invalidate_context(&model_key, &context_key, log)?;
+                return Err(if error.is_resource_admission() {
+                    resource_admission_error(&error).expect("resource failure was classified")
+                } else if error.is_multimodal_encode() {
                     ModelManagerError::MultimodalEncodeFailed {
                         message: error.message().to_string(),
                     }
@@ -508,7 +667,7 @@ impl<R: ModelRuntime> Worker<R> {
             return Ok(false);
         }
         while self.models.len() >= self.options.max_loaded_models {
-            self.evict_lru_model();
+            self.evict_lru_model(log)?;
         }
         let lease = self
             .options
@@ -520,13 +679,28 @@ impl<R: ModelRuntime> Worker<R> {
                 model_digest: job.model_key().digest().to_string(),
                 message,
             })?;
-        let model = match self.runtime.load_model(job.model_key(), job.config()) {
+        let model = match self.runtime.load_model(job) {
             Ok(operation) => {
                 append_operation_log(log, "model_load", &operation.log);
                 operation.value
             }
             Err(error) => {
                 append_operation_log(log, "model_load", error.log());
+                check_job_gate(job)?;
+                if error.is_backend_lost() {
+                    let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                        ModelManagerError::BackendLost {
+                            message: error.message().to_string(),
+                        }
+                    });
+                    self.discard_generation();
+                    return Err(outcome);
+                }
+                if error.is_resource_admission() {
+                    return Err(
+                        resource_admission_error(&error).expect("resource failure was classified")
+                    );
+                }
                 return Err(ModelManagerError::LoadFailed {
                     model_digest: job.model_key().digest().to_string(),
                     message: error.message().to_string(),
@@ -569,7 +743,7 @@ impl<R: ModelRuntime> Worker<R> {
             .get(&model_key)
             .is_some_and(|entry| entry.contexts.len() >= self.options.max_contexts_per_model)
         {
-            self.evict_lru_context(&model_key);
+            self.evict_lru_context(&model_key, log)?;
         }
         let context = {
             let entry = self
@@ -583,6 +757,20 @@ impl<R: ModelRuntime> Worker<R> {
                 }
                 Err(error) => {
                     append_operation_log(log, "context_create", error.log());
+                    check_job_gate(job)?;
+                    if error.is_backend_lost() {
+                        let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                            ModelManagerError::BackendLost {
+                                message: error.message().to_string(),
+                            }
+                        });
+                        self.discard_generation();
+                        return Err(outcome);
+                    }
+                    if error.is_resource_admission() {
+                        return Err(resource_admission_error(&error)
+                            .expect("resource failure was classified"));
+                    }
                     return Err(ModelManagerError::ContextFailed {
                         context_digest: job.context_key().digest().to_string(),
                         message: error.message().to_string(),
@@ -612,79 +800,164 @@ impl<R: ModelRuntime> Worker<R> {
     }
 
     fn clear_context(&mut self, key: &ContextKey) -> Result<(), ModelManagerError> {
-        let Some(entry) = self.models.get_mut(key.model_key()) else {
-            return Ok(());
+        let outcome = {
+            let Some(entry) = self.models.get_mut(key.model_key()) else {
+                return Ok(());
+            };
+            let Some(context) = entry.contexts.get_mut(key) else {
+                return Ok(());
+            };
+            self.runtime
+                .clear_context(&mut entry.model, &mut context.context)
         };
-        let Some(context) = entry.contexts.get_mut(key) else {
-            return Ok(());
-        };
-        self.runtime
-            .clear_context(&mut entry.model, &mut context.context)
-            .map_err(|error| ModelManagerError::ContextFailed {
+        match outcome {
+            Ok(_) => {
+                self.models
+                    .get_mut(key.model_key())
+                    .and_then(|entry| entry.contexts.get_mut(key))
+                    .expect("cleared context remains present")
+                    .idle_since = Instant::now();
+                Ok(())
+            }
+            Err(error) if error.is_backend_lost() => {
+                let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                    ModelManagerError::BackendLost {
+                        message: error.message().to_string(),
+                    }
+                });
+                self.discard_generation();
+                Err(outcome)
+            }
+            Err(error) if error.is_resource_admission() => {
+                Err(resource_admission_error(&error).expect("resource failure was classified"))
+            }
+            Err(error) => Err(ModelManagerError::ContextFailed {
                 context_digest: key.digest().to_string(),
                 message: error.message().to_string(),
-            })?;
-        context.idle_since = Instant::now();
-        Ok(())
-    }
-
-    fn release_context(&mut self, key: &ContextKey) {
-        if let Some(entry) = self.models.get_mut(key.model_key()) {
-            entry.contexts.remove(key);
+            }),
         }
-        self.refresh_resource_status();
     }
 
-    fn invalidate_context(&mut self, model_key: &ModelKey, context_key: &ContextKey) {
-        if let Some(entry) = self.models.get_mut(model_key)
-            && entry.contexts.remove(context_key).is_some()
-        {
+    fn release_context(&mut self, key: &ContextKey) -> Result<(), ModelManagerError> {
+        self.release_context_resource(key, None, false).map(|_| ())
+    }
+
+    fn invalidate_context(
+        &mut self,
+        _model_key: &ModelKey,
+        context_key: &ContextKey,
+        log: &mut String,
+    ) -> Result<(), ModelManagerError> {
+        self.release_context_resource(context_key, Some(log), true)
+            .map(|_| ())
+    }
+
+    fn release_context_resource(
+        &mut self,
+        key: &ContextKey,
+        mut log: Option<&mut String>,
+        count_eviction: bool,
+    ) -> Result<bool, ModelManagerError> {
+        let outcome = {
+            let Some(entry) = self.models.get_mut(key.model_key()) else {
+                return Ok(false);
+            };
+            let Some(context) = entry.contexts.get_mut(key) else {
+                return Ok(false);
+            };
+            self.runtime
+                .release_context(&mut entry.model, &mut context.context)
+        };
+        let operation = match outcome {
+            Ok(operation) => operation,
+            Err(error) => {
+                if let Some(log) = log.as_deref_mut() {
+                    append_operation_log(log, "context_release", error.log());
+                }
+                if error.is_backend_lost() {
+                    let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                        ModelManagerError::BackendLost {
+                            message: error.message().to_string(),
+                        }
+                    });
+                    self.discard_generation();
+                    return Err(outcome);
+                }
+                if error.is_resource_admission() {
+                    return Err(
+                        resource_admission_error(&error).expect("resource failure was classified")
+                    );
+                }
+                return Err(ModelManagerError::ContextFailed {
+                    context_digest: key.digest().to_string(),
+                    message: error.message().to_string(),
+                });
+            }
+        };
+        if let Some(log) = log {
+            append_operation_log(log, "context_release", &operation.log);
+        }
+        self.models
+            .get_mut(key.model_key())
+            .expect("acknowledged context model remains present")
+            .contexts
+            .remove(key)
+            .expect("acknowledged context remains present until removal");
+        if count_eviction {
             let mut status = lock_status(&self.status);
             status.context_evictions = status.context_evictions.saturating_add(1);
         }
+        self.refresh_resource_status();
+        Ok(true)
     }
 
-    fn prune_expired_contexts(&mut self) {
+    fn prune_expired_contexts(&mut self) -> Result<(), ModelManagerError> {
         let now = Instant::now();
         let retention = self.options.idle_context_retention;
-        let mut evicted = 0u64;
-        for entry in self.models.values_mut() {
-            let before = entry.contexts.len();
-            entry
-                .contexts
-                .retain(|_, context| now.duration_since(context.idle_since) < retention);
-            evicted = evicted.saturating_add(
-                u64::try_from(before.saturating_sub(entry.contexts.len())).unwrap_or(u64::MAX),
-            );
+        let expired = self
+            .models
+            .values()
+            .flat_map(|entry| {
+                entry
+                    .contexts
+                    .iter()
+                    .filter(|(_, context)| now.duration_since(context.idle_since) >= retention)
+                    .map(|(key, _)| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in expired {
+            self.release_context_resource(&key, None, true)?;
         }
-        if evicted > 0 {
-            let mut status = lock_status(&self.status);
-            status.context_evictions = status.context_evictions.saturating_add(evicted);
-            drop(status);
-            self.refresh_resource_status();
-        }
+        Ok(())
     }
 
-    fn evict_lru_model(&mut self) {
+    fn evict_lru_model(&mut self, log: &mut String) -> Result<(), ModelManagerError> {
         let key = self
             .models
             .iter()
             .min_by_key(|(key, entry)| (entry.last_used, *key))
             .map(|(key, _)| key.clone())
             .expect("model limit requires an eviction candidate");
-        let mut entry = self
+        let contexts = self
             .models
-            .remove(&key)
-            .expect("LRU model candidate remains present");
-        let contexts = u64::try_from(entry.contexts.len()).unwrap_or(u64::MAX);
-        entry.contexts.clear();
-        drop(entry.model);
-        let mut status = lock_status(&self.status);
-        status.model_evictions = status.model_evictions.saturating_add(1);
-        status.context_evictions = status.context_evictions.saturating_add(contexts);
+            .get(&key)
+            .expect("LRU model candidate remains present")
+            .contexts
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for context_key in contexts {
+            self.release_context_resource(&context_key, Some(log), true)?;
+        }
+        self.release_model_resource(&key, Some(log), true)?;
+        Ok(())
     }
 
-    fn evict_lru_context(&mut self, model_key: &ModelKey) {
+    fn evict_lru_context(
+        &mut self,
+        model_key: &ModelKey,
+        log: &mut String,
+    ) -> Result<(), ModelManagerError> {
         let entry = self
             .models
             .get_mut(model_key)
@@ -695,9 +968,84 @@ impl<R: ModelRuntime> Worker<R> {
             .min_by_key(|(key, context)| (context.last_used, *key))
             .map(|(key, _)| key.clone())
             .expect("context limit requires an eviction candidate");
-        entry.contexts.remove(&key);
-        let mut status = lock_status(&self.status);
-        status.context_evictions = status.context_evictions.saturating_add(1);
+        self.release_context_resource(&key, Some(log), true)?;
+        Ok(())
+    }
+
+    fn release_model_resource(
+        &mut self,
+        key: &ModelKey,
+        mut log: Option<&mut String>,
+        count_eviction: bool,
+    ) -> Result<bool, ModelManagerError> {
+        let outcome = {
+            let Some(entry) = self.models.get_mut(key) else {
+                return Ok(false);
+            };
+            debug_assert!(entry.contexts.is_empty());
+            self.runtime.release_model(&mut entry.model)
+        };
+        let operation = match outcome {
+            Ok(operation) => operation,
+            Err(error) => {
+                if let Some(log) = log.as_deref_mut() {
+                    append_operation_log(log, "model_release", error.log());
+                }
+                if error.is_backend_lost() {
+                    let outcome = resource_admission_error(&error).unwrap_or_else(|| {
+                        ModelManagerError::BackendLost {
+                            message: error.message().to_string(),
+                        }
+                    });
+                    self.discard_generation();
+                    return Err(outcome);
+                }
+                if error.is_resource_admission() {
+                    return Err(
+                        resource_admission_error(&error).expect("resource failure was classified")
+                    );
+                }
+                return Err(ModelManagerError::LoadFailed {
+                    model_digest: key.digest().to_string(),
+                    message: error.message().to_string(),
+                });
+            }
+        };
+        if let Some(log) = log {
+            append_operation_log(log, "model_release", &operation.log);
+        }
+        self.models
+            .remove(key)
+            .expect("acknowledged model remains present until removal");
+        if count_eviction {
+            let mut status = lock_status(&self.status);
+            status.model_evictions = status.model_evictions.saturating_add(1);
+        }
+        self.refresh_resource_status();
+        Ok(true)
+    }
+
+    fn release_all(&mut self) -> Result<(), ModelManagerError> {
+        let model_keys = self.models.keys().cloned().collect::<Vec<_>>();
+        for model_key in model_keys {
+            let context_keys = self
+                .models
+                .get(&model_key)
+                .into_iter()
+                .flat_map(|entry| entry.contexts.keys().cloned())
+                .collect::<Vec<_>>();
+            for context_key in context_keys {
+                self.release_context_resource(&context_key, None, false)?;
+            }
+            self.release_model_resource(&model_key, None, false)?;
+        }
+        Ok(())
+    }
+
+    fn discard_generation(&mut self) {
+        let discarded = std::mem::take(&mut self.models);
+        self.refresh_resource_status();
+        drop(discarded);
     }
 
     fn refresh_resource_status(&self) {
@@ -845,6 +1193,15 @@ fn append_generation_log(
         Ok(operation) => append_operation_log(log, "generation", &operation.log),
         Err(failure) => append_operation_log(log, "generation", failure.log()),
     }
+}
+
+fn resource_admission_error(error: &RuntimeFailure) -> Option<ModelManagerError> {
+    error
+        .is_resource_admission()
+        .then(|| ModelManagerError::ResourceAdmission {
+            code: error.code().to_string(),
+            message: error.message().to_string(),
+        })
 }
 
 fn elapsed_millis(started: Instant) -> u64 {

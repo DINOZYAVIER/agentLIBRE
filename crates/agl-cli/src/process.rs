@@ -582,6 +582,10 @@ fn print_doctor_report(report: &ProcessDoctorReport) {
 }
 
 fn process_launcher_path() -> Result<PathBuf> {
+    Ok(runtime_sibling_directory()?.join("agl-process-launcher"))
+}
+
+fn runtime_sibling_directory() -> Result<PathBuf> {
     let executable = std::env::current_exe().context("failed to resolve current executable")?;
     let parent = executable
         .parent()
@@ -593,14 +597,36 @@ fn process_launcher_path() -> Result<PathBuf> {
     } else {
         parent
     };
-    Ok(directory.join("agl-process-launcher"))
+    Ok(directory.to_owned())
 }
 
 pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
     let launcher = process_launcher_path()?;
     agl_process::verify_process_launcher_identity(&launcher)
         .map_err(anyhow::Error::from)
-        .context("process launcher identity verification failed")
+        .context("process launcher identity verification failed")?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let worker_path =
+            runtime_sibling_directory()?.join(agl_inference::worker_protocol::WORKER_BINARY_NAME);
+        let worker = agl_inference::worker_protocol::WorkerExecutable::open_exact(&worker_path)
+            .map_err(anyhow::Error::from)
+            .context("inference worker trust verification failed")?;
+        let process =
+            agl_inference::worker_protocol::WorkerProcess::spawn(&worker, Duration::from_secs(5))
+                .map_err(anyhow::Error::from)
+                .context("inference worker identity verification failed")?;
+        process
+            .shutdown(
+                agl_inference::worker_protocol::ShutdownReason::Requested,
+                Duration::from_secs(5),
+            )
+            .map_err(anyhow::Error::from)
+            .context("inference worker identity verification shutdown failed")?;
+    }
+
+    Ok(())
 }
 
 fn unix_millis() -> i64 {

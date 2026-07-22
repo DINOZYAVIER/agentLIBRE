@@ -1027,13 +1027,15 @@ fn batch_logging_init_failure_is_quiet_without_panicking() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn init_dry_run_reports_conservative_catalog_without_writes() {
     let repo = TempRepo::new("init-dry-run-plan");
     let home = TempHome::new("init-dry-run-plan");
     let hf_home = home.path().join("hf-home");
     let home_arg = home.path_string();
-    let init = run_agl_in_with_hf_home(
+    let init = run_agl_in_with_hf_home_and_fake_inventory(
+        &home,
         repo.path(),
         &[
             "--home",
@@ -1073,8 +1075,15 @@ fn init_dry_run_reports_conservative_catalog_without_writes() {
         !home.path().join("state/setup").exists(),
         "guided dry-run must not persist a checkpoint"
     );
+    assert!(
+        !agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf())
+            .inference_worker_temp_root()
+            .exists(),
+        "daemon-owned inventory must not create a process-local worker root"
+    );
 }
 
+#[cfg(unix)]
 #[test]
 fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
     let repo = TempRepo::new("init-resume-offline");
@@ -1091,7 +1100,7 @@ fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
         "--allow-low-memory",
     ];
 
-    let first = run_agl_in_with_hf_home(repo.path(), &args, &hf_home);
+    let first = run_agl_in_with_hf_home_and_fake_inventory(&home, repo.path(), &args, &hf_home);
     assert_failure(&first);
     let first_stdout = stdout(&first);
     let failure: serde_json::Value = serde_json::from_str(&first_stdout)
@@ -1122,13 +1131,19 @@ fn init_offline_failure_persists_and_reuses_confirmed_checkpoint() {
         serde_json::json!(["confirmed"])
     );
 
-    let second = run_agl_in_with_hf_home(repo.path(), &args, &hf_home);
+    let second = run_agl_in_with_hf_home_and_fake_inventory(&home, repo.path(), &args, &hf_home);
     assert_failure(&second);
     assert_contains(&stderr(&second), "\"resuming\": true");
     assert_eq!(
         fs::read(&checkpoints[0]).expect("reread setup checkpoint"),
         checkpoint_before,
         "an identical interrupted plan must resume the existing checkpoint"
+    );
+    assert!(
+        !agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf())
+            .inference_worker_temp_root()
+            .exists(),
+        "daemon-owned inventory must not create a process-local worker root"
     );
 }
 
@@ -1615,6 +1630,84 @@ fn daemon_status_without_daemon_reports_not_running_without_model_config() {
     assert_contains(&stdout, "next_step=agl serve");
 }
 
+#[cfg(unix)]
+#[test]
+fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads() {
+    let home = TempHome::new("status-worker-state");
+    let (output, request) = run_agl_with_fake_daemon(&home, &["daemon", "status"], |_| {
+        agl_protocol::DaemonEventKind::InferenceStatus(agl_protocol::InferenceStatusEvent {
+            worker_build_id: "sha256:test-worker".to_owned(),
+            worker_state: agl_protocol::ProtocolInferenceWorkerState::CoolingDown,
+            worker_pid: None,
+            launch_generation: None,
+            physical_device_id: Some("pci:0000:03:00.0".to_owned()),
+            reserved_bytes: 64 * 1024 * 1024,
+            cooldown_not_before_unix_ms: Some(12_345),
+        })
+    });
+
+    assert!(matches!(
+        request,
+        agl_protocol::DaemonRequestKind::InferenceStatus(_)
+    ));
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=running");
+    assert_contains(&stdout, "protocol_version=v6alpha");
+    assert_contains(&stdout, "product_version=");
+    assert_contains(&stdout, "daemon_instance_id=");
+    assert_contains(&stdout, "worker_build_id=sha256:test-worker");
+    assert_contains(&stdout, "worker_state=cooling_down");
+    assert_contains(&stdout, "worker_pid=none");
+    assert_contains(&stdout, "worker_launch_generation=none");
+    assert_contains(&stdout, "accelerator_physical_device_id=pci:0000:03:00.0");
+    assert_contains(&stdout, "accelerator_reserved_bytes=67108864");
+    assert_contains(&stdout, "accelerator_cooldown_not_before_unix_ms=12345");
+    assert!(!stdout.contains("model_path="));
+    assert!(!stdout.contains("prompt="));
+    assert!(!stdout.contains("backend_log="));
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_status_reports_connected_invalid_protocol_as_unhealthy() {
+    let home = TempHome::new("status-invalid-daemon");
+    let paths = agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf());
+    let socket_path = agl_daemon::default_socket_path(&paths);
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    if socket_path.exists() {
+        fs::remove_file(&socket_path).unwrap();
+    }
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let request = read_fake_daemon_request(&mut reader);
+        assert!(matches!(
+            request.kind,
+            agl_protocol::DaemonRequestKind::Hello(_)
+        ));
+        stream.write_all(b"not-json\n").unwrap();
+        stream.flush().unwrap();
+    });
+
+    let output = run_agl(&["--home", &home.path_string(), "daemon", "status"]);
+    server.join().unwrap();
+
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "state=unhealthy");
+    assert_contains(&stdout, "daemon protocol frame was invalid");
+    assert_contains(
+        &stdout,
+        "next_step=restart the daemon with the current `agl serve` binary",
+    );
+    assert!(!stdout.contains("state=not_running"));
+}
+
 #[test]
 fn completion_bash_emits_agl_completion_function() {
     let output = run_agl(&["completion", "bash"]);
@@ -1899,6 +1992,9 @@ where
     let paths = agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf());
     let socket_path = agl_daemon::default_socket_path(&paths);
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    if socket_path.exists() {
+        fs::remove_file(&socket_path).unwrap();
+    }
     let listener = UnixListener::bind(&socket_path).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
@@ -1972,18 +2068,72 @@ fn run_agl_in(cwd: &std::path::Path, args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
 }
 
-fn run_agl_in_with_hf_home(
+#[cfg(unix)]
+fn run_agl_in_with_hf_home_and_fake_inventory(
+    home: &TempHome,
     cwd: &std::path::Path,
     args: &[&str],
     hf_home: &std::path::Path,
 ) -> Output {
-    Command::new(AGL_BIN)
+    use agl_protocol::{
+        DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequestKind, HelloEvent,
+        InferenceInventoryEvent, PROTOCOL_VERSION,
+    };
+
+    let paths = agl_runtime::AgentLibrePaths::from_agl_home(home.path().to_path_buf());
+    let socket_path = agl_daemon::default_socket_path(&paths);
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    if socket_path.exists() {
+        fs::remove_file(&socket_path).unwrap();
+    }
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+        let hello = read_fake_daemon_request(&mut reader);
+        assert!(matches!(hello.kind, DaemonRequestKind::Hello(_)));
+        write_fake_daemon_event(
+            &mut stream,
+            &DaemonEvent::new(
+                Some(hello.request_id),
+                DaemonEventKind::Hello(HelloEvent {
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    product_version: env!("CARGO_PKG_VERSION").to_string(),
+                    daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
+                    capabilities: vec![DaemonCapability::InferenceInventory],
+                }),
+            ),
+        );
+
+        let inventory = read_fake_daemon_request(&mut reader);
+        assert!(matches!(
+            inventory.kind,
+            DaemonRequestKind::InferenceInventory(_)
+        ));
+        write_fake_daemon_event(
+            &mut stream,
+            &DaemonEvent::new(
+                Some(inventory.request_id),
+                DaemonEventKind::InferenceInventory(InferenceInventoryEvent {
+                    devices: Vec::new(),
+                }),
+            ),
+        );
+    });
+
+    let output = Command::new(AGL_BIN)
         .current_dir(cwd)
         .env("HF_HOME", hf_home)
         .env("HF_HUB_OFFLINE", "YES")
         .args(args)
         .output()
-        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"))
+        .unwrap_or_else(|err| panic!("failed to run agl binary at {AGL_BIN}: {err}"));
+    server.join().expect("fake inventory daemon panicked");
+    output
 }
 
 fn submodule_workspace_with_skill(

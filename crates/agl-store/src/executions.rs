@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agl_ids::{ExecutionId, RunId, SessionId, StepId};
+use agl_ids::{ExecutionId, RunId, SessionId, StepId, WriterLeaseId};
 use agl_process::{
     CommittedOutputFrame, ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionKind,
     ExecutionListFilter, ExecutionOutputChunk, ExecutionOwner, ExecutionPrivateCommand,
@@ -303,12 +303,7 @@ impl ExecutionRepository for AglExecutionRepository {
         lease: &InputLease,
         occurred_at_unix_ms: i64,
     ) -> ProcessResult<()> {
-        if !lease.writable {
-            return Err(ProcessError::new(
-                ProcessErrorCode::InvalidRequest,
-                "only writable attachments can bind the input lease",
-            ));
-        }
+        let writer_lease_id = require_writer_lease_id(lease)?;
         self.with_store(|store| {
             store.transaction(|tx| {
                 let changed = tx.execute(
@@ -317,7 +312,7 @@ impl ExecutionRepository for AglExecutionRepository {
                      WHERE id = ?3 AND supervisor_id = ?4 AND state IN ('starting', 'running')
                        AND input_lease_id IS NULL",
                     params![
-                        lease.attachment_id.as_str(),
+                        writer_lease_id.as_str(),
                         occurred_at_unix_ms,
                         execution_id.as_str(),
                         supervisor_id,
@@ -350,6 +345,7 @@ impl ExecutionRepository for AglExecutionRepository {
         lease: &InputLease,
         occurred_at_unix_ms: i64,
     ) -> ProcessResult<()> {
+        let writer_lease_id = require_writer_lease_id(lease)?;
         self.with_store(|store| {
             store.transaction(|tx| {
                 let changed = tx.execute(
@@ -361,7 +357,7 @@ impl ExecutionRepository for AglExecutionRepository {
                         occurred_at_unix_ms,
                         execution_id.as_str(),
                         supervisor_id,
-                        lease.attachment_id.as_str(),
+                        writer_lease_id.as_str(),
                     ],
                 )?;
                 require_fenced_change(changed, execution_id)?;
@@ -377,12 +373,7 @@ impl ExecutionRepository for AglExecutionRepository {
         lease: &InputLease,
         occurred_at_unix_ms: i64,
     ) -> ProcessResult<()> {
-        if !lease.writable {
-            return Err(ProcessError::new(
-                ProcessErrorCode::InvalidRequest,
-                "only writable attachments can renew the input lease",
-            ));
-        }
+        let writer_lease_id = require_writer_lease_id(lease)?;
         self.with_store(|store| {
             store.transaction(|tx| {
                 let changed = tx.execute(
@@ -394,7 +385,7 @@ impl ExecutionRepository for AglExecutionRepository {
                         occurred_at_unix_ms,
                         execution_id.as_str(),
                         supervisor_id,
-                        lease.attachment_id.as_str(),
+                        writer_lease_id.as_str(),
                     ],
                 )?;
                 if changed == 0 {
@@ -426,6 +417,7 @@ impl ExecutionRepository for AglExecutionRepository {
         _eof: bool,
         occurred_at_unix_ms: i64,
     ) -> ProcessResult<()> {
+        let writer_lease_id = require_writer_lease_id(lease)?;
         let byte_length = i64::try_from(byte_length).map_err(|_| integer_process_error())?;
         self.with_store(|store| {
             store.transaction(|tx| {
@@ -439,7 +431,7 @@ impl ExecutionRepository for AglExecutionRepository {
                         occurred_at_unix_ms,
                         execution_id.as_str(),
                         supervisor_id,
-                        lease.attachment_id.as_str(),
+                        writer_lease_id.as_str(),
                     ],
                 )?;
                 require_fenced_change(changed, execution_id)?;
@@ -1285,6 +1277,15 @@ fn integer_process_error() -> ProcessError {
         ProcessErrorCode::StoreCorrupt,
         "execution metadata integer is out of range",
     )
+}
+
+fn require_writer_lease_id(lease: &InputLease) -> ProcessResult<&WriterLeaseId> {
+    lease.writer_lease_id().ok_or_else(|| {
+        ProcessError::new(
+            ProcessErrorCode::InvalidRequest,
+            "operation requires a writable input lease",
+        )
+    })
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

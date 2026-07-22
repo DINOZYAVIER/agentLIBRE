@@ -1,13 +1,16 @@
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
-use crate::model_manager::{
-    InferenceJob, ModelGeneration, ModelKey, ModelRuntime, ResolvedContentPart,
-    ResolvedModelContent, RuntimeFailure, RuntimeOperation,
-};
 use agl_config::{KvCacheType, MtpRuntimeConfig, ResolvedInferenceConfig};
 use agl_content::Content;
+use agl_inference::worker_protocol::{AllocationReceipt, WORKER_BUILD_ID, WorkerFailureCode};
+use agl_inference::{
+    InferenceDeviceInfo, InferenceDeviceKind, InferenceJob, ModelGeneration, ModelRuntime,
+    ResolvedContentPart, ResolvedModelContent, RuntimeFailure, RuntimeOperation,
+};
 use agl_oven::RenderedModelRequest;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -16,11 +19,13 @@ use super::context_slot::{LlamaCppContextSlot, LlamaCppGenerationRequest};
 use super::ffi;
 use super::generation::LlamaCppGenerationControl;
 use super::model::LlamaCppModel;
+use crate::service::WorkerServiceRuntime;
 
 static LLAMA_BACKEND: OnceLock<()> = OnceLock::new();
 static LLAMA_LOGS: Mutex<NativeLogState> = Mutex::new(NativeLogState { active: None });
 const MAX_NATIVE_LOG_BYTES: usize = 4 * 1024 * 1024;
 const NATIVE_LOG_TRUNCATION_MARKER: &str = "\n[agentlibre native log truncated]\n";
+const CPU_PHYSICAL_DEVICE_ID: &str = "cpu";
 
 struct NativeLogState {
     active: Option<NativeLogBuffer>,
@@ -36,12 +41,36 @@ pub(crate) struct NativeLogCapture {
     active: bool,
 }
 
-#[derive(Default)]
-pub struct LlamaCppModelRuntime;
+pub struct LlamaCppModelRuntime {
+    native_library_dir: PathBuf,
+}
 
 impl LlamaCppModelRuntime {
     pub fn new() -> Self {
-        Self
+        #[cfg(test)]
+        {
+            Self::with_native_library_dir(ffi::library_dir())
+        }
+        #[cfg(not(test))]
+        {
+            let executable = std::env::current_exe().expect("resolve exact inference worker");
+            let parent = executable
+                .parent()
+                .expect("exact inference worker has a sibling directory");
+            Self::with_native_library_dir(parent.join(env!("AGL_INFERENCE_NATIVE_RELATIVE_DIR")))
+        }
+    }
+
+    pub fn with_native_library_dir(path: impl Into<PathBuf>) -> Self {
+        Self {
+            native_library_dir: path.into(),
+        }
+    }
+}
+
+impl Default for LlamaCppModelRuntime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -59,6 +88,9 @@ pub enum LlamaCppDeviceKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LlamaCppDeviceInfo {
+    /// Stable physical identity reported by llama.cpp (PCI BDF for PCI GPUs).
+    /// Display names are never used as an admission or lease identity.
+    pub physical_device_id: Option<String>,
     pub name: String,
     pub description: String,
     pub kind: LlamaCppDeviceKind,
@@ -68,8 +100,8 @@ pub struct LlamaCppDeviceInfo {
     pub supports_gpu_offload: bool,
 }
 
-pub fn llama_cpp_device_inventory() -> Vec<LlamaCppDeviceInfo> {
-    init_llama_backend();
+pub fn llama_cpp_device_inventory(native_library_dir: &Path) -> Vec<LlamaCppDeviceInfo> {
+    init_llama_backend(native_library_dir);
     let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
     let count = unsafe { ffi::ggml_backend_dev_count() };
     let mut devices = Vec::with_capacity(count);
@@ -80,6 +112,7 @@ pub fn llama_cpp_device_inventory() -> Vec<LlamaCppDeviceInfo> {
         }
         let name = cstr_to_string(unsafe { ffi::ggml_backend_dev_name(device) })
             .unwrap_or_else(|| format!("device-{index}"));
+        let physical_device_id = cstr_to_string(unsafe { ffi::agl_ggml_backend_dev_id(device) });
         let description = cstr_to_string(unsafe { ffi::ggml_backend_dev_description(device) })
             .unwrap_or_else(|| "unknown llama.cpp device".to_string());
         let mut free = 0_usize;
@@ -98,6 +131,7 @@ pub fn llama_cpp_device_inventory() -> Vec<LlamaCppDeviceInfo> {
             LlamaCppDeviceKind::DiscreteGpu | LlamaCppDeviceKind::IntegratedGpu
         );
         devices.push(LlamaCppDeviceInfo {
+            physical_device_id,
             name,
             description,
             kind,
@@ -110,19 +144,179 @@ pub fn llama_cpp_device_inventory() -> Vec<LlamaCppDeviceInfo> {
     devices
 }
 
+/// Convert native backend enumeration into the host-safe runtime contract.
+///
+/// CPU execution is scoped to the exact worker build. GPU PCI identity and
+/// native capability are reported only when llama.cpp exposes them. Untrusted
+/// ggml GPU memory counters are represented as `0/0` (unknown); the host must
+/// merge fresh sysfs memory and driver evidence before admission. Display
+/// names are never substituted for authority identity.
+pub fn llama_cpp_inference_device_inventory(
+    native_library_dir: &Path,
+) -> std::result::Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
+    map_inference_device_inventory(llama_cpp_device_inventory(native_library_dir))
+}
+
+fn map_inference_device_inventory(
+    devices: Vec<LlamaCppDeviceInfo>,
+) -> std::result::Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
+    let mut mapped = Vec::with_capacity(devices.len());
+    let mut identities = BTreeSet::new();
+    for device in devices {
+        let gpu = matches!(
+            device.kind,
+            LlamaCppDeviceKind::DiscreteGpu | LlamaCppDeviceKind::IntegratedGpu
+        );
+        if !gpu && device.free_memory_bytes > device.total_memory_bytes {
+            return Err(RuntimeFailure::new(
+                "llama.cpp device inventory reported impossible memory capacity",
+                "",
+            ));
+        }
+        let kind = match device.kind {
+            LlamaCppDeviceKind::Cpu => InferenceDeviceKind::Cpu,
+            LlamaCppDeviceKind::DiscreteGpu => InferenceDeviceKind::DiscreteGpu,
+            LlamaCppDeviceKind::IntegratedGpu => InferenceDeviceKind::IntegratedGpu,
+            LlamaCppDeviceKind::Accelerator => InferenceDeviceKind::Accelerator,
+            LlamaCppDeviceKind::Metadata => InferenceDeviceKind::Metadata,
+            LlamaCppDeviceKind::Unknown => InferenceDeviceKind::Unknown,
+        };
+        let (
+            physical_device_id,
+            driver_build_id,
+            usable,
+            supports_gpu_offload,
+            free_memory_bytes,
+            total_memory_bytes,
+        ) = match device.kind {
+            LlamaCppDeviceKind::Cpu => (
+                CPU_PHYSICAL_DEVICE_ID.to_string(),
+                WORKER_BUILD_ID.to_string(),
+                device.usable,
+                false,
+                device.free_memory_bytes,
+                device.total_memory_bytes,
+            ),
+            LlamaCppDeviceKind::DiscreteGpu | LlamaCppDeviceKind::IntegratedGpu => {
+                let physical_device_id = device.physical_device_id.as_deref().ok_or_else(|| {
+                    RuntimeFailure::new(
+                        "llama.cpp GPU inventory lacks a stable physical-device identity",
+                        "",
+                    )
+                })?;
+                let pci_bdf = canonical_pci_bdf(physical_device_id)?;
+                (
+                    format!("pci:{pci_bdf}"),
+                    // This exact marker proves the worker build, not the GPU
+                    // driver. The host replaces it with matching sysfs driver
+                    // evidence before using this native capability.
+                    WORKER_BUILD_ID.to_string(),
+                    device.usable,
+                    device.supports_gpu_offload,
+                    // ggml may report process-accounting values here, and has
+                    // produced free > total in practice. The wire contract
+                    // uses 0/0 as unknown until the host merges kernel sysfs.
+                    0,
+                    0,
+                )
+            }
+            LlamaCppDeviceKind::Accelerator
+            | LlamaCppDeviceKind::Metadata
+            | LlamaCppDeviceKind::Unknown => {
+                let physical_device_id = device.physical_device_id.ok_or_else(|| {
+                    RuntimeFailure::new(
+                        "llama.cpp non-CPU inventory lacks a stable physical-device identity",
+                        "",
+                    )
+                })?;
+                if physical_device_id.is_empty() || physical_device_id.len() > 256 {
+                    return Err(RuntimeFailure::new(
+                        "llama.cpp physical-device identity is invalid",
+                        "",
+                    ));
+                }
+                (
+                    physical_device_id,
+                    WORKER_BUILD_ID.to_string(),
+                    false,
+                    false,
+                    device.free_memory_bytes,
+                    device.total_memory_bytes,
+                )
+            }
+        };
+        if !identities.insert(physical_device_id.clone()) {
+            return Err(RuntimeFailure::new(
+                "llama.cpp device inventory contains duplicate physical identities",
+                "",
+            ));
+        }
+        mapped.push(InferenceDeviceInfo {
+            physical_device_id,
+            driver_build_id,
+            backend_name: device.name,
+            description: device.description,
+            kind,
+            free_memory_bytes,
+            total_memory_bytes,
+            usable,
+            supports_gpu_offload,
+        });
+    }
+    Ok(mapped)
+}
+
+fn canonical_pci_bdf(value: &str) -> std::result::Result<String, RuntimeFailure> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 12
+        && bytes[4] == b':'
+        && bytes[7] == b':'
+        && bytes[10] == b'.'
+        && bytes[..4].iter().all(u8::is_ascii_hexdigit)
+        && bytes[5..7].iter().all(u8::is_ascii_hexdigit)
+        && bytes[8..10].iter().all(u8::is_ascii_hexdigit)
+        && bytes[11].is_ascii_hexdigit();
+    if !valid {
+        return Err(RuntimeFailure::new(
+            "llama.cpp GPU physical identity is not canonical PCI BDF syntax",
+            "",
+        ));
+    }
+    let device = u8::from_str_radix(&value[8..10], 16).unwrap_or(u8::MAX);
+    let function = u8::from_str_radix(&value[11..12], 16).unwrap_or(u8::MAX);
+    if device > 0x1f || function > 7 {
+        return Err(RuntimeFailure::new(
+            "llama.cpp GPU physical identity is outside PCI BDF bounds",
+            "",
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 impl ModelRuntime for LlamaCppModelRuntime {
     type Model = LlamaCppModel;
     type Context = LlamaCppContextSlot;
 
+    fn device_inventory(
+        &mut self,
+    ) -> std::result::Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
+        llama_cpp_inference_device_inventory(&self.native_library_dir)
+    }
+
     fn load_model(
         &mut self,
-        _key: &ModelKey,
-        config: &ResolvedInferenceConfig,
+        job: &InferenceJob,
     ) -> std::result::Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
+        let config = job.config();
+        require_known_gpu_shape(config)?;
         let mut operation = capture_operation(|log| {
-            init_llama_backend();
+            init_llama_backend(&self.native_library_dir);
             let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
-            log.push_str(&runtime_log_header(config, supports_gpu_offload));
+            log.push_str(&runtime_log_header(
+                config,
+                supports_gpu_offload,
+                &self.native_library_dir,
+            ));
             log.push_str("llama_cpp_operation = load_model\n");
             if let Some(message) =
                 gpu_offload_unavailable_message(config.runtime.gpu_layers, supports_gpu_offload)
@@ -164,7 +358,11 @@ impl ModelRuntime for LlamaCppModelRuntime {
         let has_media = resolved_image_count(job.resolved_content()) > 0;
         let result = capture_operation(|log| {
             let supports_gpu_offload = unsafe { ffi::llama_supports_gpu_offload() };
-            log.push_str(&runtime_log_header(job.config(), supports_gpu_offload));
+            log.push_str(&runtime_log_header(
+                job.config(),
+                supports_gpu_offload,
+                &self.native_library_dir,
+            ));
             log.push_str("llama_cpp_operation = generate\n");
             ensure!(
                 model.matches_config(job.config()),
@@ -185,10 +383,8 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 log.push('\n');
                 context.reset_cache(model, job.config(), log)?;
             }
-            let control = LlamaCppGenerationControl::cancellable_until(
-                job.cancellation().atomic_flag(),
-                job.deadline(),
-            );
+            let control =
+                LlamaCppGenerationControl::cancellable_until(job.cancellation(), job.deadline());
             let output = if has_media {
                 let marker = model
                     .vision_marker()
@@ -248,6 +444,158 @@ impl ModelRuntime for LlamaCppModelRuntime {
             log.push_str("llama_cpp_operation = clear_context\n");
             context.clear_cache(model, log)
         })
+    }
+
+    fn release_context(
+        &mut self,
+        _model: &mut Self::Model,
+        _context: &mut Self::Context,
+    ) -> std::result::Result<RuntimeOperation<()>, RuntimeFailure> {
+        Ok(RuntimeOperation::new(
+            (),
+            "llama_cpp_operation = release_context\n",
+        ))
+    }
+
+    fn release_model(
+        &mut self,
+        _model: &mut Self::Model,
+    ) -> std::result::Result<RuntimeOperation<()>, RuntimeFailure> {
+        Ok(RuntimeOperation::new(
+            (),
+            "llama_cpp_operation = release_model\n",
+        ))
+    }
+}
+
+impl WorkerServiceRuntime for LlamaCppModelRuntime {
+    fn allocation_receipt(
+        &self,
+        _model: &Self::Model,
+        context: &Self::Context,
+        job: &InferenceJob,
+    ) -> std::result::Result<AllocationReceipt, RuntimeFailure> {
+        let Some(_profile) = require_known_gpu_shape(job.config())? else {
+            return AllocationReceipt::new(0, 0, 0, None)
+                .map_err(|error| RuntimeFailure::new(error.to_string(), ""));
+        };
+        let selector =
+            job.config().runtime.device.as_deref().ok_or_else(|| {
+                RuntimeFailure::new("known GPU profile has no device selector", "")
+            })?;
+        let device = llama_cpp_device_inventory(&self.native_library_dir)
+            .into_iter()
+            .find(|device| device.name == selector)
+            .ok_or_else(|| {
+                RuntimeFailure::new(
+                    "known GPU profile selector disappeared from native inventory",
+                    "",
+                )
+            })?;
+        if !device.usable || !device.supports_gpu_offload {
+            return Err(RuntimeFailure::new(
+                "known GPU profile device is not usable for native offload",
+                "",
+            ));
+        }
+        let physical = device.physical_device_id.as_deref().ok_or_else(|| {
+            RuntimeFailure::new("known GPU profile device lacks a physical PCI identity", "")
+        })?;
+        let selector_c = CString::new(selector).map_err(|_| {
+            RuntimeFailure::new("known GPU profile device selector contains NUL", "")
+        })?;
+        let backend_device = unsafe { ffi::ggml_backend_dev_by_name(selector_c.as_ptr()) };
+        if backend_device.is_null() {
+            return Err(RuntimeFailure::new(
+                "known GPU profile selector disappeared before allocation receipt",
+                "",
+            ));
+        }
+        let receipt = measured_device_allocation(context, backend_device)
+            .map_err(|error| RuntimeFailure::new(error.to_string(), ""))?;
+        AllocationReceipt::new(
+            receipt.model_bytes,
+            receipt.context_bytes,
+            receipt.compute_bytes,
+            Some(format!("pci:{}", canonical_pci_bdf(physical)?)),
+        )
+        .map_err(|error| RuntimeFailure::new(error.to_string(), ""))
+    }
+
+    fn failure_code(&self, failure: &RuntimeFailure) -> WorkerFailureCode {
+        if failure.is_backend_lost() {
+            WorkerFailureCode::DeviceLost
+        } else {
+            WorkerFailureCode::RuntimeFailure
+        }
+    }
+}
+
+fn measured_device_allocation(
+    context: &LlamaCppContextSlot,
+    device: ffi::ggml_backend_dev_t,
+) -> Result<ffi::agl_llama_device_memory_breakdown> {
+    let mut total = ffi::agl_llama_device_memory_breakdown::default();
+    let mut found = false;
+    for context_ptr in
+        std::iter::once(context.main_context_ptr()).chain(context.draft_context_ptr())
+    {
+        let mut current = ffi::agl_llama_device_memory_breakdown::default();
+        let status = unsafe {
+            ffi::agl_llama_context_device_memory_breakdown(context_ptr, device, &mut current)
+        };
+        ensure!(
+            status == 0,
+            "llama.cpp device allocation breakdown failed with status {status}"
+        );
+        ensure!(
+            current.found <= 1,
+            "llama.cpp device allocation breakdown returned an invalid presence marker"
+        );
+        found |= current.found == 1;
+        total.model_bytes = total
+            .model_bytes
+            .checked_add(current.model_bytes)
+            .ok_or_else(|| anyhow::anyhow!("llama.cpp model allocation receipt overflow"))?;
+        total.context_bytes = total
+            .context_bytes
+            .checked_add(current.context_bytes)
+            .ok_or_else(|| anyhow::anyhow!("llama.cpp context allocation receipt overflow"))?;
+        total.compute_bytes = total
+            .compute_bytes
+            .checked_add(current.compute_bytes)
+            .ok_or_else(|| anyhow::anyhow!("llama.cpp compute allocation receipt overflow"))?;
+    }
+    ensure!(
+        found,
+        "llama.cpp reported no allocated buffers on the admitted GPU"
+    );
+    total.found = 1;
+    Ok(total)
+}
+
+fn requests_gpu_allocation(config: &ResolvedInferenceConfig) -> bool {
+    config.runtime.gpu_layers > 0
+        || (config.runtime.mtp.enabled
+            && config
+                .runtime
+                .mtp
+                .gpu_layers
+                .unwrap_or(config.runtime.gpu_layers)
+                > 0)
+}
+
+fn require_known_gpu_shape(
+    config: &ResolvedInferenceConfig,
+) -> std::result::Result<Option<agl_inference::gpu_profile::KnownGpuProfile>, RuntimeFailure> {
+    match agl_inference::gpu_profile::known_gpu_profile_shape(config) {
+        Ok(profile) => Ok(profile),
+        Err(error) if requests_gpu_allocation(config) => Err(RuntimeFailure::resource_admission(
+            error.code(),
+            error.to_string(),
+            "",
+        )),
+        Err(error) => Err(RuntimeFailure::new(error.to_string(), "")),
     }
 }
 
@@ -332,9 +680,10 @@ fn capture_operation<T>(
     }
 }
 
-pub(crate) fn init_llama_backend() {
+pub(crate) fn init_llama_backend(native_library_dir: &Path) {
     LLAMA_BACKEND.get_or_init(|| {
-        let lib_dir = CString::new(ffi::library_dir()).expect("valid llama.cpp lib dir");
+        let lib_dir = CString::new(native_library_dir.as_os_str().as_encoded_bytes())
+            .expect("valid llama.cpp native bundle directory");
         unsafe {
             ffi::llama_log_set(Some(llama_log_callback), ptr::null_mut());
             ffi::mtmd_log_set(Some(llama_log_callback), ptr::null_mut());
@@ -470,11 +819,15 @@ fn selected_device_from_llama_logs(log: &str) -> Option<String> {
     None
 }
 
-fn runtime_log_header(config: &ResolvedInferenceConfig, supports_gpu_offload: bool) -> String {
+fn runtime_log_header(
+    config: &ResolvedInferenceConfig,
+    supports_gpu_offload: bool,
+    native_library_dir: &Path,
+) -> String {
     let mut log = String::new();
     log.push_str("backend = llama_cpp\n");
     log.push_str("library_dir = ");
-    log.push_str(ffi::library_dir());
+    log.push_str(&native_library_dir.to_string_lossy());
     log.push('\n');
     log.push_str("gpu_layers_requested = ");
     log.push_str(&config.runtime.gpu_layers.to_string());
@@ -666,6 +1019,89 @@ mod tests {
     #[test]
     fn model_runtime_can_move_to_worker_before_loading_native_resources() {
         assert_send::<LlamaCppModelRuntime>();
+    }
+
+    #[test]
+    fn allocation_breakdown_bridge_rejects_null_native_handles() {
+        let mut breakdown = ffi::agl_llama_device_memory_breakdown::default();
+        let status = unsafe {
+            ffi::agl_llama_context_device_memory_breakdown(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                &mut breakdown,
+            )
+        };
+        assert_eq!(status, -1);
+        assert_eq!(breakdown, ffi::agl_llama_device_memory_breakdown::default());
+    }
+
+    #[test]
+    fn host_safe_inventory_uses_only_proven_authority_evidence() {
+        let mapped = map_inference_device_inventory(vec![
+            LlamaCppDeviceInfo {
+                physical_device_id: None,
+                name: "CPU".to_string(),
+                description: "host CPU".to_string(),
+                kind: LlamaCppDeviceKind::Cpu,
+                free_memory_bytes: 100,
+                total_memory_bytes: 200,
+                usable: true,
+                supports_gpu_offload: false,
+            },
+            LlamaCppDeviceInfo {
+                physical_device_id: Some("0000:0A:1F.7".to_string()),
+                name: "Vulkan0".to_string(),
+                description: "display-only GPU description".to_string(),
+                kind: LlamaCppDeviceKind::DiscreteGpu,
+                free_memory_bytes: 500,
+                total_memory_bytes: 400,
+                usable: true,
+                supports_gpu_offload: true,
+            },
+        ])
+        .expect("map proven native identities");
+
+        assert_eq!(mapped[0].physical_device_id, CPU_PHYSICAL_DEVICE_ID);
+        assert_eq!(mapped[0].driver_build_id, WORKER_BUILD_ID);
+        assert!(mapped[0].usable);
+        assert!(!mapped[0].supports_gpu_offload);
+        assert_eq!(mapped[1].physical_device_id, "pci:0000:0a:1f.7");
+        assert_eq!(mapped[1].driver_build_id, WORKER_BUILD_ID);
+        assert_eq!(mapped[1].backend_name, "Vulkan0");
+        assert!(mapped[1].usable);
+        assert!(mapped[1].supports_gpu_offload);
+        assert_eq!(mapped[1].free_memory_bytes, 0);
+        assert_eq!(mapped[1].total_memory_bytes, 0);
+    }
+
+    #[test]
+    fn gpu_inventory_never_uses_backend_or_display_names_as_identity() {
+        let error = map_inference_device_inventory(vec![LlamaCppDeviceInfo {
+            physical_device_id: None,
+            name: "Vulkan0".to_string(),
+            description: "tempting display name".to_string(),
+            kind: LlamaCppDeviceKind::DiscreteGpu,
+            free_memory_bytes: 300,
+            total_memory_bytes: 400,
+            usable: true,
+            supports_gpu_offload: true,
+        }])
+        .expect_err("GPU without physical identity must fail closed");
+
+        assert!(error.message().contains("physical-device identity"));
+    }
+
+    #[test]
+    fn device_loss_classification_uses_typed_runtime_kind_only() {
+        let runtime = LlamaCppModelRuntime::new();
+        let ordinary = RuntimeFailure::new("identical message", "VK_ERROR_DEVICE_LOST text");
+        let lost = RuntimeFailure::backend_lost("identical message", "unstructured text ignored");
+
+        assert_eq!(
+            runtime.failure_code(&ordinary),
+            WorkerFailureCode::RuntimeFailure
+        );
+        assert_eq!(runtime.failure_code(&lost), WorkerFailureCode::DeviceLost);
     }
 
     #[test]

@@ -7,19 +7,19 @@ use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
 use agl_ids::{
     AttemptId, DaemonInstanceId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
-    TurnId,
+    TurnId, WriterLeaseId,
 };
 pub use agl_process::{
-    ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionOutputChunk, ExecutionOwner,
-    ExecutionPrivateCommand, ExecutionProfile, ExecutionReadResult, ExecutionState,
+    ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionIo, ExecutionOutputChunk,
+    ExecutionOwner, ExecutionPrivateCommand, ExecutionProfile, ExecutionReadResult, ExecutionState,
     ExecutionStatus, KillMode, ProcessBytes, ProcessBytesEncoding, TerminalSize,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v5alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v5alpha";
-pub const PROTOCOL_VERSION: &str = "v5alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v6alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v6alpha";
+pub const PROTOCOL_VERSION: &str = "v6alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -41,7 +41,7 @@ impl DaemonRequest {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != REQUEST_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon request schema does not match protocol v5alpha",
+                "daemon request schema does not match protocol v6alpha",
             ));
         }
         self.kind.validate_surface()?;
@@ -93,6 +93,7 @@ impl<'de> Deserialize<'de> for DaemonRequest {
 pub enum DaemonRequestKind {
     Hello(HelloRequest),
     SessionOpen(SessionOpenRequest),
+    SetupSmokeSessionOpen(SetupSmokeSessionOpenRequest),
     SessionClear(SessionClearRequest),
     SessionFinish(SessionFinishRequest),
     SessionStatus(SessionStatusRequest),
@@ -104,6 +105,8 @@ pub enum DaemonRequestKind {
     RunCancel(RunCancelRequest),
     RunEvents(RunEventsRequest),
     RunSubscribe(RunSubscribeRequest),
+    InferenceInventory(InferenceInventoryRequest),
+    InferenceStatus(InferenceStatusRequest),
     CommandCatalog(CommandCatalogRequest),
     CommandSuggestions(CommandSuggestionsRequest),
     ApplicationAction(ApplicationActionRequest),
@@ -112,6 +115,7 @@ pub enum DaemonRequestKind {
     SubscriptionCancel(SubscriptionCancelRequest),
     HumanTerminalEnsure(HumanTerminalEnsureRequest),
     HumanHostTerminalEnsure(HumanHostTerminalEnsureRequest),
+    HumanTerminalCommandSubmit(HumanTerminalCommandSubmitRequest),
     ExecutionList(ExecutionListRequest),
     ExecutionStatus(ExecutionStatusRequest),
     ExecutionRead(ExecutionReadRequest),
@@ -147,7 +151,7 @@ impl DaemonEvent {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != EVENT_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon event schema does not match protocol v5alpha",
+                "daemon event schema does not match protocol v6alpha",
             ));
         }
         validate_safe_metadata(&self.safe_metadata)?;
@@ -239,6 +243,8 @@ pub enum DaemonEventKind {
     RunSubscriptionStarted(RunSubscriptionStartedEvent),
     RunEvent(Box<SafeRuntimeEventEnvelope>),
     RunSubscriptionFinished(RunSubscriptionFinishedEvent),
+    InferenceInventory(InferenceInventoryEvent),
+    InferenceStatus(InferenceStatusEvent),
     CommandCatalog(CommandCatalogEvent),
     CommandSuggestions(CommandSuggestionsEvent),
     ApplicationActionResult(ApplicationActionResultEvent),
@@ -249,6 +255,7 @@ pub enum DaemonEventKind {
     SessionPresentationSubscriptionFinished(SessionPresentationSubscriptionFinishedEvent),
     SubscriptionCancelled(SubscriptionCancelledEvent),
     HumanTerminalEnsured(HumanTerminalEnsuredEvent),
+    HumanTerminalCommandAccepted(HumanTerminalCommandAcceptedEvent),
     ExecutionList(ExecutionListEvent),
     ExecutionStatus(ExecutionStatusEvent),
     ExecutionRead(ExecutionReadEvent),
@@ -281,10 +288,81 @@ pub struct HelloEvent {
     pub capabilities: Vec<DaemonCapability>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceInventoryRequest {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolInferenceDeviceKind {
+    Cpu,
+    DiscreteGpu,
+    IntegratedGpu,
+    Accelerator,
+    Metadata,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceDeviceEvent {
+    pub physical_device_id: String,
+    pub driver_build_id: String,
+    pub backend_name: String,
+    pub description: String,
+    pub kind: ProtocolInferenceDeviceKind,
+    pub free_memory_bytes: u64,
+    pub total_memory_bytes: u64,
+    pub usable: bool,
+    pub supports_gpu_offload: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceInventoryEvent {
+    pub devices: Vec<InferenceDeviceEvent>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceStatusRequest {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolInferenceWorkerState {
+    Cold,
+    Starting,
+    Ready,
+    Busy,
+    CoolingDown,
+}
+
+/// Safe aggregate status for the daemon-owned native inference boundary.
+///
+/// This deliberately carries process and resource accounting only. Model
+/// paths, prompts, generated content, backend logs and allocation receipts are
+/// private runtime evidence and never enter the public daemon protocol.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceStatusEvent {
+    pub worker_build_id: String,
+    pub worker_state: ProtocolInferenceWorkerState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_device_id: Option<String>,
+    pub reserved_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_not_before_unix_ms: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonCapability {
     SessionOpen,
+    SetupSmokeSessionOpen,
     SessionClear,
     SessionFinish,
     SessionStatus,
@@ -298,6 +376,8 @@ pub enum DaemonCapability {
     RunCancel,
     RunReplay,
     RunSubscribe,
+    InferenceInventory,
+    InferenceStatus,
     ExecutionList,
     ExecutionControl,
     ExecutionAttach,
@@ -324,6 +404,31 @@ pub struct SessionOpenRequest {
     pub skills: Vec<String>,
     #[serde(default)]
     pub tool_mode: ProtocolToolMode,
+}
+
+/// Opens one daemon-owned setup smoke session with staged model state.
+///
+/// The daemon fixes this session to read-only, no-history execution. This
+/// request deliberately carries no generic Chat/session authority knobs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupSmokeSessionOpenRequest {
+    pub workspace_root: String,
+    pub function_ref: String,
+    pub staged_bindings: agl_config::ModelBindings,
+    pub runtime_plan: SetupSmokeRuntimePlan,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupSmokeRuntimePlan {
+    pub profile_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_device: Option<String>,
+    pub runtime: agl_config::InferenceRuntimeConfig,
+    pub smoke_timeout_seconds: u64,
+    pub expected_speed: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -584,6 +689,8 @@ pub struct ExecutionAttachmentStartedEvent {
     pub attachment_id: RequestId,
     pub status: ExecutionStatus,
     pub writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_lease_id: Option<WriterLeaseId>,
     pub next_sequence: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
@@ -793,13 +900,17 @@ pub enum ProtocolRunState {
     Running,
     Waiting,
     Succeeded,
+    Incomplete,
     Failed,
     Cancelled,
 }
 
 impl ProtocolRunState {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Incomplete | Self::Failed | Self::Cancelled
+        )
     }
 }
 
@@ -834,6 +945,16 @@ pub enum TranscriptEvent {
         run_id: RunId,
         turn_id: TurnId,
         message_id: MessageId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<Content>,
+    },
+    AssistantIncomplete {
+        run_id: RunId,
+        turn_id: TurnId,
+        message_id: MessageId,
+        source_attempt_id: AttemptId,
+        reason: IncompleteOutputReason,
+        continuation_index: u16,
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<Content>,
     },
@@ -910,7 +1031,11 @@ pub enum ProtocolErrorCode {
     ModelNotInstalled,
     ModelContextTooSmall,
     SkillNotAdmitted,
+    IncompleteOutputNotFound,
+    ContinuationAlreadyClaimed,
+    StaleContinuationContext,
     InputBackpressure,
+    ActivityCapacityExceeded,
     ResyncRequired,
     OutcomeUnknown,
     Internal,
@@ -972,11 +1097,95 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v5alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v6alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
         assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    fn setup_smoke_request() -> SetupSmokeSessionOpenRequest {
+        SetupSmokeSessionOpenRequest {
+            workspace_root: "/workspace".to_owned(),
+            function_ref: "gemma4-12b".to_owned(),
+            staged_bindings: agl_config::ModelBindings {
+                version: 1,
+                models: BTreeMap::from([(
+                    agl_config::ModelId::new("gemma4-12b").unwrap(),
+                    agl_config::ModelBinding {
+                        path: "/models/gemma4-12b.gguf".into(),
+                    },
+                )]),
+            },
+            runtime_plan: SetupSmokeRuntimePlan {
+                profile_id: "gpu-64k".to_owned(),
+                selected_device: Some("pci:0000:03:00.0".to_owned()),
+                runtime: agl_config::InferenceRuntimeConfig {
+                    gpu_layers: 65,
+                    context_tokens: 65_536,
+                    threads: 8,
+                    device: Some("pci:0000:03:00.0".to_owned()),
+                    batch_size: Some(1_024),
+                    ubatch_size: Some(256),
+                    flash_attention: Some(agl_config::RuntimeSwitch::On),
+                    cache_type_k: Some(agl_config::KvCacheType::Q8_0),
+                    cache_type_v: Some(agl_config::KvCacheType::Q8_0),
+                    mmap: Some(true),
+                    kv_unified: Some(true),
+                    mtp: agl_config::MtpRuntimeConfig::default(),
+                },
+                smoke_timeout_seconds: 300,
+                expected_speed: "interactive".to_owned(),
+            },
+            max_output_tokens: 32,
+        }
+    }
+
+    #[test]
+    fn setup_smoke_session_request_is_typed_bounded_and_exact() {
+        let request = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::SetupSmokeSessionOpen(setup_smoke_request()),
+        );
+        request.validate().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["kind"], "setup_smoke_session_open");
+        assert_eq!(
+            value["payload"]["staged_bindings"]["models"]["gemma4-12b"]["path"],
+            "/models/gemma4-12b.gguf"
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(value).unwrap(),
+            request
+        );
+
+        let mut relative = setup_smoke_request();
+        relative
+            .staged_bindings
+            .models
+            .values_mut()
+            .next()
+            .unwrap()
+            .path = "relative.gguf".into();
+        assert!(
+            DaemonRequest::new(
+                request_id(),
+                DaemonRequestKind::SetupSmokeSessionOpen(relative)
+            )
+            .validate()
+            .is_err()
+        );
+
+        let mut unbounded = setup_smoke_request();
+        unbounded.max_output_tokens = MAX_SETUP_SMOKE_OUTPUT_TOKENS + 1;
+        assert!(
+            DaemonRequest::new(
+                request_id(),
+                DaemonRequestKind::SetupSmokeSessionOpen(unbounded)
+            )
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]

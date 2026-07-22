@@ -64,6 +64,7 @@ pub struct HostResources {
 
 impl HostResources {
     pub fn inspect(cache_path: impl AsRef<Path>, devices: Vec<LlamaDeviceInfo>) -> Result<Self> {
+        validate_device_snapshots(&devices)?;
         let system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_memory(MemoryRefreshKind::everything())
@@ -88,6 +89,37 @@ impl HostResources {
     pub fn below_recommended_floor(&self) -> bool {
         self.nominal_memory_class_bytes < RECOMMENDED_MEMORY_FLOOR_BYTES
     }
+}
+
+fn validate_device_snapshots(devices: &[LlamaDeviceInfo]) -> Result<()> {
+    for device in devices.iter().filter(|device| {
+        device.usable
+            && device.supports_gpu_offload
+            && matches!(
+                device.kind,
+                LlamaDeviceKind::DiscreteGpu | LlamaDeviceKind::IntegratedGpu
+            )
+    }) {
+        ensure!(
+            !device.name.is_empty()
+                && device.name.len() <= 256
+                && !device.name.chars().any(char::is_control),
+            "GPU device identity is invalid"
+        );
+        ensure!(
+            device.total_memory_bytes > 0,
+            "GPU device `{}` reports zero total memory",
+            device.name
+        );
+        ensure!(
+            device.free_memory_bytes <= device.total_memory_bytes,
+            "GPU device `{}` reports {} free bytes above its {} total bytes",
+            device.name,
+            device.free_memory_bytes,
+            device.total_memory_bytes
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -729,6 +761,29 @@ mod tests {
         assert_eq!(plans.selected.runtime.gpu_layers, 43);
         assert_eq!(plans.cpu_fallback.as_ref().unwrap().profile_id, "cpu-8gb");
         assert_eq!(plans.cpu_fallback.as_ref().unwrap().runtime.gpu_layers, 0);
+    }
+
+    #[test]
+    fn impossible_gpu_memory_snapshots_fail_before_planning() {
+        let device = |free_memory_bytes, total_memory_bytes| LlamaDeviceInfo {
+            name: "Vulkan0".to_string(),
+            description: "invalid driver fixture".to_string(),
+            kind: LlamaDeviceKind::DiscreteGpu,
+            free_memory_bytes,
+            total_memory_bytes,
+            usable: true,
+            supports_gpu_offload: true,
+        };
+
+        let zero_total = validate_device_snapshots(&[device(0, 0)]).unwrap_err();
+        assert!(zero_total.to_string().contains("zero total memory"));
+
+        let free_above_total = validate_device_snapshots(&[device(18_788, 6_390)]).unwrap_err();
+        assert!(
+            free_above_total
+                .to_string()
+                .contains("above its 6390 total")
+        );
     }
 
     #[test]

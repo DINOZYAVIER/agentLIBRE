@@ -54,6 +54,10 @@ pub(super) trait QueueCommand: Send + 'static {
     fn active_scope(&self) -> Option<InferenceJobScope>;
     fn complete(self, error: ModelManagerError);
 
+    fn on_queued(&self) {}
+
+    fn on_active(&self) {}
+
     fn terminal_gate(&self, now: Instant) -> Option<TerminalReason> {
         if self
             .cancellation()
@@ -164,6 +168,11 @@ impl<C: QueueCommand> PendingQueue<C> {
                     let id = QueueEntryId(state.next_id);
                     match state.next_id.checked_add(1) {
                         Some(next_id) => {
+                            // Publish Queued while the queue lock still makes
+                            // this entry invisible to the worker. This keeps
+                            // the public stage stream ordered even under an
+                            // immediate consumer wakeup.
+                            command.on_queued();
                             state.next_id = next_id;
                             state.entries.push_back(PendingEntry {
                                 id,

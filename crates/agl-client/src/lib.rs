@@ -20,9 +20,12 @@ const EXECUTION_ATTACHMENT_CAPACITY: usize = 256;
 const ABANDONED_STREAM_CAPACITY: usize = 256;
 const CONNECTION_ROUTE_CAPACITY: usize = 256;
 const IGNORED_TERMINAL_CAPACITY: usize = 256;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientError {
+    DaemonUnavailable(String),
+    HandshakeTimeout,
     Io(String),
     InvalidProtocolFrame,
     Protocol {
@@ -65,6 +68,10 @@ pub enum ClientError {
 impl Display for ClientError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DaemonUnavailable(message) => {
+                write!(formatter, "daemon is not available: {message}")
+            }
+            Self::HandshakeTimeout => formatter.write_str("daemon protocol handshake timed out"),
             Self::Io(message) => write!(formatter, "daemon connection I/O failed: {message}"),
             Self::InvalidProtocolFrame => formatter.write_str("daemon protocol frame was invalid"),
             Self::Protocol { code, retryable } => {
@@ -153,7 +160,16 @@ pub struct AgentLibreClient {
 
 impl AgentLibreClient {
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, ClientError> {
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = UnixStream::connect(socket_path).await.map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) {
+                ClientError::DaemonUnavailable(error.to_string())
+            } else {
+                ClientError::Io(error.to_string())
+            }
+        })?;
         Self::from_stream(stream).await
     }
 
@@ -163,6 +179,13 @@ impl AgentLibreClient {
     }
 
     async fn from_verified_stream(stream: UnixStream) -> Result<Self, ClientError> {
+        Self::from_verified_stream_with_timeout(stream, HANDSHAKE_TIMEOUT).await
+    }
+
+    async fn from_verified_stream_with_timeout(
+        stream: UnixStream,
+        handshake_timeout: Duration,
+    ) -> Result<Self, ClientError> {
         let (sender, receiver) = mpsc::channel(OUTBOUND_CAPACITY);
         tokio::spawn(connection_task(stream, receiver, sender.downgrade()));
         let client = Self {
@@ -170,13 +193,16 @@ impl AgentLibreClient {
             hello: Arc::new(RwLock::new(None)),
             one_shot_slots: Arc::new(Semaphore::new(ONE_SHOT_CAPACITY)),
         };
-        let hello = match client
-            .request(DaemonRequestKind::Hello(HelloRequest {
+        let hello_response = tokio::time::timeout(
+            handshake_timeout,
+            client.request(DaemonRequestKind::Hello(HelloRequest {
                 client_name: Some("agl-client".to_owned()),
                 accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
-            }))
-            .await?
-        {
+            })),
+        )
+        .await
+        .map_err(|_| ClientError::HandshakeTimeout)??;
+        let hello = match hello_response {
             DaemonEventKind::Hello(event) => event,
             other => return Err(unexpected("hello", &other)),
         };
@@ -197,6 +223,14 @@ impl AgentLibreClient {
         Self::from_verified_stream(stream).await
     }
 
+    #[cfg(test)]
+    async fn from_test_stream_with_handshake_timeout(
+        stream: UnixStream,
+        handshake_timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        Self::from_verified_stream_with_timeout(stream, handshake_timeout).await
+    }
+
     pub fn hello(&self) -> Result<HelloEvent, ClientError> {
         self.hello
             .read()
@@ -211,6 +245,19 @@ impl AgentLibreClient {
     ) -> Result<SessionOpenedEvent, ClientError> {
         match self
             .request(DaemonRequestKind::SessionOpen(request))
+            .await?
+        {
+            DaemonEventKind::SessionOpened(event) => Ok(event),
+            other => Err(unexpected("session_opened", &other)),
+        }
+    }
+
+    pub async fn open_setup_smoke_session(
+        &self,
+        request: SetupSmokeSessionOpenRequest,
+    ) -> Result<SessionOpenedEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::SetupSmokeSessionOpen(request))
             .await?
         {
             DaemonEventKind::SessionOpened(event) => Ok(event),
@@ -290,6 +337,30 @@ impl AgentLibreClient {
         match self.request(DaemonRequestKind::RunSubmit(request)).await? {
             DaemonEventKind::RunAccepted(event) => Ok(event),
             other => Err(unexpected("run_accepted", &other)),
+        }
+    }
+
+    pub async fn inference_inventory(&self) -> Result<InferenceInventoryEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::InferenceInventory(
+                InferenceInventoryRequest::default(),
+            ))
+            .await?
+        {
+            DaemonEventKind::InferenceInventory(event) => Ok(event),
+            other => Err(unexpected("inference_inventory", &other)),
+        }
+    }
+
+    pub async fn inference_status(&self) -> Result<InferenceStatusEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::InferenceStatus(
+                InferenceStatusRequest::default(),
+            ))
+            .await?
+        {
+            DaemonEventKind::InferenceStatus(event) => Ok(event),
+            other => Err(unexpected("inference_status", &other)),
         }
     }
 
@@ -434,7 +505,9 @@ impl AgentLibreClient {
             .await?;
         let started = match raw.recv().await? {
             DaemonEventKind::ExecutionAttachmentStarted(started)
-                if started.status.execution_id == execution_id && started.writable == writable =>
+                if started.status.execution_id == execution_id
+                    && started.writable == writable
+                    && started.writable == started.writer_lease_id.is_some() =>
             {
                 started
             }
@@ -574,6 +647,19 @@ impl AgentLibreClient {
         {
             DaemonEventKind::HumanTerminalEnsured(event) => Ok(event),
             other => Err(unexpected("human_terminal_ensured", &other)),
+        }
+    }
+
+    pub async fn submit_human_terminal_command(
+        &self,
+        request: HumanTerminalCommandSubmitRequest,
+    ) -> Result<HumanTerminalCommandAcceptedEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::HumanTerminalCommandSubmit(request))
+            .await?
+        {
+            DaemonEventKind::HumanTerminalCommandAccepted(event) => Ok(event),
+            other => Err(unexpected("human_terminal_command_accepted", &other)),
         }
     }
 
@@ -1076,6 +1162,10 @@ impl ExecutionAttachment {
         &self.attachment_id
     }
 
+    pub fn writer_lease_id(&self) -> Option<&agl_ids::WriterLeaseId> {
+        self.started.writer_lease_id.as_ref()
+    }
+
     pub async fn input(
         &self,
         bytes: ProcessBytes,
@@ -1336,6 +1426,9 @@ enum Expected {
     PresentationSnapshotStream,
     SubscriptionCancelled,
     HumanTerminalEnsured,
+    HumanTerminalCommandAccepted,
+    InferenceInventory,
+    InferenceStatus,
     RunStream,
     PresentationStream,
     ExecutionStream,
@@ -1345,7 +1438,11 @@ impl Expected {
     fn for_request(kind: &DaemonRequestKind, stream: bool) -> Option<Self> {
         Some(match kind {
             DaemonRequestKind::Hello(_) if !stream => Self::Hello,
-            DaemonRequestKind::SessionOpen(_) if !stream => Self::SessionOpened,
+            DaemonRequestKind::SessionOpen(_) | DaemonRequestKind::SetupSmokeSessionOpen(_)
+                if !stream =>
+            {
+                Self::SessionOpened
+            }
             DaemonRequestKind::SessionClear(_) | DaemonRequestKind::SessionStatus(_) if !stream => {
                 Self::SessionStatus
             }
@@ -1359,6 +1456,8 @@ impl Expected {
             DaemonRequestKind::RunTree(_) if !stream => Self::RunTree,
             DaemonRequestKind::RunEvents(_) if !stream => Self::RunEvents,
             DaemonRequestKind::RunSubscribe(_) if stream => Self::RunStream,
+            DaemonRequestKind::InferenceInventory(_) if !stream => Self::InferenceInventory,
+            DaemonRequestKind::InferenceStatus(_) if !stream => Self::InferenceStatus,
             DaemonRequestKind::ExecutionList(_) if !stream => Self::ExecutionList,
             DaemonRequestKind::ExecutionStatus(_) if !stream => Self::ExecutionStatus,
             DaemonRequestKind::ExecutionRead(_) if !stream => Self::ExecutionRead,
@@ -1378,6 +1477,9 @@ impl Expected {
             DaemonRequestKind::SubscriptionCancel(_) if !stream => Self::SubscriptionCancelled,
             DaemonRequestKind::HumanTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
             DaemonRequestKind::HumanHostTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
+            DaemonRequestKind::HumanTerminalCommandSubmit(_) if !stream => {
+                Self::HumanTerminalCommandAccepted
+            }
             _ => return None,
         })
     }
@@ -1395,6 +1497,10 @@ impl Expected {
                 Self::RunStatus => matches!(event, DaemonEventKind::RunStatus(_)),
                 Self::RunTree => matches!(event, DaemonEventKind::RunTree(_)),
                 Self::RunEvents => matches!(event, DaemonEventKind::RunEvents(_)),
+                Self::InferenceInventory => {
+                    matches!(event, DaemonEventKind::InferenceInventory(_))
+                }
+                Self::InferenceStatus => matches!(event, DaemonEventKind::InferenceStatus(_)),
                 Self::ExecutionList => matches!(event, DaemonEventKind::ExecutionList(_)),
                 Self::ExecutionStatus => matches!(event, DaemonEventKind::ExecutionStatus(_)),
                 Self::ExecutionRead => matches!(event, DaemonEventKind::ExecutionRead(_)),
@@ -1419,6 +1525,9 @@ impl Expected {
                 }
                 Self::HumanTerminalEnsured => {
                     matches!(event, DaemonEventKind::HumanTerminalEnsured(_))
+                }
+                Self::HumanTerminalCommandAccepted => {
+                    matches!(event, DaemonEventKind::HumanTerminalCommandAccepted(_))
                 }
                 Self::RunStream => matches!(
                     event,
@@ -1731,6 +1840,8 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::RunSubscriptionStarted(_) => "run_subscription_started",
         DaemonEventKind::RunEvent(_) => "run_event",
         DaemonEventKind::RunSubscriptionFinished(_) => "run_subscription_finished",
+        DaemonEventKind::InferenceInventory(_) => "inference_inventory",
+        DaemonEventKind::InferenceStatus(_) => "inference_status",
         DaemonEventKind::CommandCatalog(_) => "command_catalog",
         DaemonEventKind::CommandSuggestions(_) => "command_suggestions",
         DaemonEventKind::ApplicationActionResult(_) => "application_action_result",
@@ -1749,6 +1860,7 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         }
         DaemonEventKind::SubscriptionCancelled(_) => "subscription_cancelled",
         DaemonEventKind::HumanTerminalEnsured(_) => "human_terminal_ensured",
+        DaemonEventKind::HumanTerminalCommandAccepted(_) => "human_terminal_command_accepted",
         DaemonEventKind::ExecutionList(_) => "execution_list",
         DaemonEventKind::ExecutionStatus(_) => "execution_status",
         DaemonEventKind::ExecutionRead(_) => "execution_read",
@@ -1799,6 +1911,43 @@ mod tests {
             .await
             .unwrap();
         server
+    }
+
+    fn setup_smoke_request() -> SetupSmokeSessionOpenRequest {
+        SetupSmokeSessionOpenRequest {
+            workspace_root: "/workspace".to_owned(),
+            function_ref: "gemma4-12b".to_owned(),
+            staged_bindings: agl_config::ModelBindings {
+                version: 1,
+                models: BTreeMap::from([(
+                    agl_config::ModelId::new("gemma4-12b").unwrap(),
+                    agl_config::ModelBinding {
+                        path: "/models/gemma4-12b.gguf".into(),
+                    },
+                )]),
+            },
+            runtime_plan: SetupSmokeRuntimePlan {
+                profile_id: "cpu-test".to_owned(),
+                selected_device: None,
+                runtime: agl_config::InferenceRuntimeConfig {
+                    gpu_layers: 0,
+                    context_tokens: 4_096,
+                    threads: 2,
+                    device: None,
+                    batch_size: Some(128),
+                    ubatch_size: Some(64),
+                    flash_attention: Some(agl_config::RuntimeSwitch::Off),
+                    cache_type_k: None,
+                    cache_type_v: None,
+                    mmap: Some(true),
+                    kv_unified: Some(true),
+                    mtp: agl_config::MtpRuntimeConfig::default(),
+                },
+                smoke_timeout_seconds: 30,
+                expected_speed: "test".to_owned(),
+            },
+            max_output_tokens: 32,
+        }
     }
 
     async fn send_snapshot_transfer(
@@ -1858,6 +2007,153 @@ mod tests {
             verify_peer_identity(1001, 1000),
             Err(ClientError::IdentityMismatch(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn initial_missing_socket_is_the_only_standalone_availability_signal() {
+        let socket_path =
+            std::env::temp_dir().join(format!("agl-client-missing-{}.sock", RequestId::generate()));
+        let error = match AgentLibreClient::connect(&socket_path).await {
+            Ok(_) => panic!("missing socket unexpectedly accepted a daemon connection"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ClientError::DaemonUnavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn connected_invalid_daemon_is_not_reported_as_unavailable() {
+        let socket_path =
+            std::env::temp_dir().join(format!("agl-client-invalid-{}.sock", RequestId::generate()));
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut server = Framed::new(
+                stream,
+                LinesCodec::new_with_max_length(MAX_JSONL_FRAME_BYTES),
+            );
+            let _: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            server.send("not-json".to_string()).await.unwrap();
+        });
+
+        let error = match AgentLibreClient::connect(&socket_path).await {
+            Ok(_) => panic!("invalid daemon unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ClientError::InvalidProtocolFrame);
+        server.await.unwrap();
+        std::fs::remove_file(socket_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connected_silent_daemon_has_a_bounded_unhealthy_handshake() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut server = Framed::new(
+                server_stream,
+                LinesCodec::new_with_max_length(MAX_JSONL_FRAME_BYTES),
+            );
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert!(matches!(request.kind, DaemonRequestKind::Hello(_)));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let error = match AgentLibreClient::from_test_stream_with_handshake_timeout(
+            client_stream,
+            Duration::from_millis(5),
+        )
+        .await
+        {
+            Ok(_) => panic!("silent daemon unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+        assert_eq!(error, ClientError::HandshakeTimeout);
+        assert!(!matches!(error, ClientError::DaemonUnavailable(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inference_status_routes_as_one_safe_typed_response() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert!(matches!(
+                request.kind,
+                DaemonRequestKind::InferenceStatus(InferenceStatusRequest {})
+            ));
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(request.request_id),
+                        DaemonEventKind::InferenceStatus(InferenceStatusEvent {
+                            worker_build_id: "sha256:test-worker".to_owned(),
+                            worker_state: ProtocolInferenceWorkerState::CoolingDown,
+                            worker_pid: None,
+                            launch_generation: None,
+                            physical_device_id: Some("pci:0000:03:00.0".to_owned()),
+                            reserved_bytes: 0,
+                            cooldown_not_before_unix_ms: Some(9_000),
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let status = client.inference_status().await.unwrap();
+        assert_eq!(status.worker_build_id, "sha256:test-worker");
+        assert_eq!(
+            status.worker_state,
+            ProtocolInferenceWorkerState::CoolingDown
+        );
+        assert_eq!(status.cooldown_not_before_unix_ms, Some(9_000));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_smoke_session_open_routes_only_the_typed_request() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let expected = setup_smoke_request();
+        let server_expected = expected.clone();
+        let session_id = agl_ids::SessionId::generate();
+        let server_session_id = session_id.clone();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(
+                request.kind,
+                DaemonRequestKind::SetupSmokeSessionOpen(server_expected)
+            );
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(request.request_id),
+                        DaemonEventKind::SessionOpened(SessionOpenedEvent {
+                            session_id: server_session_id,
+                            resumed: false,
+                        }),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        let opened = client.open_setup_smoke_session(expected).await.unwrap();
+        assert_eq!(opened.session_id, session_id);
+        assert!(!opened.resumed);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1953,6 +2249,7 @@ mod tests {
                     attachment_id: attachment_id.clone(),
                     status,
                     writable: false,
+                    writer_lease_id: None,
                     next_sequence: 0,
                     lease_ttl_ms: None,
                     heartbeat_interval_ms: None,
@@ -2617,6 +2914,13 @@ mod tests {
         }
     }
 
+    fn display_path(text: &str) -> SanitizedDisplayPath {
+        SanitizedDisplayPath {
+            text: text.to_owned(),
+            truncated: false,
+        }
+    }
+
     fn terminal(session_id: &agl_ids::SessionId) -> TerminalSessionView {
         TerminalSessionView {
             terminal_id: agl_ids::TerminalSessionId::generate(),
@@ -2627,15 +2931,16 @@ mod tests {
             profile: ExecutionProfile::Workspace,
             shell: ShellProfileView {
                 profile_id: "bash-managed".to_owned(),
-                program: "/bin/bash".to_owned(),
+                program: display_path("/bin/bash"),
                 executable_digest: "sha256:aaaaaaaa".to_owned(),
                 config_digest: "sha256:bbbbbbbb".to_owned(),
             },
-            workspace_root: "/workspace".to_owned(),
-            cwd: "/workspace".to_owned(),
+            workspace_root: display_path("/workspace"),
+            cwd: display_path("/workspace"),
             initial_environment_digest: "sha256:cccccccc".to_owned(),
             environment_names: vec!["PATH".to_owned()],
             command_sequence: 0,
+            prompt_generation: Some(1),
             prompt_state: TerminalPromptState::Ready,
             process_state: ExecutionState::Running,
             exit: None,
@@ -2666,8 +2971,9 @@ mod tests {
                 operation_mode: ProtocolToolMode::ReadOnly,
                 selected_skills: Vec::new(),
                 runtime_context_revision: 1,
-                workspace_root: "/tmp".to_owned(),
-                cwd: "/tmp".to_owned(),
+                workspace_root: display_path("/tmp"),
+                workspace_history_scope: format!("sha256:{}", "a".repeat(64)),
+                cwd: display_path("/tmp"),
                 execution_context_revision: 1,
                 context_used_tokens: None,
                 context_limit_tokens: None,
@@ -2680,6 +2986,8 @@ mod tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
+            human_commands: Vec::new(),
+            activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id),
                 session_active: true,

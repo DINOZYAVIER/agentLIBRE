@@ -8,6 +8,15 @@ agl init
 agl
 ```
 
+Native llama.cpp, ggml, and Vulkan state runs in the exact private
+`agl-inference-worker` sibling supervised by the daemon. A native abort, signal,
+protocol failure, or lost GPU therefore fails the active attempt without taking
+down the daemon, durable session, or Human terminal. The failed worker is reaped
+and the device enters a bounded cooldown; only a later explicit request may
+start a clean worker after fresh admission. `agl daemon status` reports the
+daemon identity plus the worker build, PID/FSM state, selected device,
+reservation, and cooldown without exposing prompts or native payloads.
+
 The conservative default is `gemma4-e4b`, a Gemma 4 E4B QAT Q4 main model plus
 its required projector. `--model gemma4-12b`, `gemma4-26b`, and
 `gemma4-31b` select larger pinned packages. The plan reports cache hits, bytes

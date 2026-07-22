@@ -98,7 +98,6 @@ dependencies = [
  "agl-host-tools",
  "agl-ids",
  "agl-inference",
- "agl-llama-cpp-sys",
  "agl-loop",
  "agl-memory",
  "agl-models",
@@ -132,7 +131,6 @@ dependencies = [
  "agl-functions",
  "agl-ids",
  "agl-inference",
- "agl-llama-cpp-sys",
  "agl-memory",
  "agl-models",
  "agl-notes",
@@ -155,12 +153,14 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
 name = "agl-client"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-config",
  "agl-content",
  "agl-events",
  "agl-ids",
@@ -215,7 +215,7 @@ dependencies = [
  "agl-functions",
  "agl-ids",
  "agl-inference",
- "agl-llama-cpp-sys",
+ "agl-models",
  "agl-process",
  "agl-protocol",
  "agl-runtime",
@@ -309,15 +309,34 @@ dependencies = [
  "agl-content",
  "agl-events",
  "agl-ids",
- "agl-llama-cpp-sys",
  "agl-oven",
  "agl-process",
  "agl-store",
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "agl-inference-worker"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-actions",
+ "agl-config",
+ "agl-content",
+ "agl-ids",
+ "agl-inference",
+ "agl-llama-cpp-sys",
+ "agl-oven",
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -434,6 +453,7 @@ dependencies = [
 name = "agl-protocol"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-config",
  "agl-content",
  "agl-events",
  "agl-ids",

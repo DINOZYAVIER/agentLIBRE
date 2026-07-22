@@ -12,8 +12,8 @@ pub use payload::{
     SafeRuntimeEvent, SafeRuntimeEventEnvelope,
 };
 pub use taxonomy::{
-    HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent, SafeParsedActionEvent,
-    StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
+    HookBatchOutcomeEvent, IncompleteOutputReasonEvent, InferenceFinishStatus, ParsedActionEvent,
+    SafeParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
 };
 pub use writer::{EventAppender, RuntimeEventWriter};
 

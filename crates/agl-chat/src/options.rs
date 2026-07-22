@@ -21,6 +21,8 @@ pub struct InferenceOptions {
     #[serde(skip)]
     pub model_bindings_path: Option<PathBuf>,
     #[serde(skip)]
+    pub model_bindings_override: Option<agl_config::ModelBindings>,
+    #[serde(skip)]
     pub runtime_plan_override: Option<agl_models::RuntimePlan>,
 }
 
@@ -36,6 +38,7 @@ impl Default for InferenceOptions {
             skills: Vec::new(),
             memory: false,
             model_bindings_path: None,
+            model_bindings_override: None,
             runtime_plan_override: None,
         }
     }
@@ -45,6 +48,12 @@ impl InferenceOptions {
     #[doc(hidden)]
     pub fn with_model_bindings_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.model_bindings_path = Some(path.into());
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_model_bindings_override(mut self, bindings: agl_config::ModelBindings) -> Self {
+        self.model_bindings_override = Some(bindings);
         self
     }
 

@@ -10,7 +10,10 @@ use agl_ids::{ExecutionId, RequestId, RunId, SessionId, StepId, TerminalSessionI
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::terminal::command::{AgentTerminalCommandQueue, TerminalCommandResult};
+use crate::terminal::command::{
+    AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult,
+    human_terminal_command_submission,
+};
 use crate::terminal::environment::{
     TerminalEnvironmentDigest, TerminalEnvironmentRequest, TerminalSecretResolver,
 };
@@ -19,9 +22,10 @@ use crate::terminal::repository::{
     StoredTerminalRecord, TerminalRepository, TerminalReservation, terminal_slot_key,
 };
 use crate::terminal::shell::{
-    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, HostStartupPolicy,
-    IntegrationBatch, ManagedShellStartup, ShellIntegrationEvent, ShellIntegrationHealth,
-    ShellIntegrationNotice, ShellIntegrationToken, TerminalPromptState,
+    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, CommandBoundary,
+    HostStartupPolicy, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES, ManagedShellStartup,
+    ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth, ShellIntegrationNotice,
+    ShellIntegrationToken, TerminalPromptState, TypedCommandAbortReason, TypedCommandTransactionId,
 };
 use crate::{
     ExecutionAuthorization, ExecutionContextSnapshot, ExecutionGrantLease, ExecutionIo,
@@ -34,7 +38,7 @@ use crate::{
 const AGENT_TERMINAL_DRIVE_INTERVAL: Duration = Duration::from_millis(5);
 const AGENT_TERMINAL_PROMPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT: Duration = Duration::from_secs(2);
-const AGENT_TERMINAL_INTEGRATION_READ_BYTES: usize = 64 * 1024;
+const AGENT_TERMINAL_INTEGRATION_READ_BYTES: usize = MAX_SHELL_INTEGRATION_FRAME_BYTES;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -174,6 +178,34 @@ struct TerminalEntry {
     command_timeout: Option<AgentCommandTimeout>,
     pending_prompt_result: Option<PendingAgentCommandResult>,
     command_driver_busy: bool,
+    pending_human_command: Option<PendingHumanCommand>,
+    pending_agent_transaction: Option<PendingAgentTransaction>,
+    active_typed_command: Option<ActiveTypedCommand>,
+    raw_human_input_pending: bool,
+}
+
+struct PendingHumanCommand {
+    command_sequence: u64,
+    transaction_id: TypedCommandTransactionId,
+    canonical_command: String,
+}
+
+struct PendingAgentTransaction {
+    command_sequence: u64,
+    transaction_id: TypedCommandTransactionId,
+    canonical_command: String,
+}
+
+struct ActiveTypedCommand {
+    command_sequence: u64,
+    transaction_id: TypedCommandTransactionId,
+    owner: TypedCommandOwner,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedCommandOwner {
+    Human,
+    Agent,
 }
 
 struct AgentCommandTimeout {
@@ -237,6 +269,12 @@ trait TerminalExecutionStarter: Send + Sync {
         maximum_bytes: usize,
     ) -> Result<ShellIntegrationReadResult>;
 
+    fn send_shell_integration_control(
+        &self,
+        execution_id: &ExecutionId,
+        frame: ProcessBytes,
+    ) -> Result<u64>;
+
     fn attach(&self, execution_id: &ExecutionId, attachment_id: RequestId) -> Result<InputLease>;
 
     fn detach(&self, execution_id: &ExecutionId, lease: InputLease) -> Result<()>;
@@ -248,6 +286,7 @@ trait TerminalExecutionStarter: Send + Sync {
         execution_id: &ExecutionId,
         lease: InputLease,
         bytes: ProcessBytes,
+        eof: bool,
     ) -> Result<()>;
 
     fn interrupt_foreground(&self, execution_id: &ExecutionId) -> Result<()>;
@@ -290,6 +329,15 @@ impl TerminalExecutionStarter for SupervisorTerminalStarter {
             .operator_read_shell_integration(execution_id, maximum_bytes)
     }
 
+    fn send_shell_integration_control(
+        &self,
+        execution_id: &ExecutionId,
+        frame: ProcessBytes,
+    ) -> Result<u64> {
+        self.0
+            .operator_send_shell_integration_control(execution_id, frame)
+    }
+
     fn attach(&self, execution_id: &ExecutionId, attachment_id: RequestId) -> Result<InputLease> {
         self.0.operator_attach(execution_id, attachment_id, true)
     }
@@ -307,8 +355,9 @@ impl TerminalExecutionStarter for SupervisorTerminalStarter {
         execution_id: &ExecutionId,
         lease: InputLease,
         bytes: ProcessBytes,
+        eof: bool,
     ) -> Result<()> {
-        self.0.operator_write(execution_id, lease, bytes, false)
+        self.0.operator_write(execution_id, lease, bytes, eof)
     }
 
     fn interrupt_foreground(&self, execution_id: &ExecutionId) -> Result<()> {
@@ -577,6 +626,313 @@ impl TerminalRegistry {
         self.execute_agent_command_cancellable(request, command, deadline, || false)
     }
 
+    /// Atomically admits one explicit Human command only at the trusted prompt
+    /// generation observed by the client. The caller must write `submission`
+    /// through the already-owned Human input lease and call
+    /// `cancel_human_command_admission` if that write fails.
+    pub fn admit_human_command(
+        &self,
+        session_id: &SessionId,
+        terminal_id: &TerminalSessionId,
+        expected_command_sequence: u64,
+        expected_prompt_generation: u64,
+        command: &str,
+    ) -> Result<HumanTerminalCommandAdmission> {
+        let submission = human_terminal_command_submission(command)?;
+        let transaction_id = TypedCommandTransactionId::generate()?;
+        let mut state = self.lock()?;
+        let entry = state
+            .terminals
+            .get_mut(terminal_id)
+            .ok_or_else(|| terminal_not_found(terminal_id))?;
+        if entry.record.owner.human_session_id() != Some(session_id) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotOwned,
+                "Human terminal command requires the terminal's owning session",
+            ));
+        }
+        if !matches!(
+            entry.record.state,
+            TerminalState::Starting | TerminalState::Running
+        ) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotLive,
+                "Human terminal command requires a live terminal",
+            ));
+        }
+        if entry.raw_human_input_pending {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal has pending raw input; attach Terminal instead",
+            ));
+        }
+        if entry.pending_human_command.is_some()
+            || entry.pending_agent_transaction.is_some()
+            || entry.active_typed_command.is_some()
+        {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal is busy; attach Terminal instead",
+            ));
+        }
+        if entry.record.command_sequence != expected_command_sequence {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal command sequence changed; refresh before submitting",
+            ));
+        }
+        let TerminalPromptState::Ready { sequence, .. } = entry.record.prompt_state else {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal is not at a trusted fresh prompt; attach Terminal instead",
+            ));
+        };
+        if sequence != expected_prompt_generation {
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal prompt generation changed; refresh before submitting",
+            ));
+        }
+        let command_sequence = entry
+            .record
+            .command_sequence
+            .checked_add(1)
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "Human terminal command sequence overflowed",
+                )
+            })?;
+        let execution_id = entry.record.execution_id.clone();
+        let integration = entry.integration.as_ref().ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal has no private shell integration driver",
+            )
+        })?;
+        let arm = integration.encode_control(&ShellIntegrationControl::ArmTypedCommand {
+            transaction_id: transaction_id.clone(),
+            expected_command_sequence: command_sequence,
+        })?;
+        let output_after_sequence = match self
+            .starter
+            .send_shell_integration_control(&execution_id, ProcessBytes::from_bytes(&arm))
+        {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                if let Some(integration) = entry.integration.as_mut() {
+                    integration.mark_unavailable();
+                    sync_integration_projection(&mut entry.record, integration);
+                }
+                drop(state);
+                let _ = self.starter.kill(&execution_id, KillMode::Immediate);
+                return Err(error);
+            }
+        };
+        entry.record.prompt_state = TerminalPromptState::Unknown;
+        entry.pending_human_command = Some(PendingHumanCommand {
+            command_sequence,
+            transaction_id,
+            canonical_command: command.to_owned(),
+        });
+        Ok(HumanTerminalCommandAdmission {
+            terminal_id: terminal_id.clone(),
+            execution_id,
+            command_sequence,
+            output_after_sequence,
+            submission,
+        })
+    }
+
+    /// Writes the exact transaction returned by `admit_human_command` through
+    /// the same per-terminal transition gate used by raw Human input. A raw
+    /// writer cannot enter while this admission is pending.
+    pub fn write_admitted_human_command(
+        &self,
+        terminal_id: &TerminalSessionId,
+        execution_id: &ExecutionId,
+        command_sequence: u64,
+        lease: InputLease,
+        submission: ProcessBytes,
+    ) -> Result<()> {
+        let canonical_submission = {
+            let state = self.lock()?;
+            let entry = state
+                .terminals
+                .get(terminal_id)
+                .ok_or_else(|| terminal_not_found(terminal_id))?;
+            if entry.record.execution_id != *execution_id
+                || entry.record.owner.human_session_id().is_none()
+            {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::ExecutionNotOwned,
+                    "Human command admission does not own this terminal execution",
+                ));
+            }
+            let pending = entry
+                .pending_human_command
+                .as_ref()
+                .filter(|pending| pending.command_sequence == command_sequence)
+                .ok_or_else(|| {
+                    ProcessError::new(
+                        ProcessErrorCode::StateConflict,
+                        "Human command input transition is no longer pending",
+                    )
+                })?;
+            if pending.command_sequence != command_sequence {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "Human command input transition is no longer pending",
+                ));
+            }
+            if entry.raw_human_input_pending {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "Human terminal raw input already owns the input transition",
+                ));
+            }
+            human_terminal_command_submission(&pending.canonical_command)?
+        };
+        if submission != canonical_submission {
+            let _ = self.cancel_human_command_admission(terminal_id, command_sequence);
+            return Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human command submission bytes differ from the armed canonical command",
+            ));
+        }
+
+        let result = self.starter.write(execution_id, lease, submission, false);
+        if result.is_err() {
+            let _ = self.cancel_human_command_admission(terminal_id, command_sequence);
+        }
+        result
+    }
+
+    /// Routes raw input for a managed Human terminal through the shared input
+    /// transition gate. Returns `Ok(false)` when `execution_id` is not a
+    /// managed Human terminal, allowing the caller to use the generic process
+    /// input path. Once any raw input wins, typed command admission remains
+    /// closed until private shell integration observes a newer trusted prompt.
+    pub fn write_raw_human_input_if_managed(
+        &self,
+        execution_id: &ExecutionId,
+        lease: InputLease,
+        bytes: ProcessBytes,
+        eof: bool,
+    ) -> Result<bool> {
+        {
+            let mut state = self.lock()?;
+            let terminal_id = state.terminals.iter().find_map(|(terminal_id, entry)| {
+                (entry.record.execution_id == *execution_id
+                    && entry.record.owner.human_session_id().is_some())
+                .then(|| terminal_id.clone())
+            });
+            let Some(terminal_id) = terminal_id else {
+                return Ok(false);
+            };
+            let (mut record, slot, active_slot, pending_human_command) = {
+                let entry = state
+                    .terminals
+                    .get(&terminal_id)
+                    .expect("Human terminal execution was selected above");
+                (
+                    entry.record.clone(),
+                    entry.slot.clone(),
+                    entry.active_slot,
+                    entry.pending_human_command.is_some(),
+                )
+            };
+            if !record.state.is_live() {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::ExecutionNotLive,
+                    "raw Human terminal input requires a live terminal",
+                ));
+            }
+            if pending_human_command {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "Human terminal input transition is busy with a typed command",
+                ));
+            }
+            if eof || !bytes.data.is_empty() {
+                if matches!(record.prompt_state, TerminalPromptState::Ready { .. }) {
+                    record.prompt_state = TerminalPromptState::Unknown;
+                    if let Err(error) = replace_terminal_record(
+                        self.repository.as_ref(),
+                        &mut state,
+                        &terminal_id,
+                        record,
+                        slot,
+                        active_slot,
+                    ) {
+                        mark_terminal_outcome_unknown(&mut state, &terminal_id, None)?;
+                        return Err(error);
+                    }
+                }
+                state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .expect("Human terminal was checked before its raw-input transition")
+                    .raw_human_input_pending = true;
+            }
+        }
+
+        // Fail closed on write error: the raw-input latch intentionally stays
+        // armed because the physical delivery outcome may be unknown.
+        self.starter
+            .write(execution_id, lease, bytes, eof)
+            .map(|()| true)
+    }
+
+    pub fn cancel_human_command_admission(
+        &self,
+        terminal_id: &TerminalSessionId,
+        command_sequence: u64,
+    ) -> Result<()> {
+        let mut state = self.lock()?;
+        let entry = state
+            .terminals
+            .get_mut(terminal_id)
+            .ok_or_else(|| terminal_not_found(terminal_id))?;
+        let pending = entry
+            .pending_human_command
+            .as_ref()
+            .filter(|pending| pending.command_sequence == command_sequence)
+            .map(|pending| {
+                (
+                    pending.transaction_id.clone(),
+                    entry.record.execution_id.clone(),
+                )
+            });
+        let Some((transaction_id, execution_id)) = pending else {
+            return Ok(());
+        };
+        let integration = entry.integration.as_ref().ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "Human terminal has no private shell integration driver",
+            )
+        })?;
+        let disarm = integration.encode_control(&ShellIntegrationControl::DisarmTypedCommand {
+            transaction_id,
+            reason: TypedCommandAbortReason::Cancelled,
+        })?;
+        let disarmed = self
+            .starter
+            .send_shell_integration_control(&execution_id, ProcessBytes::from_bytes(&disarm));
+        entry.pending_human_command = None;
+        if let Err(error) = disarmed {
+            if let Some(integration) = entry.integration.as_mut() {
+                integration.mark_unavailable();
+                sync_integration_projection(&mut entry.record, integration);
+            }
+            drop(state);
+            let _ = self.starter.kill(&execution_id, KillMode::Immediate);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn execute_agent_command_cancellable(
         &self,
         request: TerminalEnsureRequest,
@@ -823,17 +1179,118 @@ impl TerminalRegistry {
         command_sequence: u64,
         submission: ProcessBytes,
     ) -> Result<()> {
+        let transaction_id = TypedCommandTransactionId::generate()?;
+        let previous_prompt = {
+            let mut state = self.lock()?;
+            let entry = state
+                .terminals
+                .get_mut(terminal_id)
+                .ok_or_else(|| terminal_not_found(terminal_id))?;
+            if entry.commands.active_sequence() != Some(command_sequence)
+                || entry.pending_human_command.is_some()
+                || entry.pending_agent_transaction.is_some()
+                || entry.active_typed_command.is_some()
+            {
+                entry.command_driver_busy = false;
+                return Err(ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "agent terminal typed-input transition is no longer available",
+                ));
+            }
+            let canonical_command = entry
+                .commands
+                .active_command()
+                .ok_or_else(|| {
+                    ProcessError::new(
+                        ProcessErrorCode::StateConflict,
+                        "agent terminal has no canonical active command",
+                    )
+                })?
+                .to_owned();
+            let integration = entry.integration.as_ref().ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "agent terminal has no private shell integration driver",
+                )
+            })?;
+            let arm = integration.encode_control(&ShellIntegrationControl::ArmTypedCommand {
+                transaction_id: transaction_id.clone(),
+                expected_command_sequence: command_sequence,
+            })?;
+            if let Err(error) = self
+                .starter
+                .send_shell_integration_control(execution_id, ProcessBytes::from_bytes(&arm))
+            {
+                if let Some(integration) = entry.integration.as_mut() {
+                    integration.mark_unavailable();
+                    entry.record.prompt_state = integration.state().prompt().clone();
+                    entry.record.integration_health = integration.state().health();
+                }
+                entry.command_driver_busy = false;
+                drop(state);
+                let _ = self.starter.kill(execution_id, KillMode::Immediate);
+                return Err(error);
+            }
+            let previous_prompt = entry.record.prompt_state.clone();
+            entry.record.prompt_state = TerminalPromptState::Unknown;
+            entry.pending_agent_transaction = Some(PendingAgentTransaction {
+                command_sequence,
+                transaction_id: transaction_id.clone(),
+                canonical_command,
+            });
+            previous_prompt
+        };
+
         let attachment_id = RequestId::generate();
         let attached = self.starter.attach(execution_id, attachment_id);
         let (lease, submitted) = match attached {
             Ok(lease) => {
-                let submitted = self.starter.write(execution_id, lease.clone(), submission);
+                let submitted = self
+                    .starter
+                    .write(execution_id, lease.clone(), submission, false);
                 (Some(lease), submitted)
             }
             Err(error) => (None, Err(error)),
         };
+        let disarm_failed = if submitted.is_err() {
+            let mut state = self.lock()?;
+            let entry = state
+                .terminals
+                .get_mut(terminal_id)
+                .ok_or_else(|| terminal_not_found(terminal_id))?;
+            let disarm = entry
+                .integration
+                .as_ref()
+                .ok_or_else(|| {
+                    ProcessError::new(
+                        ProcessErrorCode::StateConflict,
+                        "agent terminal lost its private shell integration driver",
+                    )
+                })?
+                .encode_control(&ShellIntegrationControl::DisarmTypedCommand {
+                    transaction_id: transaction_id.clone(),
+                    reason: TypedCommandAbortReason::InputWriteFailed,
+                })?;
+            let disarmed = self
+                .starter
+                .send_shell_integration_control(execution_id, ProcessBytes::from_bytes(&disarm));
+            entry.pending_agent_transaction = None;
+            if disarmed.is_ok() {
+                entry.record.prompt_state = previous_prompt;
+                false
+            } else {
+                if let Some(integration) = entry.integration.as_mut() {
+                    integration.mark_unavailable();
+                    entry.record.prompt_state = integration.state().prompt().clone();
+                    entry.record.integration_health = integration.state().health();
+                }
+                true
+            }
+        } else {
+            false
+        };
         let mut detach = None;
-        let mut terminate = false;
+        let mut terminate = disarm_failed;
         {
             let mut state = self.lock()?;
             let entry = state
@@ -1043,7 +1500,7 @@ impl TerminalRegistry {
         foreground_sample: Option<Option<i32>>,
     ) -> Result<IntegrationBatch> {
         let mut state = self.lock()?;
-        let (mut integration, mut record, slot, active_slot) = {
+        let (mut integration, mut record, slot, active_slot, raw_human_input_pending) = {
             let entry = state
                 .terminals
                 .get(terminal_id)
@@ -1065,6 +1522,7 @@ impl TerminalRegistry {
                 entry.record.clone(),
                 entry.slot.clone(),
                 entry.active_slot,
+                entry.raw_human_input_pending,
             )
         };
         let previous = record.clone();
@@ -1099,7 +1557,18 @@ impl TerminalRegistry {
                 }
             }
         }
+        let trusted_prompt_after_raw_input = raw_human_input_pending
+            && matches!(
+                batch.events.last(),
+                Some(ShellIntegrationEvent::PromptReady { .. })
+            );
         sync_integration_projection(&mut record, &integration);
+        if raw_human_input_pending
+            && !trusted_prompt_after_raw_input
+            && matches!(record.prompt_state, TerminalPromptState::Ready { .. })
+        {
+            record.prompt_state = TerminalPromptState::Unknown;
+        }
         if record != previous
             && let Err(error) = replace_terminal_record(
                 self.repository.as_ref(),
@@ -1113,11 +1582,14 @@ impl TerminalRegistry {
             mark_terminal_outcome_unknown(&mut state, terminal_id, None)?;
             return Err(error);
         }
-        state
+        let entry = state
             .terminals
             .get_mut(terminal_id)
-            .expect("terminal was checked before integration persistence")
-            .integration = Some(integration);
+            .expect("terminal was checked before integration persistence");
+        entry.integration = Some(integration);
+        if trusted_prompt_after_raw_input {
+            entry.raw_human_input_pending = false;
+        }
         Ok(batch)
     }
 
@@ -1127,7 +1599,7 @@ impl TerminalRegistry {
         update: impl FnOnce(&mut BoundedShellIntegration) -> IntegrationBatch,
     ) -> Result<IntegrationBatch> {
         let mut state = self.lock()?;
-        let (mut integration, mut record, slot, active_slot) = {
+        let (mut integration, mut record, slot, active_slot, raw_human_input_pending) = {
             let entry = state
                 .terminals
                 .get(terminal_id)
@@ -1143,11 +1615,17 @@ impl TerminalRegistry {
                 entry.record.clone(),
                 entry.slot.clone(),
                 entry.active_slot,
+                entry.raw_human_input_pending,
             )
         };
         let previous = record.clone();
         let batch = update(&mut integration);
         sync_integration_projection(&mut record, &integration);
+        if raw_human_input_pending
+            && matches!(record.prompt_state, TerminalPromptState::Ready { .. })
+        {
+            record.prompt_state = TerminalPromptState::Unknown;
+        }
         if record != previous
             && let Err(error) = replace_terminal_record(
                 self.repository.as_ref(),
@@ -1208,56 +1686,16 @@ impl TerminalRegistry {
             .read_shell_integration(&execution_id, maximum_bytes)?;
         let bytes = read.bytes.decode(maximum_bytes)?;
         let status = self.starter.status(&execution_id)?;
-        let mut batch = self.accept_private_integration_sample(
+        let (batch, transaction_must_terminate) = self.accept_acknowledged_private_packet(
             terminal_id,
             &bytes,
-            Some(read.foreground_process_group),
+            read.foreground_process_group,
+            read.degraded,
+            read.channel_closed,
         )?;
-        if read.degraded && batch.notice.is_none() {
-            batch.notice = self
-                .update_private_integration(terminal_id, |integration| {
-                    integration.mark_unavailable()
-                })?
-                .notice;
-        }
-        if read.channel_closed && batch.notice.is_none() {
-            batch.notice = self
-                .update_private_integration(terminal_id, |integration| {
-                    integration.channel_closed()
-                })?
-                .notice;
-        }
-        let refreshed = self.persist_execution_status(terminal_id, status)?;
-        let agent_event_error = if refreshed.state.is_live() && batch.notice.is_none() {
-            let mut state = self.lock()?;
-            let entry = state
-                .terminals
-                .get_mut(terminal_id)
-                .ok_or_else(|| terminal_not_found(terminal_id))?;
-            apply_events_to_agent_commands(
-                entry,
-                terminal_id,
-                &execution_id,
-                &batch.events,
-                read.output_through_sequence,
-            )
-            .err()
-        } else {
-            None
-        };
-        if let Some(error) = agent_event_error {
-            let degraded = self.update_private_integration(terminal_id, |integration| {
-                integration.mark_unavailable()
-            })?;
-            batch.notice = degraded.notice.or_else(|| {
-                Some(ShellIntegrationNotice {
-                    code: "shell_integration_degraded",
-                    message: error.message().to_owned(),
-                })
-            });
-        }
+        self.persist_execution_status(terminal_id, status)?;
         let mut detach = None;
-        let mut terminate = false;
+        let mut terminate = transaction_must_terminate;
         {
             let mut state = self.lock()?;
             let entry = state
@@ -1274,7 +1712,7 @@ impl TerminalRegistry {
                 );
                 detach = entry.agent_input_lease.take();
                 entry.renew_input_lease_at = None;
-                terminate = entry.record.owner.is_agent() && entry.record.state.is_live();
+                terminate |= entry.record.owner.is_agent() && entry.record.state.is_live();
             } else if entry.commands.active_sequence().is_none() {
                 detach = entry.agent_input_lease.take();
                 entry.renew_input_lease_at = None;
@@ -1287,6 +1725,357 @@ impl TerminalRegistry {
             self.terminate_terminal(terminal_id, KillMode::Immediate)?;
         }
         Ok(batch)
+    }
+
+    fn accept_acknowledged_private_packet(
+        &self,
+        terminal_id: &TerminalSessionId,
+        bytes: &[u8],
+        foreground_sample: Option<i32>,
+        transport_degraded: bool,
+        channel_closed: bool,
+    ) -> Result<(IntegrationBatch, bool)> {
+        let mut state = self.lock()?;
+        let entry = state
+            .terminals
+            .get_mut(terminal_id)
+            .ok_or_else(|| terminal_not_found(terminal_id))?;
+        if !entry.record.state.is_live() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::ExecutionNotLive,
+                "private shell integration belongs to a non-live terminal",
+            ));
+        }
+        let mut integration = entry.integration.take().ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "terminal recovered without private shell integration ownership",
+            )
+        })?;
+        let previous_record = entry.record.clone();
+        let mut record = previous_record.clone();
+        let slot = entry.slot.clone();
+        let active_slot = entry.active_slot;
+        let execution_id = entry.record.execution_id.clone();
+        let mut force_prompt_unknown = false;
+        let mut transaction_must_terminate = false;
+        let mut batch = if bytes.is_empty() {
+            integration.observe_foreground(foreground_sample)
+        } else {
+            integration.push_packet(bytes)
+        };
+
+        if batch.notice.is_none() {
+            let events = batch.events.clone();
+            for event in &events {
+                let result = (|| -> Result<()> {
+                    match event {
+                        ShellIntegrationEvent::PromptReady {
+                            sequence,
+                            input_pending,
+                            ..
+                        } => {
+                            let mut next_record = record.clone();
+                            apply_event_to_record(&mut next_record, event)?;
+                            if entry.pending_human_command.is_some()
+                                || entry.pending_agent_transaction.is_some()
+                                || entry.active_typed_command.is_some()
+                            {
+                                Err(ProcessError::new(
+                                    ProcessErrorCode::StateConflict,
+                                    "prompt_ready arrived while a typed command transaction was active",
+                                ))
+                            } else {
+                                let prompt_generation = (!*input_pending
+                                    && !entry.raw_human_input_pending)
+                                    .then_some(*sequence);
+                                let shell_sequence =
+                                    integration.last_shell_sequence().ok_or_else(|| {
+                                        ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "prompt_ready omitted its shell event sequence",
+                                        )
+                                    })?;
+                                let acknowledgement = integration.encode_control(
+                                    &ShellIntegrationControl::PromptReadyAck {
+                                        event_sequence: shell_sequence,
+                                        prompt_generation,
+                                    },
+                                )?;
+                                self.starter.send_shell_integration_control(
+                                    &execution_id,
+                                    ProcessBytes::from_bytes(&acknowledgement),
+                                )?;
+                                // A previously latched raw write has now made this
+                                // prompt dirty. Consume that latch, while a fresh
+                                // kernel probe keeps the next transition dirty.
+                                entry.raw_human_input_pending = *input_pending;
+                                force_prompt_unknown = prompt_generation.is_none();
+                                if prompt_generation.is_some()
+                                    && let Some(pending) = entry.pending_prompt_result.take()
+                                {
+                                    entry
+                                        .completed_commands
+                                        .insert(pending.command_sequence, Err(pending.outcome));
+                                }
+                                record = next_record;
+                                Ok(())
+                            }
+                        }
+                        ShellIntegrationEvent::CommandStarted {
+                            sequence,
+                            transaction_id,
+                            command,
+                            ..
+                        } => {
+                            let mut next_record = record.clone();
+                            apply_event_to_record(&mut next_record, event)?;
+                            let next_command_sequence =
+                                record.command_sequence.checked_add(1).ok_or_else(|| {
+                                    ProcessError::new(
+                                        ProcessErrorCode::StateConflict,
+                                        "terminal command sequence overflowed",
+                                    )
+                                })?;
+                            match transaction_id {
+                                None => {
+                                    if entry.pending_human_command.is_some()
+                                        || entry.pending_agent_transaction.is_some()
+                                        || entry.active_typed_command.is_some()
+                                    {
+                                        Err(ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "unarmed command_started raced an armed typed transaction",
+                                        ))
+                                    } else {
+                                        entry.raw_human_input_pending = false;
+                                        record = next_record;
+                                        Ok(())
+                                    }
+                                }
+                                Some(transaction_id) => {
+                                    let expected = entry
+                                    .pending_human_command
+                                    .as_ref()
+                                    .map(|pending| {
+                                        (
+                                            TypedCommandOwner::Human,
+                                            pending.command_sequence,
+                                            pending.transaction_id.clone(),
+                                            pending.canonical_command.clone(),
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        entry.pending_agent_transaction.as_ref().map(|pending| {
+                                            (
+                                                TypedCommandOwner::Agent,
+                                                pending.command_sequence,
+                                                pending.transaction_id.clone(),
+                                                pending.canonical_command.clone(),
+                                            )
+                                        })
+                                    })
+                                    .ok_or_else(|| {
+                                        ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "typed command_started had no armed registry transaction",
+                                        )
+                                    })?;
+                                    if entry.active_typed_command.is_some()
+                                        || expected.1 != next_command_sequence
+                                        || expected.2 != *transaction_id
+                                        || expected.3 != *command
+                                        || (expected.0 == TypedCommandOwner::Agent
+                                            && entry.commands.active_sequence() != Some(expected.1))
+                                    {
+                                        Err(ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "typed command_started did not match the armed identity, sequence, and canonical command",
+                                        ))
+                                    } else {
+                                        let acknowledgement = integration.encode_control(
+                                            &ShellIntegrationControl::CommandBoundaryAck {
+                                                transaction_id: transaction_id.clone(),
+                                                boundary: CommandBoundary::Started,
+                                            },
+                                        )?;
+                                        let output_after_sequence =
+                                            self.starter.send_shell_integration_control(
+                                                &execution_id,
+                                                ProcessBytes::from_bytes(&acknowledgement),
+                                            )?;
+                                        if expected.0 == TypedCommandOwner::Agent {
+                                            entry
+                                                .commands
+                                                .mark_started(*sequence, output_after_sequence)?;
+                                            entry.pending_agent_transaction = None;
+                                        } else {
+                                            entry.pending_human_command = None;
+                                        }
+                                        entry.active_typed_command = Some(ActiveTypedCommand {
+                                            command_sequence: expected.1,
+                                            transaction_id: transaction_id.clone(),
+                                            owner: expected.0,
+                                        });
+                                        record = next_record;
+                                        Ok(())
+                                    }
+                                }
+                            }
+                        }
+                        ShellIntegrationEvent::CommandFinished {
+                            sequence,
+                            transaction_id,
+                            exit,
+                            cwd,
+                        } => {
+                            let mut next_record = record.clone();
+                            apply_event_to_record(&mut next_record, event)?;
+                            match transaction_id {
+                                None => {
+                                    if entry.pending_human_command.is_some()
+                                        || entry.pending_agent_transaction.is_some()
+                                        || entry.active_typed_command.is_some()
+                                    {
+                                        Err(ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "unarmed command_finished raced a typed transaction",
+                                        ))
+                                    } else {
+                                        record = next_record;
+                                        Ok(())
+                                    }
+                                }
+                                Some(transaction_id) => {
+                                    let active = entry.active_typed_command.as_ref().ok_or_else(|| {
+                                    ProcessError::new(
+                                        ProcessErrorCode::StateConflict,
+                                        "typed command_finished had no acknowledged start transaction",
+                                    )
+                                })?;
+                                    if active.transaction_id != *transaction_id
+                                        || active.command_sequence != record.command_sequence
+                                    {
+                                        Err(ProcessError::new(
+                                            ProcessErrorCode::StateConflict,
+                                            "typed command_finished did not match the acknowledged transaction",
+                                        ))
+                                    } else {
+                                        let active_owner = active.owner;
+                                        let command_sequence = active.command_sequence;
+                                        let acknowledgement = integration.encode_control(
+                                            &ShellIntegrationControl::CommandBoundaryAck {
+                                                transaction_id: transaction_id.clone(),
+                                                boundary: CommandBoundary::Finished,
+                                            },
+                                        )?;
+                                        let output_through_sequence =
+                                            self.starter.send_shell_integration_control(
+                                                &execution_id,
+                                                ProcessBytes::from_bytes(&acknowledgement),
+                                            )?;
+                                        if active_owner == TypedCommandOwner::Agent {
+                                            let result = entry.commands.finish(
+                                                terminal_id.clone(),
+                                                execution_id.clone(),
+                                                *sequence,
+                                                exit.clone(),
+                                                cwd.clone(),
+                                                output_through_sequence,
+                                            )?;
+                                            if let Some(timeout) =
+                                                entry.command_timeout.take().filter(|timeout| {
+                                                    timeout.command_sequence == command_sequence
+                                                })
+                                            {
+                                                entry.pending_prompt_result =
+                                                    Some(PendingAgentCommandResult {
+                                                        command_sequence,
+                                                        outcome: agent_command_outcome_error(
+                                                            timeout.outcome,
+                                                        ),
+                                                        recover_by: timeout.recover_by,
+                                                    });
+                                            } else {
+                                                entry
+                                                    .completed_commands
+                                                    .insert(command_sequence, Ok(result));
+                                            }
+                                            entry.command_driver_busy = false;
+                                        }
+                                        entry.active_typed_command = None;
+                                        record = next_record;
+                                        Ok(())
+                                    }
+                                }
+                            }
+                        }
+                        ShellIntegrationEvent::ForegroundChanged { .. } => Ok(()),
+                    }
+                })();
+                if let Err(error) = result {
+                    transaction_must_terminate = entry.pending_human_command.is_some()
+                        || entry.pending_agent_transaction.is_some()
+                        || entry.active_typed_command.is_some()
+                        || matches!(
+                            event,
+                            ShellIntegrationEvent::CommandStarted {
+                                transaction_id: Some(_),
+                                ..
+                            } | ShellIntegrationEvent::CommandFinished {
+                                transaction_id: Some(_),
+                                ..
+                            }
+                        );
+                    integration.mark_unavailable();
+                    batch.events.clear();
+                    batch.notice = Some(ShellIntegrationNotice {
+                        code: "shell_integration_degraded",
+                        message: error.message().to_owned(),
+                    });
+                    break;
+                }
+            }
+        }
+        if batch.notice.is_none() && !bytes.is_empty() {
+            merge_integration_batch(
+                &mut batch,
+                integration.observe_foreground(foreground_sample),
+            );
+        }
+
+        if batch.notice.is_none() && transport_degraded {
+            batch = integration.mark_unavailable();
+        }
+        if batch.notice.is_none() && channel_closed {
+            batch = integration.channel_closed();
+        }
+        if batch.notice.is_some() {
+            transaction_must_terminate |= entry.pending_human_command.is_some()
+                || entry.pending_agent_transaction.is_some()
+                || entry.active_typed_command.is_some();
+        }
+        sync_integration_projection(&mut record, &integration);
+        if force_prompt_unknown && matches!(record.prompt_state, TerminalPromptState::Ready { .. })
+        {
+            record.prompt_state = TerminalPromptState::Unknown;
+        }
+        entry.integration = Some(integration);
+        let record_changed = record != previous_record;
+        if record_changed
+            && let Err(error) = replace_terminal_record(
+                self.repository.as_ref(),
+                &mut state,
+                terminal_id,
+                record,
+                slot,
+                active_slot,
+            )
+        {
+            mark_terminal_outcome_unknown(&mut state, terminal_id, None)?;
+            return Err(error);
+        }
+        Ok((batch, transaction_must_terminate))
     }
 
     pub fn integration_closed(
@@ -1596,6 +2385,10 @@ fn insert_stored_terminal(state: &mut RegistryState, stored: StoredTerminalRecor
             command_timeout: None,
             pending_prompt_result: None,
             command_driver_busy: false,
+            pending_human_command: None,
+            pending_agent_transaction: None,
+            active_typed_command: None,
+            raw_human_input_pending: false,
         },
     );
     Ok(())
@@ -2003,69 +2796,6 @@ fn sync_integration_projection(record: &mut TerminalRecord, integration: &Bounde
     record.integration_health = integration.state().health();
 }
 
-fn apply_events_to_agent_commands(
-    entry: &mut TerminalEntry,
-    terminal_id: &TerminalSessionId,
-    execution_id: &ExecutionId,
-    events: &[ShellIntegrationEvent],
-    output_through_sequence: u64,
-) -> Result<()> {
-    if !entry.record.owner.is_agent() {
-        return Ok(());
-    }
-    for event in events {
-        match event {
-            ShellIntegrationEvent::CommandStarted { sequence, .. }
-                if entry.commands.active_sequence().is_some() =>
-            {
-                entry.commands.mark_started(*sequence)?;
-            }
-            ShellIntegrationEvent::CommandFinished {
-                sequence,
-                exit,
-                cwd,
-            } if entry.commands.active_sequence().is_some() => {
-                let result = entry.commands.finish(
-                    terminal_id.clone(),
-                    execution_id.clone(),
-                    *sequence,
-                    exit.clone(),
-                    cwd.clone(),
-                    output_through_sequence,
-                )?;
-                let command_sequence = result.command_sequence;
-                if let Some(timeout) = entry
-                    .command_timeout
-                    .take()
-                    .filter(|timeout| timeout.command_sequence == command_sequence)
-                {
-                    entry.pending_prompt_result = Some(PendingAgentCommandResult {
-                        command_sequence,
-                        outcome: agent_command_outcome_error(timeout.outcome),
-                        recover_by: timeout.recover_by,
-                    });
-                } else {
-                    entry
-                        .completed_commands
-                        .insert(command_sequence, Ok(result));
-                }
-                entry.command_driver_busy = false;
-            }
-            ShellIntegrationEvent::PromptReady { .. } => {
-                if let Some(pending) = entry.pending_prompt_result.take() {
-                    entry
-                        .completed_commands
-                        .insert(pending.command_sequence, Err(pending.outcome));
-                }
-            }
-            ShellIntegrationEvent::CommandStarted { .. }
-            | ShellIntegrationEvent::CommandFinished { .. }
-            | ShellIntegrationEvent::ForegroundChanged { .. } => {}
-        }
-    }
-    Ok(())
-}
-
 fn fail_all_agent_commands(entry: &mut TerminalEntry, error: ProcessError) {
     if let Some(pending) = entry.pending_prompt_result.take() {
         entry
@@ -2267,6 +2997,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    use agl_ids::WriterLeaseId;
+
     use super::*;
     use crate::terminal::command::MAX_AGENT_TERMINAL_COMMAND_BYTES;
     use crate::terminal::environment::TerminalSecretValue;
@@ -2295,10 +3027,15 @@ mod tests {
 
     #[derive(Default)]
     struct FakeIntegration {
-        buffered: VecDeque<u8>,
+        packets: VecDeque<(Vec<u8>, u64)>,
         output_through_sequence: u64,
+        last_read_output_sequence: u64,
         next_event_sequence: u64,
         foreground_process_group: Option<i32>,
+        armed_transaction: Option<String>,
+        active_transaction: Option<String>,
+        channel_closed: bool,
+        degraded: bool,
     }
 
     #[derive(Default)]
@@ -2313,8 +3050,9 @@ mod tests {
         records: Mutex<BTreeMap<ExecutionId, ExecutionStatus>>,
         tokens: Mutex<BTreeMap<ExecutionId, ShellIntegrationToken>>,
         integrations: Mutex<BTreeMap<ExecutionId, FakeIntegration>>,
-        writable_leases: Mutex<BTreeMap<ExecutionId, RequestId>>,
+        writable_leases: Mutex<BTreeMap<ExecutionId, (RequestId, WriterLeaseId)>>,
         writes: Mutex<Vec<(ExecutionId, Vec<u8>)>>,
+        controls: Mutex<Vec<(ExecutionId, Vec<String>)>>,
     }
 
     impl TerminalExecutionStarter for FakeStarter {
@@ -2373,7 +3111,11 @@ mod tests {
             self.push_event(
                 &status.execution_id,
                 "prompt_ready",
-                &[status.cwd.to_string_lossy().into_owned(), "-".to_owned()],
+                &[
+                    status.cwd.to_string_lossy().into_owned(),
+                    "-".to_owned(),
+                    "0".to_owned(),
+                ],
                 2,
             );
             Ok(status)
@@ -2408,16 +3150,76 @@ mod tests {
             self.status(execution_id)?;
             let mut integrations = self.integrations.lock().unwrap();
             let integration = integrations.get_mut(execution_id).unwrap();
-            let count = maximum_bytes.min(integration.buffered.len());
-            let bytes = integration.buffered.drain(..count).collect::<Vec<_>>();
+            let (bytes, output_through_sequence) = integration
+                .packets
+                .pop_front()
+                .unwrap_or_else(|| (Vec::new(), 0));
+            if !bytes.is_empty() {
+                integration.last_read_output_sequence = output_through_sequence;
+            }
+            if bytes.len() > maximum_bytes {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::InvalidRequest,
+                    "fake integration packet exceeds read bound",
+                ));
+            }
             Ok(ShellIntegrationReadResult {
                 execution_id: execution_id.clone(),
                 bytes: ProcessBytes::from_bytes(&bytes),
-                output_through_sequence: integration.output_through_sequence,
+                output_through_sequence,
                 foreground_process_group: integration.foreground_process_group,
-                channel_closed: false,
-                degraded: false,
+                channel_closed: integration.channel_closed,
+                degraded: integration.degraded,
             })
+        }
+
+        fn send_shell_integration_control(
+            &self,
+            execution_id: &ExecutionId,
+            frame: ProcessBytes,
+        ) -> Result<u64> {
+            let frame = frame.decode(MAX_SHELL_INTEGRATION_FRAME_BYTES)?;
+            let fields = frame
+                .split(|byte| *byte == 0)
+                .filter(|field| !field.is_empty())
+                .map(|field| std::str::from_utf8(field).map(str::to_owned))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| ProcessError::new(ProcessErrorCode::InvalidBytes, "fake control"))?;
+            let token = self.token(execution_id);
+            if fields.first().map(String::as_str) != Some("AGL2")
+                || fields.get(1).map(String::as_str) != Some(token.expose_to_managed_startup())
+            {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "fake control authentication failed",
+                ));
+            }
+            let mut integrations = self.integrations.lock().unwrap();
+            let integration = integrations.get_mut(execution_id).unwrap();
+            self.controls
+                .lock()
+                .unwrap()
+                .push((execution_id.clone(), fields.clone()));
+            match fields.get(2).map(String::as_str) {
+                Some("arm_typed_command") => {
+                    integration.armed_transaction = fields.get(3).cloned();
+                }
+                Some("disarm_typed_command") => {
+                    if integration.armed_transaction.as_ref() == fields.get(3) {
+                        integration.armed_transaction = None;
+                    }
+                }
+                Some("command_boundary_ack") | Some("prompt_ready_ack") => {}
+                _ => {
+                    return Err(ProcessError::new(
+                        ProcessErrorCode::StateConflict,
+                        "fake control kind is unsupported",
+                    ));
+                }
+            }
+            let output_through_sequence = integration.last_read_output_sequence;
+            drop(integrations);
+            Ok(output_through_sequence)
         }
 
         fn attach(
@@ -2433,17 +3235,27 @@ mod tests {
                     "fake terminal already has a writable lease",
                 ));
             }
-            leases.insert(execution_id.clone(), attachment_id.clone());
+            let writer_lease_id = WriterLeaseId::generate();
+            leases.insert(
+                execution_id.clone(),
+                (attachment_id.clone(), writer_lease_id.clone()),
+            );
             Ok(InputLease {
                 attachment_id,
-                writable: true,
+                writer_lease_id: Some(writer_lease_id),
             })
         }
 
         fn detach(&self, execution_id: &ExecutionId, lease: InputLease) -> Result<()> {
             self.status(execution_id)?;
             let mut leases = self.writable_leases.lock().unwrap();
-            if leases.get(execution_id) == Some(&lease.attachment_id) {
+            if leases
+                .get(execution_id)
+                .is_some_and(|(attachment_id, writer_lease_id)| {
+                    attachment_id == &lease.attachment_id
+                        && lease.writer_lease_id.as_ref() == Some(writer_lease_id)
+                })
+            {
                 leases.remove(execution_id);
                 Ok(())
             } else {
@@ -2456,7 +3268,15 @@ mod tests {
 
         fn renew_input_lease(&self, execution_id: &ExecutionId, lease: InputLease) -> Result<()> {
             self.status(execution_id)?;
-            if self.writable_leases.lock().unwrap().get(execution_id) == Some(&lease.attachment_id)
+            if self
+                .writable_leases
+                .lock()
+                .unwrap()
+                .get(execution_id)
+                .is_some_and(|(attachment_id, writer_lease_id)| {
+                    attachment_id == &lease.attachment_id
+                        && lease.writer_lease_id.as_ref() == Some(writer_lease_id)
+                })
             {
                 Ok(())
             } else {
@@ -2472,27 +3292,57 @@ mod tests {
             execution_id: &ExecutionId,
             lease: InputLease,
             bytes: ProcessBytes,
+            eof: bool,
         ) -> Result<()> {
+            if eof {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::InvalidRequest,
+                    "fake managed terminal does not accept an EOF write",
+                ));
+            }
             self.renew_input_lease(execution_id, lease)?;
             let bytes = bytes.decode(MAX_AGENT_TERMINAL_COMMAND_BYTES + 1)?;
             self.writes
                 .lock()
                 .unwrap()
                 .push((execution_id.clone(), bytes.clone()));
+            if self
+                .integrations
+                .lock()
+                .unwrap()
+                .get(execution_id)
+                .is_none_or(|integration| integration.armed_transaction.is_none())
+            {
+                return Ok(());
+            }
             let command = std::str::from_utf8(&bytes)
                 .map_err(|_| ProcessError::new(ProcessErrorCode::InvalidBytes, "fake input"))?
-                .strip_suffix('\n')
+                .strip_prefix("\u{1b}[200~")
+                .and_then(|command| command.strip_suffix("\u{1b}[201~\n"))
                 .ok_or_else(|| {
-                    ProcessError::new(ProcessErrorCode::InvalidRequest, "fake missing newline")
+                    ProcessError::new(
+                        ProcessErrorCode::InvalidRequest,
+                        "fake missing typed bracketed-paste barrier",
+                    )
                 })?
                 .to_owned();
             let status = self.status(execution_id)?;
             let output_before = status.last_sequence;
             let cwd = status.cwd.to_string_lossy().into_owned();
+            let transaction = {
+                let mut integrations = self.integrations.lock().unwrap();
+                let integration = integrations.get_mut(execution_id).unwrap();
+                let transaction = integration
+                    .armed_transaction
+                    .take()
+                    .unwrap_or_else(|| "-".to_owned());
+                integration.active_transaction = (transaction != "-").then(|| transaction.clone());
+                transaction
+            };
             self.push_event(
                 execution_id,
                 "command_started",
-                &[command, cwd.clone()],
+                &[transaction.clone(), command, cwd.clone()],
                 output_before,
             );
             if self.command_behavior.load(Ordering::Acquire) == FAKE_COMMAND_COMPLETE {
@@ -2500,13 +3350,19 @@ mod tests {
                 self.push_event(
                     execution_id,
                     "command_finished",
-                    &["code".to_owned(), "0".to_owned(), cwd.clone()],
+                    &[transaction, "code".to_owned(), "0".to_owned(), cwd.clone()],
                     output_after,
                 );
+                self.integrations
+                    .lock()
+                    .unwrap()
+                    .get_mut(execution_id)
+                    .unwrap()
+                    .active_transaction = None;
                 self.push_event(
                     execution_id,
                     "prompt_ready",
-                    &[cwd, "0".to_owned()],
+                    &[cwd, "0".to_owned(), "0".to_owned()],
                     output_after,
                 );
             }
@@ -2519,16 +3375,34 @@ mod tests {
             if self.command_behavior.load(Ordering::Acquire) == FAKE_COMMAND_FINISH_ON_INTERRUPT {
                 let cwd = status.cwd.to_string_lossy().into_owned();
                 let output_after = status.last_sequence + 7;
+                let transaction = self
+                    .integrations
+                    .lock()
+                    .unwrap()
+                    .get(execution_id)
+                    .and_then(|integration| integration.active_transaction.clone())
+                    .unwrap_or_else(|| "-".to_owned());
                 self.push_event(
                     execution_id,
                     "command_finished",
-                    &["code".to_owned(), "130".to_owned(), cwd.clone()],
+                    &[
+                        transaction,
+                        "code".to_owned(),
+                        "130".to_owned(),
+                        cwd.clone(),
+                    ],
                     output_after,
                 );
+                self.integrations
+                    .lock()
+                    .unwrap()
+                    .get_mut(execution_id)
+                    .unwrap()
+                    .active_transaction = None;
                 self.push_event(
                     execution_id,
                     "prompt_ready",
-                    &[cwd, "130".to_owned()],
+                    &[cwd, "130".to_owned(), "0".to_owned()],
                     output_after,
                 );
             }
@@ -2568,15 +3442,19 @@ mod tests {
             let integration = integrations.get_mut(execution_id).unwrap();
             integration.next_event_sequence += 1;
             let sequence = integration.next_event_sequence.to_string();
-            for field in std::iter::once("AGL1")
+            let mut packet = Vec::new();
+            for field in std::iter::once("AGL2")
                 .chain(std::iter::once(token.expose_to_managed_startup()))
                 .chain(std::iter::once(sequence.as_str()))
                 .chain(std::iter::once(kind))
                 .chain(fields.iter().map(String::as_str))
             {
-                integration.buffered.extend(field.as_bytes());
-                integration.buffered.push_back(0);
+                packet.extend_from_slice(field.as_bytes());
+                packet.push(0);
             }
+            integration
+                .packets
+                .push_back((packet, output_through_sequence));
             integration.output_through_sequence = output_through_sequence;
             drop(integrations);
             self.records
@@ -2618,6 +3496,25 @@ mod tests {
                 .iter()
                 .map(|(_, bytes)| bytes.clone())
                 .collect()
+        }
+
+        fn controls(&self, execution_id: &ExecutionId) -> Vec<Vec<String>> {
+            self.controls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(found, _)| found == execution_id)
+                .map(|(_, fields)| fields.clone())
+                .collect()
+        }
+
+        fn close_integration(&self, execution_id: &ExecutionId) {
+            self.integrations
+                .lock()
+                .unwrap()
+                .get_mut(execution_id)
+                .unwrap()
+                .channel_closed = true;
         }
 
         fn set_state(&self, execution_id: &ExecutionId, state: ExecutionState) {
@@ -3422,7 +4319,7 @@ mod tests {
             first_registry.execute_agent_command(
                 first_request,
                 "printf '%s' first".to_owned(),
-                Some(Instant::now() + Duration::from_secs(2)),
+                Some(Instant::now() + Duration::from_secs(10)),
             )
         });
         let second_registry = registry.clone();
@@ -3430,7 +4327,7 @@ mod tests {
             second_registry.execute_agent_command(
                 second_request,
                 "pwd && printf '%s' second".to_owned(),
-                Some(Instant::now() + Duration::from_secs(2)),
+                Some(Instant::now() + Duration::from_secs(10)),
             )
         });
         let first = first.join().unwrap().unwrap();
@@ -3450,8 +4347,8 @@ mod tests {
         assert_eq!(
             writes,
             vec![
-                b"printf '%s' first\n".to_vec(),
-                b"pwd && printf '%s' second\n".to_vec(),
+                b"\x1b[200~printf '%s' first\x1b[201~\n".to_vec(),
+                b"\x1b[200~pwd && printf '%s' second\x1b[201~\n".to_vec(),
             ]
         );
         assert_eq!(starter.starts.load(Ordering::Relaxed), 1);
@@ -3660,21 +4557,23 @@ mod tests {
         append_integration_frame(
             &mut frames,
             &[
-                "AGL1",
+                "AGL2",
                 token.expose_to_managed_startup(),
                 "1",
                 "prompt_ready",
                 root.to_str().unwrap(),
                 "-",
+                "0",
             ],
         );
         append_integration_frame(
             &mut frames,
             &[
-                "AGL1",
+                "AGL2",
                 token.expose_to_managed_startup(),
                 "2",
                 "command_started",
+                "-",
                 "cd child",
                 root.to_str().unwrap(),
             ],
@@ -3696,10 +4595,11 @@ mod tests {
         append_integration_frame(
             &mut escape,
             &[
-                "AGL1",
+                "AGL2",
                 token.expose_to_managed_startup(),
                 "3",
                 "command_finished",
+                "-",
                 "code",
                 "0",
                 outside.to_str().unwrap(),
@@ -3893,7 +4793,11 @@ mod tests {
         starter.push_event(
             &terminal.execution_id,
             "command_started",
-            &["sleep 10".to_owned(), root.to_string_lossy().into_owned()],
+            &[
+                "-".to_owned(),
+                "sleep 10".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
             3,
         );
         starter.set_foreground_process_group(&terminal.execution_id, Some(4242));
@@ -3938,6 +4842,7 @@ mod tests {
             &terminal.execution_id,
             "command_finished",
             &[
+                "-".to_owned(),
                 "code".to_owned(),
                 "0".to_owned(),
                 root.to_string_lossy().into_owned(),
@@ -3947,16 +4852,24 @@ mod tests {
         starter.push_event(
             &terminal.execution_id,
             "prompt_ready",
-            &[root.to_string_lossy().into_owned(), "0".to_owned()],
+            &[
+                root.to_string_lossy().into_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
             5,
         );
-        let completed = registry
+        let finished = registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let prompt = registry
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         assert_eq!(
-            completed
+            finished
                 .events
                 .iter()
+                .chain(prompt.events.iter())
                 .map(ShellIntegrationEvent::sequence)
                 .collect::<Vec<_>>(),
             vec![5, 6]
@@ -3967,6 +4880,524 @@ mod tests {
                 .unwrap()
                 .prompt_state
                 .is_trusted_ready()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn human_command_admission_is_prompt_generation_gated_and_never_queued() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        let admission = registry
+            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .unwrap();
+        assert_eq!(admission.command_sequence, 1);
+        assert_eq!(
+            admission.submission.decode(128).unwrap(),
+            b"\x1b[200~pwd\x1b[201~\n"
+        );
+        assert_eq!(
+            registry
+                .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "echo queued")
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::StateConflict
+        );
+        assert_eq!(
+            registry
+                .admit_human_command(&SessionId::generate(), &terminal.terminal_id, 0, 1, "pwd",)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotOwned
+        );
+
+        let transaction_id = registry.lock().unwrap().terminals[&terminal.terminal_id]
+            .pending_human_command
+            .as_ref()
+            .unwrap()
+            .transaction_id
+            .as_str()
+            .to_owned();
+        starter.push_event(
+            &terminal.execution_id,
+            "command_started",
+            &[
+                transaction_id,
+                "pwd".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
+            1,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        assert_eq!(
+            registry
+                .admit_human_command(&session_id, &terminal.terminal_id, 1, 1, "echo busy")
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::StateConflict
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prompt_probe_with_pending_input_never_installs_a_fresh_generation() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        {
+            let mut integrations = starter.integrations.lock().unwrap();
+            let integration = integrations.get_mut(&terminal.execution_id).unwrap();
+            integration.packets.clear();
+            integration.next_event_sequence = 0;
+        }
+        starter.push_event(
+            &terminal.execution_id,
+            "prompt_ready",
+            &[
+                root.to_string_lossy().into_owned(),
+                "-".to_owned(),
+                "1".to_owned(),
+            ],
+            0,
+        );
+
+        let batch = registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        assert!(matches!(
+            batch.events.as_slice(),
+            [ShellIntegrationEvent::PromptReady {
+                input_pending: true,
+                ..
+            }]
+        ));
+        let record = registry.record(&terminal.terminal_id).unwrap();
+        assert_eq!(record.prompt_state, TerminalPromptState::Unknown);
+        assert_eq!(record.integration_health, ShellIntegrationHealth::Trusted);
+        let controls = starter.controls(&terminal.execution_id);
+        assert!(controls.iter().any(|fields| {
+            fields.get(2).map(String::as_str) == Some("prompt_ready_ack")
+                && fields.get(4).map(String::as_str) == Some("-")
+        }));
+        assert_eq!(
+            registry
+                .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::StateConflict
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn raw_foreground_exit_reprobes_before_restoring_trusted_prompt() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let lease = starter
+            .attach(&terminal.execution_id, RequestId::generate())
+            .unwrap();
+
+        registry
+            .write_raw_human_input_if_managed(
+                &terminal.execution_id,
+                lease.clone(),
+                ProcessBytes::from_bytes(b"foreground-app\n"),
+                false,
+            )
+            .unwrap();
+        starter.push_event(
+            &terminal.execution_id,
+            "command_started",
+            &[
+                "-".to_owned(),
+                "foreground-app".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        starter.set_foreground_process_group(&terminal.execution_id, Some(4242));
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        registry
+            .write_raw_human_input_if_managed(
+                &terminal.execution_id,
+                lease,
+                ProcessBytes::from_bytes(b"application-input"),
+                false,
+            )
+            .unwrap();
+        starter.set_foreground_process_group(&terminal.execution_id, None);
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        starter.push_event(
+            &terminal.execution_id,
+            "command_finished",
+            &[
+                "-".to_owned(),
+                "code".to_owned(),
+                "0".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        starter.push_event(
+            &terminal.execution_id,
+            "prompt_ready",
+            &[
+                root.to_string_lossy().into_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        assert_eq!(
+            registry.record(&terminal.terminal_id).unwrap().prompt_state,
+            TerminalPromptState::Unknown
+        );
+
+        starter.push_event(
+            &terminal.execution_id,
+            "prompt_ready",
+            &[
+                root.to_string_lossy().into_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let record = registry.record(&terminal.terminal_id).unwrap();
+        let TerminalPromptState::Ready {
+            sequence: prompt_generation,
+            ..
+        } = record.prompt_state
+        else {
+            panic!("bounded clean re-probe did not restore a trusted prompt");
+        };
+        registry
+            .admit_human_command(
+                &session_id,
+                &terminal.terminal_id,
+                1,
+                prompt_generation,
+                "pwd",
+            )
+            .unwrap();
+        let controls = starter.controls(&terminal.execution_id);
+        assert!(controls.iter().any(|fields| {
+            fields.get(2).map(String::as_str) == Some("prompt_ready_ack")
+                && fields.get(4).map(String::as_str) == Some("-")
+        }));
+        assert!(controls.iter().any(|fields| {
+            fields.get(2).map(String::as_str) == Some("prompt_ready_ack")
+                && fields.get(4).is_some_and(|generation| generation != "-")
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn raw_write_racing_prompt_reprobe_never_installs_generation() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let lease = starter
+            .attach(&terminal.execution_id, RequestId::generate())
+            .unwrap();
+
+        registry
+            .write_raw_human_input_if_managed(
+                &terminal.execution_id,
+                lease.clone(),
+                ProcessBytes::from_bytes(b"first"),
+                false,
+            )
+            .unwrap();
+        starter.push_event(
+            &terminal.execution_id,
+            "prompt_ready",
+            &[
+                root.to_string_lossy().into_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        registry
+            .write_raw_human_input_if_managed(
+                &terminal.execution_id,
+                lease,
+                ProcessBytes::from_bytes(b"raced"),
+                false,
+            )
+            .unwrap();
+        starter.push_event(
+            &terminal.execution_id,
+            "prompt_ready",
+            &[
+                root.to_string_lossy().into_owned(),
+                "0".to_owned(),
+                "0".to_owned(),
+            ],
+            0,
+        );
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        assert_eq!(
+            registry.record(&terminal.terminal_id).unwrap().prompt_state,
+            TerminalPromptState::Unknown
+        );
+        assert_eq!(
+            registry
+                .admit_human_command(&session_id, &terminal.terminal_id, 0, 3, "pwd")
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::StateConflict
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mismatched_typed_start_gets_no_ack_and_kills_the_terminal() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        registry
+            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .unwrap();
+        let transaction_id = registry.lock().unwrap().terminals[&terminal.terminal_id]
+            .pending_human_command
+            .as_ref()
+            .unwrap()
+            .transaction_id
+            .as_str()
+            .to_owned();
+        starter.push_event(
+            &terminal.execution_id,
+            "command_started",
+            &[
+                transaction_id,
+                "printf wrong".to_owned(),
+                root.to_string_lossy().into_owned(),
+            ],
+            1,
+        );
+
+        let batch = registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        assert_eq!(batch.notice.unwrap().code, "shell_integration_degraded");
+        assert_eq!(starter.kills.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            registry.record(&terminal.terminal_id).unwrap().state,
+            TerminalState::Stopping
+        );
+        assert!(
+            !starter
+                .controls(&terminal.execution_id)
+                .iter()
+                .any(|fields| {
+                    fields.get(2).map(String::as_str) == Some("command_boundary_ack")
+                })
+        );
+        assert!(starter.written_commands().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn integration_loss_while_armed_kills_before_typed_execution() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = TerminalRegistry::with_starter(
+            starter.clone(),
+            Arc::new(NoSecrets),
+            Arc::new(crate::InMemoryTerminalRepository::new()),
+        )
+        .unwrap();
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        registry
+            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .unwrap();
+        starter.close_integration(&terminal.execution_id);
+
+        let batch = registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+
+        assert_eq!(batch.notice.unwrap().code, "shell_integration_degraded");
+        assert_eq!(starter.kills.load(Ordering::Relaxed), 1);
+        assert!(starter.written_commands().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_raw_and_typed_human_input_have_exactly_one_writer() {
+        let starter = Arc::new(FakeStarter::default());
+        let registry = Arc::new(
+            TerminalRegistry::with_starter(
+                starter.clone(),
+                Arc::new(NoSecrets),
+                Arc::new(crate::InMemoryTerminalRepository::new()),
+            )
+            .unwrap(),
+        );
+        let (root, context, shell) = fixture();
+        let session_id = SessionId::generate();
+        let terminal = registry
+            .ensure_terminal(ensure_request(session_id.clone(), context, shell))
+            .unwrap();
+        registry
+            .poll_private_integration(&terminal.terminal_id, 4096)
+            .unwrap();
+        let lease = starter
+            .attach(&terminal.execution_id, RequestId::generate())
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let raw_registry = Arc::clone(&registry);
+        let raw_execution_id = terminal.execution_id.clone();
+        let raw_lease = lease.clone();
+        let raw_barrier = Arc::clone(&barrier);
+        let raw = std::thread::spawn(move || {
+            raw_barrier.wait();
+            raw_registry.write_raw_human_input_if_managed(
+                &raw_execution_id,
+                raw_lease,
+                ProcessBytes::from_bytes(b"raw-winner\n"),
+                false,
+            )
+        });
+
+        let typed_registry = Arc::clone(&registry);
+        let typed_session_id = session_id.clone();
+        let typed_terminal_id = terminal.terminal_id.clone();
+        let typed_execution_id = terminal.execution_id.clone();
+        let typed_lease = lease;
+        let typed_barrier = Arc::clone(&barrier);
+        let typed = std::thread::spawn(move || {
+            typed_barrier.wait();
+            let admission = typed_registry.admit_human_command(
+                &typed_session_id,
+                &typed_terminal_id,
+                0,
+                1,
+                "typed-winner",
+            )?;
+            typed_registry.write_admitted_human_command(
+                &typed_terminal_id,
+                &typed_execution_id,
+                admission.command_sequence,
+                typed_lease,
+                admission.submission,
+            )
+        });
+
+        barrier.wait();
+        let raw = raw.join().unwrap();
+        let typed = typed.join().unwrap();
+        assert_eq!(usize::from(raw.is_ok()) + usize::from(typed.is_ok()), 1);
+        if let Err(error) = &raw {
+            assert_eq!(error.code(), ProcessErrorCode::StateConflict);
+        }
+        if let Err(error) = &typed {
+            assert_eq!(error.code(), ProcessErrorCode::StateConflict);
+        }
+
+        let writes = starter.written_commands();
+        assert_eq!(writes.len(), 1, "losing input path wrote physical bytes");
+        assert!(
+            writes[0] == b"raw-winner\n" || writes[0] == b"\x1b[200~typed-winner\x1b[201~\n",
+            "winning transaction was altered or concatenated: {:?}",
+            writes[0]
         );
         std::fs::remove_dir_all(root).unwrap();
     }

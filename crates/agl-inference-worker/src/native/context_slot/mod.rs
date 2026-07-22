@@ -15,7 +15,7 @@ use agl_ids::AttemptId;
 use agl_oven::{RenderedMessage, RenderedModelRequest};
 use anyhow::{Context, Result, ensure};
 
-use crate::InferenceOutputSink;
+use agl_inference::InferenceOutputSink;
 
 use super::ffi;
 use super::generation::{
@@ -152,6 +152,14 @@ impl LlamaCppContextSlot {
 
     pub(crate) fn matches_config(&self, config: &ResolvedInferenceConfig) -> bool {
         self.runtime == config.runtime
+    }
+
+    pub(crate) fn main_context_ptr(&self) -> *mut std::ffi::c_void {
+        self.context.as_ptr()
+    }
+
+    pub(crate) fn draft_context_ptr(&self) -> Option<*mut std::ffi::c_void> {
+        self.mtp.as_ref().map(MtpState::draft_context_ptr)
     }
 
     pub(crate) fn reset_cache(

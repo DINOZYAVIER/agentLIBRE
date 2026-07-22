@@ -5,6 +5,8 @@ pub mod registry;
 pub mod repository;
 pub mod shell;
 
+pub use command::CommandCardSanitizer;
+
 pub use registry::{
     TerminalEnsureRequest, TerminalOwner, TerminalRecord, TerminalRegistry, TerminalState,
 };

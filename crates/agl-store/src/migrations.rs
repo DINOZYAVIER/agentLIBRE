@@ -5,7 +5,7 @@ pub struct StoreMigration {
     pub sql: &'static str,
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 16;
+pub const CURRENT_SCHEMA_VERSION: u32 = 17;
 
 pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     StoreMigration {
@@ -609,6 +609,126 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             );
             CREATE UNIQUE INDEX terminal_sessions_active_slot_unique_idx
                 ON terminal_sessions(slot_key) WHERE active_slot = 1;
+        "#,
+    },
+    StoreMigration {
+        version: 17,
+        name: "017_incomplete_run_state",
+        sql: r#"
+            PRAGMA legacy_alter_table = ON;
+            ALTER TABLE runs RENAME TO runs_v16;
+
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                kind TEXT NOT NULL CHECK (kind IN ('turn', 'cron', 'subagent')),
+                state TEXT NOT NULL CHECK (state IN (
+                    'queued', 'running', 'waiting', 'succeeded', 'incomplete',
+                    'failed', 'cancelled'
+                )),
+                priority INTEGER NOT NULL,
+                input_json TEXT NOT NULL,
+                checkpoint_json TEXT,
+                effective_policy_hash TEXT,
+                budget_json TEXT NOT NULL,
+                usage_json TEXT NOT NULL,
+                lease_owner TEXT,
+                lease_generation INTEGER NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+                lease_expires_at_ms INTEGER,
+                cancellation_requested_at_ms INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                not_before_ms INTEGER,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                started_at_ms INTEGER,
+                finished_at_ms INTEGER,
+                terminal_result_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                parent_run_id TEXT REFERENCES runs(id),
+                root_run_id TEXT REFERENCES runs(id),
+                depth INTEGER NOT NULL DEFAULT 0 CHECK (depth >= 0),
+                subagent_id TEXT,
+                spawned_by_step_id TEXT REFERENCES run_steps(id),
+                child_spec_digest TEXT,
+                model_profile_digest TEXT,
+                result_delivered_at_ms INTEGER,
+                tree_usage_recorded_at_ms INTEGER,
+                delegation_budget_json TEXT,
+                delegation_reserved_descendants INTEGER NOT NULL DEFAULT 0,
+                delegation_reserved_output_tokens INTEGER NOT NULL DEFAULT 0,
+                delegation_used_output_tokens INTEGER NOT NULL DEFAULT 0,
+                execution_context_json TEXT,
+                concurrency_key TEXT,
+                CHECK ((session_id IS NULL) = (turn_id IS NULL)),
+                CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL))
+            );
+
+            INSERT INTO runs (
+                id, session_id, turn_id, kind, state, priority, input_json,
+                checkpoint_json, effective_policy_hash, budget_json, usage_json,
+                lease_owner, lease_generation, lease_expires_at_ms,
+                cancellation_requested_at_ms, attempts, not_before_ms,
+                created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
+                terminal_result_json, error_code, error_message, parent_run_id,
+                root_run_id, depth, subagent_id, spawned_by_step_id,
+                child_spec_digest, model_profile_digest, result_delivered_at_ms,
+                tree_usage_recorded_at_ms, delegation_budget_json,
+                delegation_reserved_descendants, delegation_reserved_output_tokens,
+                delegation_used_output_tokens, execution_context_json, concurrency_key
+            )
+            SELECT
+                id, session_id, turn_id, kind, state, priority, input_json,
+                checkpoint_json, effective_policy_hash, budget_json, usage_json,
+                lease_owner, lease_generation, lease_expires_at_ms,
+                cancellation_requested_at_ms, attempts, not_before_ms,
+                created_at_ms, updated_at_ms, started_at_ms, finished_at_ms,
+                terminal_result_json, error_code, error_message, parent_run_id,
+                root_run_id, depth, subagent_id, spawned_by_step_id,
+                child_spec_digest, model_profile_digest, result_delivered_at_ms,
+                tree_usage_recorded_at_ms, delegation_budget_json,
+                delegation_reserved_descendants, delegation_reserved_output_tokens,
+                delegation_used_output_tokens, execution_context_json, concurrency_key
+            FROM runs_v16;
+
+            DROP TABLE runs_v16;
+
+            CREATE INDEX runs_runnable_idx
+                ON runs(state, not_before_ms, priority DESC, created_at_ms);
+            CREATE INDEX runs_lease_idx
+                ON runs(state, lease_expires_at_ms);
+            CREATE INDEX runs_session_fifo_idx
+                ON runs(session_id, created_at_ms, state);
+            CREATE UNIQUE INDEX runs_spawn_step_unique_idx
+                ON runs(spawned_by_step_id) WHERE spawned_by_step_id IS NOT NULL;
+            CREATE INDEX runs_parent_idx ON runs(parent_run_id, created_at_ms);
+            CREATE INDEX runs_root_depth_idx ON runs(root_run_id, depth, created_at_ms);
+            CREATE INDEX runs_concurrency_fifo_idx
+                ON runs(concurrency_key, state, priority DESC, created_at_ms)
+                WHERE concurrency_key IS NOT NULL;
+
+            CREATE TRIGGER runs_subagent_insert_guard
+            BEFORE INSERT ON runs
+            WHEN (
+                NEW.kind = 'subagent' AND (
+                    NEW.session_id IS NOT NULL OR NEW.turn_id IS NOT NULL OR
+                    NEW.parent_run_id IS NULL OR NEW.root_run_id IS NULL OR
+                    NEW.depth <= 0 OR NEW.subagent_id IS NULL OR
+                    NEW.spawned_by_step_id IS NULL OR NEW.child_spec_digest IS NULL OR
+                    NEW.model_profile_digest IS NULL
+                )
+            ) OR (
+                NEW.kind != 'subagent' AND (
+                    NEW.parent_run_id IS NOT NULL OR NEW.depth != 0 OR
+                    NEW.subagent_id IS NOT NULL OR NEW.spawned_by_step_id IS NOT NULL OR
+                    NEW.child_spec_digest IS NOT NULL OR NEW.model_profile_digest IS NOT NULL
+                )
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid supervised subagent run shape');
+            END;
+            PRAGMA legacy_alter_table = OFF;
         "#,
     },
 ];

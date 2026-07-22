@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
 
-use agl_ids::{ExecutionId, RunId, SessionId, TerminalSessionId};
+use agl_ids::{ExecutionId, RunId, SessionId, TerminalSessionId, WriterLeaseId};
 use agl_process::{ExecutionExit, ExecutionProfile, ExecutionState, TerminalSize};
 use serde::{Deserialize, Serialize};
 
-use crate::{ApplicationError, ApplicationErrorCode};
+use crate::{ApplicationError, ApplicationErrorCode, SanitizedDisplayPath};
 
 pub const MAX_TERMINALS_PER_SESSION: usize = 128;
 pub const MAX_CLIENT_SUBMISSION_ID_BYTES: usize = 256;
@@ -133,6 +133,67 @@ pub struct HumanTerminalEnsure {
     pub host_startup: HostStartupPolicy,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanTerminalCommandSubmit {
+    pub session_id: SessionId,
+    pub terminal_id: TerminalSessionId,
+    pub client_submission_id: String,
+    pub writer_lease_id: WriterLeaseId,
+    pub expected_command_sequence: u64,
+    pub expected_prompt_generation: u64,
+    pub command: String,
+}
+
+impl Debug for HumanTerminalCommandSubmit {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HumanTerminalCommandSubmit")
+            .field("session_id", &self.session_id)
+            .field("terminal_id", &self.terminal_id)
+            .field("client_submission_id", &self.client_submission_id)
+            .field("writer_lease_present", &true)
+            .field("expected_command_sequence", &self.expected_command_sequence)
+            .field(
+                "expected_prompt_generation",
+                &self.expected_prompt_generation,
+            )
+            .field("command_bytes", &self.command.len())
+            .finish()
+    }
+}
+
+impl HumanTerminalCommandSubmit {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        validate_bounded_identifier(
+            &self.client_submission_id,
+            MAX_CLIENT_SUBMISSION_ID_BYTES,
+            "client submission ID",
+        )?;
+        if self.command.is_empty()
+            || self.command.len() > crate::MAX_HUMAN_COMMAND_BYTES
+            || self.command.chars().any(|character| {
+                let code = character as u32;
+                (code <= 0x1f && character != '\n' && character != '\t')
+                    || (0x7f..=0x9f).contains(&code)
+            })
+        {
+            return invalid(
+                "Human terminal command must be nonempty, bounded UTF-8 without unsafe controls",
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanTerminalCommandAccepted {
+    pub terminal_id: TerminalSessionId,
+    pub command_sequence: u64,
+    pub output_after_sequence: u64,
+}
+
 impl HumanTerminalEnsure {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         validate_bounded_identifier(
@@ -162,7 +223,7 @@ impl HumanTerminalEnsure {
 #[serde(deny_unknown_fields)]
 pub struct ShellProfileView {
     pub profile_id: String,
-    pub program: String,
+    pub program: SanitizedDisplayPath,
     pub executable_digest: String,
     pub config_digest: String,
 }
@@ -174,7 +235,7 @@ impl ShellProfileView {
             MAX_SHELL_PROFILE_ID_BYTES,
             "shell profile ID",
         )?;
-        validate_path(&self.program, "shell program")?;
+        self.program.validate()?;
         validate_digest(&self.executable_digest, "shell executable digest")?;
         validate_digest(&self.config_digest, "shell configuration digest")?;
         Ok(())
@@ -228,11 +289,12 @@ pub struct TerminalSessionView {
     pub owner: TerminalOwnerView,
     pub profile: ExecutionProfile,
     pub shell: ShellProfileView,
-    pub workspace_root: String,
-    pub cwd: String,
+    pub workspace_root: SanitizedDisplayPath,
+    pub cwd: SanitizedDisplayPath,
     pub initial_environment_digest: String,
     pub environment_names: Vec<String>,
     pub command_sequence: u64,
+    pub prompt_generation: Option<u64>,
     pub prompt_state: TerminalPromptState,
     pub process_state: ExecutionState,
     pub exit: Option<ExecutionExit>,
@@ -243,8 +305,8 @@ pub struct TerminalSessionView {
 impl TerminalSessionView {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         self.shell.validate()?;
-        validate_path(&self.workspace_root, "terminal workspace root")?;
-        validate_path(&self.cwd, "terminal working directory")?;
+        self.workspace_root.validate()?;
+        self.cwd.validate()?;
         validate_digest(
             &self.initial_environment_digest,
             "initial environment digest",
@@ -269,6 +331,13 @@ impl TerminalSessionView {
         }
         if self.process_state.is_live() && self.exit.is_some() {
             return invalid("a live terminal cannot carry a process exit outcome");
+        }
+        if matches!(self.prompt_state, TerminalPromptState::Ready)
+            != self.prompt_generation.is_some()
+        {
+            return invalid(
+                "terminal prompt generation must be present exactly for a trusted ready prompt",
+            );
         }
         Ok(())
     }
@@ -342,13 +411,6 @@ fn validate_bounded_identifier(
 ) -> Result<(), ApplicationError> {
     if value.is_empty() || value.len() > maximum_bytes || value.contains(['\0', '\n', '\r']) {
         return invalid(format!("{label} must be nonempty bounded single-line text"));
-    }
-    Ok(())
-}
-
-fn validate_path(value: &str, label: &str) -> Result<(), ApplicationError> {
-    if value.is_empty() || value.len() > MAX_TERMINAL_PATH_BYTES || value.contains('\0') {
-        return invalid(format!("{label} must be nonempty bounded text without NUL"));
     }
     Ok(())
 }

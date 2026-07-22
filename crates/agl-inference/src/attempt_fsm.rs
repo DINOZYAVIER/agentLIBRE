@@ -172,7 +172,7 @@ fn next_phase(
         (
             ResponseRecorded,
             FinishAttempt {
-                status: InferenceFinishStatus::Succeeded,
+                status: InferenceFinishStatus::Succeeded | InferenceFinishStatus::IncompleteOutput,
             },
         ) => Some(Finished),
         (
@@ -268,6 +268,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.to, InferenceAttemptPhase::Finished);
+    }
+
+    #[test]
+    fn accepts_incomplete_output_without_relabeling_it_succeeded() {
+        let mut machine = machine();
+        machine
+            .apply(InferenceAttemptTransition::StartAttempt {
+                backend: "llama_cpp".to_string(),
+                request_path: PathBuf::from("request.json"),
+            })
+            .unwrap();
+        machine
+            .apply(InferenceAttemptTransition::RecordRequest {
+                path: PathBuf::from("request.json"),
+            })
+            .unwrap();
+        machine
+            .apply(InferenceAttemptTransition::StartRuntime)
+            .unwrap();
+        machine
+            .apply(InferenceAttemptTransition::RecordRuntimeLog {
+                path: PathBuf::from("runtime.log"),
+            })
+            .unwrap();
+        machine
+            .apply(InferenceAttemptTransition::RecordResponse {
+                path: PathBuf::from("response.json"),
+            })
+            .unwrap();
+        let record = machine
+            .apply(InferenceAttemptTransition::FinishAttempt {
+                status: InferenceFinishStatus::IncompleteOutput,
+            })
+            .unwrap();
+
+        assert_eq!(record.to, InferenceAttemptPhase::Finished);
+        assert!(matches!(
+            record.transition,
+            InferenceAttemptTransition::FinishAttempt {
+                status: InferenceFinishStatus::IncompleteOutput
+            }
+        ));
+        assert!(!matches!(
+            record.transition,
+            InferenceAttemptTransition::FinishAttempt {
+                status: InferenceFinishStatus::Succeeded
+            }
+        ));
     }
 
     #[test]
