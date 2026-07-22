@@ -16,5 +16,6 @@ fi
 "$script_dir/test.sh"
 "$script_dir/fsm-boundaries.sh"
 "$script_dir/install-bundle-dry-run.sh"
+"$script_dir/uninstall-bundle.sh"
 "$script_dir/systemd-dry-run.sh"
 "$script_dir/diff-check.sh"

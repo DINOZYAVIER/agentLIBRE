@@ -43,6 +43,8 @@ stage_root="$install_root/libexec/agentlibre/generations/.staging.DRY-RUN/.cargo
   ci_fail "install plan omitted Nix GC portability for external ELF references: $output"
 [[ "$output" == *"publish complete generation through $install_root/libexec/agentlibre/current"* ]] ||
   ci_fail "install plan omitted the atomic current publication: $output"
+[[ "$output" == *"reconcile an exact preserved agentlibre-daemon.service/socket pair after publication"* ]] ||
+  ci_fail "install plan omitted standard user-unit reconciliation: $output"
 
 launcher_line="$(printf '%s\n' "$output" | grep -n -F -- "$launcher_command" | cut -d: -f1)"
 worker_line="$(printf '%s\n' "$output" | grep -n -F -- "$worker_command" | cut -d: -f1)"
@@ -65,6 +67,8 @@ default_output="$(
   ci_fail "install plan did not resolve an explicit default root: $default_output"
 
 fake_bin="$tmp_dir/fake-bin"
+fake_systemd_state="$tmp_dir/fake-systemd-state"
+fake_systemctl_log="$tmp_dir/install-systemctl.log"
 llama_bin="$tmp_dir/llama/bin"
 fake_target="$tmp_dir/fake-target"
 fake_bundle_digest="$(printf 'a%.0s' {1..64})"
@@ -75,8 +79,49 @@ case "$(uname -m)" in
   aarch64) fake_dynamic_linker="/lib/ld-linux-aarch64.so.1" ;;
   *) ci_fail "unsupported fixture architecture: $(uname -m)" ;;
 esac
-mkdir -p "$fake_bin" "$llama_bin" "$fake_native_bundle" "$fake_other_bundle"
+mkdir -p "$fake_bin" "$fake_systemd_state" "$llama_bin" "$fake_native_bundle" "$fake_other_bundle"
 printf 'unselected build variant\n' >"$fake_other_bundle/not-a-runtime-library"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf '\''%q '\'' "$@" >>"${FAKE_SYSTEMCTL_LOG:?}"' \
+  'printf '\''\n'\'' >>"$FAKE_SYSTEMCTL_LOG"' \
+  '[[ "${1:-}" == --user ]] || exit 64' \
+  'shift' \
+  'command_name="${1:-}"' \
+  'shift || true' \
+  '[[ "${FAKE_SYSTEMCTL_FAIL_COMMAND:-}" != "$command_name" ]] || exit 1' \
+  'case "$command_name" in' \
+  '  show)' \
+  '    unit="${1:?missing unit}"' \
+  '    unit_file="${FAKE_SYSTEMD_UNIT_DIR:?}/$unit"' \
+  '    if [[ -f "$unit_file" ]]; then fragment="$unit_file"; else fragment=""; fi' \
+  '    exec_start=""' \
+  '    if [[ "$unit" == agentlibre-daemon.service && -f "$unit_file" ]]; then' \
+  '      command_line="$(sed -n '\''s/^ExecStart="\([^\"]*\)" \(.*\)$/\1 \2/p'\'' "$unit_file")"' \
+  '      executable="${command_line%% *}"' \
+  '      exec_start="{ path=$executable ; argv[]=$command_line ; ignore_errors=no ; }"' \
+  '    fi' \
+  '    printf '\''FragmentPath=%s\nDropInPaths=%s\nExecStart=%s\n'\'' "$fragment" "${FAKE_SYSTEMCTL_DROPINS:-}" "$exec_start"' \
+  '    ;;' \
+  '  daemon-reload | reset-failed) ;;' \
+  '  start)' \
+  '    for unit in "$@"; do printf active >"${FAKE_SYSTEMD_STATE:?}/$unit"; done' \
+  '    ;;' \
+  '  try-restart)' \
+  '    for unit in "$@"; do' \
+  '      state="$(cat "${FAKE_SYSTEMD_STATE:?}/$unit" 2>/dev/null || printf inactive)"' \
+  '      [[ "$state" != active ]] || printf active >"${FAKE_SYSTEMD_STATE:?}/$unit"' \
+  '    done' \
+  '    ;;' \
+  '  is-active)' \
+  '    [[ "${1:-}" == --quiet ]] && shift' \
+  '    [[ "$(cat "${FAKE_SYSTEMD_STATE:?}/${1:?missing unit}" 2>/dev/null || printf inactive)" == active ]]' \
+  '    ;;' \
+  '  *) exit 64 ;;' \
+  'esac' \
+  >"$fake_bin/systemctl"
+chmod 0755 "$fake_bin/systemctl"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
@@ -149,22 +194,61 @@ seed_regular_pair() {
   write_bundle_binary "$root/bin/agl-process-launcher" "$label"
 }
 
+seed_obsolete_managed_generation() {
+  local root="$1"
+  local label="$2"
+  local generation="$root/libexec/agentlibre/generations/generation-obsolete"
+  mkdir -p "$root/bin" "$generation"
+  write_bundle_binary "$generation/agl" "$label"
+  write_bundle_binary "$generation/agl-process-launcher" "$label"
+  chmod 0555 "$generation/agl" "$generation/agl-process-launcher" "$generation"
+  ln -s -- "generations/generation-obsolete" "$root/libexec/agentlibre/current"
+  ln -s -- "../libexec/agentlibre/current/agl" "$root/bin/agl"
+  ln -s -- "../libexec/agentlibre/current/agl-process-launcher" \
+    "$root/bin/agl-process-launcher"
+}
+
 run_fake_installer() {
   local root="$1"
   shift
   env \
     PATH="$fake_bin:$PATH" \
     HOME="$tmp_dir/home" \
+    XDG_CONFIG_HOME="$tmp_dir/home/.config" \
     XDG_STATE_HOME="$tmp_dir/state" \
     AGL_LLAMA_CPP_BUILD_DIR="$tmp_dir/llama" \
     FAKE_BUNDLE_DIGEST="$fake_bundle_digest" \
     FAKE_DYNAMIC_LINKER="$fake_dynamic_linker" \
+    FAKE_SYSTEMD_STATE="$fake_systemd_state" \
+    FAKE_SYSTEMD_UNIT_DIR="$tmp_dir/home/.config/systemd/user" \
+    FAKE_SYSTEMCTL_LOG="$fake_systemctl_log" \
     CARGO_TARGET_DIR="$fake_target" \
     "$@" \
     scripts/install-agl-cargo.sh \
       --root "$root" \
       --skip-submodules \
       --skip-llama-build
+}
+
+seed_standard_systemd_units() {
+  local root="$1"
+  local unit_dir="$tmp_dir/home/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  cat >"$unit_dir/agentlibre-daemon.service" <<EOF
+[Unit]
+Requires=agentlibre-daemon.socket
+After=agentlibre-daemon.socket
+[Service]
+ExecStart="$root/bin/agl" serve --systemd-activation --config /tmp/local.toml
+EOF
+  cat >"$unit_dir/agentlibre-daemon.socket" <<'EOF'
+[Socket]
+Accept=no
+Service=agentlibre-daemon.service
+EOF
+  chmod 0644 \
+    "$unit_dir/agentlibre-daemon.service" \
+    "$unit_dir/agentlibre-daemon.socket"
 }
 
 assert_current_complete() {
@@ -364,6 +448,38 @@ assert_surface_label "$unmanaged_root" old
 [[ -z "$(find "$unmanaged_root/libexec/agentlibre/generations" -mindepth 1 -print -quit)" ]] ||
   ci_fail "unmanaged rejection unexpectedly staged a generation"
 
+obsolete_root="$tmp_dir/obsolete-managed-generation"
+seed_obsolete_managed_generation "$obsolete_root" old
+obsolete_generation="$obsolete_root/libexec/agentlibre/generations/generation-obsolete"
+obsolete_status=0
+run_fake_installer "$obsolete_root" FAKE_BUNDLE_LABEL=new \
+  >"$tmp_dir/obsolete.out" \
+  2>"$tmp_dir/obsolete.err" || obsolete_status=$?
+[[ "$obsolete_status" -eq 1 ]] ||
+  ci_fail "expected an obsolete managed generation to be rejected"
+grep -F "agentLIBRE alpha installers do not migrate obsolete runtime generations" \
+  "$tmp_dir/obsolete.err" >/dev/null ||
+  ci_fail "obsolete managed-generation rejection was not actionable"
+grep -F "scripts/uninstall-agl-cargo.sh --root $obsolete_root --apply" \
+  "$tmp_dir/obsolete.err" >/dev/null ||
+  ci_fail "obsolete managed-generation rejection omitted the explicit uninstaller"
+for obsolete_artifact in \
+  "$obsolete_root/bin/agl" \
+  "$obsolete_root/bin/agl-process-launcher" \
+  "$obsolete_root/libexec/agentlibre/current" \
+  "$obsolete_generation"
+do
+  grep -F "  $obsolete_artifact" "$tmp_dir/obsolete.err" >/dev/null ||
+    ci_fail "obsolete managed-generation rejection omitted: $obsolete_artifact"
+done
+assert_stable_links "$obsolete_root"
+assert_surface_label "$obsolete_root" old
+[[ "$(stat -c '%a' -- "$obsolete_generation")" == 555 ]] ||
+  ci_fail "obsolete managed-generation rejection mutated the generation"
+[[ -z "$(find "$obsolete_root/libexec/agentlibre/generations" \
+  -mindepth 1 -maxdepth 1 ! -name generation-obsolete -print -quit)" ]] ||
+  ci_fail "obsolete managed-generation rejection unexpectedly staged a generation"
+
 public_worker_root="$tmp_dir/public-worker"
 run_fake_installer "$public_worker_root" FAKE_BUNDLE_LABEL=old >"$tmp_dir/public-worker-seed.out"
 write_bundle_binary "$public_worker_root/bin/agl-inference-worker" leaked
@@ -497,6 +613,44 @@ assert_surface_label "$publish_root" new
   ci_fail "managed update mutated its prior immutable generation"
 [[ "$(stat -c '%a' -- "$publish_root/.agentlibre-runtime.lock")" == 600 ]] ||
   ci_fail "runtime bundle lock is not private"
+
+socket_hint_root="$tmp_dir/socket-hint"
+seed_standard_systemd_units "$socket_hint_root"
+: >"$fake_systemctl_log"
+run_fake_installer "$socket_hint_root" FAKE_BUNDLE_LABEL=hint \
+  >"$tmp_dir/socket-hint.out"
+grep -F "reconciled standard agentLIBRE user units with the installed generation" \
+  "$tmp_dir/socket-hint.out" >/dev/null ||
+  ci_fail "installer did not report automatic standard-unit reconciliation: $(cat "$tmp_dir/socket-hint.out")"
+for expected_call in \
+  "--user daemon-reload" \
+  "--user reset-failed agentlibre-daemon.service agentlibre-daemon.socket" \
+  "--user start agentlibre-daemon.socket" \
+  "--user try-restart agentlibre-daemon.service" \
+  "--user is-active --quiet agentlibre-daemon.socket"
+do
+  grep -F -- "$expected_call" "$fake_systemctl_log" >/dev/null ||
+    ci_fail "installer omitted automatic systemd call: $expected_call"
+done
+[[ "$(cat "$fake_systemd_state/agentlibre-daemon.socket")" == active ]] ||
+  ci_fail "installer did not activate the preserved standard socket"
+
+systemd_failure_root="$tmp_dir/systemd-failure"
+seed_standard_systemd_units "$systemd_failure_root"
+printf inactive >"$fake_systemd_state/agentlibre-daemon.socket"
+printf inactive >"$fake_systemd_state/agentlibre-daemon.service"
+systemd_failure_status=0
+run_fake_installer "$systemd_failure_root" \
+  FAKE_BUNDLE_LABEL=systemd-failure \
+  FAKE_SYSTEMCTL_FAIL_COMMAND=start \
+  >"$tmp_dir/systemd-failure.out" \
+  2>"$tmp_dir/systemd-failure.err" || systemd_failure_status=$?
+[[ "$systemd_failure_status" -eq 1 ]] ||
+  ci_fail "systemd start failure did not fail the post-publication install"
+grep -F "runtime publication succeeded; systemd reconciliation failed" \
+  "$tmp_dir/systemd-failure.err" >/dev/null ||
+  ci_fail "systemd reconciliation failure did not preserve the publication boundary"
+assert_current_complete "$systemd_failure_root" systemd-failure
 
 declare -A fresh_fault_runnable=(
   [after-generation-ready]=0

@@ -9,6 +9,7 @@ ci_cd_repo
 ci_section "Systemd service dry-run"
 ci_need_tool cc
 ci_need_tool readelf
+unset VK_DRIVER_FILES VK_ICD_FILENAMES
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -110,7 +111,7 @@ require_output_not_contains() {
   fi
 }
 
-daemon_output="$(env PATH="$tmp_dir/bin:$PATH" \
+daemon_output="$(env -u VK_DRIVER_FILES -u VK_ICD_FILENAMES PATH="$tmp_dir/bin:$PATH" \
   "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
   --dry-run \
   --unit agl-test.service \
@@ -135,6 +136,10 @@ require_output_contains "$daemon_output" "socket unit file: ${XDG_CONFIG_HOME:-$
 require_output_contains "$daemon_output" "WorkingDirectory=$tmp_dir/workspace"
 require_output_contains "$daemon_output" "Environment=AGL_LOG=agentlibre=debug"
 require_output_contains "$daemon_output" "Environment=AGL_LOG_STDERR=always"
+require_output_contains "$daemon_output" "Vulkan driver manifests: none (CPU-only discovery)"
+require_output_not_contains "$daemon_output" "Environment=\"VK_DRIVER_FILES="
+require_output_contains "$daemon_output" \
+  "UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"
 require_output_contains "$daemon_output" "UMask=0077"
 require_output_contains "$daemon_output" "Requires=agl-test.socket"
 require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
@@ -149,6 +154,63 @@ require_output_contains "$daemon_output" "WantedBy=sockets.target"
 if [[ -e "$tmp_dir/state" || -L "$tmp_dir/state" ]]; then
   ci_fail "daemon dry-run created or replaced the socket parent"
 fi
+
+vulkan_manifest="$tmp_dir/vulkan/%n/icd.d/driver.json"
+fallback_manifest="$tmp_dir/vulkan/icd.d/fallback.json"
+escaped_vulkan_manifest="${vulkan_manifest//%/%%}"
+vulkan_output="$(env \
+  VK_DRIVER_FILES="$vulkan_manifest" \
+  VK_ICD_FILENAMES="$fallback_manifest" \
+  PATH="$tmp_dir/bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-vulkan-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace")"
+require_output_contains "$vulkan_output" \
+  "Vulkan driver manifests: $vulkan_manifest (from VK_DRIVER_FILES)"
+require_output_contains "$vulkan_output" \
+  "Environment=\"VK_DRIVER_FILES=$escaped_vulkan_manifest\""
+require_output_contains "$vulkan_output" \
+  $'Environment="VK_DRIVER_FILES='"$escaped_vulkan_manifest"$'"\nUnsetEnvironment=VK_ICD_FILENAMES\nExecStart='
+require_output_not_contains "$vulkan_output" "$fallback_manifest"
+
+legacy_vulkan_output="$(env -u VK_DRIVER_FILES \
+  VK_ICD_FILENAMES="$fallback_manifest" \
+  PATH="$tmp_dir/bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-vulkan-legacy-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace")"
+require_output_contains "$legacy_vulkan_output" \
+  "Vulkan driver manifests: $fallback_manifest (from VK_ICD_FILENAMES)"
+require_output_contains "$legacy_vulkan_output" \
+  "Environment=\"VK_DRIVER_FILES=$fallback_manifest\""
+
+empty_primary_status=0
+env \
+  VK_DRIVER_FILES= \
+  VK_ICD_FILENAMES="$fallback_manifest" \
+  PATH="$tmp_dir/bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-vulkan-empty-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/vulkan-empty.out" \
+  2>"$tmp_dir/vulkan-empty.err" || empty_primary_status=$?
+[[ "$empty_primary_status" -eq 2 ]] ||
+  ci_fail "daemon installer did not reject an explicitly empty VK_DRIVER_FILES"
+grep -F "VK_DRIVER_FILES must select nonempty colon-separated Vulkan manifest paths" \
+  "$tmp_dir/vulkan-empty.err" >/dev/null ||
+  ci_fail "empty VK_DRIVER_FILES rejection was not actionable"
 
 expect_native_bundle_rejection() {
   local label="$1"
