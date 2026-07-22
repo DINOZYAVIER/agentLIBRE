@@ -149,6 +149,20 @@ seed_regular_pair() {
   write_bundle_binary "$root/bin/agl-process-launcher" "$label"
 }
 
+seed_obsolete_managed_generation() {
+  local root="$1"
+  local label="$2"
+  local generation="$root/libexec/agentlibre/generations/generation-obsolete"
+  mkdir -p "$root/bin" "$generation"
+  write_bundle_binary "$generation/agl" "$label"
+  write_bundle_binary "$generation/agl-process-launcher" "$label"
+  chmod 0555 "$generation/agl" "$generation/agl-process-launcher" "$generation"
+  ln -s -- "generations/generation-obsolete" "$root/libexec/agentlibre/current"
+  ln -s -- "../libexec/agentlibre/current/agl" "$root/bin/agl"
+  ln -s -- "../libexec/agentlibre/current/agl-process-launcher" \
+    "$root/bin/agl-process-launcher"
+}
+
 run_fake_installer() {
   local root="$1"
   shift
@@ -363,6 +377,35 @@ assert_surface_label "$unmanaged_root" old
   ci_fail "unmanaged rejection unexpectedly published current"
 [[ -z "$(find "$unmanaged_root/libexec/agentlibre/generations" -mindepth 1 -print -quit)" ]] ||
   ci_fail "unmanaged rejection unexpectedly staged a generation"
+
+obsolete_root="$tmp_dir/obsolete-managed-generation"
+seed_obsolete_managed_generation "$obsolete_root" old
+obsolete_generation="$obsolete_root/libexec/agentlibre/generations/generation-obsolete"
+obsolete_status=0
+run_fake_installer "$obsolete_root" FAKE_BUNDLE_LABEL=new \
+  >"$tmp_dir/obsolete.out" \
+  2>"$tmp_dir/obsolete.err" || obsolete_status=$?
+[[ "$obsolete_status" -eq 1 ]] ||
+  ci_fail "expected an obsolete managed generation to be rejected"
+grep -F "agentLIBRE alpha installers do not migrate obsolete runtime generations" \
+  "$tmp_dir/obsolete.err" >/dev/null ||
+  ci_fail "obsolete managed-generation rejection was not actionable"
+for obsolete_artifact in \
+  "$obsolete_root/bin/agl" \
+  "$obsolete_root/bin/agl-process-launcher" \
+  "$obsolete_root/libexec/agentlibre/current" \
+  "$obsolete_generation"
+do
+  grep -F "  $obsolete_artifact" "$tmp_dir/obsolete.err" >/dev/null ||
+    ci_fail "obsolete managed-generation rejection omitted: $obsolete_artifact"
+done
+assert_stable_links "$obsolete_root"
+assert_surface_label "$obsolete_root" old
+[[ "$(stat -c '%a' -- "$obsolete_generation")" == 555 ]] ||
+  ci_fail "obsolete managed-generation rejection mutated the generation"
+[[ -z "$(find "$obsolete_root/libexec/agentlibre/generations" \
+  -mindepth 1 -maxdepth 1 ! -name generation-obsolete -print -quit)" ]] ||
+  ci_fail "obsolete managed-generation rejection unexpectedly staged a generation"
 
 public_worker_root="$tmp_dir/public-worker"
 run_fake_installer "$public_worker_root" FAKE_BUNDLE_LABEL=old >"$tmp_dir/public-worker-seed.out"

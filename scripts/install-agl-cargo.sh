@@ -404,6 +404,51 @@ validate_generation() {
     "$generation/agl-inference-worker"
 }
 
+is_obsolete_two_binary_generation() {
+  local generation="$1"
+  local entry
+  local name
+  local entry_count=0
+  [[ -d "$generation" && ! -L "$generation" &&
+    "$(stat -c '%a' -- "$generation")" == 555 &&
+    "$(stat -c '%u' -- "$generation")" == "$(id -u)" ]] ||
+    return 1
+  for name in agl agl-process-launcher; do
+    entry="$generation/$name"
+    [[ -f "$entry" && -x "$entry" && ! -L "$entry" &&
+      "$(stat -c '%a' -- "$entry")" == 555 &&
+      "$(stat -c '%u' -- "$entry")" == "$(id -u)" &&
+      "$(stat -c '%h' -- "$entry")" == 1 ]] ||
+      return 1
+  done
+  shopt -s nullglob
+  for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
+    case "${entry##*/}" in
+      agl | agl-process-launcher) ;;
+      *)
+        shopt -u nullglob
+        return 1
+        ;;
+    esac
+    entry_count=$((entry_count + 1))
+  done
+  shopt -u nullglob
+  (( entry_count == 2 ))
+}
+
+reject_obsolete_two_binary_generation() {
+  local generation="$1"
+  is_obsolete_two_binary_generation "$generation" || return 0
+  echo "existing managed runtime uses an obsolete two-binary alpha layout" >&2
+  echo "agentLIBRE alpha installers do not migrate obsolete runtime generations" >&2
+  echo "move or remove all of these managed artifacts before a clean install:" >&2
+  echo "  $installed_agl" >&2
+  echo "  $installed_launcher" >&2
+  echo "  $current_link" >&2
+  echo "  $generation" >&2
+  fail "then rerun the installer"
+}
+
 validate_native_bundle() {
   local base="$1"
   local worker="$2"
@@ -586,6 +631,7 @@ resolve_current_generation() {
   resolved="$(readlink -f -- "$current_link")" || fail "runtime current pointer is broken: $current_link"
   [[ "$(dirname -- "$resolved")" == "$generations_dir" ]] ||
     fail "runtime current pointer escapes the generations directory: $current_link"
+  reject_obsolete_two_binary_generation "$resolved"
   validate_generation "$resolved"
   validate_nix_runtime_roots "$resolved"
   printf '%s\n' "$resolved"
