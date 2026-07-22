@@ -1051,6 +1051,8 @@ mod tests {
             private_home: workspace_root.join("home"),
             private_tmp: workspace_root.join("tmp"),
             setup_timeout_ms: 1_000,
+            has_private_environment: false,
+            has_shell_integration: false,
         }
     }
 

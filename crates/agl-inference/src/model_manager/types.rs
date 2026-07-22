@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use agl_config::ResolvedInferenceConfig;
 use agl_content::{ArtifactRef, ContentPart};
 use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::evidence::InferenceArtifactRoot;
@@ -209,10 +209,6 @@ impl InferenceCancellation {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
-
-    pub(crate) fn atomic_flag(&self) -> &AtomicBool {
-        self.cancelled.as_ref()
-    }
 }
 
 impl fmt::Debug for InferenceCancellation {
@@ -248,6 +244,18 @@ pub struct InferenceJob {
     deadline: Option<Instant>,
     cancellation: InferenceCancellation,
     output_sink: Arc<dyn InferenceOutputSink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkerJobPayload {
+    config: ResolvedInferenceConfig,
+    request: InferenceRequest,
+    model_key_digest: String,
+    context_key_digest: String,
+    resolved_content: ResolvedModelContent,
+    max_output_tokens: u32,
+    deadline_after_ms: Option<u64>,
 }
 
 impl fmt::Debug for InferenceJob {
@@ -367,6 +375,14 @@ impl InferenceJob {
         self.output_sink.as_ref()
     }
 
+    pub(super) fn output_sink_handle(&self) -> Arc<dyn InferenceOutputSink> {
+        Arc::clone(&self.output_sink)
+    }
+
+    pub(super) fn replace_output_sink(&mut self, output_sink: Arc<dyn InferenceOutputSink>) {
+        self.output_sink = output_sink;
+    }
+
     pub fn scope(&self) -> InferenceJobScope {
         InferenceJobScope {
             run_id: self.request.run_id.clone(),
@@ -384,6 +400,100 @@ impl InferenceJob {
 
     pub fn should_abort(&self) -> bool {
         self.cancellation.is_cancelled() || self.deadline_exceeded()
+    }
+
+    pub(crate) fn worker_payload(
+        &self,
+        now: Instant,
+    ) -> Result<WorkerJobPayload, ModelManagerError> {
+        let resolved_content =
+            self.resolved_content
+                .clone()
+                .ok_or_else(|| ModelManagerError::UnsupportedContent {
+                    message: "inference worker dispatch requires host-resolved content".to_string(),
+                })?;
+        Ok(WorkerJobPayload {
+            config: self.config.clone(),
+            request: self.request.clone(),
+            model_key_digest: self.model_key.digest().to_string(),
+            context_key_digest: self.context_key.digest().to_string(),
+            resolved_content,
+            max_output_tokens: self.max_output_tokens,
+            deadline_after_ms: self.deadline.map(|deadline| {
+                u64::try_from(deadline.saturating_duration_since(now).as_millis())
+                    .unwrap_or(u64::MAX)
+            }),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn encode_worker_payload(&self, now: Instant) -> Result<Vec<u8>, ModelManagerError> {
+        serde_json::to_vec(&self.worker_payload(now)?).map_err(|error| {
+            ModelManagerError::ProfileInvalid {
+                message: format!("failed to encode inference worker job: {error}"),
+            }
+        })
+    }
+
+    pub(crate) fn from_worker_payload(
+        payload: WorkerJobPayload,
+        cancellation: InferenceCancellation,
+        output_sink: Arc<dyn InferenceOutputSink>,
+        now: Instant,
+    ) -> Result<Self, ModelManagerError> {
+        let model_key = ModelKey::from_config(&payload.config)?;
+        if model_key.digest() != payload.model_key_digest
+            || !valid_digest(&payload.context_key_digest)
+        {
+            return Err(ModelManagerError::ProfileInvalid {
+                message: "inference worker job identity is invalid".to_string(),
+            });
+        }
+        let context_key = ContextKey {
+            model_key,
+            digest: payload.context_key_digest,
+        };
+        let mut job = Self::new(
+            payload.config,
+            payload.request,
+            context_key,
+            InferenceArtifactRoot::new("/worker-private/evidence-disabled"),
+            PathBuf::from("/worker-private/content-store-disabled"),
+            payload.max_output_tokens,
+            output_sink,
+        )?
+        .with_cancellation(cancellation);
+        job.resolved_content = Some(payload.resolved_content);
+        if let Some(after_ms) = payload.deadline_after_ms {
+            let deadline = now
+                .checked_add(Duration::from_millis(after_ms))
+                .ok_or_else(|| ModelManagerError::ProfileInvalid {
+                    message: "inference worker deadline overflows monotonic time".to_string(),
+                })?;
+            job = job.with_deadline(deadline);
+        }
+        Ok(job)
+    }
+
+    #[doc(hidden)]
+    pub fn decode_worker_payload(
+        bytes: &[u8],
+        cancellation: InferenceCancellation,
+        output_sink: Arc<dyn InferenceOutputSink>,
+        now: Instant,
+    ) -> Result<Self, ModelManagerError> {
+        let payload =
+            serde_json::from_slice(bytes).map_err(|error| ModelManagerError::ProfileInvalid {
+                message: format!("failed to decode inference worker job: {error}"),
+            })?;
+        Self::from_worker_payload(payload, cancellation, output_sink, now)
+    }
+
+    #[doc(hidden)]
+    pub fn resolve_content_for_worker_dispatch(
+        &mut self,
+    ) -> Result<(usize, u64), ModelManagerError> {
+        self.resolve_content()
     }
 
     pub(super) fn resolve_content(&mut self) -> Result<(usize, u64), ModelManagerError> {
@@ -443,7 +553,8 @@ impl InferenceJob {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedModelContent {
     messages: Vec<ResolvedMessageContent>,
 }
@@ -454,7 +565,8 @@ impl ResolvedModelContent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedMessageContent {
     parts: Vec<ResolvedContentPart>,
 }
@@ -465,7 +577,8 @@ impl ResolvedMessageContent {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResolvedContentPart {
     Text {
         text: String,
@@ -474,6 +587,13 @@ pub enum ResolvedContentPart {
         artifact: ArtifactRef,
         bytes: Vec<u8>,
     },
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl ResolvedContentPart {
@@ -550,6 +670,7 @@ pub struct ModelManagerStatus {
     pub model_evictions: u64,
     pub context_evictions: u64,
     pub completed_jobs: u64,
+    pub incomplete_jobs: u64,
     pub cancellations: u64,
     pub deadline_exceeded: u64,
     pub failures: u64,
@@ -566,6 +687,10 @@ pub enum ModelManagerError {
     DeadlineExceeded,
     Cancelled,
     ProfileInvalid {
+        message: String,
+    },
+    ResourceAdmission {
+        code: String,
         message: String,
     },
     LoadFailed {
@@ -593,6 +718,12 @@ pub enum ModelManagerError {
     MultimodalEncodeFailed {
         message: String,
     },
+    DeviceInventoryFailed {
+        message: String,
+    },
+    BackendLost {
+        message: String,
+    },
     ManagerUnavailable,
 }
 
@@ -601,13 +732,14 @@ impl ModelManagerError {
         matches!(self, Self::QueueFull { .. } | Self::ManagerUnavailable)
     }
 
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::InvalidOptions { .. } => "manager.invalid_options",
             Self::QueueFull { .. } => "manager.queue_full",
             Self::DeadlineExceeded => "manager.deadline_exceeded",
             Self::Cancelled => "manager.cancelled",
             Self::ProfileInvalid { .. } => "manager.profile_invalid",
+            Self::ResourceAdmission { code, .. } => code,
             Self::LoadFailed { .. } => "manager.load_failed",
             Self::ContextFailed { .. } => "manager.context_failed",
             Self::GenerationFailed { .. } => "manager.generation_failed",
@@ -615,6 +747,8 @@ impl ModelManagerError {
             Self::ArtifactUnavailable { .. } => "artifact_unavailable",
             Self::ArtifactIntegrityFailed { .. } => "artifact_integrity_failed",
             Self::MultimodalEncodeFailed { .. } => "multimodal_encode_failed",
+            Self::DeviceInventoryFailed { .. } => "manager.device_inventory_failed",
+            Self::BackendLost { .. } => "manager.backend_lost",
             Self::ManagerUnavailable => "manager.unavailable",
         }
     }
@@ -634,6 +768,12 @@ impl fmt::Display for ModelManagerError {
             Self::Cancelled => formatter.write_str("inference job cancelled"),
             Self::ProfileInvalid { message } => {
                 write!(formatter, "invalid inference profile: {message}")
+            }
+            Self::ResourceAdmission { code, message } => {
+                write!(
+                    formatter,
+                    "inference resource admission failed ({code}): {message}"
+                )
             }
             Self::LoadFailed {
                 model_digest,
@@ -665,6 +805,12 @@ impl fmt::Display for ModelManagerError {
             ),
             Self::MultimodalEncodeFailed { message } => {
                 write!(formatter, "multimodal encoding failed: {message}")
+            }
+            Self::DeviceInventoryFailed { message } => {
+                write!(formatter, "inference device inventory failed: {message}")
+            }
+            Self::BackendLost { message } => {
+                write!(formatter, "inference backend was lost: {message}")
             }
             Self::ManagerUnavailable => formatter.write_str("model manager is unavailable"),
         }

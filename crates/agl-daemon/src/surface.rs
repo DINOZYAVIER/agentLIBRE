@@ -2,9 +2,10 @@ use std::sync::{Arc, Weak};
 
 use agl_app::{
     ApplicationBackend, ApplicationCallContext, ApplicationError, ApplicationErrorCode,
-    ApplicationService, CommandContext, CommandId, HumanTerminalEnsure, PresentationSubscribe,
-    PromptAdmission, PromptAdmissionState, PromptBudget, PromptSubmission, SessionOpen,
-    SessionOpened, SessionPresentationEventEnvelope, SessionPresentationSnapshot, SuggestionPage,
+    ApplicationService, CommandContext, CommandId, HumanTerminalCommandAdmission,
+    HumanTerminalCommandSubmit, HumanTerminalEnsure, PresentationSubscribe, PromptAdmission,
+    PromptAdmissionState, PromptBudget, PromptSubmission, SessionOpen, SessionOpened,
+    SessionPresentationEventEnvelope, SessionPresentationSnapshot, SuggestionPage,
     SuggestionRequest, TerminalEnsured,
 };
 use agl_ids::{DaemonInstanceId, RequestId, SessionId};
@@ -58,6 +59,7 @@ pub(crate) async fn handle_prompt_submit_request(
                     PromptAdmissionState::Running => ProtocolRunState::Running,
                     PromptAdmissionState::Waiting => ProtocolRunState::Waiting,
                     PromptAdmissionState::Succeeded => ProtocolRunState::Succeeded,
+                    PromptAdmissionState::Incomplete => ProtocolRunState::Incomplete,
                     PromptAdmissionState::Failed => ProtocolRunState::Failed,
                     PromptAdmissionState::Cancelled => ProtocolRunState::Cancelled,
                 },
@@ -152,6 +154,16 @@ impl ApplicationBackend for DaemonApplicationBackend {
     ) -> Result<TerminalEnsured, ApplicationError> {
         self.with_state(context, move |state, _| {
             state.application_ensure_human_terminal(request)
+        })
+    }
+
+    fn submit_human_terminal_command(
+        &self,
+        context: ApplicationCallContext,
+        request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
+        self.with_state(context, move |state, _| {
+            state.application_submit_human_terminal_command(request)
         })
     }
 
@@ -382,7 +394,19 @@ pub(crate) fn protocol_error(error: ApplicationError) -> ProtocolError {
             (ProtocolErrorCode::ModelContextTooSmall, false)
         }
         ApplicationErrorCode::SkillNotAdmitted => (ProtocolErrorCode::SkillNotAdmitted, false),
+        ApplicationErrorCode::IncompleteOutputNotFound => {
+            (ProtocolErrorCode::IncompleteOutputNotFound, false)
+        }
+        ApplicationErrorCode::ContinuationAlreadyClaimed => {
+            (ProtocolErrorCode::ContinuationAlreadyClaimed, false)
+        }
+        ApplicationErrorCode::StaleContinuationContext => {
+            (ProtocolErrorCode::StaleContinuationContext, false)
+        }
         ApplicationErrorCode::InputBackpressure => (ProtocolErrorCode::InputBackpressure, true),
+        ApplicationErrorCode::ActivityCapacityExceeded => {
+            (ProtocolErrorCode::ActivityCapacityExceeded, false)
+        }
         ApplicationErrorCode::ResyncRequired => (ProtocolErrorCode::ResyncRequired, true),
         ApplicationErrorCode::OutcomeUnknown => (ProtocolErrorCode::OutcomeUnknown, false),
         ApplicationErrorCode::Internal => (ProtocolErrorCode::Internal, false),

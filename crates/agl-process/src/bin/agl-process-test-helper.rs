@@ -123,7 +123,17 @@ mod linux {
             if io::stdin().read_line(&mut input)? == 0 {
                 return Ok(());
             }
-            write!(io::stdout(), "reply:{input}")?;
+            if input == "emit-terminal-effects\n" {
+                io::stdout().write_all(
+                    b"filter-before\x1b]52;c;PRIVATE_CLIPBOARD\x07\
+                      \x1b]0;PRIVATE_TITLE\x1b\\\
+                      \x1bPPRIVATE_DCS\x1b\\\
+                      \x1b_PRIVATE_APC\x1b\\\
+                      \x1b^PRIVATE_PM\x1b\\filter-after\n",
+                )?;
+            } else {
+                write!(io::stdout(), "reply:{input}")?;
+            }
             io::stdout().flush()?;
         }
     }

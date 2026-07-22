@@ -53,6 +53,11 @@ pub enum ChatSessionTransition {
         message_id: MessageId,
         content: Content,
     },
+    BeginIncompleteContinuation {
+        run_id: RunId,
+        turn_id: TurnId,
+        source_message_id: MessageId,
+    },
     LinkModelAttempt {
         run_id: RunId,
         turn_id: TurnId,
@@ -103,6 +108,9 @@ impl ChatSessionTransition {
             ChatSessionTransition::ReadCommandClear => "read_command_clear",
             ChatSessionTransition::ReadCommandExit => "read_command_exit",
             ChatSessionTransition::RecordUserMessage { .. } => "record_user_message",
+            ChatSessionTransition::BeginIncompleteContinuation { .. } => {
+                "begin_incomplete_continuation"
+            }
             ChatSessionTransition::LinkModelAttempt { .. } => "link_model_attempt",
             ChatSessionTransition::RecordAssistantAnswer { .. } => "record_assistant_answer",
             ChatSessionTransition::RecordAssistantStopMarker { .. } => {
@@ -146,7 +154,6 @@ impl ChatSessionMachine {
         &self.session_id
     }
 
-    #[cfg(test)]
     pub(crate) fn phase(&self) -> ChatSessionPhase {
         self.phase
     }
@@ -209,6 +216,7 @@ fn next_phase(
         (AwaitingInput, ReadCommandClear) => Some(HandlingCommand),
         (HandlingCommand, ClearContext) => Some(ContextCleared),
         (RecordingUserMessage, RecordUserMessage { .. }) => Some(RunningTurn),
+        (AwaitingInput, BeginIncompleteContinuation { .. }) => Some(RunningTurn),
         (RunningTurn, LinkModelAttempt { .. }) => Some(RunningTurn),
         (RunningTurn, RecordAssistantToolCall { .. }) => Some(RunningTurn),
         (RunningTurn, RecordToolMessage { .. }) => Some(RunningTurn),

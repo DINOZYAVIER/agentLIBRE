@@ -1,5 +1,7 @@
 use crate::evidence::{InferenceEventWriter, InferenceFinishStatus};
-use crate::{InferenceAttemptMachine, InferenceAttemptTransition, InferenceResponse};
+use crate::{
+    InferenceAttemptMachine, InferenceAttemptTransition, InferenceFinishReason, InferenceResponse,
+};
 
 use super::{InferenceJob, ModelManagerError};
 
@@ -74,7 +76,12 @@ impl AttemptEvidence {
             &self.writer,
             &mut self.machine,
             InferenceAttemptTransition::FinishAttempt {
-                status: InferenceFinishStatus::Succeeded,
+                status: match response.finish_reason {
+                    InferenceFinishReason::Stop => InferenceFinishStatus::Succeeded,
+                    InferenceFinishReason::Length | InferenceFinishReason::ContentByteLimit => {
+                        InferenceFinishStatus::IncompleteOutput
+                    }
+                },
             },
         )?;
         Ok(())

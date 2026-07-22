@@ -3,8 +3,8 @@ use std::fmt::{self, Debug, Display, Formatter, Write as _};
 
 use agl_content::Content;
 use agl_ids::{
-    DaemonInstanceId, EventId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
-    TerminalSessionId, TurnId,
+    AttemptId, DaemonInstanceId, EventId, ExecutionId, MessageId, RequestId, RunId, SessionId,
+    StepId, TerminalSessionId, TurnId, WriterLeaseId,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    DaemonEventKind, DaemonRequestKind, ExecutionExit, ExecutionProfile, ExecutionState, KillMode,
-    ProtocolToolMode, TerminalSize,
+    DaemonEventKind, DaemonRequestKind, ExecutionCursor, ExecutionExit, ExecutionProfile,
+    ExecutionState, KillMode, ProtocolToolMode, TerminalSize,
 };
 
 pub const MAX_JSONL_FRAME_BYTES: usize = 1024 * 1024;
@@ -36,6 +36,21 @@ pub const MAX_SUGGESTIONS: usize = 50;
 pub const MAX_COMMAND_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_DISPLAY_BYTES: usize = 8 * 1024;
 pub const MAX_SAFE_METADATA_ENTRIES: usize = 64;
+pub const MAX_HUMAN_COMMAND_BYTES: usize = 64 * 1024;
+pub const MAX_HUMAN_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+pub const MAX_HUMAN_COMMAND_CARDS: usize = 32;
+pub const MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_ACTIVITY_NODES: usize = 512;
+pub const MAX_ACTIVE_ACTIVITY_NODES: usize = 256;
+pub const MAX_ACTIVITY_PATH_NODES: usize = 32;
+pub const MAX_ACTIVITY_SUMMARY_BYTES: usize = 1024;
+pub const MAX_ACTIVITY_NODE_BYTES: usize = 8 * 1024;
+pub const MAX_ACTIVITY_GRAPH_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ACTIVE_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_ACTIVITY_DELTA_BYTES: usize = 700 * 1024;
+pub const MAX_INFERENCE_DEVICES: usize = 64;
+pub const MAX_SETUP_SMOKE_MODEL_BINDINGS: usize = 16;
+pub const MAX_SETUP_SMOKE_OUTPUT_TOKENS: u32 = 4_096;
 
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_LABEL_BYTES: usize = 512;
@@ -144,6 +159,7 @@ pub enum ApplicationActionKind {
     WorkspaceSet,
     TerminalList,
     TerminalPromote,
+    IncompleteTurnContinue,
     ExecutionList,
     ExecutionAttach,
     ExecutionKill,
@@ -255,6 +271,10 @@ pub enum ApplicationAction {
     TerminalPromote {
         terminal_id: TerminalSessionId,
     },
+    IncompleteTurnContinue {
+        message_id: MessageId,
+        expected_execution_context_revision: u64,
+    },
     ExecutionList {
         include_finished: bool,
     },
@@ -363,6 +383,36 @@ pub struct HumanTerminalEnsureRequest {
     pub host_startup: HostStartupPolicy,
 }
 
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanTerminalCommandSubmitRequest {
+    pub session_id: SessionId,
+    pub terminal_id: TerminalSessionId,
+    pub client_submission_id: String,
+    pub writer_lease_id: WriterLeaseId,
+    pub expected_command_sequence: u64,
+    pub expected_prompt_generation: u64,
+    pub command: String,
+}
+
+impl Debug for HumanTerminalCommandSubmitRequest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HumanTerminalCommandSubmitRequest")
+            .field("session_id", &self.session_id)
+            .field("terminal_id", &self.terminal_id)
+            .field("client_submission_id", &self.client_submission_id)
+            .field("writer_lease_present", &true)
+            .field("expected_command_sequence", &self.expected_command_sequence)
+            .field(
+                "expected_prompt_generation",
+                &self.expected_prompt_generation,
+            )
+            .field("command_bytes", &self.command.len())
+            .finish()
+    }
+}
+
 /// Explicit local-operator admission for one Human Host terminal lifetime.
 ///
 /// The confirmation is deliberately non-secret and carries no reusable model
@@ -392,6 +442,29 @@ pub enum SessionPresentationStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct SanitizedDisplayPath {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl SanitizedDisplayPath {
+    fn validate(&self) -> Result<(), SurfaceValidationError> {
+        bound_string(&self.text, MAX_PATH_BYTES, "sanitized display path", false)?;
+        if self
+            .text
+            .chars()
+            .any(|character| character.is_control() || is_unicode_format_control(character as u32))
+        {
+            return Err(SurfaceValidationError::new(
+                "sanitized display path contains a control or format character",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionHeader {
     pub session_id: SessionId,
     pub status: SessionPresentationStatus,
@@ -403,8 +476,9 @@ pub struct SessionHeader {
     pub operation_mode: ProtocolToolMode,
     pub selected_skills: Vec<String>,
     pub runtime_context_revision: u64,
-    pub workspace_root: String,
-    pub cwd: String,
+    pub workspace_root: SanitizedDisplayPath,
+    pub workspace_history_scope: String,
+    pub cwd: SanitizedDisplayPath,
     pub execution_context_revision: u64,
     pub context_used_tokens: Option<u64>,
     pub context_limit_tokens: Option<u64>,
@@ -420,6 +494,42 @@ pub enum AssistantItemState {
     Final,
     Cancelled,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteOutputReason {
+    ModelLength,
+    ContentByteLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinueUnavailableReason {
+    StaleContext,
+    PolicyDenied,
+    SessionFinished,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContinueActionView {
+    Available,
+    Claimed { continuation_run_id: RunId },
+    Unavailable { reason: ContinueUnavailableReason },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncompleteAssistantItemView {
+    pub message_id: MessageId,
+    pub content: Content,
+    pub source_run_id: RunId,
+    pub source_turn_id: TurnId,
+    pub source_attempt_id: AttemptId,
+    pub reason: IncompleteOutputReason,
+    pub continuation_index: u16,
+    pub continue_action: ContinueActionView,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -451,6 +561,9 @@ pub enum SessionPresentationItem {
         message_id: MessageId,
         content: Content,
         state: AssistantItemState,
+    },
+    IncompleteAssistant {
+        item: IncompleteAssistantItemView,
     },
     AgentAction {
         run_id: RunId,
@@ -492,10 +605,309 @@ pub struct ExecutionView {
     pub execution_id: ExecutionId,
     pub state: ExecutionState,
     pub profile: ExecutionProfile,
-    pub cwd: String,
+    pub cwd: SanitizedDisplayPath,
     pub exit: Option<ExecutionExit>,
     pub last_sequence: u64,
     pub output_truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCommandCardState {
+    Starting,
+    Running,
+    Exited,
+    OutcomeUnknown,
+}
+
+pub type ExecutionOutputCursor = ExecutionCursor;
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SanitizedTerminalText(String);
+
+impl SanitizedTerminalText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(
+        &self,
+        maximum_bytes: usize,
+        allow_empty: bool,
+    ) -> Result<(), SurfaceValidationError> {
+        if (!allow_empty && self.0.is_empty())
+            || self.0.len() > maximum_bytes
+            || self.0.chars().any(is_forbidden_presentation_character)
+        {
+            return Err(SurfaceValidationError::new(
+                "sanitized terminal text is empty, oversized, or contains a forbidden character",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Debug for SanitizedTerminalText {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SanitizedTerminalText")
+            .field("bytes", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanCommandCardView {
+    pub terminal_id: TerminalSessionId,
+    pub execution_id: ExecutionId,
+    pub command_sequence: u64,
+    pub command: SanitizedTerminalText,
+    pub output: SanitizedTerminalText,
+    pub output_start: ExecutionOutputCursor,
+    pub output_end: ExecutionOutputCursor,
+    pub state: HumanCommandCardState,
+    pub exit_status: Option<i32>,
+    pub cwd: SanitizedDisplayPath,
+    pub truncated: bool,
+    pub filtered_effects: u32,
+    pub started_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityNodeKind {
+    Run,
+    Turn,
+    Attempt,
+    Step,
+    ChildRun,
+    Inference,
+    Aggregate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPhase {
+    Queued,
+    Policy,
+    Model,
+    Tool,
+    ChildRun,
+    InferenceQueue,
+    InferenceAdmission,
+    ModelLoad,
+    Context,
+    Prefill,
+    Generation,
+    OutputParsing,
+    Terminal,
+    Retention,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityNodeState {
+    Pending,
+    Waiting,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Incomplete,
+    Truncated,
+}
+
+impl ActivityNodeState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Incomplete | Self::Truncated
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityCompleteness {
+    Complete,
+    Truncated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPolicyOutcome {
+    Allowed,
+    Denied,
+    ConfirmationRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityCacheDisposition {
+    NotApplicable,
+    Cold,
+    Reused,
+    Rebuilt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceProgressUnit {
+    Tokens,
+    Chunks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceProductStageView {
+    Queued,
+    Admission,
+    ModelLoad,
+    ModelReuse,
+    ContextReuse,
+    ContextRebuild,
+    Prefill,
+    Generation,
+    OutputParse,
+    Completed,
+    Incomplete,
+    Cancelled,
+    Failed,
+    BackendLost,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "capability", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CapabilityActivityDetail {
+    FilesystemList {
+        path: SanitizedDisplayPath,
+        entries: u32,
+        completeness: ActivityCompleteness,
+    },
+    FilesystemRead {
+        path: SanitizedDisplayPath,
+        bytes: u64,
+    },
+    RepositorySearch {
+        scope: SanitizedDisplayPath,
+        matches: u32,
+        complete: bool,
+    },
+    ProcessExecution {
+        profile: ExecutionProfile,
+        exit_status: Option<i32>,
+    },
+    PolicyCheck {
+        capability_id: String,
+        outcome: ActivityPolicyOutcome,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceActivityDetail {
+    pub stage: InferenceProductStageView,
+    pub completed: Option<u64>,
+    pub total: Option<u64>,
+    pub unit: Option<InferenceProgressUnit>,
+    pub cache: ActivityCacheDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityAggregateReason {
+    Retention,
+    NodeLimit,
+    ByteLimit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityAggregateDetail {
+    pub collapsed_nodes: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub cancelled: u32,
+    pub incomplete: u32,
+    pub elapsed_ms: u64,
+    pub reason: ActivityAggregateReason,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "detail",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ActivityDetailView {
+    #[default]
+    None,
+    Capability(CapabilityActivityDetail),
+    Inference(InferenceActivityDetail),
+    Aggregate(ActivityAggregateDetail),
+    UnknownCapability {
+        capability_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityRemovalReason {
+    CollapsedIntoAggregate,
+    RetentionExpired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityNodeRemoval {
+    pub subtree_root_id: String,
+    pub reason: ActivityRemovalReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityNodeView {
+    pub node_id: String,
+    pub parent_node_id: Option<String>,
+    pub order_index: u64,
+    pub run_id: RunId,
+    pub turn_id: Option<TurnId>,
+    pub attempt_id: Option<AttemptId>,
+    pub step_id: Option<StepId>,
+    pub kind: ActivityNodeKind,
+    pub phase: ActivityPhase,
+    pub state: ActivityNodeState,
+    pub retry: u32,
+    pub started_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+    pub finished_at_unix_ms: Option<i64>,
+    pub elapsed_ms: u64,
+    pub summary: String,
+    pub detail: ActivityDetailView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityGraphView {
+    pub graph_revision: u64,
+    pub roots: Vec<String>,
+    pub nodes: Vec<ActivityNodeView>,
+    pub current_path: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityGraphDeltaBatch {
+    pub graph_revision: u64,
+    pub upserts: Vec<ActivityNodeView>,
+    pub removals: Vec<ActivityNodeRemoval>,
+    pub current_path: Option<Vec<String>>,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -521,7 +933,7 @@ pub enum TerminalOwnerView {
 #[serde(deny_unknown_fields)]
 pub struct ShellProfileView {
     pub profile_id: String,
-    pub program: String,
+    pub program: SanitizedDisplayPath,
     pub executable_digest: String,
     pub config_digest: String,
 }
@@ -554,11 +966,12 @@ pub struct TerminalSessionView {
     pub owner: TerminalOwnerView,
     pub profile: ExecutionProfile,
     pub shell: ShellProfileView,
-    pub workspace_root: String,
-    pub cwd: String,
+    pub workspace_root: SanitizedDisplayPath,
+    pub cwd: SanitizedDisplayPath,
     pub initial_environment_digest: String,
     pub environment_names: Vec<String>,
     pub command_sequence: u64,
+    pub prompt_generation: Option<u64>,
     pub prompt_state: TerminalPromptState,
     pub process_state: ExecutionState,
     pub exit: Option<ExecutionExit>,
@@ -589,6 +1002,8 @@ pub struct SessionPresentationSnapshot {
     pub queued_prompts: Vec<QueuedPromptView>,
     pub terminals: Vec<TerminalSessionView>,
     pub executions: Vec<ExecutionView>,
+    pub human_commands: Vec<HumanCommandCardView>,
+    pub activity: Option<ActivityGraphView>,
     pub command_context: CommandContext,
 }
 
@@ -745,7 +1160,17 @@ pub enum SessionPresentationEventPayload {
         terminal_id: TerminalSessionId,
         sequence: u64,
         exit_status: i32,
-        cwd: String,
+        cwd: SanitizedDisplayPath,
+    },
+    HumanCommandCardUpsert {
+        card: HumanCommandCardView,
+    },
+    HumanCommandCardRemoved {
+        terminal_id: TerminalSessionId,
+        command_sequence: u64,
+    },
+    ActivityGraphDelta {
+        batch: ActivityGraphDeltaBatch,
     },
     ExecutionStateChanged {
         execution: ExecutionView,
@@ -807,6 +1232,14 @@ pub struct HumanTerminalEnsuredEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanTerminalCommandAcceptedEvent {
+    pub terminal_id: TerminalSessionId,
+    pub command_sequence: u64,
+    pub output_after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationActionResult {
     SessionOpened {
@@ -858,6 +1291,33 @@ pub enum ApplicationActionResult {
         cancelled_runs: u32,
         terminated_terminals: u32,
     },
+    IncompleteTurnContinued {
+        admission: PromptAdmission,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptAdmission {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub turn_id: TurnId,
+    pub ordinal: u32,
+    pub queued: bool,
+    pub state: PromptAdmissionState,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptAdmissionState {
+    Queued,
+    Running,
+    Waiting,
+    Succeeded,
+    Incomplete,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -976,6 +1436,547 @@ impl HumanTerminalEnsureRequest {
     }
 }
 
+impl HumanTerminalCommandSubmitRequest {
+    pub fn validate(&self) -> Result<(), SurfaceValidationError> {
+        bound_string(
+            &self.client_submission_id,
+            MAX_IDENTIFIER_BYTES,
+            "client submission ID",
+            false,
+        )?;
+        validate_single_line(&self.client_submission_id, "client submission ID")?;
+        bound_string(
+            &self.command,
+            MAX_HUMAN_COMMAND_BYTES,
+            "Human terminal command",
+            false,
+        )?;
+        if self
+            .command
+            .chars()
+            .any(is_forbidden_human_command_character)
+        {
+            return Err(SurfaceValidationError::new(
+                "Human terminal command contains a forbidden control character",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl HumanCommandCardView {
+    fn validate(&self) -> Result<(), SurfaceValidationError> {
+        self.command.validate(MAX_HUMAN_COMMAND_BYTES, false)?;
+        self.output.validate(MAX_HUMAN_COMMAND_OUTPUT_BYTES, true)?;
+        if self.output_start.after_sequence > self.output_end.after_sequence
+            || self.updated_at_unix_ms < self.started_at_unix_ms
+        {
+            return Err(SurfaceValidationError::new(
+                "Human command card cursors or timestamps are inconsistent",
+            ));
+        }
+        self.cwd.validate()?;
+        if matches!(self.state, HumanCommandCardState::Exited) != self.exit_status.is_some() {
+            return Err(SurfaceValidationError::new(
+                "only an exited Human command card carries an exit status",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ActivityNodeView {
+    fn validate(&self) -> Result<(), SurfaceValidationError> {
+        bound_string(&self.node_id, 512, "activity node ID", false)?;
+        bound_optional_string(
+            self.parent_node_id.as_deref(),
+            512,
+            "activity parent node ID",
+        )?;
+        bound_string(
+            &self.summary,
+            MAX_ACTIVITY_SUMMARY_BYTES,
+            "activity summary",
+            true,
+        )?;
+        if self
+            .node_id
+            .chars()
+            .any(is_forbidden_presentation_character)
+            || self
+                .parent_node_id
+                .as_ref()
+                .is_some_and(|id| id.chars().any(is_forbidden_presentation_character))
+            || self
+                .summary
+                .chars()
+                .any(is_forbidden_presentation_character)
+            || contains_absolute_display_path(&self.summary)
+        {
+            return Err(SurfaceValidationError::new(
+                "activity summary contains forbidden presentation controls",
+            ));
+        }
+        self.detail.validate()?;
+        let terminal = self.state.is_terminal();
+        if self.started_at_unix_ms < 0
+            || self.updated_at_unix_ms < self.started_at_unix_ms
+            || terminal != self.finished_at_unix_ms.is_some()
+            || self
+                .finished_at_unix_ms
+                .is_some_and(|finished| finished < self.started_at_unix_ms)
+            || self.finished_at_unix_ms.is_some_and(|finished| {
+                self.elapsed_ms
+                    > u64::try_from(finished.saturating_sub(self.started_at_unix_ms))
+                        .unwrap_or_default()
+            })
+        {
+            return Err(SurfaceValidationError::new(
+                "activity node timing is inconsistent with its state",
+            ));
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| SurfaceValidationError::new("activity node could not be encoded"))?
+            .len()
+            > MAX_ACTIVITY_NODE_BYTES
+        {
+            return Err(SurfaceValidationError::new(
+                "activity node exceeds its encoded display bound",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ActivityDetailView {
+    fn validate(&self) -> Result<(), SurfaceValidationError> {
+        let path = match self {
+            Self::Capability(CapabilityActivityDetail::FilesystemList { path, .. })
+            | Self::Capability(CapabilityActivityDetail::FilesystemRead { path, .. }) => Some(path),
+            Self::Capability(CapabilityActivityDetail::RepositorySearch { scope, .. }) => {
+                Some(scope)
+            }
+            _ => None,
+        };
+        if let Some(path) = path {
+            path.validate()?;
+            if !is_redacted_capability_display_path(&path.text) {
+                return Err(SurfaceValidationError::new(
+                    "capability activity path must be a normalized workspace-relative display value",
+                ));
+            }
+        }
+        let capability_id = match self {
+            Self::Capability(CapabilityActivityDetail::PolicyCheck { capability_id, .. })
+            | Self::UnknownCapability { capability_id } => Some(capability_id),
+            _ => None,
+        };
+        if let Some(capability_id) = capability_id {
+            bound_string(
+                capability_id,
+                MAX_IDENTIFIER_BYTES,
+                "activity capability ID",
+                false,
+            )?;
+            if capability_id
+                .chars()
+                .any(is_forbidden_presentation_character)
+                || contains_absolute_display_path(capability_id)
+            {
+                return Err(SurfaceValidationError::new(
+                    "activity capability identity contains unsafe display data",
+                ));
+            }
+        }
+        if let Self::Inference(detail) = self
+            && matches!((detail.completed, detail.total), (Some(done), Some(total)) if done > total)
+        {
+            return Err(SurfaceValidationError::new(
+                "activity inference progress cannot exceed its total",
+            ));
+        }
+        if let Self::Inference(detail) = self
+            && (detail.completed.is_some() || detail.total.is_some())
+            && detail.unit.is_none()
+        {
+            return Err(SurfaceValidationError::new(
+                "activity inference counters require a typed unit",
+            ));
+        }
+        if let Self::Inference(detail) = self {
+            let expected = match detail.stage {
+                InferenceProductStageView::ModelLoad => ActivityCacheDisposition::Cold,
+                InferenceProductStageView::ModelReuse | InferenceProductStageView::ContextReuse => {
+                    ActivityCacheDisposition::Reused
+                }
+                InferenceProductStageView::ContextRebuild => ActivityCacheDisposition::Rebuilt,
+                _ => ActivityCacheDisposition::NotApplicable,
+            };
+            if detail.cache != expected {
+                return Err(SurfaceValidationError::new(
+                    "activity inference cache disposition does not match its stage",
+                ));
+            }
+        }
+        if let Self::Aggregate(detail) = self
+            && detail.collapsed_nodes == 0
+        {
+            return Err(SurfaceValidationError::new(
+                "activity aggregate must represent at least one collapsed node",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ActivityGraphView {
+    pub fn validate(&self) -> Result<(), SurfaceValidationError> {
+        if self.graph_revision == 0 {
+            return Err(SurfaceValidationError::new(
+                "activity graph revision must be nonzero",
+            ));
+        }
+        bound_count(self.nodes.len(), MAX_ACTIVITY_NODES, "activity nodes")?;
+        bound_count(self.roots.len(), MAX_ACTIVITY_NODES, "activity roots")?;
+        bound_count(
+            self.current_path.len(),
+            MAX_ACTIVITY_PATH_NODES,
+            "activity current path",
+        )?;
+        let mut ids = BTreeSet::new();
+        for node in &self.nodes {
+            node.validate()?;
+            if !ids.insert(node.node_id.as_str()) {
+                return Err(SurfaceValidationError::new(
+                    "activity graph node identities must be unique",
+                ));
+            }
+        }
+        let derived_roots = self
+            .nodes
+            .iter()
+            .filter(|node| node.parent_node_id.is_none())
+            .collect::<Vec<_>>();
+        if derived_roots.len() != self.roots.len()
+            || derived_roots
+                .iter()
+                .zip(&self.roots)
+                .any(|(node, id)| &node.node_id != id)
+            || derived_roots.iter().any(|root| {
+                !matches!(
+                    root.kind,
+                    ActivityNodeKind::Run | ActivityNodeKind::Aggregate
+                )
+            })
+        {
+            return Err(SurfaceValidationError::new(
+                "activity graph roots must be canonical run or aggregate roots",
+            ));
+        }
+        for node in &self.nodes {
+            if node
+                .parent_node_id
+                .as_ref()
+                .is_some_and(|parent| !ids.contains(parent.as_str()))
+            {
+                return Err(SurfaceValidationError::new(
+                    "activity graph parent must reference an existing node",
+                ));
+            }
+            let mut cursor = Some(node.node_id.as_str());
+            let mut visited = BTreeSet::new();
+            while let Some(node_id) = cursor {
+                if !visited.insert(node_id) {
+                    return Err(SurfaceValidationError::new(
+                        "activity graph must be acyclic",
+                    ));
+                }
+                let current = self
+                    .nodes
+                    .iter()
+                    .find(|candidate| candidate.node_id == node_id)
+                    .expect("validated activity node identity exists");
+                cursor = current.parent_node_id.as_deref();
+            }
+            if !visited
+                .iter()
+                .any(|id| self.roots.iter().any(|root| root == *id))
+            {
+                return Err(SurfaceValidationError::new(
+                    "activity graph node is disconnected from its run root",
+                ));
+            }
+        }
+        let canonical = canonical_activity_node_ids(&self.nodes)?;
+        if canonical
+            .iter()
+            .zip(&self.nodes)
+            .any(|(id, node)| *id != node.node_id)
+            || canonical.len() != self.nodes.len()
+        {
+            return Err(SurfaceValidationError::new(
+                "activity nodes must use deterministic parent-before-child ordering",
+            ));
+        }
+        let mut order_indices = BTreeSet::new();
+        if self
+            .nodes
+            .iter()
+            .any(|node| node.order_index == 0 || !order_indices.insert(node.order_index))
+        {
+            return Err(SurfaceValidationError::new(
+                "activity order indices must be unique and nonzero",
+            ));
+        }
+        let has_active = self.nodes.iter().any(|node| !node.state.is_terminal());
+        let path_valid = (!has_active && self.current_path.is_empty())
+            || (has_active
+                && self
+                    .current_path
+                    .first()
+                    .is_some_and(|root| self.roots.contains(root))
+                && self.current_path.iter().all(|id| {
+                    ids.contains(id.as_str())
+                        && self
+                            .nodes
+                            .iter()
+                            .find(|node| &node.node_id == id)
+                            .is_some_and(|node| {
+                                !node.state.is_terminal()
+                                    && node.kind != ActivityNodeKind::Aggregate
+                            })
+                })
+                && self.current_path.windows(2).all(|pair| {
+                    self.nodes
+                        .iter()
+                        .find(|node| node.node_id == pair[1])
+                        .and_then(|node| node.parent_node_id.as_deref())
+                        == Some(pair[0].as_str())
+                })
+                && self.current_path.last().is_some_and(|leaf| {
+                    self.nodes.iter().all(|node| {
+                        node.parent_node_id.as_deref() != Some(leaf.as_str())
+                            || node.state.is_terminal()
+                    })
+                })
+                && self.current_path.iter().collect::<BTreeSet<_>>().len()
+                    == self.current_path.len());
+        if !path_valid || self.current_path != deterministic_activity_current_path(&self.nodes) {
+            return Err(SurfaceValidationError::new(
+                "activity current path must be a connected root-to-node chain",
+            ));
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| SurfaceValidationError::new("activity graph could not be encoded"))?
+            .len()
+            > MAX_ACTIVITY_GRAPH_BYTES
+        {
+            return Err(SurfaceValidationError::new(
+                "activity graph exceeds its encoded display bound",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ActivityGraphDeltaBatch {
+    pub fn validate_shape(&self) -> Result<(), SurfaceValidationError> {
+        if self.graph_revision == 0 {
+            return Err(SurfaceValidationError::new(
+                "activity delta revision must be nonzero",
+            ));
+        }
+        bound_count(
+            self.upserts.len(),
+            MAX_ACTIVITY_NODES,
+            "activity delta upserts",
+        )?;
+        bound_count(
+            self.removals.len(),
+            MAX_ACTIVITY_NODES,
+            "activity delta removals",
+        )?;
+        if let Some(path) = &self.current_path {
+            bound_count(
+                path.len(),
+                MAX_ACTIVITY_PATH_NODES,
+                "activity delta current path",
+            )?;
+            for id in path {
+                bound_string(id, 512, "activity delta path ID", false)?;
+                if id.chars().any(is_forbidden_presentation_character) {
+                    return Err(SurfaceValidationError::new(
+                        "activity delta path contains an unsafe node identity",
+                    ));
+                }
+            }
+        }
+        let mut upserts = BTreeSet::new();
+        let mut order_indices = BTreeSet::new();
+        for (index, node) in self.upserts.iter().enumerate() {
+            node.validate()?;
+            if node.order_index == 0
+                || !upserts.insert(node.node_id.as_str())
+                || !order_indices.insert(node.order_index)
+            {
+                return Err(SurfaceValidationError::new(
+                    "activity delta upsert identities and order indices must be unique and nonzero",
+                ));
+            }
+            if node.parent_node_id.as_ref().is_some_and(|parent| {
+                self.upserts
+                    .iter()
+                    .position(|candidate| &candidate.node_id == parent)
+                    .is_some_and(|parent_index| parent_index >= index)
+            }) {
+                return Err(SurfaceValidationError::new(
+                    "activity delta parents must precede their children",
+                ));
+            }
+        }
+        let mut removals = BTreeSet::new();
+        for removal in &self.removals {
+            bound_string(
+                &removal.subtree_root_id,
+                512,
+                "activity delta removal ID",
+                false,
+            )?;
+            if removal
+                .subtree_root_id
+                .chars()
+                .any(is_forbidden_presentation_character)
+                || !removals.insert(removal.subtree_root_id.as_str())
+                || upserts.contains(removal.subtree_root_id.as_str())
+            {
+                return Err(SurfaceValidationError::new(
+                    "activity delta removal identities must be unique",
+                ));
+            }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| SurfaceValidationError::new("activity delta could not be encoded"))?
+            .len()
+            > MAX_ACTIVITY_DELTA_BYTES
+        {
+            return Err(SurfaceValidationError::new(
+                "activity delta exceeds its encoded wire bound",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn canonical_activity_node_ids(
+    nodes: &[ActivityNodeView],
+) -> Result<Vec<String>, SurfaceValidationError> {
+    let mut children = BTreeMap::<Option<&str>, Vec<&ActivityNodeView>>::new();
+    for node in nodes {
+        children
+            .entry(node.parent_node_id.as_deref())
+            .or_default()
+            .push(node);
+    }
+    for siblings in children.values_mut() {
+        siblings.sort_by(|left, right| {
+            (left.order_index, left.node_id.as_str())
+                .cmp(&(right.order_index, right.node_id.as_str()))
+        });
+    }
+    fn visit(
+        parent: Option<&str>,
+        children: &BTreeMap<Option<&str>, Vec<&ActivityNodeView>>,
+        visiting: &mut BTreeSet<String>,
+        output: &mut Vec<String>,
+    ) -> Result<(), SurfaceValidationError> {
+        for node in children.get(&parent).into_iter().flatten() {
+            if !visiting.insert(node.node_id.clone()) {
+                return Err(SurfaceValidationError::new(
+                    "activity graph must be acyclic",
+                ));
+            }
+            output.push(node.node_id.clone());
+            visit(Some(&node.node_id), children, visiting, output)?;
+            visiting.remove(&node.node_id);
+        }
+        Ok(())
+    }
+    let mut output = Vec::with_capacity(nodes.len());
+    visit(None, &children, &mut BTreeSet::new(), &mut output)?;
+    Ok(output)
+}
+
+fn deterministic_activity_current_path(nodes: &[ActivityNodeView]) -> Vec<String> {
+    let priority = |state: ActivityNodeState| match state {
+        ActivityNodeState::Running => Some(0u8),
+        ActivityNodeState::Waiting => Some(1),
+        ActivityNodeState::Pending => Some(2),
+        _ => None,
+    };
+    let depth = |node: &ActivityNodeView| {
+        let mut depth = 0usize;
+        let mut parent = node.parent_node_id.as_deref();
+        while let Some(parent_id) = parent {
+            let Some(parent_node) = nodes.iter().find(|node| node.node_id == parent_id) else {
+                break;
+            };
+            depth = depth.saturating_add(1);
+            parent = parent_node.parent_node_id.as_deref();
+        }
+        depth
+    };
+    let mut leaves = nodes
+        .iter()
+        .filter(|node| priority(node.state).is_some())
+        .filter(|node| {
+            nodes.iter().all(|child| {
+                child.parent_node_id.as_deref() != Some(node.node_id.as_str())
+                    || priority(child.state).is_none()
+            })
+        })
+        .collect::<Vec<_>>();
+    leaves.sort_by(|left, right| {
+        priority(left.state)
+            .cmp(&priority(right.state))
+            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+            .then_with(|| depth(right).cmp(&depth(left)))
+            .then_with(|| left.order_index.cmp(&right.order_index))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let Some(leaf) = leaves.first() else {
+        return Vec::new();
+    };
+    let mut path = vec![leaf.node_id.clone()];
+    let mut parent = leaf.parent_node_id.as_deref();
+    while let Some(parent_id) = parent {
+        let Some(parent_node) = nodes.iter().find(|node| node.node_id == parent_id) else {
+            return Vec::new();
+        };
+        path.push(parent_node.node_id.clone());
+        parent = parent_node.parent_node_id.as_deref();
+    }
+    path.reverse();
+    path
+}
+
+fn contains_absolute_display_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'/'
+            && bytes.get(index + 1).is_some_and(|next| *next != b'/')
+            && (index == 0
+                || bytes[index - 1].is_ascii_whitespace()
+                || b"([{=:,'\"".contains(&bytes[index - 1]))
+    })
+}
+
+fn is_redacted_capability_display_path(value: &str) -> bool {
+    !value.starts_with('/')
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
 impl HumanHostTerminalEnsureRequest {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         self.terminal.validate()?;
@@ -996,18 +1997,8 @@ impl HumanHostTerminalEnsureRequest {
 impl TerminalSessionView {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         validate_shell_profile(&self.shell)?;
-        bound_string(
-            &self.workspace_root,
-            MAX_PATH_BYTES,
-            "terminal workspace root",
-            false,
-        )?;
-        bound_string(&self.cwd, MAX_PATH_BYTES, "terminal cwd", false)?;
-        if self.workspace_root.contains('\0') || self.cwd.contains('\0') {
-            return Err(SurfaceValidationError::new(
-                "terminal paths must not contain NUL",
-            ));
-        }
+        self.workspace_root.validate()?;
+        self.cwd.validate()?;
         bound_string(
             &self.initial_environment_digest,
             MAX_DIGEST_BYTES,
@@ -1047,6 +2038,13 @@ impl TerminalSessionView {
         if self.process_state.is_live() && self.exit.is_some() {
             return Err(SurfaceValidationError::new(
                 "a live terminal cannot carry a process exit outcome",
+            ));
+        }
+        if matches!(self.prompt_state, TerminalPromptState::Ready)
+            != self.prompt_generation.is_some()
+        {
+            return Err(SurfaceValidationError::new(
+                "terminal prompt generation must be present exactly for a trusted ready prompt",
             ));
         }
         validate_exit(self.exit.as_ref())
@@ -1091,6 +2089,11 @@ impl SessionPresentationSnapshot {
             MAX_PRESENTATION_ITEMS,
             "execution records",
         )?;
+        bound_count(
+            self.human_commands.len(),
+            MAX_HUMAN_COMMAND_CARDS,
+            "Human command cards",
+        )?;
         validate_header(&self.header)?;
         for item in &self.items {
             validate_item(item)?;
@@ -1108,6 +2111,26 @@ impl SessionPresentationSnapshot {
         }
         for execution in &self.executions {
             validate_execution(execution)?;
+        }
+        let mut command_keys = BTreeSet::new();
+        let mut command_output_bytes = 0usize;
+        for command in &self.human_commands {
+            command.validate()?;
+            command_output_bytes =
+                command_output_bytes.saturating_add(command.output.as_str().len());
+            if !command_keys.insert((&command.terminal_id, command.command_sequence)) {
+                return Err(SurfaceValidationError::new(
+                    "Human command card identities must be unique",
+                ));
+            }
+        }
+        if command_output_bytes > MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES {
+            return Err(SurfaceValidationError::new(
+                "Human command cards exceed their aggregate output bound",
+            ));
+        }
+        if let Some(activity) = &self.activity {
+            activity.validate()?;
         }
         if self.header.session_id != self.session_id
             || self
@@ -1353,6 +2376,7 @@ fn validate_snapshot_transfer_summary(
 impl DaemonRequestKind {
     pub fn validate_surface(&self) -> Result<(), SurfaceValidationError> {
         match self {
+            Self::SetupSmokeSessionOpen(request) => validate_setup_smoke_session_open(request),
             Self::CommandCatalog(request) => {
                 bound_count(
                     request.client_effects.len(),
@@ -1389,6 +2413,7 @@ impl DaemonRequestKind {
             Self::ApplicationAction(request) => validate_application_action_request(request),
             Self::HumanTerminalEnsure(request) => request.validate(),
             Self::HumanHostTerminalEnsure(request) => request.validate(),
+            Self::HumanTerminalCommandSubmit(request) => request.validate(),
             Self::SessionPresentation(request) => bound_optional_string(
                 request.page_cursor.as_deref(),
                 MAX_IDENTIFIER_BYTES,
@@ -1398,6 +2423,115 @@ impl DaemonRequestKind {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_setup_smoke_session_open(
+    request: &crate::SetupSmokeSessionOpenRequest,
+) -> Result<(), SurfaceValidationError> {
+    bound_string(
+        &request.workspace_root,
+        MAX_PATH_BYTES,
+        "setup smoke workspace root",
+        false,
+    )?;
+    if !std::path::Path::new(&request.workspace_root).is_absolute()
+        || request.workspace_root.contains('\0')
+    {
+        return Err(SurfaceValidationError::new(
+            "setup smoke workspace root must be an absolute path without NUL bytes",
+        ));
+    }
+    bound_string(
+        &request.function_ref,
+        MAX_PATH_BYTES,
+        "setup smoke function reference",
+        false,
+    )?;
+    if request.function_ref.contains('\0') {
+        return Err(SurfaceValidationError::new(
+            "setup smoke function reference cannot contain NUL bytes",
+        ));
+    }
+    if request.max_output_tokens == 0 || request.max_output_tokens > MAX_SETUP_SMOKE_OUTPUT_TOKENS {
+        return Err(SurfaceValidationError::new(format!(
+            "setup smoke output limit must be between 1 and {MAX_SETUP_SMOKE_OUTPUT_TOKENS}"
+        )));
+    }
+    request.staged_bindings.validate().map_err(|error| {
+        SurfaceValidationError::new(format!("invalid staged bindings: {error}"))
+    })?;
+    bound_count(
+        request.staged_bindings.models.len(),
+        MAX_SETUP_SMOKE_MODEL_BINDINGS,
+        "setup smoke model bindings",
+    )?;
+    for binding in request.staged_bindings.models.values() {
+        let path = binding.path.to_str().ok_or_else(|| {
+            SurfaceValidationError::new("setup smoke model binding path must be UTF-8")
+        })?;
+        bound_string(
+            path,
+            MAX_PATH_BYTES,
+            "setup smoke model binding path",
+            false,
+        )?;
+        if !binding.path.is_absolute() || path.contains('\0') {
+            return Err(SurfaceValidationError::new(
+                "setup smoke model binding path must be absolute and contain no NUL bytes",
+            ));
+        }
+    }
+    bound_string(
+        &request.runtime_plan.profile_id,
+        MAX_IDENTIFIER_BYTES,
+        "setup smoke runtime profile ID",
+        false,
+    )?;
+    bound_optional_string(
+        request.runtime_plan.selected_device.as_deref(),
+        MAX_LABEL_BYTES,
+        "setup smoke selected device",
+    )?;
+    bound_string(
+        &request.runtime_plan.expected_speed,
+        MAX_LABEL_BYTES,
+        "setup smoke expected speed",
+        false,
+    )?;
+    if request.runtime_plan.smoke_timeout_seconds == 0
+        || request.runtime_plan.smoke_timeout_seconds > 3_600
+    {
+        return Err(SurfaceValidationError::new(
+            "setup smoke runtime timeout must be between 1 and 3600 seconds",
+        ));
+    }
+    request
+        .runtime_plan
+        .runtime
+        .validate()
+        .map_err(|error| SurfaceValidationError::new(format!("invalid runtime plan: {error}")))?;
+    bound_optional_string(
+        request.runtime_plan.runtime.device.as_deref(),
+        MAX_LABEL_BYTES,
+        "setup smoke runtime device",
+    )?;
+    if let Some(draft_model) = request.runtime_plan.runtime.mtp.draft_model.as_deref() {
+        let path = draft_model.to_str().ok_or_else(|| {
+            SurfaceValidationError::new("setup smoke MTP draft model path must be UTF-8")
+        })?;
+        bound_string(
+            path,
+            MAX_PATH_BYTES,
+            "setup smoke MTP draft model path",
+            false,
+        )?;
+        if !draft_model.is_absolute() || path.contains('\0') {
+            return Err(SurfaceValidationError::new(
+                "setup smoke MTP draft model path must be absolute and contain no NUL bytes",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl DaemonEventKind {
@@ -1414,6 +2548,9 @@ impl DaemonEventKind {
                 Ok(())
             }
             Self::HumanTerminalEnsured(event) => event.terminal.validate(),
+            Self::HumanTerminalCommandAccepted(_) => Ok(()),
+            Self::InferenceInventory(event) => validate_inference_inventory(event),
+            Self::InferenceStatus(event) => validate_inference_status(event),
             Self::Error(error) => {
                 bound_string(
                     &error.message,
@@ -1426,6 +2563,91 @@ impl DaemonEventKind {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_inference_inventory(
+    inventory: &crate::InferenceInventoryEvent,
+) -> Result<(), SurfaceValidationError> {
+    bound_count(
+        inventory.devices.len(),
+        MAX_INFERENCE_DEVICES,
+        "inference devices",
+    )?;
+    let mut physical_ids = BTreeSet::new();
+    let mut backend_names = BTreeSet::new();
+    for device in &inventory.devices {
+        bound_string(
+            &device.physical_device_id,
+            MAX_IDENTIFIER_BYTES,
+            "inference physical device ID",
+            false,
+        )?;
+        bound_string(
+            &device.driver_build_id,
+            MAX_DIGEST_BYTES,
+            "inference driver build ID",
+            false,
+        )?;
+        bound_string(
+            &device.backend_name,
+            MAX_IDENTIFIER_BYTES,
+            "inference backend name",
+            false,
+        )?;
+        bound_string(
+            &device.description,
+            MAX_DISPLAY_BYTES,
+            "inference device description",
+            false,
+        )?;
+        if !physical_ids.insert(device.physical_device_id.as_str()) {
+            return Err(SurfaceValidationError::new(
+                "inference inventory contains a duplicate physical device ID",
+            ));
+        }
+        if !backend_names.insert(device.backend_name.as_str()) {
+            return Err(SurfaceValidationError::new(
+                "inference inventory contains a duplicate backend name",
+            ));
+        }
+        if device.free_memory_bytes > device.total_memory_bytes {
+            return Err(SurfaceValidationError::new(
+                "inference device free memory exceeds total memory",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_inference_status(
+    status: &crate::InferenceStatusEvent,
+) -> Result<(), SurfaceValidationError> {
+    bound_string(
+        &status.worker_build_id,
+        MAX_DIGEST_BYTES,
+        "inference worker build ID",
+        false,
+    )?;
+    if status.worker_pid == Some(0) {
+        return Err(SurfaceValidationError::new(
+            "inference worker PID must be nonzero",
+        ));
+    }
+    if status.launch_generation == Some(0) {
+        return Err(SurfaceValidationError::new(
+            "inference worker launch generation must be nonzero",
+        ));
+    }
+    if status.worker_pid.is_some() != status.launch_generation.is_some() {
+        return Err(SurfaceValidationError::new(
+            "inference worker PID and launch generation must be present together",
+        ));
+    }
+    bound_optional_string(
+        status.physical_device_id.as_deref(),
+        MAX_IDENTIFIER_BYTES,
+        "inference physical device ID",
+    )
 }
 
 fn validate_catalog(catalog: &CommandCatalogEvent) -> Result<(), SurfaceValidationError> {
@@ -1583,6 +2805,7 @@ fn validate_application_action_request(
         | ApplicationAction::WorkspaceGet
         | ApplicationAction::TerminalList { .. }
         | ApplicationAction::TerminalPromote { .. }
+        | ApplicationAction::IncompleteTurnContinue { .. }
         | ApplicationAction::ExecutionList { .. }
         | ApplicationAction::ExecutionAttach { .. }
         | ApplicationAction::ExecutionKill { .. }
@@ -1643,6 +2866,19 @@ fn validate_action_result(result: &ApplicationActionResult) -> Result<(), Surfac
         | ApplicationActionResult::KillAccepted { .. }
         | ApplicationActionResult::Cleared { .. }
         | ApplicationActionResult::SessionExited { .. } => Ok(()),
+        ApplicationActionResult::IncompleteTurnContinued { admission } => {
+            if admission.queued
+                != matches!(
+                    admission.state,
+                    PromptAdmissionState::Queued | PromptAdmissionState::Waiting
+                )
+            {
+                return Err(SurfaceValidationError::new(
+                    "continuation admission queue state is inconsistent",
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1668,9 +2904,9 @@ fn validate_presentation_event(
         | SessionPresentationEventPayload::TerminalChanged { terminal } => {
             terminal.validate_for_session(&envelope.session_id)
         }
-        SessionPresentationEventPayload::TerminalCommandFinished { cwd, .. } => {
-            bound_string(cwd, MAX_PATH_BYTES, "terminal cwd", false)
-        }
+        SessionPresentationEventPayload::TerminalCommandFinished { cwd, .. } => cwd.validate(),
+        SessionPresentationEventPayload::HumanCommandCardUpsert { card } => card.validate(),
+        SessionPresentationEventPayload::ActivityGraphDelta { batch } => batch.validate_shape(),
         SessionPresentationEventPayload::ExecutionStateChanged { execution } => {
             validate_execution(execution)
         }
@@ -1682,6 +2918,7 @@ fn validate_presentation_event(
         | SessionPresentationEventPayload::PromptActivated { .. }
         | SessionPresentationEventPayload::TerminalRemoved { .. }
         | SessionPresentationEventPayload::TerminalCommandStarted { .. }
+        | SessionPresentationEventPayload::HumanCommandCardRemoved { .. }
         | SessionPresentationEventPayload::CommandAvailabilityChanged
         | SessionPresentationEventPayload::SessionFinished => Ok(()),
     }
@@ -1695,11 +2932,9 @@ fn validate_header(header: &SessionHeader) -> Result<(), SurfaceValidationError>
         "function name",
         false,
     )?;
-    if header.workspace_root.contains('\0') || header.cwd.contains('\0') {
-        return Err(SurfaceValidationError::new(
-            "presentation paths must not contain NUL",
-        ));
-    }
+    header.workspace_root.validate()?;
+    validate_workspace_history_scope(&header.workspace_history_scope)?;
+    header.cwd.validate()?;
     bound_optional_string(header.model_id.as_deref(), MAX_IDENTIFIER_BYTES, "model ID")?;
     validate_identifier_list(
         &header.selected_skills,
@@ -1707,19 +2942,41 @@ fn validate_header(header: &SessionHeader) -> Result<(), SurfaceValidationError>
         "selected skills",
         "skill ID",
     )?;
-    bound_string(
-        &header.workspace_root,
-        MAX_PATH_BYTES,
-        "workspace root",
-        false,
-    )?;
-    bound_string(&header.cwd, MAX_PATH_BYTES, "working directory", false)
+    Ok(())
+}
+
+fn validate_workspace_history_scope(scope: &str) -> Result<(), SurfaceValidationError> {
+    let Some(digest) = scope.strip_prefix("sha256:") else {
+        return Err(SurfaceValidationError::new(
+            "workspace history scope must be an opaque SHA-256 identity",
+        ));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SurfaceValidationError::new(
+            "workspace history scope must be an opaque SHA-256 identity",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_item(item: &SessionPresentationItem) -> Result<(), SurfaceValidationError> {
     let result = match item {
         SessionPresentationItem::UserMessage { .. }
         | SessionPresentationItem::AssistantMessage { .. } => Ok(()),
+        SessionPresentationItem::IncompleteAssistant { item } => {
+            let encoded = serde_json::to_vec(&item.content).map_err(|_| {
+                SurfaceValidationError::new("incomplete assistant content is not encodable")
+            })?;
+            bound_count(
+                encoded.len(),
+                MAX_PRESENTATION_CONTENT_BYTES,
+                "incomplete assistant content",
+            )
+        }
         SessionPresentationItem::AgentAction {
             capability_id,
             summary,
@@ -1751,12 +3008,7 @@ fn validate_item(item: &SessionPresentationItem) -> Result<(), SurfaceValidation
 }
 
 fn validate_execution(execution: &ExecutionView) -> Result<(), SurfaceValidationError> {
-    bound_string(&execution.cwd, MAX_PATH_BYTES, "execution cwd", false)?;
-    if execution.cwd.contains('\0') {
-        return Err(SurfaceValidationError::new(
-            "execution cwd must not contain NUL",
-        ));
-    }
+    execution.cwd.validate()?;
     if execution.state.is_live() && execution.exit.is_some() {
         return Err(SurfaceValidationError::new(
             "a live execution cannot carry an exit outcome",
@@ -1780,12 +3032,7 @@ fn validate_shell_profile(shell: &ShellProfileView) -> Result<(), SurfaceValidat
         "shell profile ID",
         false,
     )?;
-    bound_string(&shell.program, MAX_PATH_BYTES, "shell program", false)?;
-    if shell.program.contains('\0') {
-        return Err(SurfaceValidationError::new(
-            "shell program must not contain NUL",
-        ));
-    }
+    shell.program.validate()?;
     bound_string(
         &shell.executable_digest,
         MAX_DIGEST_BYTES,
@@ -1831,6 +3078,43 @@ fn validate_identifier_list(
         }
     }
     Ok(())
+}
+
+fn is_forbidden_human_command_character(character: char) -> bool {
+    let code = character as u32;
+    (code <= 0x1f && character != '\n' && character != '\t') || (0x7f..=0x9f).contains(&code)
+}
+
+fn is_forbidden_presentation_character(character: char) -> bool {
+    let code = character as u32;
+    is_forbidden_human_command_character(character) || is_unicode_format_control(code)
+}
+
+fn is_unicode_format_control(code: u32) -> bool {
+    matches!(
+        code,
+        0x00ad
+            | 0x061c
+            | 0x06dd
+            | 0x070f
+            | 0x180e
+            | 0xfeff
+            | 0x110bd
+            | 0x110cd
+            | 0xe0001
+            | 0x0600..=0x0605
+            | 0x0890..=0x0891
+            | 0x08e2
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfff9..=0xfffb
+            | 0x13430..=0x1343f
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0020..=0xe007f
+    )
 }
 
 fn validate_environment_name(name: &str) -> Result<(), SurfaceValidationError> {
@@ -2005,6 +3289,17 @@ mod tests {
         SessionId::parse(SESSION_ID).unwrap()
     }
 
+    fn display_path(text: &str) -> SanitizedDisplayPath {
+        SanitizedDisplayPath {
+            text: text.to_owned(),
+            truncated: false,
+        }
+    }
+
+    fn workspace_history_scope() -> String {
+        format!("sha256:{}", "a".repeat(64))
+    }
+
     fn terminal() -> TerminalSessionView {
         TerminalSessionView {
             terminal_id: TerminalSessionId::parse(TERMINAL_ID).unwrap(),
@@ -2015,15 +3310,16 @@ mod tests {
             profile: ExecutionProfile::Workspace,
             shell: ShellProfileView {
                 profile_id: "bash-managed".to_owned(),
-                program: "/bin/bash".to_owned(),
+                program: display_path("/bin/bash"),
                 executable_digest: "sha256:aaaaaaaa".to_owned(),
                 config_digest: "sha256:bbbbbbbb".to_owned(),
             },
-            workspace_root: "/workspace".to_owned(),
-            cwd: "/workspace".to_owned(),
+            workspace_root: display_path("/workspace"),
+            cwd: display_path("/workspace"),
             initial_environment_digest: "sha256:cccccccc".to_owned(),
             environment_names: vec!["LANG".to_owned(), "PATH".to_owned()],
             command_sequence: 0,
+            prompt_generation: Some(1),
             prompt_state: TerminalPromptState::Ready,
             process_state: ExecutionState::Running,
             exit: None,
@@ -2052,8 +3348,9 @@ mod tests {
                 operation_mode: ProtocolToolMode::ReadOnly,
                 selected_skills: Vec::new(),
                 runtime_context_revision: 1,
-                workspace_root: "/workspace".to_owned(),
-                cwd: "/workspace".to_owned(),
+                workspace_root: display_path("/workspace"),
+                workspace_history_scope: workspace_history_scope(),
+                cwd: display_path("/workspace"),
                 execution_context_revision: 1,
                 context_used_tokens: None,
                 context_limit_tokens: None,
@@ -2069,6 +3366,8 @@ mod tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
+            human_commands: Vec::new(),
+            activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id),
                 session_active: true,
@@ -2116,7 +3415,7 @@ mod tests {
     }
 
     #[test]
-    fn human_terminal_ensure_has_strict_v5_wire_shape_and_redacted_debug() {
+    fn human_terminal_ensure_has_strict_v6_wire_shape_and_redacted_debug() {
         let request = DaemonRequest::new(
             request_id(),
             DaemonRequestKind::HumanTerminalEnsure(ensure_request()),
@@ -2331,6 +3630,64 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_output_action_and_item_have_strict_stable_wire_shapes() {
+        let request = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::ApplicationAction(ApplicationActionRequest {
+                session_id: Some(session_id()),
+                client_submission_id: "continue-stable-1".to_owned(),
+                action: ApplicationAction::IncompleteTurnContinue {
+                    message_id: MessageId::parse(MESSAGE_ID).unwrap(),
+                    expected_execution_context_revision: 41,
+                },
+            }),
+        );
+        let request_wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(request_wire["kind"], "application_action");
+        assert_eq!(
+            request_wire["payload"],
+            serde_json::json!({
+                "session_id": SESSION_ID,
+                "client_submission_id": "continue-stable-1",
+                "action": {
+                    "kind": "incomplete_turn_continue",
+                    "message_id": MESSAGE_ID,
+                    "expected_execution_context_revision": 41,
+                },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(request_wire.clone()).unwrap(),
+            request
+        );
+        let mut unknown = request_wire;
+        unknown["payload"]["action"]["retry"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<DaemonRequest>(unknown).is_err());
+
+        let item = SessionPresentationItem::IncompleteAssistant {
+            item: IncompleteAssistantItemView {
+                message_id: MessageId::parse(MESSAGE_ID).unwrap(),
+                content: Content::text("bounded partial").unwrap(),
+                source_run_id: RunId::parse(RUN_ID).unwrap(),
+                source_turn_id: TurnId::parse(TURN_ID).unwrap(),
+                source_attempt_id: AttemptId::generate(),
+                reason: IncompleteOutputReason::ContentByteLimit,
+                continuation_index: 2,
+                continue_action: ContinueActionView::Available,
+            },
+        };
+        let item_wire = serde_json::to_value(&item).unwrap();
+        assert_eq!(item_wire["kind"], "incomplete_assistant");
+        assert_eq!(item_wire["item"]["reason"], "content_byte_limit");
+        assert_eq!(item_wire["item"]["continuation_index"], 2);
+        assert_eq!(item_wire["item"]["continue_action"]["state"], "available");
+        assert_eq!(
+            serde_json::from_value::<SessionPresentationItem>(item_wire).unwrap(),
+            item
+        );
+    }
+
+    #[test]
     fn command_catalog_rejects_descriptor_count_overflow() {
         let descriptor = CommandDescriptor {
             id: "session.status".to_owned(),
@@ -2351,6 +3708,76 @@ mod tests {
         );
         let value = serde_json::to_value(event).unwrap();
         assert!(serde_json::from_value::<DaemonEvent>(value).is_err());
+    }
+
+    #[test]
+    fn inference_inventory_is_bounded_and_rejects_impossible_memory() {
+        let device = crate::InferenceDeviceEvent {
+            physical_device_id: "pci:0000:03:00.0".to_owned(),
+            driver_build_id: "sha256:driver".to_owned(),
+            backend_name: "Vulkan0".to_owned(),
+            description: "RX 7900 XTX".to_owned(),
+            kind: crate::ProtocolInferenceDeviceKind::DiscreteGpu,
+            free_memory_bytes: 20,
+            total_memory_bytes: 24,
+            usable: true,
+            supports_gpu_offload: true,
+        };
+        let event = DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::InferenceInventory(crate::InferenceInventoryEvent {
+                devices: vec![device.clone()],
+            }),
+        );
+        event.validate().unwrap();
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DaemonEvent>(&encoded).unwrap(),
+            event
+        );
+
+        let impossible = DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::InferenceInventory(crate::InferenceInventoryEvent {
+                devices: vec![crate::InferenceDeviceEvent {
+                    free_memory_bytes: 25,
+                    ..device
+                }],
+            }),
+        );
+        assert!(impossible.validate().is_err());
+    }
+
+    #[test]
+    fn inference_status_is_bounded_and_requires_complete_worker_identity() {
+        let status = crate::InferenceStatusEvent {
+            worker_build_id: "sha256:worker".to_owned(),
+            worker_state: crate::ProtocolInferenceWorkerState::Busy,
+            worker_pid: Some(42),
+            launch_generation: Some(7),
+            physical_device_id: Some("pci:0000:03:00.0".to_owned()),
+            reserved_bytes: 16 * 1024 * 1024,
+            cooldown_not_before_unix_ms: None,
+        };
+        let event = DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::InferenceStatus(status.clone()),
+        );
+        event.validate().unwrap();
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DaemonEvent>(&encoded).unwrap(),
+            event
+        );
+
+        let incomplete_identity = DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::InferenceStatus(crate::InferenceStatusEvent {
+                launch_generation: None,
+                ..status
+            }),
+        );
+        assert!(incomplete_identity.validate().is_err());
     }
 
     #[test]
@@ -2455,5 +3882,262 @@ mod tests {
         let mut snapshot = presentation_snapshot(1);
         snapshot.older_page_cursor = Some("x".repeat(MAX_IDENTIFIER_BYTES + 1));
         assert!(snapshot.validate().is_err());
+    }
+
+    #[test]
+    fn activity_graph_requires_safe_connected_consistent_topology() {
+        let run_id = RunId::parse(RUN_ID).unwrap();
+        let turn_id = TurnId::parse(TURN_ID).unwrap();
+        let root_id = format!("run:{run_id}");
+        let turn_node_id = format!("turn:{turn_id}");
+        let root = ActivityNodeView {
+            node_id: root_id.clone(),
+            parent_node_id: None,
+            order_index: 1,
+            run_id: run_id.clone(),
+            turn_id: None,
+            attempt_id: None,
+            step_id: None,
+            kind: ActivityNodeKind::Run,
+            phase: ActivityPhase::Queued,
+            state: ActivityNodeState::Running,
+            retry: 0,
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            finished_at_unix_ms: None,
+            elapsed_ms: 0,
+            summary: "run".to_owned(),
+            detail: ActivityDetailView::None,
+        };
+        let turn = ActivityNodeView {
+            node_id: turn_node_id.clone(),
+            parent_node_id: Some(root_id.clone()),
+            order_index: 2,
+            run_id: run_id.clone(),
+            turn_id: Some(turn_id),
+            attempt_id: None,
+            step_id: None,
+            kind: ActivityNodeKind::Turn,
+            phase: ActivityPhase::Model,
+            state: ActivityNodeState::Running,
+            retry: 0,
+            started_at_unix_ms: 2,
+            updated_at_unix_ms: 3,
+            finished_at_unix_ms: None,
+            elapsed_ms: 0,
+            summary: "turn".to_owned(),
+            detail: ActivityDetailView::Capability(CapabilityActivityDetail::FilesystemList {
+                path: display_path("src/lib.rs"),
+                entries: 1,
+                completeness: ActivityCompleteness::Complete,
+            }),
+        };
+        let graph = ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes: vec![root, turn],
+            current_path: vec![root_id, turn_node_id],
+            truncated: false,
+        };
+        graph.validate().unwrap();
+
+        let mut missing_parent = graph.clone();
+        missing_parent.nodes[1].parent_node_id = Some("missing".to_owned());
+        assert!(missing_parent.validate().is_err());
+
+        let mut cycle = graph.clone();
+        let attempt_id = AttemptId::generate();
+        let attempt_node_id = format!("attempt:{attempt_id}");
+        cycle.nodes[1].parent_node_id = Some(attempt_node_id.clone());
+        cycle.nodes.push(ActivityNodeView {
+            node_id: attempt_node_id,
+            parent_node_id: Some(cycle.nodes[1].node_id.clone()),
+            order_index: 3,
+            run_id: run_id.clone(),
+            turn_id: cycle.nodes[1].turn_id.clone(),
+            attempt_id: Some(attempt_id),
+            step_id: None,
+            kind: ActivityNodeKind::Attempt,
+            phase: ActivityPhase::Model,
+            state: ActivityNodeState::Running,
+            retry: 0,
+            started_at_unix_ms: 3,
+            updated_at_unix_ms: 3,
+            finished_at_unix_ms: None,
+            elapsed_ms: 0,
+            summary: "attempt".to_owned(),
+            detail: ActivityDetailView::None,
+        });
+        cycle.current_path.clear();
+        assert!(cycle.validate().is_err());
+
+        let mut bad_path = graph.clone();
+        bad_path.current_path.reverse();
+        assert!(bad_path.validate().is_err());
+
+        for path in ["/home/user/private", "src/../secret", "./src"] {
+            let mut unsafe_path = graph.clone();
+            unsafe_path.nodes[1].detail =
+                ActivityDetailView::Capability(CapabilityActivityDetail::FilesystemList {
+                    path: display_path(path),
+                    entries: 1,
+                    completeness: ActivityCompleteness::Complete,
+                });
+            assert!(
+                unsafe_path.validate().is_err(),
+                "accepted unsafe path {path}"
+            );
+        }
+
+        let mut unsafe_summary = graph.clone();
+        unsafe_summary.nodes[1].summary = "reading /home/user/private".to_owned();
+        assert!(unsafe_summary.validate().is_err());
+
+        let mut impossible_progress = graph.clone();
+        impossible_progress.nodes[1].detail =
+            ActivityDetailView::Inference(InferenceActivityDetail {
+                stage: InferenceProductStageView::Prefill,
+                completed: Some(3),
+                total: Some(2),
+                unit: Some(InferenceProgressUnit::Tokens),
+                cache: ActivityCacheDisposition::Rebuilt,
+            });
+        assert!(impossible_progress.validate().is_err());
+
+        let mut noncanonical = graph.clone();
+        noncanonical.nodes.reverse();
+        assert!(noncanonical.validate().is_err());
+
+        let encoded = serde_json::to_string(&graph).unwrap();
+        for sentinel in ["super-secret-token", "raw prompt", "/home/user/private"] {
+            assert!(!encoded.contains(sentinel));
+        }
+        assert!(
+            serde_json::from_value::<ActivityDetailView>(serde_json::json!({
+                "kind": "unknown_capability",
+                "detail": {
+                    "capability_id": "fs.list",
+                    "raw_arguments": "super-secret-token"
+                }
+            }))
+            .is_err(),
+            "closed activity detail must reject unreviewed raw fields"
+        );
+        let mut unsafe_capability = graph.clone();
+        unsafe_capability.nodes[1].detail = ActivityDetailView::UnknownCapability {
+            capability_id: "/home/user/private".to_owned(),
+        };
+        assert!(unsafe_capability.validate().is_err());
+
+        let delta = ActivityGraphDeltaBatch {
+            graph_revision: 2,
+            upserts: graph.nodes.clone(),
+            removals: Vec::new(),
+            current_path: Some(graph.current_path.clone()),
+            truncated: false,
+        };
+        delta.validate_shape().unwrap();
+        let mut child_first = delta.clone();
+        child_first.upserts.reverse();
+        assert!(child_first.validate_shape().is_err());
+
+        let mut terminal_without_finish = graph;
+        terminal_without_finish.nodes[1].state = ActivityNodeState::Succeeded;
+        assert!(terminal_without_finish.validate().is_err());
+    }
+
+    #[test]
+    fn display_path_and_workspace_scope_wire_values_fail_closed() {
+        for hostile in ["line\nbreak", "escape\u{1b}", "bidi\u{202e}", "c1\u{85}"] {
+            assert!(
+                SanitizedDisplayPath {
+                    text: hostile.to_owned(),
+                    truncated: false,
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        display_path("/workspace").validate().unwrap();
+        validate_workspace_history_scope(&workspace_history_scope()).unwrap();
+        for invalid in [
+            "",
+            "sha256:abc",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "md5:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(validate_workspace_history_scope(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn human_command_card_wire_lifecycle_is_typed_and_debug_is_redacted() {
+        let value = serde_json::json!({
+            "terminal_id": TERMINAL_ID,
+            "execution_id": EXECUTION_ID,
+            "command_sequence": 4,
+            "command": "printf private-value",
+            "output": "done\n",
+            "output_start": { "after_sequence": 10 },
+            "output_end": { "after_sequence": 12 },
+            "state": "exited",
+            "exit_status": 0,
+            "cwd": { "text": "/workspace", "truncated": false },
+            "truncated": false,
+            "filtered_effects": 0,
+            "started_at_unix_ms": 20,
+            "updated_at_unix_ms": 21
+        });
+        let card = serde_json::from_value::<HumanCommandCardView>(value.clone()).unwrap();
+        card.validate().unwrap();
+        assert!(!format!("{card:?}").contains("private-value"));
+
+        let mut missing_exit = value.clone();
+        missing_exit["exit_status"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<HumanCommandCardView>(missing_exit)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut raw_escape = value;
+        raw_escape["command"] = serde_json::json!("printf \u{1b}[31m");
+        assert!(
+            serde_json::from_value::<HumanCommandCardView>(raw_escape)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn human_command_submit_uses_writer_authority_and_redacts_debug() {
+        const SENTINEL: &str = "AGL_PROTOCOL_PRIVATE_COMMAND_148";
+        let request = HumanTerminalCommandSubmitRequest {
+            session_id: session_id(),
+            terminal_id: TerminalSessionId::parse(TERMINAL_ID).unwrap(),
+            client_submission_id: "typed-command".to_owned(),
+            writer_lease_id: WriterLeaseId::generate(),
+            expected_command_sequence: 2,
+            expected_prompt_generation: 3,
+            command: SENTINEL.to_owned(),
+        };
+        request.validate().unwrap();
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains(SENTINEL));
+        assert!(!request_debug.contains(request.writer_lease_id.as_str()));
+        let envelope = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::HumanTerminalCommandSubmit(request.clone()),
+        );
+        let envelope_debug = format!("{envelope:?}");
+        assert!(!envelope_debug.contains(SENTINEL));
+        assert!(!envelope_debug.contains(request.writer_lease_id.as_str()));
+        let encoded = serde_json::to_value(envelope).unwrap();
+        assert_eq!(
+            encoded["payload"]["writer_lease_id"],
+            request.writer_lease_id.as_str()
+        );
+        assert!(encoded["payload"].get("attachment_id").is_none());
     }
 }

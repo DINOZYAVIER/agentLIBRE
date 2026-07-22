@@ -11,7 +11,7 @@ use super::super::{
 };
 use super::output::IncrementalResponseClassifier;
 use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, native::*, prompt::*};
-use crate::InferenceFinishReason;
+use agl_inference::InferenceFinishReason;
 
 impl LlamaCppContextSlot {
     pub(super) fn generate_inner(
@@ -147,7 +147,11 @@ impl LlamaCppContextSlot {
             self.cache.token_history.push(token);
             output_tokens = output_tokens.saturating_add(1);
             if output.push(&piece) {
-                finish_reason = InferenceFinishReason::Stop;
+                finish_reason = if output.content_byte_limit_reached() {
+                    InferenceFinishReason::ContentByteLimit
+                } else {
+                    InferenceFinishReason::Stop
+                };
                 break;
             }
             if output.stopped_on_continuation() {
@@ -157,6 +161,9 @@ impl LlamaCppContextSlot {
         }
 
         let response = output.finish();
+        if response.content_byte_limit_reached {
+            finish_reason = InferenceFinishReason::ContentByteLimit;
+        }
 
         self.record_generated_assistant(
             rendered,

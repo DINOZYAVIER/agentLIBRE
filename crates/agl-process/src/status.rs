@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use agl_ids::{ExecutionId, RequestId, RunId, SessionId};
+use agl_ids::{ExecutionId, RequestId, RunId, SessionId, WriterLeaseId};
 use serde::{Deserialize, Serialize};
 
 use crate::{ExecutionIo, ExecutionOwner, ExecutionProfile, ProcessBytes, TerminalSize};
@@ -166,7 +166,18 @@ pub struct ShellIntegrationReadResult {
 #[serde(deny_unknown_fields)]
 pub struct InputLease {
     pub attachment_id: RequestId,
-    pub writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_lease_id: Option<WriterLeaseId>,
+}
+
+impl InputLease {
+    pub fn is_writable(&self) -> bool {
+        self.writer_lease_id.is_some()
+    }
+
+    pub fn writer_lease_id(&self) -> Option<&WriterLeaseId> {
+        self.writer_lease_id.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -121,6 +121,7 @@ current_link="$runtime_dir/current"
 runtime_lock="$cargo_root/.agentlibre-runtime.lock"
 installed_agl="$install_bin/agl"
 installed_launcher="$install_bin/agl-process-launcher"
+forbidden_public_worker="$install_bin/agl-inference-worker"
 agl_link_target="../libexec/agentlibre/current/agl"
 launcher_link_target="../libexec/agentlibre/current/agl-process-launcher"
 
@@ -130,6 +131,7 @@ if [[ "$dry_run" -eq 0 ]]; then
   need_tool cargo
   need_tool flock
   need_tool git
+  need_tool readelf
   need_tool sync
 fi
 
@@ -179,7 +181,47 @@ if [[ "$locked" -eq 1 ]]; then
 fi
 if [[ "$debug" -eq 1 ]]; then
   install_options+=(--debug)
+  cargo_profile=debug
+else
+  cargo_profile=release
 fi
+cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$cargo_target_dir" != /* ]]; then
+  cargo_target_dir="$repo_root/$cargo_target_dir"
+fi
+native_bundle_build_base="$cargo_target_dir/$cargo_profile/agl-inference-native"
+
+resolve_native_bundle_relative() {
+  local worker="$1"
+  local dynamic
+  local runpath
+  local component
+  local relative
+  local -a matches=()
+
+  [[ -f "$worker" && ! -L "$worker" ]] ||
+    fail "cannot resolve native bundle from a non-regular inference worker: $worker"
+  dynamic="$(LC_ALL=C readelf -d -- "$worker")" ||
+    fail "failed to inspect inference worker RUNPATH: $worker"
+  while IFS= read -r runpath; do
+    IFS=: read -r -a components <<<"$runpath"
+    for component in "${components[@]}"; do
+      if [[ "$component" == '$ORIGIN/'* ]]; then
+        relative="${component#\$ORIGIN/}"
+        if [[ "$relative" == agl-inference-native/* ]]; then
+          [[ "$relative" =~ ^agl-inference-native/sha256-[0-9a-f]{64}$ ]] ||
+            fail "inference worker names an invalid content-addressed native bundle: $component"
+          matches+=("$relative")
+        fi
+      fi
+    done
+  done < <(sed -n -E 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+
+  if (( ${#matches[@]} != 1 )); then
+    fail "inference worker must select exactly one content-addressed native bundle: $worker"
+  fi
+  printf '%s\n' "${matches[0]}"
+}
 
 set_install_args() {
   local stage_root="$1"
@@ -187,6 +229,13 @@ set_install_args() {
     install
     --path "$repo_root/crates/agl-process"
     --bin agl-process-launcher
+    "${install_options[@]}"
+    --root "$stage_root"
+  )
+  worker_install_args=(
+    install
+    --path "$repo_root/crates/agl-inference-worker"
+    --bin agl-inference-worker
     "${install_options[@]}"
     --root "$stage_root"
   )
@@ -203,7 +252,13 @@ if [[ "$dry_run" -eq 1 ]]; then
   dry_stage_root="$generations_dir/.staging.DRY-RUN/.cargo-root"
   set_install_args "$dry_stage_root"
   run cargo "${launcher_install_args[@]}"
+  run cargo "${worker_install_args[@]}"
   run cargo "${agl_install_args[@]}"
+  printf '+ resolve exact content-addressed native bundle from %q\n' \
+    "$dry_stage_root/bin/agl-inference-worker"
+  printf '+ copy selected %q/sha256-DIGEST to %q\n' \
+    "$native_bundle_build_base" "$dry_stage_root/bin/agl-inference-native"
+  printf '+ pin exact Nix runtime references below final generation .nix-gc-roots\n'
   printf '+ publish complete generation through %q\n' "$current_link"
   exit 0
 fi
@@ -239,6 +294,10 @@ require_managed_directory "$cargo_root/libexec" "libexec directory"
 require_managed_directory "$runtime_dir" "runtime directory"
 require_managed_directory "$generations_dir" "runtime generations directory"
 
+if [[ -e "$forbidden_public_worker" || -L "$forbidden_public_worker" ]]; then
+  fail "refusing a public inference worker command; remove it before installing the private runtime bundle: $forbidden_public_worker"
+fi
+
 if [[ -L "$runtime_lock" || ( -e "$runtime_lock" && ! -f "$runtime_lock" ) ]]; then
   fail "refusing to use non-regular runtime lock: $runtime_lock"
 fi
@@ -266,6 +325,7 @@ for install_artifact in "$installed_agl" "$installed_launcher" "$current_link"; 
 done
 
 generation_staging=""
+unpublished_generation=""
 pending_symlink=""
 
 cleanup_transaction() {
@@ -280,6 +340,19 @@ cleanup_transaction() {
       "$generations_dir"/.staging.*)
         chmod -R u+w -- "$generation_staging" 2>/dev/null || true
         rm -rf -- "$generation_staging"
+        ;;
+    esac
+  fi
+  if [[ -n "$unpublished_generation" ]]; then
+    case "$unpublished_generation" in
+      "$generations_dir"/generation-*)
+        current_generation="$(readlink -f -- "$current_link" 2>/dev/null || true)"
+        if [[ "$current_generation" != "$unpublished_generation" ]]; then
+          chmod u+rwx -- "$unpublished_generation" 2>/dev/null || true
+          chmod -R u+rwX -- "$unpublished_generation/agl-inference-native" 2>/dev/null || true
+          chmod u+rwx -- "$unpublished_generation/.nix-gc-roots" 2>/dev/null || true
+          rm -rf -- "$unpublished_generation"
+        fi
         ;;
     esac
   fi
@@ -305,11 +378,206 @@ sync_path() {
 
 validate_generation() {
   local generation="$1"
-  [[ -d "$generation" ]] || fail "runtime generation is not a directory: $generation"
+  local executable
+  [[ -d "$generation" && ! -L "$generation" &&
+    "$(stat -c '%a' -- "$generation")" == 555 &&
+    "$(stat -c '%u' -- "$generation")" == "$(id -u)" ]] ||
+    fail "runtime generation is not an exact immutable directory: $generation"
   [[ -f "$generation/agl" && -x "$generation/agl" && ! -L "$generation/agl" ]] ||
     fail "runtime generation has no regular executable agl: $generation"
   [[ -f "$generation/agl-process-launcher" && -x "$generation/agl-process-launcher" && ! -L "$generation/agl-process-launcher" ]] ||
     fail "runtime generation has no regular executable process launcher: $generation"
+  [[ -f "$generation/agl-inference-worker" && -x "$generation/agl-inference-worker" && ! -L "$generation/agl-inference-worker" ]] ||
+    fail "runtime generation has no regular executable inference worker: $generation"
+  for executable in \
+    "$generation/agl" \
+    "$generation/agl-process-launcher" \
+    "$generation/agl-inference-worker"
+  do
+    [[ "$(stat -c '%a' -- "$executable")" == 555 &&
+      "$(stat -c '%u' -- "$executable")" == "$(id -u)" &&
+      "$(stat -c '%h' -- "$executable")" == 1 ]] ||
+      fail "runtime generation executable is not an exact immutable single-link file: $executable"
+  done
+  validate_native_bundle \
+    "$generation/agl-inference-native" \
+    "$generation/agl-inference-worker"
+}
+
+validate_native_bundle() {
+  local base="$1"
+  local worker="$2"
+  local relative
+  local leaf_name
+  local directory
+  local base_entry
+  local base_count=0
+  [[ -d "$base" && ! -L "$base" ]] ||
+    fail "runtime generation has no exact native inference bundle base: $base"
+  [[ "$(stat -c '%a' -- "$base")" == 555 ]] ||
+    fail "native inference bundle base is not immutable: $base"
+  [[ "$(stat -c '%u' -- "$base")" == "$(id -u)" ]] ||
+    fail "native inference bundle base has the wrong owner: $base"
+  relative="$(resolve_native_bundle_relative "$worker")"
+  leaf_name="${relative#agl-inference-native/}"
+  shopt -s nullglob
+  for base_entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+    ((base_count += 1))
+    [[ "${base_entry##*/}" == "$leaf_name" ]] ||
+      fail "published native bundle contains a leaf not selected by the exact worker: $base_entry"
+  done
+  shopt -u nullglob
+  (( base_count == 1 )) ||
+    fail "published native bundle must contain exactly one selected leaf: $base"
+  directory="$base/$leaf_name"
+  validate_native_bundle_leaf "$directory"
+}
+
+validate_native_bundle_leaf() {
+  local directory="$1"
+  local entry
+  local name
+  local mode
+  local count=0
+  local cpu_count=0
+  local total_bytes=0
+  local size
+  local required
+  [[ -d "$directory" && ! -L "$directory" ]] ||
+    fail "runtime generation has no exact native inference bundle leaf: $directory"
+  mode="$(stat -c '%a' -- "$directory")"
+  [[ "$mode" == 555 ]] || fail "native inference bundle directory is not immutable: $directory"
+  [[ "$(stat -c '%u' -- "$directory")" == "$(id -u)" ]] ||
+    fail "native inference bundle directory has the wrong owner: $directory"
+  shopt -s nullglob
+  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    name="${entry##*/}"
+    [[ -f "$entry" && ! -L "$entry" && "$(stat -c '%h' -- "$entry")" == 1 ]] ||
+      fail "native inference bundle entry is not an exact single-link regular file: $entry"
+    case "$name" in
+      libllama-common.so.0 | libmtmd.so.0 | libllama.so.0 | libggml.so.0 | libggml-base.so.0 | libggml-vulkan.so) ;;
+      libggml-cpu-*.so) cpu_count=$((cpu_count + 1)) ;;
+      *) fail "native inference bundle contains an unexpected file: $entry" ;;
+    esac
+    mode="$(stat -c '%a' -- "$entry")"
+    [[ "$mode" == 555 ]] || fail "native inference bundle file is not immutable: $entry"
+    [[ "$(stat -c '%u' -- "$entry")" == "$(id -u)" ]] ||
+      fail "native inference bundle file has the wrong owner: $entry"
+    size="$(stat -c '%s' -- "$entry")"
+    [[ "$size" =~ ^[0-9]+$ ]] || fail "native inference bundle file has an invalid size: $entry"
+    (( size <= 1024 * 1024 * 1024 )) || fail "native inference bundle file exceeds its size bound: $entry"
+    total_bytes=$((total_bytes + size))
+    (( total_bytes <= 4 * 1024 * 1024 * 1024 )) ||
+      fail "native inference bundle exceeds its aggregate size bound: $directory"
+    count=$((count + 1))
+    (( count <= 64 )) || fail "native inference bundle exceeds its file bound: $directory"
+  done
+  shopt -u nullglob
+  (( cpu_count > 0 )) || fail "native inference bundle has no CPU backend: $directory"
+  for required in libllama-common.so.0 libmtmd.so.0 libllama.so.0 libggml.so.0 libggml-base.so.0; do
+    [[ -f "$directory/$required" && ! -L "$directory/$required" ]] ||
+      fail "native inference bundle is missing $required: $directory"
+  done
+}
+
+collect_nix_runtime_references() {
+  local generation="$1"
+  local output_name="$2"
+  local -n output="$output_name"
+  local object
+  local metadata
+  local reference
+  local -a objects=(
+    "$generation/agl"
+    "$generation/agl-process-launcher"
+    "$generation/agl-inference-worker"
+  )
+  shopt -s nullglob
+  objects+=("$generation/agl-inference-native"/*/*)
+  shopt -u nullglob
+  output=()
+  for object in "${objects[@]}"; do
+    if ! LC_ALL=C readelf -h "$object" >/dev/null 2>&1; then
+      continue
+    fi
+    metadata="$(
+      LC_ALL=C readelf -d "$object"
+      LC_ALL=C readelf -l "$object"
+    )" || fail "failed to inspect ELF runtime references: $object"
+    while IFS= read -r reference; do
+      [[ -n "$reference" ]] && output+=("$reference")
+    done < <(
+      grep -oE '/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+' <<<"$metadata" || true
+    )
+  done
+  if (( ${#output[@]} > 0 )); then
+    mapfile -t output < <(printf '%s\n' "${output[@]}" | sort -u)
+  fi
+  return 0
+}
+
+validate_nix_runtime_roots() {
+  local generation="$1"
+  local root_directory="$generation/.nix-gc-roots"
+  local entry
+  local name
+  local remaining
+  local target
+  local -a references=()
+  local -A expected=()
+  collect_nix_runtime_references "$generation" references
+  if (( ${#references[@]} == 0 )); then
+    [[ ! -e "$root_directory" && ! -L "$root_directory" ]] ||
+      fail "non-Nix runtime generation contains unexpected GC roots: $generation"
+    return 0
+  fi
+  [[ -d "$root_directory" && ! -L "$root_directory" &&
+    "$(stat -c '%a' -- "$root_directory")" == 555 &&
+    "$(stat -c '%u' -- "$root_directory")" == "$(id -u)" ]] ||
+    fail "Nix runtime generation has no sealed GC-root directory: $generation"
+  for target in "${references[@]}"; do
+    expected["$(basename -- "$target")"]="$target"
+  done
+  remaining=${#references[@]}
+  shopt -s nullglob
+  for entry in "$root_directory"/* "$root_directory"/.[!.]* "$root_directory"/..?*; do
+    name="${entry##*/}"
+    target="${expected[$name]:-}"
+    [[ -n "$target" && -L "$entry" && "$(readlink -- "$entry")" == "$target" &&
+      "$(readlink -f -- "$entry" 2>/dev/null || true)" == "$target" ]] ||
+      fail "Nix runtime generation contains an invalid GC root: $entry"
+    unset 'expected[$name]'
+    remaining=$((remaining - 1))
+  done
+  shopt -u nullglob
+  (( remaining == 0 )) ||
+    fail "Nix runtime generation is missing an exact GC root: $generation"
+  return 0
+}
+
+pin_nix_runtime_references() {
+  local generation="$1"
+  local root_directory="$generation/.nix-gc-roots"
+  local reference
+  local -a references=()
+  collect_nix_runtime_references "$generation" references
+  if (( ${#references[@]} == 0 )); then
+    return 0
+  fi
+  command -v nix-store >/dev/null 2>&1 ||
+    fail "Nix-linked runtime bundle requires nix-store to pin its external closure"
+  [[ -d "$root_directory" && ! -L "$root_directory" ]] ||
+    fail "Nix GC-root staging directory disappeared: $root_directory"
+  for reference in "${references[@]}"; do
+    [[ -e "$reference" ]] || fail "Nix runtime reference is already unavailable: $reference"
+    nix-store \
+      --add-root "$root_directory/$(basename -- "$reference")" \
+      --realise "$reference" >/dev/null
+  done
+  chmod 0555 "$root_directory"
+  sync_path "$root_directory"
+  sync_path "$generation"
+  validate_nix_runtime_roots "$generation"
 }
 
 resolve_current_generation() {
@@ -319,6 +587,7 @@ resolve_current_generation() {
   [[ "$(dirname -- "$resolved")" == "$generations_dir" ]] ||
     fail "runtime current pointer escapes the generations directory: $current_link"
   validate_generation "$resolved"
+  validate_nix_runtime_roots "$resolved"
   printf '%s\n' "$resolved"
 }
 
@@ -337,6 +606,7 @@ atomic_symlink() {
 publish_current() {
   local generation="$1"
   validate_generation "$generation"
+  validate_nix_runtime_roots "$generation"
   atomic_symlink "generations/$(basename -- "$generation")" "$current_link"
 }
 
@@ -406,24 +676,59 @@ mkdir -p "$stage_root"
 set_install_args "$stage_root"
 
 run cargo "${launcher_install_args[@]}"
+run cargo "${worker_install_args[@]}"
 run cargo "${agl_install_args[@]}"
+
+native_bundle_relative="$(
+  resolve_native_bundle_relative "$stage_root/bin/agl-inference-worker"
+)"
+native_bundle_leaf_name="${native_bundle_relative#agl-inference-native/}"
+native_bundle_build_leaf="$cargo_target_dir/$cargo_profile/$native_bundle_relative"
+validate_native_bundle_leaf "$native_bundle_build_leaf"
+mkdir -p -- "$stage_root/bin/agl-inference-native"
+cp -a -- \
+  "$native_bundle_build_leaf" \
+  "$stage_root/bin/agl-inference-native/$native_bundle_leaf_name"
+# Keep the private transaction directory owner-mutable until its final atomic
+# rename. The worker accepts owner-only staging authority, while the published
+# generation is sealed to 0555 below.
+chmod 0755 "$stage_root/bin/agl-inference-native"
 
 [[ -x "$stage_root/bin/agl" && ! -L "$stage_root/bin/agl" ]] ||
   fail "staged cargo install did not produce a regular executable agl"
 [[ -x "$stage_root/bin/agl-process-launcher" && ! -L "$stage_root/bin/agl-process-launcher" ]] ||
   fail "staged cargo install did not produce a regular executable process launcher"
+[[ -x "$stage_root/bin/agl-inference-worker" && ! -L "$stage_root/bin/agl-inference-worker" ]] ||
+  fail "staged cargo install did not produce a regular executable inference worker"
 run "$stage_root/bin/agl" --version
 run env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$stage_root/bin/agl"
 
-mv -- "$stage_root/bin/agl" "$generation_staging/agl"
-mv -- "$stage_root/bin/agl-process-launcher" "$generation_staging/agl-process-launcher"
+# Cargo profile outputs and cargo-install staging files may be hard-linked on
+# the same filesystem. Publish fresh inodes so no writable build-tree alias can
+# mutate an allegedly immutable runtime executable after installation.
+cp -- "$stage_root/bin/agl" "$generation_staging/agl"
+cp -- "$stage_root/bin/agl-process-launcher" "$generation_staging/agl-process-launcher"
+cp -- "$stage_root/bin/agl-inference-worker" "$generation_staging/agl-inference-worker"
+mv -- "$stage_root/bin/agl-inference-native" "$generation_staging/agl-inference-native"
 rm -rf -- "$stage_root"
-chmod 0555 "$generation_staging/agl" "$generation_staging/agl-process-launcher"
+chmod 0555 "$generation_staging/agl-inference-native"
+chmod 0555 \
+  "$generation_staging/agl" \
+  "$generation_staging/agl-process-launcher" \
+  "$generation_staging/agl-inference-worker"
+generation_nix_references=()
+collect_nix_runtime_references "$generation_staging" generation_nix_references
+if (( ${#generation_nix_references[@]} > 0 )); then
+  mkdir "$generation_staging/.nix-gc-roots"
+  chmod 0755 "$generation_staging/.nix-gc-roots"
+fi
+chmod 0555 "$generation_staging"
 validate_generation "$generation_staging"
 sync_path "$generation_staging"
-chmod 0555 "$generation_staging"
 mv -- "$generation_staging" "$new_generation"
 generation_staging=""
+unpublished_generation="$new_generation"
+pin_nix_runtime_references "$new_generation"
 sync_path "$generations_dir"
 fault_inject after-generation-ready
 
@@ -439,22 +744,30 @@ if [[ "$surface_mode" == fresh ]]; then
   fault_inject after-initial-agl-link
   fault_inject before-initial-current-publish
   publish_current "$new_generation"
+  unpublished_generation=""
   fault_inject after-initial-current-publish
 else
   fault_inject before-new-current-publish
   publish_current "$new_generation"
+  unpublished_generation=""
   fault_inject after-new-current-publish
 fi
 
 resolved_agl="$(readlink -f -- "$installed_agl")"
 resolved_launcher="$(readlink -f -- "$installed_launcher")"
+resolved_worker="$(readlink -f -- "$new_generation/agl-inference-worker")"
 [[ "$resolved_agl" == "$new_generation/agl" ]] ||
   fail "installed agl did not resolve through the published generation"
 [[ "$resolved_launcher" == "$new_generation/agl-process-launcher" ]] ||
   fail "installed launcher did not resolve through the published generation"
+[[ "$resolved_worker" == "$new_generation/agl-inference-worker" ]] ||
+  fail "installed inference worker did not remain private to the published generation"
+[[ ! -e "$forbidden_public_worker" && ! -L "$forbidden_public_worker" ]] ||
+  fail "refusing a public inference worker command under $install_bin"
 
 echo "installed agl: $installed_agl -> $resolved_agl"
 echo "installed process launcher: $installed_launcher -> $resolved_launcher"
+echo "installed private inference worker: $resolved_worker"
 run "$installed_agl" --version
 
 trap - EXIT HUP INT TERM

@@ -1,12 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Emits the runtime search paths required by a final executable that links
 /// the shared llama.cpp libraries owned by this package.
-pub fn emit_runtime_rpaths() {
+pub fn emit_runtime_rpaths(native_bundle_directory: &Path) {
     let library_dir = PathBuf::from(crate::library_dir());
     println!("cargo:rustc-link-search=native={}", library_dir.display());
-    emit_rpath(&library_dir);
+    // The build-tree directory is link-time input only. Production lookup is
+    // constrained to the immutable native bundle beside the exact worker.
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/{}",
+        native_bundle_directory.display()
+    );
 
     if let Some(cxx_runtime_dir) = cxx_runtime_library_dir() {
         println!(

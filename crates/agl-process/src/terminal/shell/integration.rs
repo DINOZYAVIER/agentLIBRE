@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ProcessError, ProcessErrorCode, Result};
 
-pub const SHELL_INTEGRATION_VERSION: u8 = 1;
-pub const MAX_SHELL_INTEGRATION_FRAME_BYTES: usize = 64 * 1024;
-pub const MAX_SHELL_INTEGRATION_COMMAND_BYTES: usize = 32 * 1024;
+pub const SHELL_INTEGRATION_VERSION: u8 = 2;
+pub const MAX_SHELL_INTEGRATION_FRAME_BYTES: usize = 80 * 1024;
+pub const MAX_SHELL_INTEGRATION_COMMAND_BYTES: usize = 64 * 1024;
 pub const MAX_SHELL_INTEGRATION_PATH_BYTES: usize = 4 * 1024;
 
-const SHELL_INTEGRATION_MAGIC: &[u8] = b"AGL1";
+const SHELL_INTEGRATION_MAGIC: &[u8] = b"AGL2";
 const SHELL_INTEGRATION_TOKEN_BYTES: usize = 32;
 const SHELL_INTEGRATION_TOKEN_HEX_BYTES: usize = SHELL_INTEGRATION_TOKEN_BYTES * 2;
 
@@ -81,6 +81,132 @@ impl Debug for ShellIntegrationToken {
     }
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TypedCommandTransactionId(String);
+
+impl TypedCommandTransactionId {
+    pub(crate) fn generate() -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut random = [0_u8; 16];
+            let mut offset = 0_usize;
+            while offset < random.len() {
+                let read = unsafe {
+                    libc::getrandom(
+                        random[offset..].as_mut_ptr().cast(),
+                        random.len() - offset,
+                        0,
+                    )
+                };
+                if read > 0 {
+                    offset += read as usize;
+                    continue;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(ProcessError::new(
+                    ProcessErrorCode::Internal,
+                    format!("failed to create typed shell transaction identity: {error}"),
+                ));
+            }
+            let mut encoded = String::with_capacity(random.len() * 2);
+            use std::fmt::Write as _;
+            for byte in random {
+                write!(&mut encoded, "{byte:02x}")
+                    .expect("writing a transaction identity to String cannot fail");
+            }
+            Ok(Self(encoded))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(ProcessError::new(
+                ProcessErrorCode::PlatformUnsupported,
+                "typed shell transactions are supported only on Linux",
+            ))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid_frame(
+                "typed shell transaction identity must be 32 hexadecimal bytes",
+            ));
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    #[cfg(test)]
+    fn fixed(byte: u8) -> Self {
+        Self(format!("{byte:02x}").repeat(16))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandBoundary {
+    Started,
+    Finished,
+}
+
+impl CommandBoundary {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Finished => "finished",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedCommandAbortReason {
+    InputWriteFailed,
+    Cancelled,
+    ValidationFailed,
+}
+
+impl TypedCommandAbortReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InputWriteFailed => "input_write_failed",
+            Self::Cancelled => "cancelled",
+            Self::ValidationFailed => "validation_failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ShellIntegrationControl {
+    ArmTypedCommand {
+        transaction_id: TypedCommandTransactionId,
+        expected_command_sequence: u64,
+    },
+    CommandBoundaryAck {
+        transaction_id: TypedCommandTransactionId,
+        boundary: CommandBoundary,
+    },
+    PromptReadyAck {
+        event_sequence: u64,
+        /// `None` withholds a trusted generation. Managed shells perform one
+        /// bounded re-probe before entering their line editor, allowing a
+        /// consumed foreground-program input latch to clear without trusting
+        /// bytes that raced the prompt boundary.
+        prompt_generation: Option<u64>,
+    },
+    DisarmTypedCommand {
+        transaction_id: TypedCommandTransactionId,
+        reason: TypedCommandAbortReason,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ShellExit {
@@ -88,21 +214,24 @@ pub enum ShellExit {
     Signal { signal: i32 },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ShellIntegrationEvent {
     PromptReady {
         sequence: u64,
         cwd: PathBuf,
         last_exit: Option<i32>,
+        input_pending: bool,
     },
     CommandStarted {
         sequence: u64,
+        transaction_id: Option<TypedCommandTransactionId>,
         command: String,
         cwd: PathBuf,
     },
     CommandFinished {
         sequence: u64,
+        transaction_id: Option<TypedCommandTransactionId>,
         exit: ShellExit,
         cwd: PathBuf,
     },
@@ -110,6 +239,57 @@ pub enum ShellIntegrationEvent {
         sequence: u64,
         process_group: Option<i32>,
     },
+}
+
+impl Debug for ShellIntegrationEvent {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PromptReady {
+                sequence,
+                cwd,
+                last_exit,
+                input_pending,
+            } => formatter
+                .debug_struct("PromptReady")
+                .field("sequence", sequence)
+                .field("cwd", cwd)
+                .field("last_exit", last_exit)
+                .field("input_pending", input_pending)
+                .finish(),
+            Self::CommandStarted {
+                sequence,
+                transaction_id,
+                command,
+                cwd,
+            } => formatter
+                .debug_struct("CommandStarted")
+                .field("sequence", sequence)
+                .field("transaction_id", transaction_id)
+                .field("command_bytes", &command.len())
+                .field("cwd", cwd)
+                .finish(),
+            Self::CommandFinished {
+                sequence,
+                transaction_id,
+                exit,
+                cwd,
+            } => formatter
+                .debug_struct("CommandFinished")
+                .field("sequence", sequence)
+                .field("transaction_id", transaction_id)
+                .field("exit", exit)
+                .field("cwd", cwd)
+                .finish(),
+            Self::ForegroundChanged {
+                sequence,
+                process_group,
+            } => formatter
+                .debug_struct("ForegroundChanged")
+                .field("sequence", sequence)
+                .field("process_group", process_group)
+                .finish(),
+        }
+    }
 }
 
 impl ShellIntegrationEvent {
@@ -390,6 +570,31 @@ impl BoundedShellIntegration {
         &self.state
     }
 
+    pub(crate) fn last_shell_sequence(&self) -> Option<u64> {
+        self.last_shell_sequence
+    }
+
+    /// Decodes one SOCK_SEQPACKET event. The relay preserves packet
+    /// boundaries, so a partial frame or multiple concatenated frames is a
+    /// protocol violation rather than an incremental read condition.
+    pub(crate) fn push_packet(&mut self, bytes: &[u8]) -> IntegrationBatch {
+        let batch = self.push(bytes);
+        if batch.notice.is_some() {
+            return batch;
+        }
+        if !self.fields.is_empty()
+            || !self.field.is_empty()
+            || self.frame_bytes != 0
+            || self.expected_fields.is_some()
+        {
+            return self.degrade("shell integration packet ended inside a frame");
+        }
+        if batch.events.len() != 1 {
+            return self.degrade("shell integration packet must contain exactly one event");
+        }
+        batch
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> IntegrationBatch {
         if self.state.health == ShellIntegrationHealth::Degraded {
             return IntegrationBatch::default();
@@ -407,8 +612,8 @@ impl BoundedShellIntegration {
             self.fields.push(std::mem::take(&mut self.field));
             if self.fields.len() == 4 {
                 self.expected_fields = match self.fields[3].as_slice() {
-                    b"prompt_ready" | b"command_started" => Some(6),
-                    b"command_finished" => Some(7),
+                    b"prompt_ready" | b"command_started" => Some(7),
+                    b"command_finished" => Some(8),
                     b"foreground_changed" => Some(5),
                     _ => return self.degrade("shell integration event kind is unsupported"),
                 };
@@ -456,6 +661,73 @@ impl BoundedShellIntegration {
             events,
             notice: None,
         }
+    }
+
+    pub(crate) fn encode_control(&self, control: &ShellIntegrationControl) -> Result<Vec<u8>> {
+        if self.state.health == ShellIntegrationHealth::Degraded {
+            return Err(invalid_frame(
+                "cannot send control through a degraded shell integration",
+            ));
+        }
+        let mut frame = Vec::new();
+        push_field(&mut frame, SHELL_INTEGRATION_MAGIC);
+        push_field(
+            &mut frame,
+            self.token.expose_to_managed_startup().as_bytes(),
+        );
+        match control {
+            ShellIntegrationControl::ArmTypedCommand {
+                transaction_id,
+                expected_command_sequence,
+            } => {
+                if *expected_command_sequence == 0 {
+                    return Err(invalid_frame(
+                        "typed shell command sequence must be nonzero",
+                    ));
+                }
+                push_field(&mut frame, b"arm_typed_command");
+                push_field(&mut frame, transaction_id.as_str().as_bytes());
+                push_field(&mut frame, expected_command_sequence.to_string().as_bytes());
+            }
+            ShellIntegrationControl::CommandBoundaryAck {
+                transaction_id,
+                boundary,
+            } => {
+                push_field(&mut frame, b"command_boundary_ack");
+                push_field(&mut frame, transaction_id.as_str().as_bytes());
+                push_field(&mut frame, boundary.as_str().as_bytes());
+            }
+            ShellIntegrationControl::PromptReadyAck {
+                event_sequence,
+                prompt_generation,
+            } => {
+                if *event_sequence == 0 {
+                    return Err(invalid_frame(
+                        "prompt-ready acknowledgement sequence must be nonzero",
+                    ));
+                }
+                push_field(&mut frame, b"prompt_ready_ack");
+                push_field(&mut frame, event_sequence.to_string().as_bytes());
+                let generation = prompt_generation
+                    .map(|generation| generation.to_string())
+                    .unwrap_or_else(|| "-".to_owned());
+                push_field(&mut frame, generation.as_bytes());
+            }
+            ShellIntegrationControl::DisarmTypedCommand {
+                transaction_id,
+                reason,
+            } => {
+                push_field(&mut frame, b"disarm_typed_command");
+                push_field(&mut frame, transaction_id.as_str().as_bytes());
+                push_field(&mut frame, reason.as_str().as_bytes());
+            }
+        }
+        if frame.len() > MAX_SHELL_INTEGRATION_FRAME_BYTES {
+            return Err(invalid_frame(
+                "shell integration control exceeded its frame bound",
+            ));
+        }
+        Ok(frame)
     }
 
     /// Merges an authoritative Linux `tcgetpgrp` sample into the private
@@ -576,26 +848,35 @@ fn decode_frame(
             sequence,
             cwd: PathBuf::from(field_utf8(fields, 4, "cwd")?),
             last_exit: parse_optional_i32(field_utf8(fields, 5, "last exit")?)?,
+            input_pending: parse_bool(field_utf8(fields, 6, "input pending")?)?,
         }),
         b"command_started" => Ok(ShellIntegrationEvent::CommandStarted {
             sequence,
-            command: field_utf8(fields, 4, "command")?.to_owned(),
-            cwd: PathBuf::from(field_utf8(fields, 5, "cwd")?),
+            transaction_id: parse_optional_transaction(field_utf8(
+                fields,
+                4,
+                "transaction identity",
+            )?)?,
+            command: field_utf8(fields, 5, "command")?.to_owned(),
+            cwd: PathBuf::from(field_utf8(fields, 6, "cwd")?),
         }),
         b"command_finished" => {
-            let exit = match field_utf8(fields, 4, "exit kind")? {
+            let transaction_id =
+                parse_optional_transaction(field_utf8(fields, 4, "transaction identity")?)?;
+            let exit = match field_utf8(fields, 5, "exit kind")? {
                 "code" => ShellExit::Code {
-                    code: parse_i32(field_utf8(fields, 5, "exit code")?, "exit code")?,
+                    code: parse_i32(field_utf8(fields, 6, "exit code")?, "exit code")?,
                 },
                 "signal" => ShellExit::Signal {
-                    signal: parse_i32(field_utf8(fields, 5, "exit signal")?, "exit signal")?,
+                    signal: parse_i32(field_utf8(fields, 6, "exit signal")?, "exit signal")?,
                 },
                 _ => return Err(invalid_frame("shell integration exit kind is unsupported")),
             };
             Ok(ShellIntegrationEvent::CommandFinished {
                 sequence,
+                transaction_id,
                 exit,
-                cwd: PathBuf::from(field_utf8(fields, 6, "cwd")?),
+                cwd: PathBuf::from(field_utf8(fields, 7, "cwd")?),
             })
         }
         b"foreground_changed" => Ok(ShellIntegrationEvent::ForegroundChanged {
@@ -633,6 +914,29 @@ fn parse_optional_i32(value: &str) -> Result<Option<i32>> {
     } else {
         parse_i32(value, "optional integer").map(Some)
     }
+}
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(invalid_frame(
+            "shell integration boolean field must be zero or one",
+        )),
+    }
+}
+
+fn parse_optional_transaction(value: &str) -> Result<Option<TypedCommandTransactionId>> {
+    if value == "-" {
+        Ok(None)
+    } else {
+        TypedCommandTransactionId::parse(value).map(Some)
+    }
+}
+
+fn push_field(frame: &mut Vec<u8>, value: &[u8]) {
+    frame.extend_from_slice(value);
+    frame.push(0);
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -674,29 +978,55 @@ mod tests {
             event.sequence().to_string().into_bytes(),
         ];
         match event {
-            ShellIntegrationEvent::PromptReady { cwd, last_exit, .. } => {
+            ShellIntegrationEvent::PromptReady {
+                cwd,
+                last_exit,
+                input_pending,
+                ..
+            } => {
                 fields.extend([
                     b"prompt_ready".to_vec(),
                     cwd.to_string_lossy().as_bytes().to_vec(),
                     last_exit
                         .map_or_else(|| "-".to_owned(), |code| code.to_string())
                         .into_bytes(),
+                    if *input_pending { b"1" } else { b"0" }.to_vec(),
                 ]);
             }
-            ShellIntegrationEvent::CommandStarted { command, cwd, .. } => {
+            ShellIntegrationEvent::CommandStarted {
+                transaction_id,
+                command,
+                cwd,
+                ..
+            } => {
                 fields.extend([
                     b"command_started".to_vec(),
+                    transaction_id
+                        .as_ref()
+                        .map_or("-", TypedCommandTransactionId::as_str)
+                        .as_bytes()
+                        .to_vec(),
                     command.as_bytes().to_vec(),
                     cwd.to_string_lossy().as_bytes().to_vec(),
                 ]);
             }
-            ShellIntegrationEvent::CommandFinished { exit, cwd, .. } => {
+            ShellIntegrationEvent::CommandFinished {
+                transaction_id,
+                exit,
+                cwd,
+                ..
+            } => {
                 let (kind, value) = match exit {
                     ShellExit::Code { code } => ("code", code.to_string()),
                     ShellExit::Signal { signal } => ("signal", signal.to_string()),
                 };
                 fields.extend([
                     b"command_finished".to_vec(),
+                    transaction_id
+                        .as_ref()
+                        .map_or("-", TypedCommandTransactionId::as_str)
+                        .as_bytes()
+                        .to_vec(),
                     kind.as_bytes().to_vec(),
                     value.into_bytes(),
                     cwd.to_string_lossy().as_bytes().to_vec(),
@@ -729,9 +1059,11 @@ mod tests {
                 sequence: 1,
                 cwd: cwd.clone(),
                 last_exit: None,
+                input_pending: false,
             },
             ShellIntegrationEvent::CommandStarted {
                 sequence: 2,
+                transaction_id: None,
                 command: "printf 'one\\ntwo' | sed -n 2p".to_owned(),
                 cwd: cwd.clone(),
             },
@@ -745,6 +1077,7 @@ mod tests {
             },
             ShellIntegrationEvent::CommandFinished {
                 sequence: 5,
+                transaction_id: None,
                 exit: ShellExit::Code { code: 0 },
                 cwd: cwd.clone(),
             },
@@ -752,6 +1085,7 @@ mod tests {
                 sequence: 6,
                 cwd: cwd.clone(),
                 last_exit: Some(0),
+                input_pending: false,
             },
         ];
         let bytes = events
@@ -781,9 +1115,11 @@ mod tests {
                 sequence: 1,
                 cwd: cwd.clone(),
                 last_exit: None,
+                input_pending: false,
             },
             ShellIntegrationEvent::CommandStarted {
                 sequence: 2,
+                transaction_id: None,
                 command: "sleep 10".to_owned(),
                 cwd: cwd.clone(),
             },
@@ -814,6 +1150,7 @@ mod tests {
         let completed = [
             ShellIntegrationEvent::CommandFinished {
                 sequence: 3,
+                transaction_id: None,
                 exit: ShellExit::Code { code: 0 },
                 cwd: cwd.clone(),
             },
@@ -821,6 +1158,7 @@ mod tests {
                 sequence: 4,
                 cwd: cwd.clone(),
                 last_exit: Some(0),
+                input_pending: false,
             },
         ]
         .iter()
@@ -852,6 +1190,7 @@ mod tests {
                 sequence: 1,
                 cwd: PathBuf::from("/workspace"),
                 last_exit: None,
+                input_pending: false,
             },
         );
         assert_eq!(integration.push(&first).events.len(), 1);
@@ -859,6 +1198,7 @@ mod tests {
             &token,
             &ShellIntegrationEvent::CommandStarted {
                 sequence: 3,
+                transaction_id: None,
                 command: "true".to_owned(),
                 cwd: PathBuf::from("/workspace"),
             },
@@ -885,6 +1225,7 @@ mod tests {
                 sequence: 1,
                 cwd: PathBuf::from("/spoofed"),
                 last_exit: None,
+                input_pending: false,
             },
         );
 
@@ -922,5 +1263,54 @@ mod tests {
         let debug = format!("{token:?}");
         assert!(!debug.contains(token.expose_to_managed_startup()));
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn typed_controls_bind_one_authenticated_transaction_and_boundary() {
+        let token = ShellIntegrationToken::fixed(0x66);
+        let transaction_id = TypedCommandTransactionId::fixed(0x77);
+        let integration = BoundedShellIntegration::new(token.clone());
+        let arm = integration
+            .encode_control(&ShellIntegrationControl::ArmTypedCommand {
+                transaction_id: transaction_id.clone(),
+                expected_command_sequence: 42,
+            })
+            .unwrap();
+        let fields = arm
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(fields[0], SHELL_INTEGRATION_MAGIC);
+        assert_eq!(fields[1], token.expose_to_managed_startup().as_bytes());
+        assert_eq!(fields[2], b"arm_typed_command");
+        assert_eq!(fields[3], transaction_id.as_str().as_bytes());
+        assert_eq!(fields[4], b"42");
+
+        let started = integration
+            .encode_control(&ShellIntegrationControl::CommandBoundaryAck {
+                transaction_id,
+                boundary: CommandBoundary::Started,
+            })
+            .unwrap();
+        assert!(
+            started
+                .windows(b"command_boundary_ack".len())
+                .any(|window| window == b"command_boundary_ack")
+        );
+        assert!(started.ends_with(b"started\0"));
+    }
+
+    #[test]
+    fn command_started_debug_never_exposes_canonical_command_text() {
+        const SENTINEL: &str = "AGL_PRIVATE_SHELL_INTEGRATION_COMMAND_148";
+        let event = ShellIntegrationEvent::CommandStarted {
+            sequence: 1,
+            transaction_id: None,
+            command: SENTINEL.to_owned(),
+            cwd: PathBuf::from("/workspace"),
+        };
+        let rendered = format!("{event:?}");
+        assert!(!rendered.contains(SENTINEL));
+        assert!(rendered.contains(&format!("command_bytes: {}", SENTINEL.len())));
     }
 }

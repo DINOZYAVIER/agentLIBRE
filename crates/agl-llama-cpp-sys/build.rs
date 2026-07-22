@@ -39,6 +39,7 @@ fn main() {
         manifest_dir.join("src/native/chat_template_bridge.cpp"),
         manifest_dir.join("src/native/mtp_speculative_bridge.cpp"),
         manifest_dir.join("src/native/mtmd_bridge.cpp"),
+        manifest_dir.join("src/native/device_props_bridge.cpp"),
         manifest_dir.join("src/native/abi_guard.cpp"),
     ] {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -64,8 +65,10 @@ fn main() {
         .file(manifest_dir.join("src/native/chat_template_bridge.cpp"))
         .file(manifest_dir.join("src/native/mtp_speculative_bridge.cpp"))
         .file(manifest_dir.join("src/native/mtmd_bridge.cpp"))
+        .file(manifest_dir.join("src/native/device_props_bridge.cpp"))
         .file(manifest_dir.join("src/native/abi_guard.cpp"))
         .include(repo_root.join("vendor/llama.cpp/include"))
+        .include(repo_root.join("vendor/llama.cpp/src"))
         .include(repo_root.join("vendor/llama.cpp/common"))
         .include(repo_root.join("vendor/llama.cpp/ggml/include"))
         .include(repo_root.join("vendor/llama.cpp/vendor"))

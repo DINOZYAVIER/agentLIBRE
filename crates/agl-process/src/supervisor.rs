@@ -9,10 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agl_ids::{ExecutionId, RequestId};
+use agl_ids::{ExecutionId, RequestId, WriterLeaseId};
 
 use crate::platform::{self, LaunchDirectories, LaunchedProcess};
-use crate::terminal::shell::{ManagedShellIntegrationTransport, ManagedShellStartup};
+use crate::terminal::shell::{
+    MAX_SHELL_INTEGRATION_FRAME_BYTES, ManagedShellIntegrationTransport, ManagedShellStartup,
+};
 use crate::{
     CommittedOutputFrame, ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionListFilter,
     ExecutionOutputChunk, ExecutionOwner, ExecutionPrivateCommand, ExecutionReadResult,
@@ -23,6 +25,7 @@ use crate::{
 };
 
 const MAX_BUFFERED_SHELL_INTEGRATION_BYTES: usize = 256 * 1024;
+const SHELL_INTEGRATION_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct ProcessHandle {
@@ -75,6 +78,11 @@ enum Command {
         maximum_bytes: usize,
         reply: Reply<ShellIntegrationReadResult>,
     },
+    SendShellIntegrationControl {
+        execution_id: ExecutionId,
+        frame: ProcessBytes,
+        reply: Reply<u64>,
+    },
     Attach {
         execution_id: ExecutionId,
         owner: Option<ExecutionOwner>,
@@ -99,6 +107,12 @@ enum Command {
         owner: Option<ExecutionOwner>,
         lease: InputLease,
         reply: Reply<bool>,
+    },
+    ResolveWriterLease {
+        execution_id: ExecutionId,
+        owner: Option<ExecutionOwner>,
+        writer_lease_id: WriterLeaseId,
+        reply: Reply<InputLease>,
     },
     Write {
         execution_id: ExecutionId,
@@ -235,24 +249,33 @@ struct ManagedLaunchedProcess {
 }
 
 struct ActiveShellIntegration {
-    reader: Option<OwnedFd>,
-    fifo_path: std::path::PathBuf,
-    buffered: VecDeque<u8>,
+    socket: Option<OwnedFd>,
+    event_fifo_guard: Option<OwnedFd>,
+    event_fifo_path: std::path::PathBuf,
+    control_fifo_path: std::path::PathBuf,
+    packets: VecDeque<BufferedShellIntegrationPacket>,
+    buffered_bytes: usize,
     closed: bool,
     degraded: bool,
+}
+
+struct BufferedShellIntegrationPacket {
+    bytes: Vec<u8>,
     output_through_sequence: u64,
 }
 
 #[derive(Clone)]
 struct WritableInputLease {
     attachment_id: RequestId,
+    writer_lease_id: WriterLeaseId,
     expires_at: Instant,
 }
 
 impl WritableInputLease {
-    fn new(attachment_id: RequestId, now: Instant) -> Self {
+    fn new(attachment_id: RequestId, writer_lease_id: WriterLeaseId, now: Instant) -> Self {
         Self {
             attachment_id,
+            writer_lease_id,
             expires_at: now + WRITABLE_INPUT_LEASE_TTL,
         }
     }
@@ -268,8 +291,13 @@ impl WritableInputLease {
     fn as_input_lease(&self) -> InputLease {
         InputLease {
             attachment_id: self.attachment_id.clone(),
-            writable: true,
+            writer_lease_id: Some(self.writer_lease_id.clone()),
         }
+    }
+
+    fn owns(&self, lease: &InputLease) -> bool {
+        self.attachment_id == lease.attachment_id
+            && lease.writer_lease_id.as_ref() == Some(&self.writer_lease_id)
     }
 }
 
@@ -504,6 +532,18 @@ impl ProcessHandle {
         self.read_shell_integration_with_owner(execution_id, None, maximum_bytes)
     }
 
+    pub(crate) fn operator_send_shell_integration_control(
+        &self,
+        execution_id: &ExecutionId,
+        frame: ProcessBytes,
+    ) -> Result<u64> {
+        self.request(|reply| Command::SendShellIntegrationControl {
+            execution_id: execution_id.clone(),
+            frame,
+            reply,
+        })
+    }
+
     pub fn attach(
         &self,
         execution_id: &ExecutionId,
@@ -568,6 +608,16 @@ impl ProcessHandle {
         lease: InputLease,
     ) -> Result<bool> {
         self.input_lease_active_with_owner(execution_id, None, lease)
+    }
+
+    /// Resolves the current writable authority independently of the transport
+    /// attachment request that originally acquired it.
+    pub fn operator_resolve_writer_lease(
+        &self,
+        execution_id: &ExecutionId,
+        writer_lease_id: WriterLeaseId,
+    ) -> Result<InputLease> {
+        self.resolve_writer_lease_with_owner(execution_id, None, writer_lease_id)
     }
 
     pub fn write(
@@ -838,6 +888,20 @@ impl ProcessHandle {
         })
     }
 
+    fn resolve_writer_lease_with_owner(
+        &self,
+        execution_id: &ExecutionId,
+        owner: Option<ExecutionOwner>,
+        writer_lease_id: WriterLeaseId,
+    ) -> Result<InputLease> {
+        self.request(|reply| Command::ResolveWriterLease {
+            execution_id: execution_id.clone(),
+            owner,
+            writer_lease_id,
+            reply,
+        })
+    }
+
     fn resize_with_owner(
         &self,
         execution_id: &ExecutionId,
@@ -1045,6 +1109,13 @@ impl Reactor {
                     maximum_bytes,
                 ));
             }
+            Command::SendShellIntegrationControl {
+                execution_id,
+                frame,
+                reply,
+            } => {
+                let _ = reply.send(self.send_shell_integration_control(&execution_id, frame));
+            }
             Command::Attach {
                 execution_id,
                 owner,
@@ -1083,6 +1154,18 @@ impl Reactor {
             } => {
                 let _ =
                     reply.send(self.input_lease_is_active(&execution_id, owner.as_ref(), &lease));
+            }
+            Command::ResolveWriterLease {
+                execution_id,
+                owner,
+                writer_lease_id,
+                reply,
+            } => {
+                let _ = reply.send(self.resolve_writer_lease(
+                    &execution_id,
+                    owner.as_ref(),
+                    &writer_lease_id,
+                ));
             }
             Command::Write {
                 execution_id,
@@ -1263,15 +1346,19 @@ impl Reactor {
         }
         let explicitly_reserved = reserved_execution_id.is_some();
         let execution_id = reserved_execution_id.unwrap_or_else(ExecutionId::generate);
-        let (directories, shell_integration_reader, private_environment) = if let Some(startup) =
-            managed_startup
-        {
-            let directories = self.execution_directories(&execution_id)?;
-            let (reader, private_environment) = startup.materialize(&mut request, &directories)?;
-            (Some(directories), Some(reader), Some(private_environment))
-        } else {
-            (None, None, None)
-        };
+        let (directories, mut shell_integration, private_environment) =
+            if let Some(startup) = managed_startup {
+                let directories = self.execution_directories(&execution_id)?;
+                let (transport, private_environment) =
+                    startup.materialize(&mut request, &directories)?;
+                (
+                    Some(directories),
+                    Some(transport),
+                    Some(private_environment),
+                )
+            } else {
+                (None, None, None)
+            };
         let now = unix_millis();
         let status = ExecutionStatus {
             execution_id: execution_id.clone(),
@@ -1323,12 +1410,16 @@ impl Reactor {
                 Err(error) => return self.fail_unspawned_execution(&execution_id, error),
             },
         };
+        let shell_integration_relay = shell_integration
+            .as_mut()
+            .and_then(|integration| integration.relay_socket.take());
         let launched = platform::launch(
             &self.options.launcher_path,
             &execution_id,
             &request,
             &directories,
             private_environment,
+            shell_integration_relay,
             self.options.setup_timeout,
             cancelled,
         );
@@ -1352,7 +1443,7 @@ impl Reactor {
             .and_then(|duration| Instant::now().checked_add(duration));
         let launched = ManagedLaunchedProcess {
             process: launched,
-            shell_integration: shell_integration_reader,
+            shell_integration,
         };
         if let Err(error) = commit_running_with_confirmation(
             &self.repository,
@@ -1569,7 +1660,7 @@ impl Reactor {
         let observe_foreground = self
             .shell_integrations
             .get(execution_id)
-            .is_some_and(|integration| integration.reader.is_some());
+            .is_some_and(|integration| integration.socket.is_some());
         let foreground_process_group = if observe_foreground {
             let execution = self.active.get(execution_id).ok_or_else(not_live)?;
             let terminal = execution.terminal.as_ref().ok_or_else(|| {
@@ -1597,16 +1688,76 @@ impl Reactor {
                     "execution has no managed shell integration channel",
                 )
             })?;
-        let byte_count = maximum_bytes.min(integration.buffered.len());
-        let bytes = integration.buffered.drain(..byte_count).collect::<Vec<_>>();
+        let packet = integration.packets.pop_front();
+        if let Some(packet) = &packet {
+            if packet.bytes.len() > maximum_bytes {
+                integration.degraded = true;
+                return Err(ProcessError::new(
+                    ProcessErrorCode::InvalidRequest,
+                    "private shell integration poll bound is smaller than one complete packet",
+                ));
+            }
+            integration.buffered_bytes = integration
+                .buffered_bytes
+                .saturating_sub(packet.bytes.len());
+        }
+        let (bytes, output_through_sequence) = packet.map_or_else(
+            || (Vec::new(), 0),
+            |packet| (packet.bytes, packet.output_through_sequence),
+        );
         Ok(ShellIntegrationReadResult {
             execution_id: execution_id.clone(),
             bytes: ProcessBytes::from_bytes(&bytes),
-            output_through_sequence: integration.output_through_sequence,
+            output_through_sequence,
             foreground_process_group,
             channel_closed: integration.closed,
             degraded: integration.degraded,
         })
+    }
+
+    fn send_shell_integration_control(
+        &mut self,
+        execution_id: &ExecutionId,
+        frame: ProcessBytes,
+    ) -> Result<u64> {
+        self.checked_status(execution_id, None)?;
+        self.require_managed_terminal_operator(execution_id, None)?;
+        let bytes = frame.decode(MAX_SHELL_INTEGRATION_FRAME_BYTES)?;
+        if bytes.is_empty() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "private shell integration control frame must be nonempty",
+            ));
+        }
+        self.drain_terminal_to_eagain(execution_id)?;
+        let output_through_sequence = self
+            .active
+            .get(execution_id)
+            .map_or(0, |execution| execution.next_sequence.saturating_sub(1));
+        let integration = self
+            .shell_integrations
+            .get_mut(execution_id)
+            .ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::StateConflict,
+                    "execution has no managed shell integration channel",
+                )
+            })?;
+        let socket = integration.socket.as_ref().ok_or_else(|| {
+            ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "managed shell integration channel is closed",
+            )
+        })?;
+        if let Err(error) = platform::send_shell_integration_control(
+            socket,
+            &bytes,
+            SHELL_INTEGRATION_CONTROL_TIMEOUT,
+        ) {
+            integration.close(true);
+            return Err(error);
+        }
+        Ok(output_through_sequence)
     }
 
     fn attach_input(
@@ -1621,7 +1772,7 @@ impl Reactor {
         if !writable {
             return Ok(InputLease {
                 attachment_id,
-                writable: false,
+                writer_lease_id: None,
             });
         }
         self.expire_input_lease_if_needed(execution_id, Instant::now())?;
@@ -1635,9 +1786,10 @@ impl Reactor {
                 "execution already has a writable input attachment",
             ));
         }
+        let writer_lease_id = WriterLeaseId::generate();
         let lease = InputLease {
             attachment_id: attachment_id.clone(),
-            writable,
+            writer_lease_id: Some(writer_lease_id.clone()),
         };
         self.repository.bind_input_lease(
             execution_id,
@@ -1647,11 +1799,12 @@ impl Reactor {
         )?;
         execution.writable_lease = Some(WritableInputLease::new(
             attachment_id.clone(),
+            writer_lease_id.clone(),
             Instant::now(),
         ));
         Ok(InputLease {
             attachment_id,
-            writable,
+            writer_lease_id: Some(writer_lease_id),
         })
     }
 
@@ -1663,7 +1816,7 @@ impl Reactor {
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
         self.require_managed_terminal_operator(execution_id, owner)?;
-        if !lease.writable {
+        if !lease.is_writable() {
             return Ok(());
         }
         if self.expire_input_lease_if_needed(execution_id, Instant::now())? {
@@ -1671,7 +1824,7 @@ impl Reactor {
         }
         let execution = self.active.get_mut(execution_id).ok_or_else(not_live)?;
         match execution.writable_lease.as_ref() {
-            Some(current) if current.attachment_id == lease.attachment_id => {
+            Some(current) if current.owns(lease) => {
                 self.repository.release_input_lease(
                     execution_id,
                     &self.supervisor_id,
@@ -1698,7 +1851,7 @@ impl Reactor {
     ) -> Result<()> {
         self.checked_status(execution_id, owner)?;
         self.require_managed_terminal_operator(execution_id, owner)?;
-        if !lease.writable {
+        if !lease.is_writable() {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
                 "read-only attachments do not own a renewable input lease",
@@ -1712,7 +1865,7 @@ impl Reactor {
         let current = execution
             .writable_lease
             .as_mut()
-            .filter(|current| current.attachment_id == lease.attachment_id)
+            .filter(|current| current.owns(lease))
             .ok_or_else(input_lease_expired)?;
         self.repository.renew_input_lease(
             execution_id,
@@ -1732,7 +1885,7 @@ impl Reactor {
     ) -> Result<bool> {
         self.checked_status(execution_id, owner)?;
         self.require_managed_terminal_operator(execution_id, owner)?;
-        if !lease.writable {
+        if !lease.is_writable() {
             return Ok(true);
         }
         if self.expire_input_lease_if_needed(execution_id, Instant::now())? {
@@ -1742,7 +1895,26 @@ impl Reactor {
             .active
             .get(execution_id)
             .and_then(|execution| execution.writable_lease.as_ref())
-            .is_some_and(|current| current.attachment_id == lease.attachment_id))
+            .is_some_and(|current| current.owns(lease)))
+    }
+
+    fn resolve_writer_lease(
+        &mut self,
+        execution_id: &ExecutionId,
+        owner: Option<&ExecutionOwner>,
+        writer_lease_id: &WriterLeaseId,
+    ) -> Result<InputLease> {
+        self.checked_status(execution_id, owner)?;
+        self.require_managed_terminal_operator(execution_id, owner)?;
+        if self.expire_input_lease_if_needed(execution_id, Instant::now())? {
+            return Err(input_lease_expired());
+        }
+        self.active
+            .get(execution_id)
+            .and_then(|execution| execution.writable_lease.as_ref())
+            .filter(|current| &current.writer_lease_id == writer_lease_id)
+            .map(WritableInputLease::as_input_lease)
+            .ok_or_else(input_lease_expired)
     }
 
     fn expire_input_lease_if_needed(
@@ -1770,7 +1942,7 @@ impl Reactor {
             && execution
                 .writable_lease
                 .as_ref()
-                .is_some_and(|current| current.attachment_id == expired.attachment_id)
+                .is_some_and(|current| current.owns(&lease))
         {
             execution.writable_lease = None;
         }
@@ -1796,11 +1968,11 @@ impl Reactor {
         if execution.termination.is_some() {
             return Err(not_live());
         }
-        if !lease.writable
+        if !lease.is_writable()
             || !execution
                 .writable_lease
                 .as_ref()
-                .is_some_and(|current| current.attachment_id == lease.attachment_id)
+                .is_some_and(|current| current.owns(lease))
         {
             return Err(ProcessError::new(
                 ProcessErrorCode::InputLeaseBusy,
@@ -2212,36 +2384,23 @@ impl Reactor {
         let Some(integration) = self.shell_integrations.get_mut(execution_id) else {
             return;
         };
-        if integration.reader.as_ref().is_some_and(|reader| {
-            !platform::shell_integration_path_is_intact(&integration.fifo_path, reader)
-        }) {
-            integration.close(true);
-            return;
-        }
         for _ in 0..32 {
-            let Some(reader) = integration.reader.as_ref() else {
+            let Some(socket) = integration.socket.as_ref() else {
                 break;
             };
-            let mut bytes = [0u8; 16 * 1024];
-            let read =
-                unsafe { libc::read(reader.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
-            if read > 0 {
-                integration.ingest(&bytes[..read as usize], output_through_sequence);
-                continue;
+            match platform::receive_shell_integration_event(
+                socket,
+                MAX_SHELL_INTEGRATION_FRAME_BYTES,
+            ) {
+                Ok(platform::ShellIntegrationReceive::Event(bytes)) => {
+                    integration.ingest(bytes, output_through_sequence);
+                }
+                Ok(platform::ShellIntegrationReceive::Empty) => break,
+                Ok(platform::ShellIntegrationReceive::Closed) | Err(_) => {
+                    integration.close(true);
+                    break;
+                }
             }
-            if read == 0 {
-                integration.close(true);
-                break;
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                break;
-            }
-            integration.close(true);
-            break;
         }
     }
 
@@ -2355,6 +2514,18 @@ impl Reactor {
             output_quiescent &= descriptor_quiescent;
         }
         Ok(output_quiescent)
+    }
+
+    fn drain_terminal_to_eagain(&mut self, execution_id: &ExecutionId) -> Result<()> {
+        for _ in 0..64 {
+            if self.pump_one(execution_id)? {
+                return Ok(());
+            }
+        }
+        Err(ProcessError::new(
+            ProcessErrorCode::InputBackpressure,
+            "managed terminal did not reach a bounded output boundary",
+        ))
     }
 
     fn record_lifecycle(&mut self, execution_id: &ExecutionId, kind: &str) -> Result<()> {
@@ -2632,29 +2803,35 @@ impl ActiveExecution {
 
 impl ActiveShellIntegration {
     fn new(transport: ManagedShellIntegrationTransport) -> Self {
+        debug_assert!(transport.relay_socket.is_none());
         Self {
-            reader: Some(transport.reader),
-            fifo_path: transport.fifo_path,
-            buffered: VecDeque::new(),
+            socket: Some(transport.supervisor_socket),
+            event_fifo_guard: Some(transport.event_fifo_guard),
+            event_fifo_path: transport.event_fifo_path,
+            control_fifo_path: transport.control_fifo_path,
+            packets: VecDeque::new(),
+            buffered_bytes: 0,
             closed: false,
             degraded: false,
-            output_through_sequence: 0,
         }
     }
 
-    fn ingest(&mut self, bytes: &[u8], output_through_sequence: u64) {
+    fn ingest(&mut self, bytes: Vec<u8>, output_through_sequence: u64) {
         if self.degraded {
             return;
         }
-        let remaining = MAX_BUFFERED_SHELL_INTEGRATION_BYTES.saturating_sub(self.buffered.len());
-        let retained = remaining.min(bytes.len());
-        self.buffered.extend(&bytes[..retained]);
-        if retained != 0 {
-            self.output_through_sequence = output_through_sequence;
-        }
-        if retained != bytes.len() {
+        if bytes.is_empty()
+            || self.buffered_bytes.saturating_add(bytes.len())
+                > MAX_BUFFERED_SHELL_INTEGRATION_BYTES
+        {
             self.degraded = true;
+            return;
         }
+        self.buffered_bytes = self.buffered_bytes.saturating_add(bytes.len());
+        self.packets.push_back(BufferedShellIntegrationPacket {
+            bytes,
+            output_through_sequence,
+        });
     }
 
     /// Unlink before closing the supervisor's O_RDWR endpoint. A shell hook
@@ -2662,13 +2839,17 @@ impl ActiveShellIntegration {
     /// on a FIFO path with no reader.
     fn close(&mut self, degraded: bool) {
         self.degraded |= degraded;
-        let reader = self.reader.take();
-        match fs::remove_file(&self.fifo_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => self.degraded = true,
+        let socket = self.socket.take();
+        let event_fifo_guard = self.event_fifo_guard.take();
+        for path in [&self.event_fifo_path, &self.control_fifo_path] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => self.degraded = true,
+            }
         }
-        drop(reader);
+        drop(socket);
+        drop(event_fifo_guard);
         self.closed = true;
     }
 }
@@ -3185,12 +3366,14 @@ mod tests {
         reactor.shell_integrations.insert(
             execution_id.clone(),
             ActiveShellIntegration {
-                reader: None,
-                fifo_path: root.join("absent-integration.fifo"),
-                buffered: VecDeque::new(),
+                socket: None,
+                event_fifo_guard: None,
+                event_fifo_path: root.join("absent-integration-events.fifo"),
+                control_fifo_path: root.join("absent-integration-control.fifo"),
+                packets: VecDeque::new(),
+                buffered_bytes: 0,
                 closed: false,
                 degraded: false,
-                output_through_sequence: 0,
             },
         );
         ManagedReactorFixture {
@@ -3285,7 +3468,8 @@ mod tests {
     #[test]
     fn writable_input_lease_deadline_is_exact_and_renewal_replaces_it() {
         let started = Instant::now();
-        let mut lease = WritableInputLease::new(RequestId::generate(), started);
+        let mut lease =
+            WritableInputLease::new(RequestId::generate(), WriterLeaseId::generate(), started);
         assert!(!lease.is_expired(started + WRITABLE_INPUT_LEASE_TTL - Duration::from_nanos(1)));
         assert!(lease.is_expired(started + WRITABLE_INPUT_LEASE_TTL));
 
@@ -3293,7 +3477,101 @@ mod tests {
         lease.renew(renewed);
         assert!(!lease.is_expired(started + WRITABLE_INPUT_LEASE_TTL));
         assert!(lease.is_expired(renewed + WRITABLE_INPUT_LEASE_TTL));
-        assert!(lease.as_input_lease().writable);
+        assert!(lease.as_input_lease().is_writable());
+    }
+
+    #[test]
+    fn writer_resolution_fails_closed_for_expiry_foreign_identity_and_takeover() {
+        let mut fixture = managed_reactor_fixture(65_536);
+        let execution_id = fixture.execution_id.clone();
+        let first = fixture
+            .reactor
+            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .unwrap();
+        let first_writer = first.writer_lease_id().unwrap().clone();
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&execution_id, None, &first_writer)
+                .unwrap(),
+            first
+        );
+        let forged_attachment = InputLease {
+            attachment_id: RequestId::generate(),
+            writer_lease_id: Some(first_writer.clone()),
+        };
+        assert_eq!(
+            fixture
+                .reactor
+                .detach_input(&execution_id, None, &forged_attachment)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputLeaseBusy
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .renew_input_lease(&execution_id, None, &forged_attachment)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputLeaseExpired
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&execution_id, None, &WriterLeaseId::generate())
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputLeaseExpired
+        );
+
+        fixture
+            .reactor
+            .active
+            .get_mut(&execution_id)
+            .unwrap()
+            .writable_lease
+            .as_mut()
+            .unwrap()
+            .expires_at = Instant::now();
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&execution_id, None, &first_writer)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputLeaseExpired
+        );
+
+        let replacement = fixture
+            .reactor
+            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .unwrap();
+        let replacement_writer = replacement.writer_lease_id().unwrap().clone();
+        assert_ne!(replacement_writer, first_writer);
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&execution_id, None, &first_writer)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InputLeaseExpired
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&execution_id, None, &replacement_writer)
+                .unwrap(),
+            replacement
+        );
+        assert_eq!(
+            fixture
+                .reactor
+                .resolve_writer_lease(&ExecutionId::generate(), None, &replacement_writer)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::ExecutionNotFound
+        );
     }
 
     #[test]
@@ -3618,25 +3896,30 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let fifo_path = root.join("integration.fifo");
-        let reader = platform::create_shell_integration_reader(&fifo_path).unwrap();
+        let event_fifo_path = root.join("integration-events.fifo");
+        let control_fifo_path = root.join("integration-control.fifo");
+        let transport =
+            platform::create_shell_integration_transport(&event_fifo_path, &control_fifo_path)
+                .unwrap();
+        drop(transport.relay);
         let mut integration = ActiveShellIntegration::new(ManagedShellIntegrationTransport {
-            reader,
-            fifo_path: fifo_path.clone(),
+            supervisor_socket: transport.supervisor,
+            relay_socket: None,
+            event_fifo_guard: transport.event_guard,
+            event_fifo_path: event_fifo_path.clone(),
+            control_fifo_path: control_fifo_path.clone(),
         });
 
-        integration.ingest(&vec![0x41; MAX_BUFFERED_SHELL_INTEGRATION_BYTES + 1], 17);
+        integration.ingest(vec![0x41; MAX_BUFFERED_SHELL_INTEGRATION_BYTES + 1], 17);
 
-        assert_eq!(
-            integration.buffered.len(),
-            MAX_BUFFERED_SHELL_INTEGRATION_BYTES
-        );
+        assert!(integration.packets.is_empty());
+        assert_eq!(integration.buffered_bytes, 0);
         assert!(integration.degraded);
-        assert_eq!(integration.output_through_sequence, 17);
         integration.close(false);
         assert!(integration.closed);
-        assert!(integration.reader.is_none());
-        assert!(!fifo_path.exists());
+        assert!(integration.socket.is_none());
+        assert!(!event_fifo_path.exists());
+        assert!(!control_fifo_path.exists());
         fs::remove_dir(root).unwrap();
     }
 

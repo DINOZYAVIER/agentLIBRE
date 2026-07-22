@@ -83,6 +83,14 @@ impl AgentLibrePaths {
         self.state_dir.join("models").join("leases")
     }
 
+    pub fn inference_state_root(&self) -> PathBuf {
+        self.state_dir.join("inference")
+    }
+
+    pub fn inference_worker_temp_root(&self) -> PathBuf {
+        self.inference_state_root().join("worker-tmp")
+    }
+
     pub fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_root().join(session_id.as_str())
     }
@@ -171,6 +179,10 @@ mod tests {
         assert_eq!(
             paths.model_lease_root(),
             PathBuf::from("/tmp/agl-home/state/models/leases")
+        );
+        assert_eq!(
+            paths.inference_worker_temp_root(),
+            PathBuf::from("/tmp/agl-home/state/inference/worker-tmp")
         );
         assert_eq!(
             paths.app_log_path(),

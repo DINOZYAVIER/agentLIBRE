@@ -102,7 +102,13 @@ pub(super) fn receive_json_with_fds<T: DeserializeOwned>(
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen = control.len();
     let received = unsafe { libc::recvmsg(fd, message, libc::MSG_CMSG_CLOEXEC) };
-    if received <= 0 {
+    if received == 0 {
+        return Err(ProcessError::new(
+            ProcessErrorCode::LauncherProtocol,
+            "process launcher closed the private wire without a response",
+        ));
+    }
+    if received < 0 {
         return Err(protocol_os_error("failed to receive launcher response"));
     }
     if message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {

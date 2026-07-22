@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
 use agl_config::ResolvedInferenceConfig;
 use agl_ids::SessionId;
-use agl_inference::{InferenceResponse, ModelManagerStatus};
+use agl_inference::{InferenceResponse, ModelManagerStatus, WorkerRuntimeStatusHandle};
 use agl_runtime::{AgentLibrePaths, AgentLibreRuntimeConfig};
 
 const READY_TEXT: &[u8] = b"agentLIBRE";
@@ -30,6 +30,10 @@ const INLINE_REDRAW_CLEAR: &[u8] = b"\x1b[J";
 struct NoInference;
 
 impl InferenceClient for NoInference {
+    fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
+        Ok(Vec::new())
+    }
+
     fn generate(&self, _job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
         anyhow::bail!("native TUI restoration test never invokes inference")
     }
@@ -80,6 +84,24 @@ fn interactive_daemon_connection_failure_restores_parent_terminal() {
     assert!(
         !status.success(),
         "daemon connection loss unexpectedly succeeded"
+    );
+    terminal.assert_parent_terminal_restored();
+    terminal.assert_control_modes_restored();
+    environment.join_server();
+}
+
+#[test]
+fn interactive_sigint_restores_parent_terminal() {
+    let mut environment = NativeTuiEnvironment::new();
+    let mut terminal = environment.spawn_tui();
+    terminal.wait_until_ready();
+    terminal.send_signal(libc::SIGINT);
+    let status = terminal.finish();
+
+    assert!(
+        status.success(),
+        "SIGINT shutdown failed: {status}; output={}",
+        escaped(&terminal.output)
     );
     terminal.assert_parent_terminal_restored();
     terminal.assert_control_modes_restored();
@@ -161,6 +183,7 @@ impl NativeTuiEnvironment {
                 ..InferenceOptions::default()
             },
             InferenceClientHandle::new(NoInference),
+            WorkerRuntimeStatusHandle::default(),
         )
         .unwrap();
         let socket = root.join("daemon.sock");

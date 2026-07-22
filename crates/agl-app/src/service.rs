@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 
 use crate::{
-    ApplicationActionRequest, CommandCatalog, CommandContext, ExecutionView, HumanTerminalEnsure,
-    PresentationCursor, SessionHeader, SessionLaunchOptions, SessionPresentationEvent,
-    SessionPresentationEventEnvelope, SessionPresentationItem, SessionPresentationSnapshot,
-    SuggestionPage, SuggestionRequest, TerminalEnsured, TerminalSessionView,
-    shared_command_catalog,
+    ApplicationActionRequest, CommandCatalog, CommandContext, ExecutionView, HumanCommandCardState,
+    HumanCommandCardView, HumanTerminalCommandAccepted, HumanTerminalCommandSubmit,
+    HumanTerminalEnsure, PresentationCursor, SessionHeader, SessionLaunchOptions,
+    SessionPresentationEvent, SessionPresentationEventEnvelope, SessionPresentationItem,
+    SessionPresentationSnapshot, SuggestionPage, SuggestionRequest, TerminalEnsured,
+    TerminalSessionView, shared_command_catalog,
 };
 
 const PRESENTATION_CHANNEL_CAPACITY: usize = 256;
@@ -38,7 +39,11 @@ pub enum ApplicationErrorCode {
     ModelNotInstalled,
     ModelContextTooSmall,
     SkillNotAdmitted,
+    IncompleteOutputNotFound,
+    ContinuationAlreadyClaimed,
+    StaleContinuationContext,
     InputBackpressure,
+    ActivityCapacityExceeded,
     ResyncRequired,
     OutcomeUnknown,
     Internal,
@@ -60,7 +65,11 @@ impl ApplicationErrorCode {
             Self::ModelNotInstalled => "model_not_installed",
             Self::ModelContextTooSmall => "model_context_too_small",
             Self::SkillNotAdmitted => "skill_not_admitted",
+            Self::IncompleteOutputNotFound => "incomplete_output_not_found",
+            Self::ContinuationAlreadyClaimed => "continuation_already_claimed",
+            Self::StaleContinuationContext => "stale_continuation_context",
             Self::InputBackpressure => "input_backpressure",
+            Self::ActivityCapacityExceeded => "activity_capacity_exceeded",
             Self::ResyncRequired => "resync_required",
             Self::OutcomeUnknown => "outcome_unknown",
             Self::Internal => "internal",
@@ -165,6 +174,7 @@ pub enum PromptAdmissionState {
     Running,
     Waiting,
     Succeeded,
+    Incomplete,
     Failed,
     Cancelled,
 }
@@ -180,6 +190,7 @@ impl PromptAdmissionState {
             Self::Running => "running",
             Self::Waiting => "waiting",
             Self::Succeeded => "succeeded",
+            Self::Incomplete => "incomplete",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
@@ -238,6 +249,9 @@ pub enum ApplicationActionResult {
         terminated_terminals: u32,
         terminated_executions: u32,
     },
+    IncompleteTurnContinued {
+        admission: PromptAdmission,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -281,11 +295,22 @@ pub trait ApplicationBackend: Send + Sync + 'static {
         context: ApplicationCallContext,
         request: HumanTerminalEnsure,
     ) -> Result<TerminalEnsured, ApplicationError>;
+    fn submit_human_terminal_command(
+        &self,
+        context: ApplicationCallContext,
+        request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError>;
     fn suggestions(
         &self,
         context: ApplicationCallContext,
         request: SuggestionRequest,
     ) -> Result<SuggestionPage, ApplicationError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanTerminalCommandAdmission {
+    pub accepted: HumanTerminalCommandAccepted,
+    pub card: HumanCommandCardView,
 }
 
 /// Cancellation shared with a finite synchronous application-owner call.
@@ -326,6 +351,8 @@ struct ProjectionState {
     older_page_cursor: Option<String>,
     sender: broadcast::Sender<SessionPresentationEventEnvelope>,
     assistant_delta_sequences: BTreeMap<MessageId, u64>,
+    next_activity_order_index: u64,
+    last_activity_batch: Option<crate::ActivityGraphDeltaBatch>,
 }
 
 #[derive(Clone)]
@@ -403,7 +430,22 @@ impl ApplicationService {
         page_cursor: Option<String>,
     ) -> Result<PresentationSnapshotPage, ApplicationError> {
         validate_page_cursor(page_cursor.as_deref())?;
-        self.load_snapshot_page(session_id, page_cursor).await
+        if page_cursor.is_some() {
+            return self.load_snapshot_page(session_id, page_cursor).await;
+        }
+        let page = self.load_snapshot_page(session_id, None).await?;
+        self.install_snapshot(page)?;
+        let projections = self.projections.lock().map_err(lock_error)?;
+        let projection = projections.get(session_id).ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::NotFound,
+                "session projection not found after latest-page installation",
+            )
+        })?;
+        Ok(PresentationSnapshotPage {
+            snapshot: projection.snapshot.clone(),
+            older_page_cursor: projection.older_page_cursor.clone(),
+        })
     }
 
     pub async fn invoke(
@@ -444,6 +486,11 @@ impl ApplicationService {
     ) -> Result<PromptAdmission, ApplicationError> {
         request.validate()?;
         let session_id = request.session_id.clone();
+        // Install the live projection before the supervisor can emit its
+        // first turn event. Durable sessions can reconstruct a missed event
+        // from their transcript, but explicitly non-durable setup smokes
+        // cannot, so admission must not race presentation registration.
+        self.snapshot(&session_id).await?;
         let backend = Arc::clone(&self.backend);
         let admission = self
             .blocking(move |context| backend.submit_prompt(context, request))
@@ -462,6 +509,7 @@ impl ApplicationService {
                 run_id: admission.run_id.clone(),
             },
             PromptAdmissionState::Succeeded
+            | PromptAdmissionState::Incomplete
             | PromptAdmissionState::Failed
             | PromptAdmissionState::Cancelled => SessionPresentationEvent::PromptFinished {
                 run_id: admission.run_id.clone(),
@@ -487,6 +535,68 @@ impl ApplicationService {
         Ok(ensured)
     }
 
+    pub async fn submit_human_terminal_command(
+        &self,
+        request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAccepted, ApplicationError> {
+        request.validate()?;
+        let session_id = request.session_id.clone();
+        // Install the private same-epoch projection before the backend can
+        // admit bytes and the terminal monitor can emit card updates.
+        self.snapshot(&session_id).await?;
+        let backend = Arc::clone(&self.backend);
+        let admission = self
+            .blocking(move |context| backend.submit_human_terminal_command(context, request))
+            .await?;
+        admission.card.validate()?;
+        if admission.accepted.terminal_id != admission.card.terminal_id
+            || admission.accepted.command_sequence != admission.card.command_sequence
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "Human terminal command admission returned an inconsistent private card",
+            ));
+        }
+        self.publish_admitted_human_command_card(&session_id, admission.card)?;
+        Ok(admission.accepted)
+    }
+
+    fn publish_admitted_human_command_card(
+        &self,
+        session_id: &SessionId,
+        card: HumanCommandCardView,
+    ) -> Result<(), ApplicationError> {
+        let mut projections = self.projections.lock().map_err(lock_error)?;
+        let projection = projections.get_mut(session_id).ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::NotFound,
+                "session projection not found",
+            )
+        })?;
+        let superseded = projection
+            .snapshot
+            .human_commands
+            .iter()
+            .find(|existing| {
+                existing.terminal_id == card.terminal_id
+                    && existing.command_sequence == card.command_sequence
+            })
+            .is_some_and(|existing| {
+                existing == &card
+                    || existing.updated_at_unix_ms > card.updated_at_unix_ms
+                    || human_command_card_state_rank(existing.state)
+                        > human_command_card_state_rank(card.state)
+            });
+        if !superseded {
+            publish_to_projection(
+                session_id,
+                SessionPresentationEvent::HumanCommandCardUpsert { card },
+                projection,
+            )?;
+        }
+        Ok(())
+    }
+
     pub async fn refresh(&self, session_id: &SessionId) -> Result<(), ApplicationError> {
         let PresentationSnapshotPage {
             mut snapshot,
@@ -504,6 +614,8 @@ impl ApplicationService {
                     older_page_cursor,
                     sender,
                     assistant_delta_sequences: BTreeMap::new(),
+                    next_activity_order_index: 1,
+                    last_activity_batch: None,
                 },
             );
             return Ok(());
@@ -553,7 +665,6 @@ impl ApplicationService {
         session_id: &SessionId,
         event: SessionPresentationEvent,
     ) -> Result<SessionPresentationEventEnvelope, ApplicationError> {
-        validate_event(session_id, &event)?;
         let mut projections = self.projections.lock().map_err(lock_error)?;
         let projection = projections.get_mut(session_id).ok_or_else(|| {
             ApplicationError::new(
@@ -565,11 +676,15 @@ impl ApplicationService {
         Ok(envelope)
     }
 
-    pub(crate) fn try_publish_batch_nonblocking(
+    /// Applies a bounded product event batch to the reconnectable projection.
+    /// Live broadcast delivery is intentionally not part of success: a
+    /// session with no attached client must still retain the latest activity
+    /// and streaming state for its next snapshot.
+    pub(crate) fn publish_batch(
         &self,
         session_id: &SessionId,
         events: impl IntoIterator<Item = SessionPresentationEvent>,
-    ) -> Result<bool, ApplicationError> {
+    ) -> Result<(), ApplicationError> {
         let events = events.into_iter().collect::<Vec<_>>();
         if events.is_empty() {
             return Err(ApplicationError::new(
@@ -577,28 +692,17 @@ impl ApplicationService {
                 "presentation event batch must not be empty",
             ));
         }
-        for event in &events {
-            validate_event(session_id, event)?;
-        }
-        let mut projections = self.projections.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => ApplicationError::new(
-                ApplicationErrorCode::InputBackpressure,
-                "application projection is busy",
-            ),
-            std::sync::TryLockError::Poisoned(error) => lock_error(error),
-        })?;
+        let mut projections = self.projections.lock().map_err(lock_error)?;
         let projection = projections.get_mut(session_id).ok_or_else(|| {
             ApplicationError::new(
                 ApplicationErrorCode::NotFound,
                 "session projection not found",
             )
         })?;
-        let mut delivered = true;
         for event in events {
-            let (_, event_delivered) = publish_to_projection(session_id, event, projection)?;
-            delivered &= event_delivered;
+            let _ = publish_to_projection(session_id, event, projection)?;
         }
-        Ok(delivered)
+        Ok(())
     }
 
     fn install_snapshot(
@@ -621,6 +725,8 @@ impl ApplicationService {
                     older_page_cursor,
                     sender,
                     assistant_delta_sequences: BTreeMap::new(),
+                    next_activity_order_index: 1,
+                    last_activity_batch: None,
                 });
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -776,6 +882,14 @@ fn lock_error<T>(_error: std::sync::PoisonError<T>) -> ApplicationError {
     )
 }
 
+fn human_command_card_state_rank(state: HumanCommandCardState) -> u8 {
+    match state {
+        HumanCommandCardState::Starting => 0,
+        HumanCommandCardState::Running => 1,
+        HumanCommandCardState::Exited | HumanCommandCardState::OutcomeUnknown => 2,
+    }
+}
+
 fn validate_submission_id(value: &str) -> Result<(), ApplicationError> {
     if value.is_empty() || value.len() > 256 || value.contains(['\0', '\n', '\r']) {
         return Err(ApplicationError::new(
@@ -804,9 +918,11 @@ fn validate_page_cursor(page_cursor: Option<&str>) -> Result<(), ApplicationErro
 
 fn publish_to_projection(
     session_id: &SessionId,
-    event: SessionPresentationEvent,
+    mut event: SessionPresentationEvent,
     projection: &mut ProjectionState,
 ) -> Result<(SessionPresentationEventEnvelope, bool), ApplicationError> {
+    prepare_activity_event(projection, &mut event)?;
+    validate_event(session_id, &event)?;
     apply_event(projection, &event)?;
     projection.snapshot.cursor.revision = projection.snapshot.cursor.revision.saturating_add(1);
     let envelope = SessionPresentationEventEnvelope {
@@ -824,13 +940,15 @@ fn merge_provisional_items(
     snapshot: &mut SessionPresentationSnapshot,
 ) {
     for item in &projection.snapshot.items {
-        if !matches!(
-            item,
-            SessionPresentationItem::AssistantMessage {
-                state: crate::AssistantItemState::Streaming,
-                ..
-            }
-        ) {
+        if snapshot.header.durable
+            && !matches!(
+                item,
+                SessionPresentationItem::AssistantMessage {
+                    state: crate::AssistantItemState::Streaming,
+                    ..
+                }
+            )
+        {
             continue;
         }
         let key = item.key();
@@ -840,6 +958,12 @@ fn merge_provisional_items(
             snapshot.items.push(item.clone());
         }
     }
+    // Human command cards and the activity graph are volatile presentation
+    // state owned by this daemon epoch. Backend snapshots deliberately do not
+    // persist them, but a refresh must not erase them for connected or
+    // reconnecting clients in the same epoch.
+    snapshot.human_commands = projection.snapshot.human_commands.clone();
+    snapshot.activity = projection.snapshot.activity.clone();
 }
 
 fn retain_live_delta_sequences(projection: &mut ProjectionState) {
@@ -861,6 +985,573 @@ fn retain_live_delta_sequences(projection: &mut ProjectionState) {
         .retain(|message_id, _| live.contains(message_id));
 }
 
+fn prepare_activity_event(
+    projection: &mut ProjectionState,
+    event: &mut SessionPresentationEvent,
+) -> Result<(), ApplicationError> {
+    let SessionPresentationEvent::ActivityGraphDelta { batch } = event else {
+        return Ok(());
+    };
+    let current_revision = projection
+        .snapshot
+        .activity
+        .as_ref()
+        .map_or(0, |graph| graph.graph_revision);
+    if batch.graph_revision == 0 {
+        batch.graph_revision = current_revision.saturating_add(1);
+    } else if batch.graph_revision == current_revision
+        && projection.last_activity_batch.as_ref() == Some(batch)
+    {
+        return Ok(());
+    } else if batch.graph_revision != current_revision.saturating_add(1) {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::ResyncRequired,
+            format!(
+                "activity graph revision is not contiguous: current {current_revision}, received {}",
+                batch.graph_revision
+            ),
+        ));
+    }
+
+    let existing = projection
+        .snapshot
+        .activity
+        .as_ref()
+        .map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .map(|node| (node.node_id.clone(), node.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for node in &mut batch.upserts {
+        if let Some(previous) = existing.get(&node.node_id) {
+            if node.parent_node_id != previous.parent_node_id
+                || node.run_id != previous.run_id
+                || node.turn_id != previous.turn_id
+                || node.attempt_id != previous.attempt_id
+                || node.step_id != previous.step_id
+                || node.kind != previous.kind
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "activity node identity and parent are immutable",
+                ));
+            }
+            node.order_index = previous.order_index;
+            node.retry = previous.retry;
+            node.started_at_unix_ms = previous.started_at_unix_ms;
+        } else {
+            if node.kind == crate::ActivityNodeKind::Attempt {
+                node.retry = u32::try_from(
+                    existing
+                        .values()
+                        .filter(|candidate| {
+                            candidate.kind == crate::ActivityNodeKind::Attempt
+                                && candidate.turn_id == node.turn_id
+                        })
+                        .count(),
+                )
+                .unwrap_or(u32::MAX);
+            }
+            node.order_index = projection.next_activity_order_index;
+            projection.next_activity_order_index = projection
+                .next_activity_order_index
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ApplicationError::new(
+                        ApplicationErrorCode::ActivityCapacityExceeded,
+                        "activity order index exhausted",
+                    )
+                })?;
+            if node.started_at_unix_ms == 0 {
+                node.started_at_unix_ms = node.updated_at_unix_ms;
+            }
+        }
+        node.updated_at_unix_ms = node.updated_at_unix_ms.max(node.started_at_unix_ms);
+        if let Some(finished) = node.finished_at_unix_ms {
+            node.updated_at_unix_ms = node.updated_at_unix_ms.max(finished);
+            node.elapsed_ms =
+                u64::try_from(finished.saturating_sub(node.started_at_unix_ms)).unwrap_or_default();
+        }
+    }
+    sort_activity_upserts(&mut batch.upserts, &existing)?;
+
+    let mut candidate = apply_activity_batch(projection.snapshot.activity.as_ref(), batch, false)?;
+    let focused_path = select_activity_current_path(&candidate);
+    if batch.current_path.as_ref() != Some(&focused_path) {
+        batch.current_path = Some(focused_path);
+        candidate = apply_activity_batch(projection.snapshot.activity.as_ref(), batch, true)?;
+    }
+    enforce_active_activity_capacity(&candidate)?;
+    while activity_graph_exceeds_retention(&candidate)? {
+        let reason = if candidate.nodes.len() > crate::MAX_ACTIVITY_NODES {
+            crate::ActivityAggregateReason::NodeLimit
+        } else {
+            crate::ActivityAggregateReason::ByteLimit
+        };
+        match collapse_oldest_completed_branch(&candidate, reason) {
+            Ok((aggregate, removal)) => {
+                batch.upserts.push(aggregate);
+                batch.removals.push(removal);
+            }
+            Err(error) => {
+                let Some(removal) = retire_oldest_activity_aggregate(&candidate) else {
+                    return Err(error);
+                };
+                batch.removals.push(removal);
+            }
+        }
+        batch.truncated = true;
+        sort_activity_upserts(&mut batch.upserts, &existing)?;
+        candidate = apply_activity_batch(projection.snapshot.activity.as_ref(), batch, false)?;
+    }
+    candidate.validate()?;
+    Ok(())
+}
+
+fn sort_activity_upserts(
+    upserts: &mut Vec<crate::ActivityNodeView>,
+    existing: &BTreeMap<String, crate::ActivityNodeView>,
+) -> Result<(), ApplicationError> {
+    let mut remaining = std::mem::take(upserts);
+    let mut emitted = existing.keys().cloned().collect::<BTreeSet<_>>();
+    while !remaining.is_empty() {
+        let Some(index) = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.parent_node_id
+                    .as_ref()
+                    .is_none_or(|parent| emitted.contains(parent))
+            })
+            .min_by(|(_, left), (_, right)| {
+                (left.order_index, left.node_id.as_str())
+                    .cmp(&(right.order_index, right.node_id.as_str()))
+            })
+            .map(|(index, _)| index)
+        else {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "activity delta contains a cycle or missing parent",
+            ));
+        };
+        let node = remaining.remove(index);
+        emitted.insert(node.node_id.clone());
+        upserts.push(node);
+    }
+    Ok(())
+}
+
+fn apply_activity_batch(
+    current: Option<&crate::ActivityGraphView>,
+    batch: &crate::ActivityGraphDeltaBatch,
+    validate: bool,
+) -> Result<crate::ActivityGraphView, ApplicationError> {
+    let current_revision = current.map_or(0, |graph| graph.graph_revision);
+    if batch.graph_revision != current_revision.saturating_add(1) {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::ResyncRequired,
+            "activity delta revision is not contiguous with the installed graph",
+        ));
+    }
+    let mut graph = current.cloned().unwrap_or(crate::ActivityGraphView {
+        graph_revision: 0,
+        roots: Vec::new(),
+        nodes: Vec::new(),
+        current_path: Vec::new(),
+        truncated: false,
+    });
+    for node in &batch.upserts {
+        if let Some(previous) = graph
+            .nodes
+            .iter_mut()
+            .find(|previous| previous.node_id == node.node_id)
+        {
+            *previous = node.clone();
+        } else {
+            graph.nodes.push(node.clone());
+        }
+    }
+    if let Some(path) = &batch.current_path {
+        graph.current_path = path.clone();
+    }
+    for removal in &batch.removals {
+        let target = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_id == removal.subtree_root_id)
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "activity removal references an unknown subtree",
+                )
+            })?;
+        match removal.reason {
+            crate::ActivityRemovalReason::CollapsedIntoAggregate
+                if !batch.upserts.iter().any(|replacement| {
+                    replacement.kind == crate::ActivityNodeKind::Aggregate
+                        && replacement.order_index == target.order_index
+                        && replacement.parent_node_id == target.parent_node_id
+                }) =>
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "collapsed activity subtree requires its typed aggregate replacement",
+                ));
+            }
+            crate::ActivityRemovalReason::RetentionExpired
+                if target.kind != crate::ActivityNodeKind::Aggregate =>
+            {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "retention expiry may remove aggregate activity nodes only",
+                ));
+            }
+            _ => {}
+        }
+        remove_completed_activity_subtree(&mut graph, removal)?;
+    }
+    graph.graph_revision = batch.graph_revision;
+    graph.truncated |= batch.truncated;
+    canonicalize_activity_graph(&mut graph)?;
+    if validate
+        && graph.nodes.len() <= crate::MAX_ACTIVITY_NODES
+        && serde_json::to_vec(&graph)
+            .map_err(|_| {
+                ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "activity graph could not be encoded",
+                )
+            })?
+            .len()
+            <= crate::MAX_ACTIVITY_GRAPH_BYTES
+    {
+        graph.validate()?;
+    }
+    Ok(graph)
+}
+
+fn remove_completed_activity_subtree(
+    graph: &mut crate::ActivityGraphView,
+    removal: &crate::ActivityNodeRemoval,
+) -> Result<(), ApplicationError> {
+    if graph
+        .nodes
+        .iter()
+        .all(|node| node.node_id != removal.subtree_root_id)
+    {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::InvalidArguments,
+            "activity removal references an unknown subtree",
+        ));
+    }
+    let mut removed = BTreeSet::from([removal.subtree_root_id.clone()]);
+    loop {
+        let before = removed.len();
+        for node in &graph.nodes {
+            if node
+                .parent_node_id
+                .as_ref()
+                .is_some_and(|parent| removed.contains(parent))
+            {
+                removed.insert(node.node_id.clone());
+            }
+        }
+        if removed.len() == before {
+            break;
+        }
+    }
+    if graph.current_path.iter().any(|id| removed.contains(id))
+        || graph
+            .nodes
+            .iter()
+            .any(|node| removed.contains(&node.node_id) && !node.state.is_terminal())
+    {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::InvalidArguments,
+            "activity removal may target completed non-focused subtrees only",
+        ));
+    }
+    graph.nodes.retain(|node| !removed.contains(&node.node_id));
+    Ok(())
+}
+
+fn canonicalize_activity_graph(
+    graph: &mut crate::ActivityGraphView,
+) -> Result<(), ApplicationError> {
+    let mut by_id = graph
+        .nodes
+        .drain(..)
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = BTreeMap::<Option<String>, Vec<String>>::new();
+    for node in by_id.values() {
+        children
+            .entry(node.parent_node_id.clone())
+            .or_default()
+            .push(node.node_id.clone());
+    }
+    for ids in children.values_mut() {
+        ids.sort_by(|left, right| {
+            let left = by_id.get(left).expect("activity child exists");
+            let right = by_id.get(right).expect("activity child exists");
+            (left.order_index, left.node_id.as_str())
+                .cmp(&(right.order_index, right.node_id.as_str()))
+        });
+    }
+    fn visit(
+        parent: Option<String>,
+        children: &BTreeMap<Option<String>, Vec<String>>,
+        by_id: &mut BTreeMap<String, crate::ActivityNodeView>,
+        output: &mut Vec<crate::ActivityNodeView>,
+    ) {
+        for id in children.get(&parent).into_iter().flatten() {
+            let Some(node) = by_id.remove(id) else {
+                continue;
+            };
+            output.push(node);
+            visit(Some(id.clone()), children, by_id, output);
+        }
+    }
+    visit(None, &children, &mut by_id, &mut graph.nodes);
+    if !by_id.is_empty() {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::InvalidArguments,
+            "activity graph contains a cycle or disconnected topology",
+        ));
+    }
+    graph.roots = graph
+        .nodes
+        .iter()
+        .filter(|node| node.parent_node_id.is_none())
+        .map(|node| node.node_id.clone())
+        .collect();
+    Ok(())
+}
+
+fn enforce_active_activity_capacity(
+    graph: &crate::ActivityGraphView,
+) -> Result<(), ApplicationError> {
+    let active = graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            !node.state.is_terminal() || graph.current_path.iter().any(|id| id == &node.node_id)
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&(&active, &graph.current_path))
+        .map_err(|_| {
+            ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "active activity topology could not be encoded",
+            )
+        })?
+        .len();
+    if active.len() > crate::MAX_ACTIVE_ACTIVITY_NODES || bytes > crate::MAX_ACTIVE_ACTIVITY_BYTES {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::ActivityCapacityExceeded,
+            "active activity topology exceeds its reserved capacity",
+        ));
+    }
+    Ok(())
+}
+
+fn select_activity_current_path(graph: &crate::ActivityGraphView) -> Vec<String> {
+    let priority = |state: crate::ActivityNodeState| match state {
+        crate::ActivityNodeState::Running => Some(0u8),
+        crate::ActivityNodeState::Waiting => Some(1),
+        crate::ActivityNodeState::Pending => Some(2),
+        _ => None,
+    };
+    let depth = |node: &crate::ActivityNodeView| {
+        let mut depth = 0usize;
+        let mut parent = node.parent_node_id.as_deref();
+        while let Some(parent_id) = parent {
+            let Some(parent_node) = graph.nodes.iter().find(|node| node.node_id == parent_id)
+            else {
+                break;
+            };
+            depth = depth.saturating_add(1);
+            parent = parent_node.parent_node_id.as_deref();
+        }
+        depth
+    };
+    let mut leaves = graph
+        .nodes
+        .iter()
+        .filter(|node| priority(node.state).is_some())
+        .filter(|node| {
+            graph.nodes.iter().all(|child| {
+                child.parent_node_id.as_deref() != Some(node.node_id.as_str())
+                    || priority(child.state).is_none()
+            })
+        })
+        .collect::<Vec<_>>();
+    leaves.sort_by(|left, right| {
+        priority(left.state)
+            .cmp(&priority(right.state))
+            .then_with(|| right.updated_at_unix_ms.cmp(&left.updated_at_unix_ms))
+            .then_with(|| depth(right).cmp(&depth(left)))
+            .then_with(|| left.order_index.cmp(&right.order_index))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let Some(leaf) = leaves.first() else {
+        return Vec::new();
+    };
+    let mut path = vec![leaf.node_id.clone()];
+    let mut parent = leaf.parent_node_id.as_deref();
+    while let Some(parent_id) = parent {
+        let Some(parent_node) = graph.nodes.iter().find(|node| node.node_id == parent_id) else {
+            return Vec::new();
+        };
+        path.push(parent_node.node_id.clone());
+        parent = parent_node.parent_node_id.as_deref();
+    }
+    path.reverse();
+    path
+}
+
+fn activity_graph_exceeds_retention(
+    graph: &crate::ActivityGraphView,
+) -> Result<bool, ApplicationError> {
+    let bytes = serde_json::to_vec(graph)
+        .map_err(|_| {
+            ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "activity graph could not be encoded",
+            )
+        })?
+        .len();
+    Ok(graph.nodes.len() > crate::MAX_ACTIVITY_NODES || bytes > crate::MAX_ACTIVITY_GRAPH_BYTES)
+}
+
+fn collapse_oldest_completed_branch(
+    graph: &crate::ActivityGraphView,
+    reason: crate::ActivityAggregateReason,
+) -> Result<(crate::ActivityNodeView, crate::ActivityNodeRemoval), ApplicationError> {
+    let mut candidates = graph
+        .nodes
+        .iter()
+        .filter(|root| root.kind != crate::ActivityNodeKind::Aggregate && root.state.is_terminal())
+        .filter(|root| {
+            root.parent_node_id.as_ref().is_none_or(|parent_id| {
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| &node.node_id == parent_id)
+                    .is_some_and(|parent| !parent.state.is_terminal())
+            })
+        })
+        .filter_map(|root| {
+            let subtree = activity_subtree(graph, &root.node_id);
+            subtree
+                .iter()
+                .all(|node| node.state.is_terminal())
+                .then_some((root, subtree))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(left, _), (right, _)| {
+        (left.order_index, left.node_id.as_str()).cmp(&(right.order_index, right.node_id.as_str()))
+    });
+    let Some((root, subtree)) = candidates.into_iter().next() else {
+        return Err(ApplicationError::new(
+            ApplicationErrorCode::ActivityCapacityExceeded,
+            "activity retention is full and no completed root can be collapsed",
+        ));
+    };
+    let count = |state| {
+        u32::try_from(subtree.iter().filter(|node| node.state == state).count()).unwrap_or(u32::MAX)
+    };
+    let finished = subtree
+        .iter()
+        .filter_map(|node| node.finished_at_unix_ms)
+        .max()
+        .unwrap_or(root.updated_at_unix_ms);
+    let aggregate = crate::ActivityNodeView {
+        node_id: format!("aggregate:{}:{}", root.run_id, root.order_index),
+        parent_node_id: root.parent_node_id.clone(),
+        order_index: root.order_index,
+        run_id: root.run_id.clone(),
+        turn_id: root.turn_id.clone(),
+        attempt_id: None,
+        step_id: None,
+        kind: crate::ActivityNodeKind::Aggregate,
+        phase: crate::ActivityPhase::Retention,
+        state: crate::ActivityNodeState::Truncated,
+        retry: 0,
+        started_at_unix_ms: root.started_at_unix_ms,
+        updated_at_unix_ms: finished,
+        finished_at_unix_ms: Some(finished),
+        elapsed_ms: u64::try_from(finished.saturating_sub(root.started_at_unix_ms))
+            .unwrap_or_default(),
+        summary: format!("{} completed activity nodes collapsed", subtree.len()),
+        detail: crate::ActivityDetailView::Aggregate(crate::ActivityAggregateDetail {
+            collapsed_nodes: u32::try_from(subtree.len()).unwrap_or(u32::MAX),
+            succeeded: count(crate::ActivityNodeState::Succeeded),
+            failed: count(crate::ActivityNodeState::Failed),
+            cancelled: count(crate::ActivityNodeState::Cancelled),
+            incomplete: count(crate::ActivityNodeState::Incomplete),
+            elapsed_ms: subtree
+                .iter()
+                .fold(0u64, |sum, node| sum.saturating_add(node.elapsed_ms)),
+            reason,
+        }),
+    };
+    Ok((
+        aggregate,
+        crate::ActivityNodeRemoval {
+            subtree_root_id: root.node_id.clone(),
+            reason: crate::ActivityRemovalReason::CollapsedIntoAggregate,
+        },
+    ))
+}
+
+fn retire_oldest_activity_aggregate(
+    graph: &crate::ActivityGraphView,
+) -> Option<crate::ActivityNodeRemoval> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == crate::ActivityNodeKind::Aggregate)
+        .min_by(|left, right| {
+            (left.order_index, left.node_id.as_str())
+                .cmp(&(right.order_index, right.node_id.as_str()))
+        })
+        .map(|node| crate::ActivityNodeRemoval {
+            subtree_root_id: node.node_id.clone(),
+            reason: crate::ActivityRemovalReason::RetentionExpired,
+        })
+}
+
+fn activity_subtree<'a>(
+    graph: &'a crate::ActivityGraphView,
+    root_id: &str,
+) -> Vec<&'a crate::ActivityNodeView> {
+    let mut ids = BTreeSet::from([root_id.to_owned()]);
+    loop {
+        let before = ids.len();
+        for node in &graph.nodes {
+            if node
+                .parent_node_id
+                .as_ref()
+                .is_some_and(|parent| ids.contains(parent))
+            {
+                ids.insert(node.node_id.clone());
+            }
+        }
+        if ids.len() == before {
+            break;
+        }
+    }
+    graph
+        .nodes
+        .iter()
+        .filter(|node| ids.contains(&node.node_id))
+        .collect()
+}
+
 fn apply_event(
     projection: &mut ProjectionState,
     event: &SessionPresentationEvent,
@@ -876,6 +1567,13 @@ fn apply_event(
             snapshot.cursor = cursor;
             projection.older_page_cursor = older_page_cursor.clone();
             projection.assistant_delta_sequences.clear();
+            projection.next_activity_order_index = snapshot
+                .activity
+                .as_ref()
+                .and_then(|graph| graph.nodes.iter().map(|node| node.order_index).max())
+                .unwrap_or(0)
+                .saturating_add(1);
+            projection.last_activity_batch = None;
         }
         SessionPresentationEvent::HeaderChanged { header } => snapshot.header = header.clone(),
         SessionPresentationEvent::ItemUpsert { item } => {
@@ -1020,6 +1718,66 @@ fn apply_event(
         | SessionPresentationEvent::TerminalCommandFinished { .. }
         | SessionPresentationEvent::CommandAvailabilityChanged
         | SessionPresentationEvent::Notice { .. } => {}
+        SessionPresentationEvent::HumanCommandCardUpsert { card } => {
+            if let Some(existing) = snapshot.human_commands.iter_mut().find(|existing| {
+                existing.terminal_id == card.terminal_id
+                    && existing.command_sequence == card.command_sequence
+            }) {
+                *existing = card.clone();
+            } else {
+                if snapshot.human_commands.len() >= crate::MAX_HUMAN_COMMAND_CARDS {
+                    let Some(position) = snapshot.human_commands.iter().position(|card| {
+                        !matches!(
+                            card.state,
+                            crate::HumanCommandCardState::Starting
+                                | crate::HumanCommandCardState::Running
+                        )
+                    }) else {
+                        return Err(ApplicationError::new(
+                            ApplicationErrorCode::InputBackpressure,
+                            "all retained Human command cards are active",
+                        ));
+                    };
+                    snapshot.human_commands.remove(position);
+                }
+                snapshot.human_commands.push(card.clone());
+            }
+            while snapshot
+                .human_commands
+                .iter()
+                .map(|card| card.output.as_str().len())
+                .sum::<usize>()
+                > crate::MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES
+            {
+                let Some(position) = snapshot.human_commands.iter().position(|card| {
+                    !matches!(
+                        card.state,
+                        crate::HumanCommandCardState::Starting
+                            | crate::HumanCommandCardState::Running
+                    )
+                }) else {
+                    return Err(ApplicationError::new(
+                        ApplicationErrorCode::InputBackpressure,
+                        "active Human command cards exceed the aggregate output bound",
+                    ));
+                };
+                snapshot.human_commands.remove(position);
+            }
+        }
+        SessionPresentationEvent::HumanCommandCardRemoved {
+            terminal_id,
+            command_sequence,
+        } => snapshot.human_commands.retain(|card| {
+            &card.terminal_id != terminal_id || card.command_sequence != *command_sequence
+        }),
+        SessionPresentationEvent::ActivityGraphDelta { batch } => {
+            if projection.last_activity_batch.as_ref() == Some(batch) {
+                return Ok(());
+            }
+            let graph = apply_activity_batch(snapshot.activity.as_ref(), batch, true)?;
+            snapshot.activity = Some(graph);
+            projection.last_activity_batch = Some(batch.clone());
+        }
     }
     Ok(())
 }
@@ -1110,33 +1868,31 @@ fn validate_event(
             }
             validate_page_cursor(older_page_cursor.as_deref())
         }
-        SessionPresentationEvent::HeaderChanged { header } if &header.session_id != session_id => {
-            Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "presentation header belongs to a different session",
-            ))
+        SessionPresentationEvent::HeaderChanged { header } => {
+            if &header.session_id != session_id {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "presentation header belongs to a different session",
+                ));
+            }
+            header.workspace_root.validate()?;
+            header.cwd.validate()?;
+            crate::projection::validate_workspace_history_scope(&header.workspace_history_scope)
         }
         SessionPresentationEvent::TerminalAdded { terminal }
         | SessionPresentationEvent::TerminalChanged { terminal } => {
             terminal.validate_for_session(session_id)
         }
         SessionPresentationEvent::ExecutionStateChanged { execution } => execution.validate(),
+        SessionPresentationEvent::HumanCommandCardUpsert { card } => card.validate(),
+        SessionPresentationEvent::ActivityGraphDelta { batch } => batch.validate_shape(),
         SessionPresentationEvent::AssistantTextDelta { text, .. } if text.len() > 16 * 1024 => {
             Err(ApplicationError::new(
                 ApplicationErrorCode::InvalidArguments,
                 "assistant text delta exceeds its byte bound",
             ))
         }
-        SessionPresentationEvent::TerminalCommandFinished { cwd, .. }
-            if cwd.is_empty()
-                || cwd.len() > crate::MAX_TERMINAL_PATH_BYTES
-                || cwd.contains('\0') =>
-        {
-            Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "terminal command cwd must be nonempty bounded text without NUL",
-            ))
-        }
+        SessionPresentationEvent::TerminalCommandFinished { cwd, .. } => cwd.validate(),
         SessionPresentationEvent::Notice { code, message, .. }
             if code.is_empty() || code.len() > 8 * 1024 || message.len() > 8 * 1024 =>
         {
@@ -1146,5 +1902,277 @@ fn validate_event(
             ))
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    fn node(
+        run_id: &RunId,
+        node_id: String,
+        parent_node_id: Option<String>,
+        order_index: u64,
+        state: crate::ActivityNodeState,
+    ) -> crate::ActivityNodeView {
+        let terminal = state.is_terminal();
+        crate::ActivityNodeView {
+            node_id,
+            parent_node_id,
+            order_index,
+            run_id: run_id.clone(),
+            turn_id: None,
+            attempt_id: None,
+            step_id: None,
+            kind: if order_index == 1 {
+                crate::ActivityNodeKind::Run
+            } else {
+                crate::ActivityNodeKind::Step
+            },
+            phase: crate::ActivityPhase::Tool,
+            state,
+            retry: 0,
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 5,
+            finished_at_unix_ms: terminal.then_some(5),
+            elapsed_ms: if terminal { 4 } else { 0 },
+            summary: "bounded product activity".to_owned(),
+            detail: crate::ActivityDetailView::None,
+        }
+    }
+
+    #[test]
+    fn completed_retention_collapses_to_a_typed_aggregate() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let mut nodes = vec![node(
+            &run_id,
+            root_id.clone(),
+            None,
+            1,
+            crate::ActivityNodeState::Succeeded,
+        )];
+        for index in 2..=513 {
+            nodes.push(node(
+                &run_id,
+                format!("step:{index:04}"),
+                Some(root_id.clone()),
+                index,
+                crate::ActivityNodeState::Succeeded,
+            ));
+        }
+        let oversized = crate::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes,
+            current_path: Vec::new(),
+            truncated: false,
+        };
+        let (aggregate, removal) =
+            collapse_oldest_completed_branch(&oversized, crate::ActivityAggregateReason::NodeLimit)
+                .unwrap();
+        assert_eq!(aggregate.kind, crate::ActivityNodeKind::Aggregate);
+        assert_eq!(aggregate.order_index, 1);
+        assert_eq!(removal.subtree_root_id, root_id);
+        assert!(matches!(
+            aggregate.detail,
+            crate::ActivityDetailView::Aggregate(crate::ActivityAggregateDetail {
+                collapsed_nodes: 513,
+                succeeded: 513,
+                reason: crate::ActivityAggregateReason::NodeLimit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn active_topology_fails_closed_at_its_reserved_bound() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let mut nodes = vec![node(
+            &run_id,
+            root_id.clone(),
+            None,
+            1,
+            crate::ActivityNodeState::Running,
+        )];
+        for index in 2..=257 {
+            nodes.push(node(
+                &run_id,
+                format!("step:{index:04}"),
+                Some(root_id.clone()),
+                index,
+                crate::ActivityNodeState::Waiting,
+            ));
+        }
+        let graph = crate::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes,
+            current_path: vec![root_id],
+            truncated: false,
+        };
+        let error = enforce_active_activity_capacity(&graph).unwrap_err();
+        assert_eq!(error.code, ApplicationErrorCode::ActivityCapacityExceeded);
+    }
+
+    #[test]
+    fn retention_can_collapse_a_completed_sibling_under_an_active_run() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let completed_id = "step:completed".to_owned();
+        let graph = crate::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes: vec![
+                node(
+                    &run_id,
+                    root_id.clone(),
+                    None,
+                    1,
+                    crate::ActivityNodeState::Running,
+                ),
+                node(
+                    &run_id,
+                    completed_id.clone(),
+                    Some(root_id.clone()),
+                    2,
+                    crate::ActivityNodeState::Succeeded,
+                ),
+                node(
+                    &run_id,
+                    "step:waiting".to_owned(),
+                    Some(root_id),
+                    3,
+                    crate::ActivityNodeState::Waiting,
+                ),
+            ],
+            current_path: vec![format!("run:{run_id}"), "step:waiting".to_owned()],
+            truncated: false,
+        };
+        graph.validate().unwrap();
+        let (aggregate, removal) =
+            collapse_oldest_completed_branch(&graph, crate::ActivityAggregateReason::Retention)
+                .unwrap();
+        assert_eq!(removal.subtree_root_id, completed_id);
+        assert_eq!(aggregate.parent_node_id, Some(format!("run:{run_id}")));
+        assert_eq!(aggregate.order_index, 2);
+    }
+
+    #[test]
+    fn atomic_delta_replaces_a_completed_subtree_without_exposing_an_invalid_graph() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let current = crate::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes: vec![
+                node(
+                    &run_id,
+                    root_id.clone(),
+                    None,
+                    1,
+                    crate::ActivityNodeState::Succeeded,
+                ),
+                node(
+                    &run_id,
+                    "step:done".to_owned(),
+                    Some(root_id.clone()),
+                    2,
+                    crate::ActivityNodeState::Succeeded,
+                ),
+            ],
+            current_path: Vec::new(),
+            truncated: false,
+        };
+        current.validate().unwrap();
+        let aggregate = crate::ActivityNodeView {
+            node_id: format!("aggregate:{run_id}:1"),
+            parent_node_id: None,
+            order_index: 1,
+            run_id,
+            turn_id: None,
+            attempt_id: None,
+            step_id: None,
+            kind: crate::ActivityNodeKind::Aggregate,
+            phase: crate::ActivityPhase::Retention,
+            state: crate::ActivityNodeState::Truncated,
+            retry: 0,
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 5,
+            finished_at_unix_ms: Some(5),
+            elapsed_ms: 4,
+            summary: "2 completed activity nodes collapsed".to_owned(),
+            detail: crate::ActivityDetailView::Aggregate(crate::ActivityAggregateDetail {
+                collapsed_nodes: 2,
+                succeeded: 2,
+                failed: 0,
+                cancelled: 0,
+                incomplete: 0,
+                elapsed_ms: 8,
+                reason: crate::ActivityAggregateReason::Retention,
+            }),
+        };
+        let next = apply_activity_batch(
+            Some(&current),
+            &crate::ActivityGraphDeltaBatch {
+                graph_revision: 2,
+                upserts: vec![aggregate.clone()],
+                removals: vec![crate::ActivityNodeRemoval {
+                    subtree_root_id: root_id,
+                    reason: crate::ActivityRemovalReason::CollapsedIntoAggregate,
+                }],
+                current_path: Some(Vec::new()),
+                truncated: true,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(next.graph_revision, 2);
+        assert_eq!(next.nodes, [aggregate]);
+        assert!(next.truncated);
+        next.validate().unwrap();
+    }
+
+    #[test]
+    fn activity_focus_is_deterministic_across_event_and_snapshot_order() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let mut root = node(
+            &run_id,
+            root_id.clone(),
+            None,
+            1,
+            crate::ActivityNodeState::Running,
+        );
+        root.updated_at_unix_ms = 1;
+        let mut waiting = node(
+            &run_id,
+            "step:waiting".to_owned(),
+            Some(root_id.clone()),
+            2,
+            crate::ActivityNodeState::Waiting,
+        );
+        waiting.updated_at_unix_ms = 100;
+        let mut running = node(
+            &run_id,
+            "step:running".to_owned(),
+            Some(root_id.clone()),
+            3,
+            crate::ActivityNodeState::Running,
+        );
+        running.updated_at_unix_ms = 2;
+        let graph = crate::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![root_id.clone()],
+            nodes: vec![root, waiting, running],
+            current_path: Vec::new(),
+            truncated: false,
+        };
+        assert_eq!(
+            select_activity_current_path(&graph),
+            [root_id, "step:running".to_owned()]
+        );
     }
 }

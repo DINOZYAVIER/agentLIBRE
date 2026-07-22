@@ -8,7 +8,7 @@ use agl_content::{
     MediaType,
 };
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_ids::{EventId, ExecutionId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_ids::{EventId, ExecutionId, RequestId, RunId, SessionId, StepId, TurnId, WriterLeaseId};
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit,
     ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLeaseOrigin, ExecutionLimits,
@@ -67,6 +67,107 @@ fn explicit_migration_reports_applied_steps_and_schema_status() {
     assert_eq!(report.applied_migrations.len(), STORE_MIGRATIONS.len());
     assert!(after.database_exists);
     assert!(!after.migration_required);
+}
+
+#[test]
+fn migration_seventeen_rebuilds_live_run_table_without_losing_foreign_keys() {
+    let root = temp_root("migrate-incomplete-run-state");
+    std::fs::create_dir_all(&root).unwrap();
+    let db_path = database_path(&root, DEFAULT_DATABASE_FILE).unwrap();
+    let conn = Connection::open(db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
+    )
+    .unwrap();
+    for migration in STORE_MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= 16)
+    {
+        conn.execute_batch(&format!(
+            "BEGIN; {} INSERT INTO schema_migrations(version, applied_at) VALUES ({}, 'test'); PRAGMA user_version = {}; COMMIT;",
+            migration.sql, migration.version, migration.version
+        ))
+        .unwrap();
+    }
+    drop(conn);
+
+    let report = AglStore::migrate_at(&root).unwrap();
+    assert_eq!(report.before_schema_version, 16);
+    assert_eq!(report.after_schema_version, 17);
+    assert_eq!(report.applied_migrations.len(), 1);
+
+    let store = AglStore::open_current_at(&root).unwrap();
+    let foreign_key_errors: u64 = store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_errors, 0);
+    let stale_run_references: u64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES runs_v16%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale_run_references, 0);
+    let draft = run_draft(Some(SessionId::generate()));
+    store.admit_run_at(&draft, 20).unwrap();
+    let lease = store
+        .claim_next_run("migrated-owner", 21, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store
+            .finish_run(
+                &lease,
+                RunState::Incomplete,
+                None,
+                &RunUsage::default(),
+                Some(&json!({"status": "incomplete_output"})),
+                None,
+                None,
+                &[],
+                22,
+            )
+            .unwrap()
+            .state,
+        RunState::Incomplete
+    );
+}
+
+#[test]
+fn durable_run_can_finish_with_typed_incomplete_outcome() {
+    let (_root, store) = open_temp_store("incomplete-run");
+    let draft = run_draft(Some(SessionId::generate()));
+    store.admit_run_at(&draft, 10).unwrap();
+    let lease = store
+        .claim_next_run("incomplete-owner", 11, 100)
+        .unwrap()
+        .unwrap();
+
+    let finished = store
+        .finish_run(
+            &lease,
+            RunState::Incomplete,
+            Some(&json!({"phase": "incomplete"})),
+            &RunUsage::default(),
+            Some(&json!({"status": "incomplete_output", "partial": "prefix"})),
+            None,
+            None,
+            &[],
+            12,
+        )
+        .unwrap();
+
+    assert_eq!(finished.state, RunState::Incomplete);
+    assert!(finished.state.is_terminal());
+    assert_eq!(
+        store.safe_run_status(&draft.run_id).unwrap().unwrap().state,
+        RunState::Incomplete
+    );
 }
 
 #[test]
@@ -937,11 +1038,11 @@ fn execution_transitions_are_sequence_owner_and_input_lease_fenced() {
 
     let first_lease = InputLease {
         attachment_id: RequestId::generate(),
-        writable: true,
+        writer_lease_id: Some(WriterLeaseId::generate()),
     };
     let second_lease = InputLease {
         attachment_id: RequestId::generate(),
-        writable: true,
+        writer_lease_id: Some(WriterLeaseId::generate()),
     };
     repository
         .bind_input_lease(&status.execution_id, "owner", &first_lease, 7)

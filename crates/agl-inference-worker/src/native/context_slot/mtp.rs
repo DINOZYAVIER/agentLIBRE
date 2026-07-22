@@ -10,7 +10,7 @@ use super::super::{
     model::LlamaCppModel,
 };
 use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, decode::*, native::*, prompt::*};
-use crate::InferenceFinishReason;
+use agl_inference::InferenceFinishReason;
 
 const AGL_LLAMA_MTP_OK: i32 = 0;
 
@@ -173,6 +173,10 @@ impl LlamaCppContextSlot {
                 let piece = token_to_piece_bytes(model.vocab(), id_last)?;
                 emitted += 1;
                 let action = output.push(&piece);
+                if output.content_byte_limit_reached() {
+                    finish_reason = InferenceFinishReason::ContentByteLimit;
+                    break;
+                }
                 if tool_call_completed {
                     continue;
                 }
@@ -191,7 +195,11 @@ impl LlamaCppContextSlot {
                 }
             }
 
-            if finish_reason == InferenceFinishReason::Stop || stopped_on_eog {
+            if matches!(
+                finish_reason,
+                InferenceFinishReason::Stop | InferenceFinishReason::ContentByteLimit
+            ) || stopped_on_eog
+            {
                 break;
             }
         }
@@ -209,6 +217,9 @@ impl LlamaCppContextSlot {
         mtp.write_stats_log(log);
 
         let response = output.finish();
+        if response.content_byte_limit_reached {
+            finish_reason = InferenceFinishReason::ContentByteLimit;
+        }
 
         self.record_generated_assistant(
             request.rendered,

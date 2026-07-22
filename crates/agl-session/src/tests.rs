@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
 use agl_content::Content;
 use agl_events::{EVENT_SCHEMA, EventEnvelope, EventScope, RuntimeEvent, RuntimeEventEnvelope};
-use agl_ids::{AttemptId, EventId, MessageId, RunId, SessionId, TurnId};
+use agl_ids::{AttemptId, EventId, MessageId, RequestId, RunId, SessionId, TurnId};
 
 use crate::fsm::{ChatSessionMachine, ChatSessionPhase, ChatSessionTransition};
 use crate::*;
@@ -16,6 +17,7 @@ const TEST_TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b33";
 const NEXT_TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b34";
 const TEST_ATTEMPT_ID: &str = "attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b35";
 const NEXT_ATTEMPT_ID: &str = "attempt_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b36";
+const TEST_REQUEST_ID: &str = "req_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b37";
 const TEST_CONFIG_PATH: &str = "/tmp/local.toml";
 const TEST_BACKEND: &str = "llama_cpp";
 
@@ -52,6 +54,10 @@ fn attempt_id() -> AttemptId {
 
 fn next_attempt_id() -> AttemptId {
     AttemptId::parse(NEXT_ATTEMPT_ID).unwrap()
+}
+
+fn request_id() -> RequestId {
+    RequestId::parse(TEST_REQUEST_ID).unwrap()
 }
 
 fn message_id(last_hex: char) -> MessageId {
@@ -139,6 +145,34 @@ fn assistant_envelope(
         RuntimeEvent::AssistantMessage {
             message_id: message_id(message_suffix),
             content: text(content),
+        },
+    )
+}
+
+fn incomplete_assistant_envelope(
+    run_id: RunId,
+    turn_id: TurnId,
+    sequence: u64,
+    event_suffix: char,
+    message_suffix: char,
+    content: &str,
+) -> RuntimeEventEnvelope {
+    runtime_envelope(
+        session_id(),
+        run_id,
+        turn_id,
+        sequence,
+        event_suffix,
+        None,
+        RuntimeEvent::AssistantIncomplete {
+            message_id: message_id(message_suffix),
+            content: text(content),
+            source_attempt_id: attempt_id(),
+            reason: agl_events::IncompleteOutputReasonEvent::ModelLength,
+            continuation_index: 0,
+            execution_context_revision: 1,
+            runtime_context_revision: 1,
+            policy_hash: "sha256:test-policy".to_owned(),
         },
     )
 }
@@ -657,6 +691,428 @@ fn open_reads_replay_without_appending_session_start() {
     assert_eq!(after, before);
     assert_eq!(replay.events.len(), 3);
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn incomplete_assistant_and_continuation_claim_survive_reopen() {
+    let root = temp_root("incomplete-continuation");
+    let id = session_id();
+    let mut store = start_session(&root, id.clone());
+    store
+        .append_user_message(user_envelope(run_id(), turn_id(), 1, '0', '7', "hello"))
+        .unwrap();
+    store
+        .link_attempt(runtime_envelope(
+            session_id(),
+            run_id(),
+            turn_id(),
+            2,
+            '1',
+            Some(attempt_id()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+    store
+        .append_incomplete_assistant_message(incomplete_assistant_envelope(
+            run_id(),
+            turn_id(),
+            3,
+            '2',
+            '8',
+            "bounded partial",
+        ))
+        .unwrap();
+    store
+        .append_incomplete_continuation_claim(
+            message_id('8'),
+            "continue-stable-1".to_owned(),
+            next_run_id(),
+            next_turn_id(),
+            request_id(),
+        )
+        .unwrap();
+    store
+        .append_incomplete_continuation_claim(
+            message_id('8'),
+            "continue-stable-1".to_owned(),
+            next_run_id(),
+            next_turn_id(),
+            request_id(),
+        )
+        .unwrap();
+    let conflicting = store
+        .append_incomplete_continuation_claim(
+            message_id('8'),
+            "continue-stable-2".to_owned(),
+            run_id(),
+            turn_id(),
+            request_id(),
+        )
+        .unwrap_err();
+    assert!(
+        conflicting
+            .to_string()
+            .contains("already has a different continuation claim")
+    );
+
+    let reopened = ChatSessionStore::open(&root, id).unwrap();
+    let replay = reopened.read_replay().unwrap();
+    assert!(replay.events.iter().any(|event| matches!(
+        event,
+        ChatSessionEvent::Runtime { envelope }
+            if matches!(
+                &envelope.payload,
+                RuntimeEvent::AssistantIncomplete {
+                    message_id: actual,
+                    content,
+                    continuation_index: 0,
+                    ..
+                } if actual == &message_id('8')
+                    && content.text_only().as_deref() == Some("bounded partial")
+            )
+    )));
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ChatSessionEvent::IncompleteContinuationClaimed {
+                    message_id: actual,
+                    client_submission_id,
+                    continuation_run_id,
+                    continuation_turn_id,
+                    continuation_request_id,
+                    ..
+                } if actual == &message_id('8')
+                    && client_submission_id == "continue-stable-1"
+                    && continuation_run_id == &next_run_id()
+                    && continuation_turn_id == &next_turn_id()
+                    && continuation_request_id == &request_id()
+            ))
+            .count(),
+        1
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn incomplete_continuation_input_is_durable_idempotent_and_restart_safe() {
+    let root = temp_root("incomplete-continuation-input");
+    let id = session_id();
+    let source_message_id = message_id('8');
+    let continuation_run_id = RunId::generate();
+    let continuation_turn_id = TurnId::generate();
+    let mut store = start_session(&root, id.clone());
+    store
+        .append_user_message(user_envelope(run_id(), turn_id(), 1, '0', '7', "hello"))
+        .unwrap();
+    store
+        .link_attempt(runtime_envelope(
+            session_id(),
+            run_id(),
+            turn_id(),
+            2,
+            '1',
+            Some(attempt_id()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+    store
+        .append_incomplete_assistant_message(incomplete_assistant_envelope(
+            run_id(),
+            turn_id(),
+            3,
+            '2',
+            '8',
+            "bounded partial",
+        ))
+        .unwrap();
+    store
+        .append_user_message(user_envelope(
+            next_run_id(),
+            next_turn_id(),
+            1,
+            '3',
+            '9',
+            "later queued prompt",
+        ))
+        .unwrap();
+    store
+        .link_attempt(runtime_envelope(
+            session_id(),
+            next_run_id(),
+            next_turn_id(),
+            2,
+            '4',
+            Some(next_attempt_id()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+    store
+        .append_assistant_message(assistant_envelope(
+            next_run_id(),
+            next_turn_id(),
+            3,
+            '5',
+            'a',
+            "later answer",
+        ))
+        .unwrap();
+
+    let missing_claim = store
+        .begin_incomplete_continuation_input(
+            source_message_id.clone(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            &request_id(),
+        )
+        .unwrap_err();
+    assert!(
+        missing_claim
+            .to_string()
+            .contains("missing its durable continuation claim")
+    );
+    store
+        .append_incomplete_continuation_claim(
+            source_message_id.clone(),
+            "continue-restart-safe".to_owned(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            request_id(),
+        )
+        .unwrap();
+    store
+        .begin_incomplete_continuation_input(
+            source_message_id.clone(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            &request_id(),
+        )
+        .unwrap();
+    assert_eq!(store.machine().phase(), ChatSessionPhase::RunningTurn);
+
+    store
+        .begin_incomplete_continuation_input(
+            source_message_id.clone(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            &request_id(),
+        )
+        .unwrap();
+    let wrong_request = store
+        .begin_incomplete_continuation_input(
+            source_message_id.clone(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            &RequestId::generate(),
+        )
+        .unwrap_err();
+    assert!(
+        wrong_request
+            .to_string()
+            .contains("identity differs from its durable continuation claim")
+    );
+    drop(store);
+
+    let mut reopened = ChatSessionStore::open(&root, id).unwrap();
+    assert_eq!(reopened.machine().phase(), ChatSessionPhase::AwaitingInput);
+    reopened
+        .begin_incomplete_continuation_input(
+            source_message_id.clone(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            &request_id(),
+        )
+        .unwrap();
+    assert_eq!(reopened.machine().phase(), ChatSessionPhase::RunningTurn);
+    reopened
+        .link_attempt(runtime_envelope(
+            session_id(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            1,
+            '6',
+            Some(AttemptId::generate()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+
+    let replay = reopened.read_replay().unwrap();
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ChatSessionEvent::IncompleteContinuationInputStarted {
+                    source_message_id: actual_source,
+                    continuation_run_id: actual_run_id,
+                    continuation_turn_id: actual_turn_id,
+                    ..
+                } if actual_source == &source_message_id
+                    && actual_run_id == &continuation_run_id
+                    && actual_turn_id == &continuation_turn_id
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ChatSessionEvent::Runtime { envelope }
+                    if matches!(envelope.payload, RuntimeEvent::UserMessage { .. })
+            ))
+            .count(),
+        2,
+        "continuation input must not create a synthetic durable user message"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn context_clear_revokes_incomplete_continuation_input() {
+    let root = temp_root("incomplete-continuation-cleared");
+    let source_message_id = message_id('8');
+    let continuation_run_id = next_run_id();
+    let continuation_turn_id = next_turn_id();
+    let mut store = start_test_session(&root);
+    store
+        .append_user_message(user_envelope(run_id(), turn_id(), 1, '0', '7', "hello"))
+        .unwrap();
+    store
+        .link_attempt(runtime_envelope(
+            session_id(),
+            run_id(),
+            turn_id(),
+            2,
+            '1',
+            Some(attempt_id()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+    store
+        .append_incomplete_assistant_message(incomplete_assistant_envelope(
+            run_id(),
+            turn_id(),
+            3,
+            '2',
+            '8',
+            "bounded partial",
+        ))
+        .unwrap();
+    store
+        .append_incomplete_continuation_claim(
+            source_message_id.clone(),
+            "continue-before-clear".to_owned(),
+            continuation_run_id.clone(),
+            continuation_turn_id.clone(),
+            request_id(),
+        )
+        .unwrap();
+    store.append_context_cleared().unwrap();
+
+    let error = store
+        .begin_incomplete_continuation_input(
+            source_message_id,
+            continuation_run_id,
+            continuation_turn_id,
+            &request_id(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("available incomplete assistant message in the current context")
+    );
+    assert!(!store.read_replay().unwrap().events.iter().any(|event| {
+        matches!(
+            event,
+            ChatSessionEvent::IncompleteContinuationInputStarted { .. }
+        )
+    }));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn concurrent_incomplete_claims_commit_exactly_one_identity() {
+    let root = temp_root("incomplete-claim-race");
+    let id = session_id();
+    let mut store = start_session(&root, id.clone());
+    store
+        .append_user_message(user_envelope(run_id(), turn_id(), 1, '0', '7', "hello"))
+        .unwrap();
+    store
+        .link_attempt(runtime_envelope(
+            session_id(),
+            run_id(),
+            turn_id(),
+            2,
+            '1',
+            Some(attempt_id()),
+            RuntimeEvent::ModelAttemptLinked,
+        ))
+        .unwrap();
+    store
+        .append_incomplete_assistant_message(incomplete_assistant_envelope(
+            run_id(),
+            turn_id(),
+            3,
+            '2',
+            '8',
+            "bounded partial",
+        ))
+        .unwrap();
+    drop(store);
+
+    let barrier = Arc::new(Barrier::new(3));
+    let mut threads = Vec::new();
+    for suffix in ["left", "right"] {
+        let root = root.clone();
+        let id = id.clone();
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            let mut store = ChatSessionStore::open(root, id).unwrap();
+            barrier.wait();
+            store.append_incomplete_continuation_claim(
+                message_id('8'),
+                format!("continue-{suffix}"),
+                RunId::generate(),
+                TurnId::generate(),
+                RequestId::generate(),
+            )
+        }));
+    }
+    barrier.wait();
+    let results = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+    let replay = ChatSessionStore::open(&root, id)
+        .unwrap()
+        .read_replay()
+        .unwrap();
+    assert_eq!(
+        replay
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                ChatSessionEvent::IncompleteContinuationClaimed { .. }
+            ))
+            .count(),
+        1
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

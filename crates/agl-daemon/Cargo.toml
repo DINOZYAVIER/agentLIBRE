@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-build = "build.rs"
 
 [dependencies]
 agl-chat.workspace = true
@@ -16,6 +15,7 @@ agl-events.workspace = true
 agl-functions.workspace = true
 agl-ids.workspace = true
 agl-inference.workspace = true
+agl-models.workspace = true
 agl-protocol.workspace = true
 agl-process.workspace = true
 agl-runtime.workspace = true
@@ -32,9 +32,6 @@ futures-util.workspace = true
 libc.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-
-[build-dependencies]
-agl-llama-cpp-sys.workspace = true
 
 [dev-dependencies]
 agl-client.workspace = true

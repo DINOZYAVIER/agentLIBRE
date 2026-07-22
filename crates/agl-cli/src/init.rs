@@ -6,7 +6,7 @@ use agl_config::{
     InferencePresetRuntimeConfig, ModelId, load_inference_preset_from_str,
     load_model_bindings_or_empty, model_bindings_path, write_model_bindings,
 };
-use agl_inference::{LlamaCppDeviceKind, llama_cpp_device_inventory};
+use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind};
 use agl_models::{
     HostResources, InstallRecordState, InstallSource, LlamaDeviceInfo, LlamaDeviceKind,
     ModelArtifactRole, ModelBindingPatch, ModelCacheStatus, ModelCatalog, ModelDownloadRequest,
@@ -175,7 +175,8 @@ fn run_init_inner(
                 .map(|status| (package.id.clone(), status))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let devices = llama_cpp_device_inventory()
+    let devices = crate::daemon_first_inference_inventory(runtime)
+        .context("failed to inspect daemon-first inference devices")?
         .into_iter()
         .map(model_device_info)
         .collect::<Vec<_>>();
@@ -738,17 +739,17 @@ fn cleanup_staged_state(staged_bindings_path: &Path) {
     }
 }
 
-fn model_device_info(device: agl_inference::LlamaCppDeviceInfo) -> LlamaDeviceInfo {
+fn model_device_info(device: InferenceDeviceInfo) -> LlamaDeviceInfo {
     LlamaDeviceInfo {
-        name: device.name,
+        name: device.backend_name,
         description: device.description,
         kind: match device.kind {
-            LlamaCppDeviceKind::Cpu => LlamaDeviceKind::Cpu,
-            LlamaCppDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
-            LlamaCppDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
-            LlamaCppDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
-            LlamaCppDeviceKind::Metadata => LlamaDeviceKind::Metadata,
-            LlamaCppDeviceKind::Unknown => LlamaDeviceKind::Unknown,
+            InferenceDeviceKind::Cpu => LlamaDeviceKind::Cpu,
+            InferenceDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
+            InferenceDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
+            InferenceDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
+            InferenceDeviceKind::Metadata => LlamaDeviceKind::Metadata,
+            InferenceDeviceKind::Unknown => LlamaDeviceKind::Unknown,
         },
         free_memory_bytes: device.free_memory_bytes,
         total_memory_bytes: device.total_memory_bytes,

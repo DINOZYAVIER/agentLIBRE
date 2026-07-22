@@ -5,17 +5,23 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agl_app::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationActionResult,
-    ApplicationCallContext, ApplicationError, ApplicationErrorCode, CommandContext, ExecutionView,
-    HumanTerminalEnsure, MAX_PRESENTATION_CONTENT_BYTES, MAX_PRESENTATION_ITEMS,
-    PresentationCursor, PresentationSnapshotPage, PromptAdmission, PromptAdmissionState,
-    PromptSubmission, QueuedPromptView, SessionHeader, SessionOpen, SessionOpened,
-    SessionPresentationItem, SessionPresentationSnapshot, SessionPresentationStatus,
-    ShellProfileView, SuggestionPage, SuggestionRequest, TerminalEnsureDisposition,
-    TerminalEnsured, TerminalOwnerView, TerminalSessionView, TerminalWriterView,
+    ApplicationCallContext, ApplicationError, ApplicationErrorCode, CommandContext,
+    ContinueActionView, ContinueUnavailableReason, ExecutionView, HumanCommandCardState,
+    HumanCommandCardView, HumanTerminalCommandAccepted, HumanTerminalCommandAdmission,
+    HumanTerminalCommandSubmit, HumanTerminalEnsure, IncompleteAssistantItemView,
+    IncompleteOutputReason, MAX_ACTIVE_ACTIVITY_BYTES, MAX_ACTIVE_ACTIVITY_NODES,
+    MAX_ACTIVITY_NODE_BYTES, MAX_ACTIVITY_PATH_NODES, MAX_HUMAN_COMMAND_OUTPUT_BYTES,
+    MAX_PRESENTATION_CONTENT_BYTES, MAX_PRESENTATION_ITEMS, PresentationCursor,
+    PresentationSnapshotPage, PromptAdmission, PromptAdmissionState, PromptSubmission,
+    QueuedPromptView, SanitizedDisplayPath, SanitizedTerminalText, SessionHeader, SessionOpen,
+    SessionOpened, SessionPresentationEvent, SessionPresentationItem, SessionPresentationSnapshot,
+    SessionPresentationStatus, ShellProfileView, SuggestionPage, SuggestionRequest,
+    TerminalEnsureDisposition, TerminalEnsured, TerminalOwnerView, TerminalSessionView,
+    TerminalWriterView,
 };
 use agl_chat::{
     ChatOptions, ChatRunInput, ChatService, ChatSupervisorFactory, InferenceClientHandle,
@@ -25,27 +31,30 @@ use agl_chat::{
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
 use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{
-    DaemonInstanceId, EventId, ExecutionId, RequestId, RunId, SessionId, StepId, TerminalSessionId,
-    TurnId,
+    DaemonInstanceId, EventId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
+    TerminalSessionId, TurnId,
 };
-use agl_inference::ModelManagerStatus;
+use agl_inference::worker_supervisor::WorkerLifecyclePhase;
+use agl_inference::{InferenceDeviceKind, ModelManagerStatus, WorkerRuntimeStatusHandle};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionAuthorization, ExecutionCursor,
     ExecutionGrantLease, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
     ExecutionOwner, ExecutionProfile, ExecutionState,
-    HostStartupPolicy as ProcessHostStartupPolicy, HumanShellHistoryStore, KillMode,
+    HostStartupPolicy as ProcessHostStartupPolicy, HumanShellHistoryStore, InputLease, KillMode,
     LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ProcessError, ProcessErrorCode, TerminalEnsureRequest,
     TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalOwner,
     TerminalPromptState as ProcessTerminalPromptState, TerminalRecord, TerminalRegistry,
-    TerminalSecretReference, TerminalState,
+    TerminalSecretReference, TerminalState, sanitize_terminal_card_output,
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionReadEvent, ExecutionStatusEvent,
-    HelloEvent, PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolRunKind,
-    ProtocolRunState, ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent,
-    RunTreeEvent, RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent,
-    SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
+    HelloEvent, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
+    PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolInferenceDeviceKind,
+    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
+    RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent, RunTreeNodeEvent,
+    RunUsageEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent, SessionStatus,
+    SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_session::{
@@ -64,8 +73,10 @@ use crate::shell_monitor::{ShellMonitorConnector, ShellMonitorSpec, TerminalMoni
 use crate::transcript::transcript_event;
 
 const RUN_SUBMIT_IDEMPOTENCY_NAMESPACE: &str = "daemon.run_submit";
+const INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE: &str = "daemon.incomplete_continue";
 const CRON_RUN_IDEMPOTENCY_NAMESPACE: &str = "daemon.cron_run";
 const PRIVATE_COMMAND_DISPLAY_MAX_BYTES: usize = 4096;
+const MAX_HUMAN_COMMAND_IDEMPOTENCY_RECORDS: usize = 128;
 const MAX_QUEUED_PROMPTS_PER_SESSION: usize = 32;
 const SESSION_EXIT_RUN_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_EXIT_RUN_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -74,12 +85,19 @@ const MAX_PRESENTATION_TRANSCRIPT_RECORD_BYTES: usize = MAX_PRESENTATION_CONTENT
 const MAX_PRESENTATION_TRANSCRIPT_SCAN_BYTES: usize = 2 * MAX_PRESENTATION_CONTENT_BYTES;
 const MAX_PRESENTATION_TRANSCRIPT_SCAN_RECORDS: usize = 8 * MAX_PRESENTATION_ITEMS;
 const DAEMON_STATE_QUEUE_CAPACITY: usize = 32;
+const ROOT_ACTIVE_ACTIVITY_NODES: usize = 4;
+const DESCENDANT_ACTIVE_ACTIVITY_NODES: usize = 5;
+const ROOT_ACTIVITY_PATH_NODES: usize = 4;
+const DESCENDANT_ACTIVITY_PATH_NODES: usize = 3;
+const MAX_RESERVED_ACTIVITY_NODE_ID_BYTES: usize = 512;
+const ACTIVE_ACTIVITY_ENCODING_OVERHEAD_BYTES: usize = 4 * 1024;
 
 pub struct DaemonState {
     daemon_instance_id: DaemonInstanceId,
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
     inference_client: InferenceClientHandle,
+    inference_status: WorkerRuntimeStatusHandle,
     sessions: BTreeMap<SessionId, SessionRuntime>,
     chat_factory: ChatSupervisorFactory,
     presentation_proxy: agl_app::TurnPresentationProxy,
@@ -88,6 +106,9 @@ pub struct DaemonState {
     human_terminal_history: HumanShellHistoryStore,
     terminal_presentations: BTreeMap<TerminalSessionId, TerminalPresentationMetadata>,
     human_terminal_submissions: BTreeMap<(SessionId, String), HumanTerminalSubmission>,
+    human_command_submissions: BTreeMap<(SessionId, String), HumanCommandSubmission>,
+    human_command_tracking: BTreeMap<(TerminalSessionId, u64), HumanCommandTracking>,
+    next_human_command_submission_ordinal: u64,
     exiting_sessions: BTreeSet<SessionId>,
     shell_monitor: ShellMonitorConnector,
     monitored_terminals: BTreeSet<TerminalSessionId>,
@@ -105,6 +126,59 @@ struct TerminalPresentationMetadata {
 struct HumanTerminalSubmission {
     fingerprint: String,
     terminal_id: TerminalSessionId,
+}
+
+#[derive(Clone)]
+struct HumanCommandSubmission {
+    fingerprint: String,
+    accepted: HumanTerminalCommandAccepted,
+    card: HumanCommandCardView,
+    ordinal: u64,
+    completed: bool,
+}
+
+#[derive(Clone)]
+struct HumanCommandTracking {
+    execution_id: ExecutionId,
+    display_command: SanitizedTerminalText,
+    command_filtered_effects: u32,
+    command_truncated: bool,
+    output_start: ExecutionCursor,
+    started_at_unix_ms: u64,
+}
+
+#[derive(Clone)]
+struct IncompleteContinuationClaim {
+    client_submission_id: String,
+    continuation_run_id: RunId,
+    continuation_turn_id: TurnId,
+    continuation_request_id: RequestId,
+}
+
+struct IncompleteProjectionContext {
+    status: SessionPresentationStatus,
+    execution_context_revision: u64,
+    runtime_context_revision: u64,
+    current_policy_hash: String,
+    claims: BTreeMap<agl_ids::MessageId, IncompleteContinuationClaim>,
+    current_context_messages: BTreeSet<agl_ids::MessageId>,
+}
+
+struct IncompleteReplayIndex {
+    claims: BTreeMap<agl_ids::MessageId, IncompleteContinuationClaim>,
+    claim_order: Vec<agl_ids::MessageId>,
+    current_context_messages: BTreeSet<agl_ids::MessageId>,
+}
+
+#[derive(Clone)]
+struct IncompleteContinuationSource {
+    message_id: MessageId,
+    source_run_id: RunId,
+    source_turn_id: TurnId,
+    continuation_index: u16,
+    execution_context_revision: u64,
+    runtime_context_revision: u64,
+    policy_hash: String,
 }
 
 #[derive(Clone, Copy)]
@@ -273,15 +347,22 @@ impl DaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
     ) -> Self {
-        Self::open(runtime, inference_defaults, inference_client)
-            .expect("test daemon state should initialize")
+        Self::open(
+            runtime,
+            inference_defaults,
+            inference_client,
+            inference_status,
+        )
+        .expect("test daemon state should initialize")
     }
 
     pub fn open(
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
     ) -> Result<Self> {
         let store_root = runtime.paths.store_root();
         let process_handle =
@@ -311,6 +392,7 @@ impl DaemonState {
             runtime,
             inference_defaults,
             inference_client,
+            inference_status,
             sessions: BTreeMap::new(),
             chat_factory,
             presentation_proxy,
@@ -319,6 +401,9 @@ impl DaemonState {
             human_terminal_history,
             terminal_presentations: BTreeMap::new(),
             human_terminal_submissions: BTreeMap::new(),
+            human_command_submissions: BTreeMap::new(),
+            human_command_tracking: BTreeMap::new(),
+            next_human_command_submission_ordinal: 1,
             exiting_sessions: BTreeSet::new(),
             shell_monitor: ShellMonitorConnector::default(),
             monitored_terminals: BTreeSet::new(),
@@ -340,6 +425,9 @@ impl DaemonState {
         let result = match request.kind {
             DaemonRequestKind::Hello(_) => Ok(DaemonEventKind::Hello(self.hello())),
             DaemonRequestKind::SessionOpen(request) => self.open_session(request),
+            DaemonRequestKind::SetupSmokeSessionOpen(request) => {
+                self.open_setup_smoke_session(request)
+            }
             DaemonRequestKind::SessionClear(request) => self.clear_session(request.session_id),
             DaemonRequestKind::SessionFinish(request) => {
                 self.finish_session(request.session_id, request.reason, context)
@@ -356,6 +444,8 @@ impl DaemonState {
             DaemonRequestKind::RunEvents(request) => {
                 self.run_events(request.run_id, request.after_sequence, request.limit)
             }
+            DaemonRequestKind::InferenceInventory(_) => self.inference_inventory(),
+            DaemonRequestKind::InferenceStatus(_) => Ok(self.inference_status()),
             DaemonRequestKind::RunSubscribe(_) => Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "run_subscribe must be handled by the streaming transport",
@@ -389,7 +479,8 @@ impl DaemonState {
             | DaemonRequestKind::SessionPresentationSubscribe(_)
             | DaemonRequestKind::SubscriptionCancel(_)
             | DaemonRequestKind::HumanTerminalEnsure(_)
-            | DaemonRequestKind::HumanHostTerminalEnsure(_) => Err(ProtocolError::new(
+            | DaemonRequestKind::HumanHostTerminalEnsure(_)
+            | DaemonRequestKind::HumanTerminalCommandSubmit(_) => Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "interactive surface operations must be handled by the private connection adapter",
                 false,
@@ -498,6 +589,7 @@ impl DaemonState {
                     let session_id = service.session_id().clone();
                     let execution_context = service.execution_context().clone();
                     let delegation_plan = service.delegation_plan();
+                    validate_root_activity_capacity_protocol(delegation_plan.as_ref())?;
                     let turn_id = TurnId::generate();
                     self.chat_factory.register(service).map_err(runtime_error)?;
                     let persisted_options = ChatOptions {
@@ -559,6 +651,7 @@ impl DaemonState {
             daemon_instance_id: self.daemon_instance_id.clone(),
             capabilities: vec![
                 DaemonCapability::SessionOpen,
+                DaemonCapability::SetupSmokeSessionOpen,
                 DaemonCapability::SessionClear,
                 DaemonCapability::SessionFinish,
                 DaemonCapability::SessionStatus,
@@ -572,6 +665,8 @@ impl DaemonState {
                 DaemonCapability::RunCancel,
                 DaemonCapability::RunReplay,
                 DaemonCapability::RunSubscribe,
+                DaemonCapability::InferenceInventory,
+                DaemonCapability::InferenceStatus,
                 DaemonCapability::ExecutionList,
                 DaemonCapability::ExecutionControl,
                 DaemonCapability::ExecutionAttach,
@@ -583,6 +678,57 @@ impl DaemonState {
                 DaemonCapability::AssistantDeltas,
             ],
         }
+    }
+
+    fn inference_inventory(&self) -> Result<DaemonEventKind, ProtocolError> {
+        let devices = self
+            .inference_client
+            .device_inventory()
+            .map_err(runtime_error)?
+            .into_iter()
+            .map(|device| InferenceDeviceEvent {
+                physical_device_id: device.physical_device_id,
+                driver_build_id: device.driver_build_id,
+                backend_name: device.backend_name,
+                description: device.description,
+                kind: match device.kind {
+                    InferenceDeviceKind::Cpu => ProtocolInferenceDeviceKind::Cpu,
+                    InferenceDeviceKind::DiscreteGpu => ProtocolInferenceDeviceKind::DiscreteGpu,
+                    InferenceDeviceKind::IntegratedGpu => {
+                        ProtocolInferenceDeviceKind::IntegratedGpu
+                    }
+                    InferenceDeviceKind::Accelerator => ProtocolInferenceDeviceKind::Accelerator,
+                    InferenceDeviceKind::Metadata => ProtocolInferenceDeviceKind::Metadata,
+                    InferenceDeviceKind::Unknown => ProtocolInferenceDeviceKind::Unknown,
+                },
+                free_memory_bytes: device.free_memory_bytes,
+                total_memory_bytes: device.total_memory_bytes,
+                usable: device.usable,
+                supports_gpu_offload: device.supports_gpu_offload,
+            })
+            .collect();
+        Ok(DaemonEventKind::InferenceInventory(
+            InferenceInventoryEvent { devices },
+        ))
+    }
+
+    fn inference_status(&self) -> DaemonEventKind {
+        let status = self.inference_status.snapshot();
+        DaemonEventKind::InferenceStatus(InferenceStatusEvent {
+            worker_build_id: status.worker_build_id().to_owned(),
+            worker_state: match status.phase() {
+                WorkerLifecyclePhase::Cold => ProtocolInferenceWorkerState::Cold,
+                WorkerLifecyclePhase::Starting => ProtocolInferenceWorkerState::Starting,
+                WorkerLifecyclePhase::Ready => ProtocolInferenceWorkerState::Ready,
+                WorkerLifecyclePhase::Busy => ProtocolInferenceWorkerState::Busy,
+                WorkerLifecyclePhase::CoolingDown => ProtocolInferenceWorkerState::CoolingDown,
+            },
+            worker_pid: status.worker_pid(),
+            launch_generation: status.launch_generation(),
+            physical_device_id: status.physical_device_id().map(str::to_owned),
+            reserved_bytes: status.reserved_bytes(),
+            cooldown_not_before_unix_ms: status.cooldown_not_before_unix_ms(),
+        })
     }
 
     fn execution_list(
@@ -670,6 +816,8 @@ impl DaemonState {
             && self.sessions.contains_key(session_id)
             && self.chat_factory.has_session(session_id)
         {
+            self.reconcile_incomplete_continuations_for_session(session_id)
+                .map_err(protocol_application_error)?;
             return Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
                 session_id: session_id.clone(),
                 resumed: true,
@@ -776,9 +924,91 @@ impl DaemonState {
                 runtime_context_revision,
             },
         );
+        self.reconcile_incomplete_continuations_for_session(&session_id)
+            .map_err(protocol_application_error)?;
         Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
             session_id,
             resumed: summary.resumed,
+        }))
+    }
+
+    fn open_setup_smoke_session(
+        &mut self,
+        request: agl_protocol::SetupSmokeSessionOpenRequest,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        request
+            .staged_bindings
+            .validate()
+            .map_err(|error| invalid(format!("invalid staged model bindings: {error}")))?;
+        request
+            .runtime_plan
+            .runtime
+            .validate()
+            .map_err(|error| invalid(format!("invalid setup runtime plan: {error}")))?;
+        let runtime_plan = agl_models::RuntimePlan {
+            profile_id: request.runtime_plan.profile_id,
+            selected_device: request.runtime_plan.selected_device,
+            runtime: request.runtime_plan.runtime,
+            smoke_timeout_seconds: request.runtime_plan.smoke_timeout_seconds,
+            expected_speed: request.runtime_plan.expected_speed,
+        };
+        let workspace_root = PathBuf::from(request.workspace_root);
+        let options = ChatOptions {
+            inference: InferenceOptions {
+                config: None,
+                function_ref: Some(request.function_ref),
+                artifact_root: Some(
+                    self.runtime
+                        .paths
+                        .setup_state_root()
+                        .join("daemon-smoke-artifacts"),
+                ),
+                workspace_root: Some(workspace_root.clone()),
+                max_output_tokens: request.max_output_tokens,
+                tool_mode: ChatToolMode::ReadOnly,
+                skills: Vec::new(),
+                memory: false,
+                model_bindings_path: None,
+                model_bindings_override: Some(request.staged_bindings),
+                runtime_plan_override: Some(runtime_plan),
+            },
+            workspace_root: Some(workspace_root),
+            session_id: None,
+            no_history: true,
+            new_session: true,
+        };
+        let service = ChatService::open(
+            options.clone(),
+            &self.runtime,
+            self.inference_client.clone(),
+        )
+        .map_err(runtime_error)?;
+        let summary = service.summary();
+        let selected_model_id = service.selected_model_id();
+        let runtime_context_revision = service.runtime_selection_revision();
+        let execution_context = service.execution_context().clone();
+        let delegation_plan = service.delegation_plan();
+        let session_id = summary.session_id.clone();
+        self.chat_factory.register(service).map_err(runtime_error)?;
+        self.sessions.insert(
+            session_id.clone(),
+            SessionRuntime {
+                status: SessionStatus::Open,
+                resumed: false,
+                options: ChatOptions {
+                    session_id: Some(session_id.clone()),
+                    new_session: false,
+                    ..options
+                },
+                delegation_plan,
+                execution_context,
+                selected_model_id,
+                runtime_context_revision,
+            },
+        );
+        Ok(DaemonEventKind::SessionOpened(SessionOpenedEvent {
+            session_id,
+            resumed: false,
         }))
     }
 
@@ -926,6 +1156,7 @@ impl DaemonState {
             )
             .map_err(runtime_error)?;
         if replay.is_none() {
+            validate_root_activity_capacity_protocol(session.delegation_plan.as_ref())?;
             let queued = store
                 .safe_runs_for_concurrency_key(&concurrency_key, false)
                 .map_err(runtime_error)?
@@ -1358,6 +1589,338 @@ impl DaemonState {
         })
     }
 
+    pub(crate) fn application_submit_human_terminal_command(
+        &mut self,
+        request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
+        request.validate()?;
+        self.ensure_session_accepts_work(&request.session_id)?;
+        let terminal = self
+            .terminal_registry
+            .record(&request.terminal_id)
+            .map_err(terminal_application_error)?;
+        let lease = self
+            .process_handle
+            .operator_resolve_writer_lease(&terminal.execution_id, request.writer_lease_id.clone())
+            .map_err(human_writer_lease_application_error)?;
+        let fingerprint = human_command_fingerprint(&request)?;
+        let submission_key = (
+            request.session_id.clone(),
+            request.client_submission_id.clone(),
+        );
+        if let Some(previous) = self.human_command_submissions.get(&submission_key) {
+            if previous.fingerprint != fingerprint {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InvalidArguments,
+                    "Human command submission ID was already used with different command data",
+                ));
+            }
+            return Ok(HumanTerminalCommandAdmission {
+                accepted: previous.accepted.clone(),
+                card: previous.card.clone(),
+            });
+        }
+
+        if self.human_command_submissions.len() >= MAX_HUMAN_COMMAND_IDEMPOTENCY_RECORDS {
+            let evict = self
+                .human_command_submissions
+                .iter()
+                .filter(|(_, submission)| submission.completed)
+                .min_by_key(|(_, submission)| submission.ordinal)
+                .map(|(key, _)| key.clone());
+            let Some(evict) = evict else {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::InputBackpressure,
+                    "Human command idempotency window is full",
+                ));
+            };
+            self.human_command_submissions.remove(&evict);
+        }
+
+        let display_command = sanitize_terminal_card_output(
+            request.command.as_bytes(),
+            agl_app::MAX_HUMAN_COMMAND_BYTES,
+        );
+        let command_filtered_effects = display_command.filtered_effects();
+        let command_truncated = display_command.truncated();
+        let display_command_text = if display_command.text().is_empty() {
+            SanitizedTerminalText::from_process_sanitized(&sanitize_terminal_card_output(
+                b"[command contained only filtered controls]",
+                agl_app::MAX_HUMAN_COMMAND_BYTES,
+            ))
+        } else {
+            SanitizedTerminalText::from_process_sanitized(&display_command)
+        };
+
+        let admission = self
+            .terminal_registry
+            .admit_human_command(
+                &request.session_id,
+                &request.terminal_id,
+                request.expected_command_sequence,
+                request.expected_prompt_generation,
+                &request.command,
+            )
+            .map_err(terminal_application_error)?;
+        if admission.execution_id != terminal.execution_id {
+            let _ = self
+                .terminal_registry
+                .cancel_human_command_admission(&request.terminal_id, admission.command_sequence);
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::TerminalOwnerMismatch,
+                "writer attachment belongs to a different terminal execution",
+            ));
+        }
+        if let Err(error) = self.terminal_registry.write_admitted_human_command(
+            &request.terminal_id,
+            &admission.execution_id,
+            admission.command_sequence,
+            lease,
+            admission.submission.clone(),
+        ) {
+            let _ = self
+                .terminal_registry
+                .cancel_human_command_admission(&request.terminal_id, admission.command_sequence);
+            return Err(terminal_application_error(error));
+        }
+
+        let accepted = HumanTerminalCommandAccepted {
+            terminal_id: request.terminal_id.clone(),
+            command_sequence: admission.command_sequence,
+            output_after_sequence: admission.output_after_sequence,
+        };
+        let started_at_unix_ms = current_unix_ms();
+        let output_start = ExecutionCursor {
+            after_sequence: admission.output_after_sequence,
+        };
+        let card = HumanCommandCardView {
+            terminal_id: request.terminal_id.clone(),
+            execution_id: admission.execution_id.clone(),
+            command_sequence: admission.command_sequence,
+            command: display_command_text.clone(),
+            output: SanitizedTerminalText::from_process_sanitized(&sanitize_terminal_card_output(
+                b"",
+                MAX_HUMAN_COMMAND_OUTPUT_BYTES,
+            )),
+            output_start,
+            output_end: output_start,
+            state: HumanCommandCardState::Starting,
+            exit_status: None,
+            cwd: SanitizedDisplayPath::from_path(&terminal.cwd),
+            truncated: command_truncated,
+            filtered_effects: command_filtered_effects,
+            started_at_unix_ms,
+            updated_at_unix_ms: started_at_unix_ms,
+        };
+        self.human_command_tracking.insert(
+            (request.terminal_id, admission.command_sequence),
+            HumanCommandTracking {
+                execution_id: admission.execution_id,
+                display_command: display_command_text,
+                command_filtered_effects,
+                command_truncated,
+                output_start,
+                started_at_unix_ms,
+            },
+        );
+        let ordinal = self.next_human_command_submission_ordinal;
+        self.next_human_command_submission_ordinal = ordinal.saturating_add(1);
+        self.human_command_submissions.insert(
+            submission_key,
+            HumanCommandSubmission {
+                fingerprint,
+                accepted: accepted.clone(),
+                card: card.clone(),
+                ordinal,
+                completed: false,
+            },
+        );
+        Ok(HumanTerminalCommandAdmission { accepted, card })
+    }
+
+    pub(crate) fn human_command_card_events(
+        &mut self,
+        terminal_id: &TerminalSessionId,
+        events: &[agl_process::ShellIntegrationEvent],
+    ) -> Result<(Vec<SessionPresentationEvent>, bool), ApplicationError> {
+        let finished = events.iter().find_map(|event| match event {
+            agl_process::ShellIntegrationEvent::CommandFinished { exit, cwd, .. } => Some((
+                match exit {
+                    agl_process::ShellExit::Code { code } => *code,
+                    agl_process::ShellExit::Signal { signal } => signal.saturating_add(128),
+                },
+                cwd.clone(),
+            )),
+            _ => None,
+        });
+        let tracking_key = self
+            .human_command_tracking
+            .keys()
+            .find(|(tracked_terminal, _)| tracked_terminal == terminal_id)
+            .cloned();
+        let Some(tracking_key) = tracking_key else {
+            return Ok((Vec::new(), false));
+        };
+        let tracking = self
+            .human_command_tracking
+            .get(&tracking_key)
+            .cloned()
+            .expect("Human command tracking key was selected above");
+        let previous_card = self
+            .human_command_submissions
+            .values()
+            .find(|submission| {
+                submission.accepted.terminal_id == *terminal_id
+                    && submission.accepted.command_sequence == tracking_key.1
+            })
+            .map(|submission| submission.card.clone())
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "Human command tracking is missing its private presentation card",
+                )
+            })?;
+        let started = events.iter().any(|event| {
+            matches!(
+                event,
+                agl_process::ShellIntegrationEvent::CommandStarted { .. }
+            )
+        });
+        let mut raw = Vec::new();
+        let mut output_through_sequence = tracking.output_start.after_sequence;
+        let mut process_output_truncated = false;
+        let mut process_output_expired = false;
+        let page_bytes = self
+            .runtime
+            .execution
+            .max_result_bytes
+            .clamp(1, MAX_HUMAN_COMMAND_OUTPUT_BYTES);
+        loop {
+            let read = self
+                .process_handle
+                .operator_read(
+                    &tracking.execution_id,
+                    ExecutionCursor {
+                        after_sequence: output_through_sequence,
+                    },
+                    page_bytes,
+                )
+                .map_err(terminal_application_error)?;
+            process_output_truncated |= read.output_truncated;
+            process_output_expired |= read.output_expired;
+            let previous_sequence = output_through_sequence;
+            output_through_sequence = read.next_sequence;
+            let empty = read.chunks.is_empty();
+            for chunk in read.chunks {
+                let decoded = chunk
+                    .bytes
+                    .decode(page_bytes)
+                    .map_err(terminal_application_error)?;
+                let remaining = MAX_HUMAN_COMMAND_OUTPUT_BYTES
+                    .saturating_add(1)
+                    .saturating_sub(raw.len());
+                raw.extend_from_slice(&decoded[..decoded.len().min(remaining)]);
+                if raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES {
+                    break;
+                }
+            }
+            if raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES
+                || empty
+                || output_through_sequence <= previous_sequence
+            {
+                break;
+            }
+        }
+        let sanitized = sanitize_terminal_card_output(&raw, MAX_HUMAN_COMMAND_OUTPUT_BYTES);
+        let exit_status = finished.as_ref().map(|(status, _)| *status);
+        let mut card = HumanCommandCardView {
+            terminal_id: terminal_id.clone(),
+            execution_id: tracking.execution_id,
+            command_sequence: tracking_key.1,
+            command: tracking.display_command,
+            output: SanitizedTerminalText::from_process_sanitized(&sanitized),
+            output_start: tracking.output_start,
+            output_end: ExecutionCursor {
+                after_sequence: output_through_sequence,
+            },
+            state: if finished.is_some() {
+                HumanCommandCardState::Exited
+            } else if started || previous_card.state == HumanCommandCardState::Running {
+                HumanCommandCardState::Running
+            } else {
+                HumanCommandCardState::Starting
+            },
+            exit_status,
+            cwd: finished
+                .as_ref()
+                .map(|(_, cwd)| SanitizedDisplayPath::from_path(cwd))
+                .unwrap_or_else(|| previous_card.cwd.clone()),
+            truncated: tracking.command_truncated
+                || process_output_truncated
+                || process_output_expired
+                || raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES
+                || sanitized.truncated(),
+            filtered_effects: tracking
+                .command_filtered_effects
+                .saturating_add(sanitized.filtered_effects()),
+            started_at_unix_ms: tracking.started_at_unix_ms,
+            updated_at_unix_ms: previous_card.updated_at_unix_ms,
+        };
+        let changed = card != previous_card;
+        if changed {
+            card.updated_at_unix_ms = current_unix_ms().max(card.started_at_unix_ms);
+        }
+        for submission in self.human_command_submissions.values_mut() {
+            if submission.accepted.terminal_id == card.terminal_id
+                && submission.accepted.command_sequence == card.command_sequence
+            {
+                submission.card = card.clone();
+                if finished.is_some() {
+                    submission.completed = true;
+                }
+            }
+        }
+        if finished.is_some() {
+            self.human_command_tracking.remove(&tracking_key);
+        }
+        let presentation = changed
+            .then_some(SessionPresentationEvent::HumanCommandCardUpsert { card })
+            .into_iter()
+            .collect();
+        Ok((presentation, finished.is_none()))
+    }
+
+    pub(crate) fn human_command_outcome_unknown_events(
+        &mut self,
+        terminal_id: &TerminalSessionId,
+    ) -> Vec<SessionPresentationEvent> {
+        let tracking_keys = self
+            .human_command_tracking
+            .keys()
+            .filter(|(tracked_terminal, _)| tracked_terminal == terminal_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut presentation = Vec::new();
+        for tracking_key in tracking_keys {
+            for submission in self.human_command_submissions.values_mut() {
+                if submission.accepted.terminal_id == tracking_key.0
+                    && submission.accepted.command_sequence == tracking_key.1
+                {
+                    submission.card.state = HumanCommandCardState::OutcomeUnknown;
+                    submission.card.exit_status = None;
+                    submission.card.updated_at_unix_ms =
+                        current_unix_ms().max(submission.card.started_at_unix_ms);
+                    submission.completed = true;
+                    presentation.push(SessionPresentationEvent::HumanCommandCardUpsert {
+                        card: submission.card.clone(),
+                    });
+                }
+            }
+            self.human_command_tracking.remove(&tracking_key);
+        }
+        presentation
+    }
+
     fn ensure_human_terminal_monitor(
         &mut self,
         record: &TerminalRecord,
@@ -1615,17 +2178,12 @@ impl DaemonState {
             profile: record.profile,
             shell: ShellProfileView {
                 profile_id: terminal_shell_profile_id(record.shell_profile.kind).to_owned(),
-                program: record
-                    .shell_profile
-                    .snapshot
-                    .program
-                    .to_string_lossy()
-                    .into_owned(),
+                program: SanitizedDisplayPath::from_path(&record.shell_profile.snapshot.program),
                 executable_digest: record.shell_profile.snapshot.executable_digest.clone(),
                 config_digest: record.shell_profile.snapshot.config_digest.clone(),
             },
-            workspace_root: record.workspace_root.to_string_lossy().into_owned(),
-            cwd: record.cwd.to_string_lossy().into_owned(),
+            workspace_root: SanitizedDisplayPath::from_path(&record.workspace_root),
+            cwd: SanitizedDisplayPath::from_path(&record.cwd),
             initial_environment_digest: record.environment_digest.as_str().to_owned(),
             environment_names: self
                 .terminal_presentations
@@ -1633,6 +2191,10 @@ impl DaemonState {
                 .map(|metadata| metadata.environment_names.clone())
                 .unwrap_or_default(),
             command_sequence: record.command_sequence,
+            prompt_generation: match &record.prompt_state {
+                ProcessTerminalPromptState::Ready { sequence, .. } => Some(*sequence),
+                _ => None,
+            },
             prompt_state: application_terminal_prompt_state(&record.prompt_state),
             process_state: status.state,
             exit: status.exit,
@@ -1987,7 +2549,31 @@ impl DaemonState {
                 "session no longer accepts new work",
             ));
         }
+        self.reconcile_incomplete_continuations_for_session(session_id)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_execution_context_revision_for_test(
+        &mut self,
+        session_id: &SessionId,
+        revision: u64,
+    ) {
+        self.sessions
+            .get_mut(session_id)
+            .expect("test session must exist")
+            .execution_context
+            .revision = revision;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_chat_service_mode_for_test(
+        &self,
+        session_id: &SessionId,
+        mode: ChatToolMode,
+    ) -> anyhow::Result<()> {
+        self.chat_factory
+            .with_session(session_id, |service| service.select_operation_mode(mode))
     }
 
     pub(crate) fn application_snapshot(
@@ -2006,14 +2592,42 @@ impl DaemonState {
         let session = self.sessions.get(session_id).cloned().ok_or_else(|| {
             ApplicationError::new(ApplicationErrorCode::NotFound, "session not found")
         })?;
-        let mut replay = ChatSessionStore::open_reverse_replay(
-            self.runtime.paths.sessions_root(),
-            session_id.clone(),
-            MAX_PRESENTATION_TRANSCRIPT_RECORD_BYTES,
-        )
-        .map_err(application_runtime_error)?;
+        let durable = !session.options.no_history;
+        let (incomplete_replay, current_policy_hash, mut replay) = if durable {
+            let incomplete_replay =
+                ChatSessionStore::open(self.runtime.paths.sessions_root(), session_id.clone())
+                    .and_then(|store| store.read_replay())
+                    .map(|replay| incomplete_replay_index(&replay.events))
+                    .map_err(application_runtime_error)?;
+            let current_policy_hash = self
+                .chat_factory
+                .current_policy_hash(session_id)
+                .map_err(application_runtime_error)?
+                .ok_or_else(|| {
+                    ApplicationError::new(
+                        ApplicationErrorCode::Internal,
+                        "session effective capability policy is unavailable",
+                    )
+                })?;
+            let replay = ChatSessionStore::open_reverse_replay(
+                self.runtime.paths.sessions_root(),
+                session_id.clone(),
+                MAX_PRESENTATION_TRANSCRIPT_RECORD_BYTES,
+            )
+            .map_err(application_runtime_error)?;
+            (
+                Some(incomplete_replay),
+                Some(current_policy_hash),
+                Some(replay),
+            )
+        } else {
+            if page_cursor.is_some() {
+                return Err(invalid_presentation_page_cursor());
+            }
+            (None, None, None)
+        };
         let cursor_scope = presentation_page_cursor_scope(session_id, &self.daemon_instance_id);
-        if let Some(cursor) = page_cursor {
+        if let (Some(cursor), Some(replay)) = (page_cursor, replay.as_mut()) {
             let end_offset =
                 parse_presentation_page_cursor(cursor, &cursor_scope, replay.transcript_len())?;
             replay
@@ -2043,7 +2657,7 @@ impl DaemonState {
                 execution_id: status.execution_id,
                 state: status.state,
                 profile: status.profile,
-                cwd: status.cwd.to_string_lossy().into_owned(),
+                cwd: SanitizedDisplayPath::from_path(&status.cwd),
                 exit: status.exit,
                 last_sequence: status.last_sequence,
                 output_truncated: status.output_truncated || status.output_expired,
@@ -2111,7 +2725,7 @@ impl DaemonState {
             header: SessionHeader {
                 session_id: session_id.clone(),
                 status,
-                durable: true,
+                durable,
                 resumed: session.resumed,
                 title: None,
                 function_name: session
@@ -2124,16 +2738,13 @@ impl DaemonState {
                 operation_mode,
                 selected_skills: session.options.inference.skills.clone(),
                 runtime_context_revision: session.runtime_context_revision,
-                workspace_root: session
-                    .execution_context
-                    .workspace_root
-                    .to_string_lossy()
-                    .into_owned(),
-                cwd: session
-                    .execution_context
-                    .working_directory
-                    .to_string_lossy()
-                    .into_owned(),
+                workspace_root: SanitizedDisplayPath::from_path(
+                    &session.execution_context.workspace_root,
+                ),
+                workspace_history_scope: workspace_history_scope(
+                    &session.execution_context.workspace_root,
+                ),
+                cwd: SanitizedDisplayPath::from_path(&session.execution_context.working_directory),
                 execution_context_revision: session.execution_context.revision,
                 context_used_tokens: None,
                 context_limit_tokens: None,
@@ -2146,9 +2757,29 @@ impl DaemonState {
             queued_prompts,
             terminals,
             executions,
+            human_commands: Vec::new(),
+            activity: None,
             command_context,
         };
-        paginate_presentation_snapshot(snapshot, replay, &cursor_scope)
+        let Some(replay) = replay else {
+            return PresentationSnapshotPage {
+                snapshot,
+                older_page_cursor: None,
+            }
+            .validate();
+        };
+        let incomplete_replay = incomplete_replay
+            .expect("durable presentation replay must include incomplete projection state");
+        let incomplete_context = IncompleteProjectionContext {
+            status,
+            execution_context_revision: session.execution_context.revision,
+            runtime_context_revision: session.runtime_context_revision,
+            current_policy_hash: current_policy_hash
+                .expect("durable presentation replay must include current policy hash"),
+            claims: incomplete_replay.claims,
+            current_context_messages: incomplete_replay.current_context_messages,
+        };
+        paginate_presentation_snapshot(snapshot, replay, &cursor_scope, &incomplete_context)
     }
 
     pub(crate) fn application_submit_prompt(
@@ -2184,6 +2815,7 @@ impl DaemonState {
             ProtocolRunState::Running => PromptAdmissionState::Running,
             ProtocolRunState::Waiting => PromptAdmissionState::Waiting,
             ProtocolRunState::Succeeded => PromptAdmissionState::Succeeded,
+            ProtocolRunState::Incomplete => PromptAdmissionState::Incomplete,
             ProtocolRunState::Failed => PromptAdmissionState::Failed,
             ProtocolRunState::Cancelled => PromptAdmissionState::Cancelled,
         };
@@ -2197,6 +2829,334 @@ impl DaemonState {
             turn_id,
             state,
             replayed: accepted.replayed,
+        })
+    }
+
+    fn application_continue_incomplete(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        client_submission_id: &str,
+        expected_execution_context_revision: u64,
+    ) -> Result<PromptAdmission, ApplicationError> {
+        self.ensure_session_accepts_work(session_id)?;
+        let session = self.sessions.get(session_id).cloned().ok_or_else(|| {
+            ApplicationError::new(ApplicationErrorCode::NotFound, "session not found")
+        })?;
+        let mut transcript =
+            ChatSessionStore::open(self.runtime.paths.sessions_root(), session_id.clone())
+                .map_err(application_runtime_error)?;
+        let replay = transcript
+            .read_replay()
+            .map_err(application_runtime_error)?;
+        let source =
+            incomplete_continuation_source(&replay.events, &message_id).ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::IncompleteOutputNotFound,
+                    "durable incomplete assistant output was not found",
+                )
+            })?;
+        let replay_index = incomplete_replay_index(&replay.events);
+
+        if let Some(claim) = replay_index.claims.get(&message_id) {
+            if claim.client_submission_id != client_submission_id {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::ContinuationAlreadyClaimed,
+                    "incomplete assistant output already has a continuation run",
+                ));
+            }
+            return self.reconcile_incomplete_continuation_claim(
+                session_id, &session, &source, claim, None, true,
+            );
+        }
+
+        if !replay_index.current_context_messages.contains(&message_id)
+            || expected_execution_context_revision != source.execution_context_revision
+            || session.execution_context.revision != source.execution_context_revision
+            || session.runtime_context_revision != source.runtime_context_revision
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::StaleContinuationContext,
+                "incomplete output no longer matches the current execution and runtime context",
+            ));
+        }
+        let current_policy_hash = self
+            .chat_factory
+            .current_policy_hash(session_id)
+            .map_err(application_runtime_error)?
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "session effective capability policy is unavailable",
+                )
+            })?;
+        if current_policy_hash != source.policy_hash {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::NotAuthorized,
+                "incomplete output capability policy is no longer admitted",
+            ));
+        }
+
+        let concurrency_key =
+            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        let fingerprint = incomplete_continuation_fingerprint(session_id, &source);
+        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
+            .map_err(application_runtime_error)?;
+        let idempotency = store
+            .idempotency_record(
+                INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE,
+                client_submission_id,
+            )
+            .map_err(application_runtime_error)?;
+        if idempotency
+            .as_ref()
+            .is_some_and(|record| record.fingerprint != fingerprint)
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "client submission ID was already used for a different continuation",
+            ));
+        }
+        if idempotency.is_some() {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "continuation idempotency record exists without its durable session claim",
+            ));
+        }
+        let queued = store
+            .safe_runs_for_concurrency_key(&concurrency_key, false)
+            .map_err(application_runtime_error)?
+            .into_iter()
+            .filter(|status| matches!(status.state, RunState::Queued | RunState::Waiting))
+            .count();
+        if queued >= MAX_QUEUED_PROMPTS_PER_SESSION {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::InputBackpressure,
+                "session prompt queue is full",
+            ));
+        }
+
+        let claim = IncompleteContinuationClaim {
+            client_submission_id: client_submission_id.to_owned(),
+            continuation_run_id: RunId::generate(),
+            continuation_turn_id: TurnId::generate(),
+            continuation_request_id: RequestId::generate(),
+        };
+        let prepared =
+            self.incomplete_continuation_run_spec(session_id, &session, &source, &claim)?;
+        transcript
+            .append_incomplete_continuation_claim(
+                message_id,
+                claim.client_submission_id.clone(),
+                claim.continuation_run_id.clone(),
+                claim.continuation_turn_id.clone(),
+                claim.continuation_request_id.clone(),
+            )
+            .map_err(application_runtime_error)?;
+        self.reconcile_incomplete_continuation_claim(
+            session_id,
+            &session,
+            &source,
+            &claim,
+            Some(prepared),
+            false,
+        )
+    }
+
+    fn reconcile_incomplete_continuations_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), ApplicationError> {
+        let session = self.sessions.get(session_id).cloned().ok_or_else(|| {
+            ApplicationError::new(ApplicationErrorCode::NotFound, "session not found")
+        })?;
+        if session.options.no_history {
+            return Ok(());
+        }
+        let transcript =
+            ChatSessionStore::open(self.runtime.paths.sessions_root(), session_id.clone())
+                .map_err(application_runtime_error)?;
+        let replay = transcript
+            .read_replay()
+            .map_err(application_runtime_error)?;
+        let index = incomplete_replay_index(&replay.events);
+        for message_id in index.claim_order {
+            let claim = index.claims.get(&message_id).ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "durable continuation replay lost its ordered claim",
+                )
+            })?;
+            let source =
+                incomplete_continuation_source(&replay.events, &message_id).ok_or_else(|| {
+                    ApplicationError::new(
+                        ApplicationErrorCode::Internal,
+                        "durable continuation claim lost its incomplete assistant source",
+                    )
+                })?;
+            self.reconcile_incomplete_continuation_claim(
+                session_id, &session, &source, claim, None, true,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_incomplete_continuation_claim(
+        &self,
+        session_id: &SessionId,
+        session: &SessionRuntime,
+        source: &IncompleteContinuationSource,
+        claim: &IncompleteContinuationClaim,
+        prepared: Option<RunSpec>,
+        replayed: bool,
+    ) -> Result<PromptAdmission, ApplicationError> {
+        let fingerprint = incomplete_continuation_fingerprint(session_id, source);
+        let store = AglStore::open_current_read_only_at(self.runtime.paths.store_root())
+            .map_err(application_runtime_error)?;
+        let idempotency = store
+            .idempotency_record(
+                INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE,
+                &claim.client_submission_id,
+            )
+            .map_err(application_runtime_error)?;
+        if let Some(record) = idempotency.as_ref()
+            && (record.fingerprint != fingerprint
+                || record.admitted_run_id.as_ref() != Some(&claim.continuation_run_id))
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "durable continuation claim conflicts with its idempotency record",
+            ));
+        }
+        if let Some(status) = store
+            .safe_run_status(&claim.continuation_run_id)
+            .map_err(application_runtime_error)?
+        {
+            if idempotency.is_none() {
+                return Err(ApplicationError::new(
+                    ApplicationErrorCode::Internal,
+                    "durable continuation run is missing its idempotency record",
+                ));
+            }
+            return self.continuation_admission_from_status(session_id, claim, status, replayed);
+        }
+        if idempotency.is_some() {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "continuation idempotency record references a missing durable run",
+            ));
+        }
+
+        let spec = match prepared {
+            Some(spec) => spec,
+            None => self.incomplete_continuation_run_spec(session_id, session, source, claim)?,
+        };
+        let accepted = self
+            .supervisor_handle
+            .submit(spec)
+            .map_err(supervisor_error)
+            .map_err(application_protocol_error)?;
+        self.continuation_admission_from_status(
+            session_id,
+            claim,
+            accepted.status,
+            replayed || accepted.replayed,
+        )
+    }
+
+    fn incomplete_continuation_run_spec(
+        &self,
+        session_id: &SessionId,
+        session: &SessionRuntime,
+        source: &IncompleteContinuationSource,
+        claim: &IncompleteContinuationClaim,
+    ) -> Result<RunSpec, ApplicationError> {
+        validate_root_activity_capacity_application(session.delegation_plan.as_ref())?;
+        let continuation_index = source.continuation_index.checked_add(1).ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::InvalidArguments,
+                "incomplete output continuation index is exhausted",
+            )
+        })?;
+        let concurrency_key =
+            agl_store::RunConcurrencyKey::session(session_id).map_err(application_runtime_error)?;
+        let input = serde_json::to_value(ChatRunInput::Continuation {
+            source_message_id: source.message_id.clone(),
+            continuation_index,
+            request_id: Some(claim.continuation_request_id.clone()),
+            options: session.options.clone(),
+            delegation_plan: session.delegation_plan.clone(),
+        })
+        .map_err(application_runtime_error)?;
+        Ok(RunSpec {
+            run: agl_store::DurableRunDraft {
+                run_id: claim.continuation_run_id.clone(),
+                session_id: Some(session_id.clone()),
+                turn_id: Some(claim.continuation_turn_id.clone()),
+                kind: RunKind::Turn,
+                priority: 0,
+                concurrency_key: Some(concurrency_key),
+                input,
+                checkpoint: None,
+                effective_policy_hash: Some(source.policy_hash.clone()),
+                execution_context: session.execution_context.clone(),
+                budget: RunBudget::default(),
+                not_before_ms: None,
+            },
+            idempotency: Some(IdempotentRunSpec {
+                namespace: INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE.to_owned(),
+                key: claim.client_submission_id.clone(),
+                fingerprint: incomplete_continuation_fingerprint(session_id, source),
+            }),
+        })
+    }
+
+    fn continuation_admission_from_status(
+        &self,
+        expected_session_id: &SessionId,
+        claim: &IncompleteContinuationClaim,
+        status: SafeRunStatus,
+        replayed: bool,
+    ) -> Result<PromptAdmission, ApplicationError> {
+        if status.run_id != claim.continuation_run_id
+            || status.session_id.as_ref() != Some(expected_session_id)
+            || status.turn_id.as_ref() != Some(&claim.continuation_turn_id)
+        {
+            return Err(ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "continuation run identity differs from its durable claim",
+            ));
+        }
+        let session_id = status.session_id.ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "continuation run lost its session identity",
+            )
+        })?;
+        let turn_id = status.turn_id.ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::Internal,
+                "continuation run lost its turn identity",
+            )
+        })?;
+        let state = match status.state {
+            RunState::Queued => PromptAdmissionState::Queued,
+            RunState::Running => PromptAdmissionState::Running,
+            RunState::Waiting => PromptAdmissionState::Waiting,
+            RunState::Succeeded => PromptAdmissionState::Succeeded,
+            RunState::Incomplete => PromptAdmissionState::Incomplete,
+            RunState::Failed => PromptAdmissionState::Failed,
+            RunState::Cancelled => PromptAdmissionState::Cancelled,
+        };
+        let ordinal = self.prompt_ordinal(&session_id, &status.run_id)?;
+        Ok(PromptAdmission {
+            session_id,
+            run_id: status.run_id,
+            turn_id,
+            ordinal,
+            queued: state.is_queued(),
+            state,
+            replayed,
         })
     }
 
@@ -2232,7 +3192,7 @@ impl DaemonState {
             .map(|_| 1)
             .ok_or_else(|| {
                 ApplicationError::new(
-                    ApplicationErrorCode::OutcomeUnknown,
+                    ApplicationErrorCode::Internal,
                     "admitted prompt disappeared",
                 )
             })
@@ -2289,12 +3249,12 @@ impl DaemonState {
                     })
                     .collect()
             }
-            "mode" => ["read_only", "write", "execute", "approve", "admin"]
+            "mode" => ["read-only", "write", "execute", "approve", "admin"]
                 .into_iter()
                 .filter(|value| value.contains(&query))
                 .map(|value| agl_app::Suggestion {
                     value: value.to_owned(),
-                    label: value.replace('_', " "),
+                    label: value.replace('-', " "),
                     detail: None,
                 })
                 .collect(),
@@ -2453,6 +3413,7 @@ impl DaemonState {
                 "client submission ID must be nonempty and bounded",
             ));
         }
+        let client_submission_id = request.client_submission_id.clone();
         if let Some(session_id) = request.session_id.as_ref()
             && self.exiting_sessions.contains(session_id)
             && !matches!(&request.action, ApplicationAction::SessionExit { .. })
@@ -2463,9 +3424,31 @@ impl DaemonState {
             ));
         }
         match request.action {
-            ApplicationAction::SessionNew { launch } => {
+            ApplicationAction::SessionNew { mut launch } => {
                 if let Some(source_session_id) = request.session_id.as_ref() {
                     self.ensure_turn_boundary_idle(source_session_id)?;
+                    if launch.workspace_root.is_none() {
+                        let workspace_root = self
+                            .sessions
+                            .get(source_session_id)
+                            .ok_or_else(|| {
+                                ApplicationError::new(
+                                    ApplicationErrorCode::NotFound,
+                                    "source session not found",
+                                )
+                            })?
+                            .execution_context
+                            .workspace_root
+                            .to_str()
+                            .ok_or_else(|| {
+                                ApplicationError::new(
+                                    ApplicationErrorCode::InvalidArguments,
+                                    "source workspace cannot be represented by the current action protocol",
+                                )
+                            })?
+                            .to_owned();
+                        launch.workspace_root = Some(workspace_root);
+                    }
                 }
                 self.application_open_session(SessionOpen { launch })
                     .map(|opened| ApplicationActionResult::SessionOpened {
@@ -2530,6 +3513,7 @@ impl DaemonState {
                         "application action requires a current session",
                     )
                 })?;
+                self.reconcile_incomplete_continuations_for_session(&session_id)?;
                 if matches!(
                     &action,
                     ApplicationAction::ModelSelect { .. }
@@ -2620,6 +3604,20 @@ impl DaemonState {
                             .map_err(terminal_application_error)?;
                         Ok(ApplicationActionResult::TerminalPromoted {
                             terminal: self.terminal_view(&promoted)?,
+                        })
+                    }
+                    ApplicationAction::IncompleteTurnContinue {
+                        message_id,
+                        expected_execution_context_revision,
+                    } => {
+                        self.application_continue_incomplete(
+                            &session_id,
+                            message_id,
+                            &client_submission_id,
+                            expected_execution_context_revision,
+                        )
+                        .map(|admission| {
+                            ApplicationActionResult::IncompleteTurnContinued { admission }
                         })
                     }
                     ApplicationAction::ExecutionList { include_finished } => self
@@ -3205,6 +4203,43 @@ fn human_terminal_fingerprint(request: &HumanTerminalEnsure) -> Result<String, A
     human_terminal_request_digest(b"agentlibre.human-terminal-submission.v1\0", request)
 }
 
+fn workspace_history_scope(workspace_root: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"agentlibre.cli.workspace-history.v1\0");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        digest.update(workspace_root.as_os_str().as_bytes());
+    }
+    #[cfg(not(unix))]
+    digest.update(workspace_root.to_string_lossy().as_bytes());
+    let bytes = digest.finalize();
+    let mut rendered = String::with_capacity(7 + bytes.len() * 2);
+    rendered.push_str("sha256:");
+    use std::fmt::Write as _;
+    for byte in bytes {
+        write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    rendered
+}
+
+fn human_command_fingerprint(
+    request: &HumanTerminalCommandSubmit,
+) -> Result<String, ApplicationError> {
+    let encoded = serde_json::to_vec(request).map_err(application_runtime_error)?;
+    let mut digest = Sha256::new();
+    digest.update(b"agentlibre.human-terminal-command.v1\0");
+    digest.update(encoded);
+    let digest = digest.finalize();
+    Ok(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
 fn human_terminal_admission_fingerprint(
     request: &HumanTerminalEnsure,
 ) -> Result<String, ApplicationError> {
@@ -3237,10 +4272,18 @@ fn bounded_count(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 fn paginate_presentation_snapshot(
     mut snapshot: SessionPresentationSnapshot,
     mut replay: ChatSessionReverseReader,
     cursor_scope: &str,
+    incomplete_context: &IncompleteProjectionContext,
 ) -> Result<PresentationSnapshotPage, ApplicationError> {
     debug_assert!(snapshot.items.is_empty());
     let empty_snapshot_bytes = serde_json::to_vec(&snapshot)
@@ -3283,7 +4326,8 @@ fn paginate_presentation_snapshot(
             })?;
         scanned_records += 1;
 
-        let Some(item) = presentation_item_from_transcript_event(record.event) else {
+        let Some(item) = presentation_item_from_transcript_event(record.event, incomplete_context)
+        else {
             continue;
         };
         let item_bytes = serde_json::to_vec(&item)
@@ -3361,6 +4405,7 @@ fn paginate_presentation_snapshot(
 
 fn presentation_item_from_transcript_event(
     event: agl_session::ChatSessionEvent,
+    incomplete_context: &IncompleteProjectionContext,
 ) -> Option<SessionPresentationItem> {
     match event {
         agl_session::ChatSessionEvent::Runtime { envelope } => match envelope.payload {
@@ -3379,6 +4424,66 @@ fn presentation_item_from_transcript_event(
                 content,
                 state: agl_app::AssistantItemState::Final,
             }),
+            agl_events::RuntimeEvent::AssistantIncomplete {
+                message_id,
+                content,
+                source_attempt_id,
+                reason,
+                continuation_index,
+                execution_context_revision,
+                runtime_context_revision,
+                policy_hash,
+            } => {
+                let continue_action = if let Some(claim) =
+                    incomplete_context.claims.get(&message_id)
+                {
+                    ContinueActionView::Claimed {
+                        continuation_run_id: claim.continuation_run_id.clone(),
+                    }
+                } else if incomplete_context.status != SessionPresentationStatus::Active {
+                    ContinueActionView::Unavailable {
+                        reason: ContinueUnavailableReason::SessionFinished,
+                    }
+                } else if !incomplete_context
+                    .current_context_messages
+                    .contains(&message_id)
+                    || execution_context_revision != incomplete_context.execution_context_revision
+                    || runtime_context_revision != incomplete_context.runtime_context_revision
+                {
+                    ContinueActionView::Unavailable {
+                        reason: ContinueUnavailableReason::StaleContext,
+                    }
+                } else if incomplete_context.current_policy_hash.as_str() != policy_hash.as_str() {
+                    ContinueActionView::Unavailable {
+                        reason: ContinueUnavailableReason::PolicyDenied,
+                    }
+                } else {
+                    ContinueActionView::Available
+                };
+                Some(SessionPresentationItem::IncompleteAssistant {
+                    item: IncompleteAssistantItemView {
+                        message_id,
+                        content,
+                        source_run_id: envelope.scope.run_id().clone(),
+                        source_turn_id: envelope
+                            .scope
+                            .turn_id()
+                            .expect("session transcript runtime event has a turn")
+                            .clone(),
+                        source_attempt_id,
+                        reason: match reason {
+                            agl_events::IncompleteOutputReasonEvent::ModelLength => {
+                                IncompleteOutputReason::ModelLength
+                            }
+                            agl_events::IncompleteOutputReasonEvent::ContentByteLimit => {
+                                IncompleteOutputReason::ContentByteLimit
+                            }
+                        },
+                        continuation_index,
+                        continue_action,
+                    },
+                })
+            }
             _ => None,
         },
         agl_session::ChatSessionEvent::ContextCleared { .. } => {
@@ -3389,8 +4494,123 @@ fn presentation_item_from_transcript_event(
         }
         agl_session::ChatSessionEvent::SessionStarted { .. }
         | agl_session::ChatSessionEvent::SessionFinished { .. }
-        | agl_session::ChatSessionEvent::SessionFailed { .. } => None,
+        | agl_session::ChatSessionEvent::SessionFailed { .. }
+        | agl_session::ChatSessionEvent::IncompleteContinuationClaimed { .. }
+        | agl_session::ChatSessionEvent::IncompleteContinuationInputStarted { .. } => None,
     }
+}
+
+fn incomplete_replay_index(events: &[agl_session::ChatSessionEvent]) -> IncompleteReplayIndex {
+    let mut claims = BTreeMap::new();
+    let mut claim_order = Vec::new();
+    let mut current_context_messages = BTreeSet::new();
+    for event in events {
+        match event {
+            agl_session::ChatSessionEvent::Runtime { envelope } => {
+                if let agl_events::RuntimeEvent::AssistantIncomplete { message_id, .. } =
+                    &envelope.payload
+                {
+                    current_context_messages.insert(message_id.clone());
+                }
+            }
+            agl_session::ChatSessionEvent::ContextCleared { .. } => {
+                current_context_messages.clear();
+            }
+            agl_session::ChatSessionEvent::IncompleteContinuationClaimed {
+                message_id,
+                client_submission_id,
+                continuation_run_id,
+                continuation_turn_id,
+                continuation_request_id,
+                ..
+            } => {
+                if !claims.contains_key(message_id) {
+                    claim_order.push(message_id.clone());
+                    claims.insert(
+                        message_id.clone(),
+                        IncompleteContinuationClaim {
+                            client_submission_id: client_submission_id.clone(),
+                            continuation_run_id: continuation_run_id.clone(),
+                            continuation_turn_id: continuation_turn_id.clone(),
+                            continuation_request_id: continuation_request_id.clone(),
+                        },
+                    );
+                }
+            }
+            agl_session::ChatSessionEvent::SessionStarted { .. }
+            | agl_session::ChatSessionEvent::SessionFinished { .. }
+            | agl_session::ChatSessionEvent::SessionFailed { .. }
+            | agl_session::ChatSessionEvent::IncompleteContinuationInputStarted { .. } => {}
+        }
+    }
+    IncompleteReplayIndex {
+        claims,
+        claim_order,
+        current_context_messages,
+    }
+}
+
+fn incomplete_continuation_source(
+    events: &[agl_session::ChatSessionEvent],
+    requested_message_id: &MessageId,
+) -> Option<IncompleteContinuationSource> {
+    events.iter().find_map(|event| {
+        let agl_session::ChatSessionEvent::Runtime { envelope } = event else {
+            return None;
+        };
+        let agl_events::RuntimeEvent::AssistantIncomplete {
+            message_id,
+            continuation_index,
+            execution_context_revision,
+            runtime_context_revision,
+            policy_hash,
+            ..
+        } = &envelope.payload
+        else {
+            return None;
+        };
+        if message_id != requested_message_id {
+            return None;
+        }
+        Some(IncompleteContinuationSource {
+            message_id: message_id.clone(),
+            source_run_id: envelope.scope.run_id().clone(),
+            source_turn_id: envelope.scope.turn_id()?.clone(),
+            continuation_index: *continuation_index,
+            execution_context_revision: *execution_context_revision,
+            runtime_context_revision: *runtime_context_revision,
+            policy_hash: policy_hash.clone(),
+        })
+    })
+}
+
+fn incomplete_continuation_fingerprint(
+    session_id: &SessionId,
+    source: &IncompleteContinuationSource,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"agentlibre.incomplete-continuation.v1\0");
+    for value in [
+        session_id.as_str(),
+        source.message_id.as_str(),
+        source.source_run_id.as_str(),
+        source.source_turn_id.as_str(),
+        source.policy_hash.as_str(),
+    ] {
+        digest.update(value.as_bytes());
+        digest.update(b"\0");
+    }
+    digest.update(source.continuation_index.to_le_bytes());
+    digest.update(source.execution_context_revision.to_le_bytes());
+    digest.update(source.runtime_context_revision.to_le_bytes());
+    let bytes = digest.finalize();
+    let mut rendered = String::with_capacity(7 + bytes.len() * 2);
+    rendered.push_str("sha256:");
+    use std::fmt::Write as _;
+    for byte in bytes {
+        write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    rendered
 }
 
 fn presentation_page_cursor_scope(
@@ -3470,6 +4690,7 @@ mod presentation_paging_tests {
             .collect::<Vec<_>>();
         let root = write_presentation_transcript(&session_id, &items);
         let cursor_scope = presentation_page_cursor_scope(&session_id, &daemon_instance_id);
+        let incomplete_context = empty_incomplete_context();
         let expected_keys = items
             .iter()
             .map(SessionPresentationItem::key)
@@ -3479,6 +4700,7 @@ mod presentation_paging_tests {
             snapshot.clone(),
             open_presentation_replay(&root, &session_id, None, &cursor_scope),
             &cursor_scope,
+            &incomplete_context,
         )
         .unwrap();
         assert_eq!(latest.snapshot.items.len(), MAX_PRESENTATION_ITEMS);
@@ -3496,6 +4718,7 @@ mod presentation_paging_tests {
             snapshot.clone(),
             open_presentation_replay(&root, &session_id, Some(&cursor), &cursor_scope),
             &cursor_scope,
+            &incomplete_context,
         )
         .unwrap();
         assert_eq!(older.snapshot.items.len(), 1);
@@ -3534,6 +4757,7 @@ mod presentation_paging_tests {
             .collect::<Vec<_>>();
         let root = write_presentation_transcript(&session_id, &items);
         let cursor_scope = presentation_page_cursor_scope(&session_id, &daemon_instance_id);
+        let incomplete_context = empty_incomplete_context();
         let expected_keys = items
             .iter()
             .map(SessionPresentationItem::key)
@@ -3545,6 +4769,7 @@ mod presentation_paging_tests {
                 snapshot.clone(),
                 open_presentation_replay(&root, &session_id, cursor.as_deref(), &cursor_scope),
                 &cursor_scope,
+                &incomplete_context,
             )
             .unwrap();
             let wire = crate::surface::presentation_snapshot(
@@ -3572,6 +4797,105 @@ mod presentation_paging_tests {
             expected_keys
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incomplete_item_replays_distinctly_and_claim_disables_continue() {
+        let session_id = SessionId::generate();
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
+        let message_id = MessageId::generate();
+        let attempt_id = agl_ids::AttemptId::generate();
+        let event = agl_session::ChatSessionEvent::Runtime {
+            envelope: Box::new(agl_events::EventEnvelope {
+                schema: agl_events::EVENT_SCHEMA.to_owned(),
+                event_id: EventId::generate(),
+                sequence: 1,
+                occurred_at_unix_ms: 1,
+                scope: agl_events::EventScope::builder(run_id.clone())
+                    .session_id(session_id)
+                    .turn_id(turn_id.clone())
+                    .build()
+                    .unwrap(),
+                request_id: None,
+                caused_by: None,
+                payload: agl_events::RuntimeEvent::AssistantIncomplete {
+                    message_id: message_id.clone(),
+                    content: agl_content::Content::text("bounded partial").unwrap(),
+                    source_attempt_id: attempt_id.clone(),
+                    reason: agl_events::IncompleteOutputReasonEvent::ModelLength,
+                    continuation_index: 2,
+                    execution_context_revision: 7,
+                    runtime_context_revision: 9,
+                    policy_hash: "sha256:test-policy".to_owned(),
+                },
+            }),
+        };
+        let mut context = IncompleteProjectionContext {
+            status: SessionPresentationStatus::Active,
+            execution_context_revision: 7,
+            runtime_context_revision: 9,
+            current_policy_hash: "sha256:test-policy".to_owned(),
+            claims: BTreeMap::new(),
+            current_context_messages: BTreeSet::from([message_id.clone()]),
+        };
+
+        let available = presentation_item_from_transcript_event(event.clone(), &context).unwrap();
+        assert!(matches!(
+            available,
+            SessionPresentationItem::IncompleteAssistant {
+                item: IncompleteAssistantItemView {
+                    message_id: actual_message_id,
+                    source_run_id,
+                    source_turn_id,
+                    source_attempt_id,
+                    continuation_index: 2,
+                    continue_action: ContinueActionView::Available,
+                    ..
+                }
+            } if actual_message_id == message_id
+                && source_run_id == run_id
+                && source_turn_id == turn_id
+                && source_attempt_id == attempt_id
+        ));
+
+        context.current_policy_hash = "sha256:denied-policy".to_owned();
+        let denied = presentation_item_from_transcript_event(event.clone(), &context).unwrap();
+        assert!(matches!(
+            denied,
+            SessionPresentationItem::IncompleteAssistant {
+                item: IncompleteAssistantItemView {
+                    continue_action: ContinueActionView::Unavailable {
+                        reason: ContinueUnavailableReason::PolicyDenied,
+                    },
+                    ..
+                }
+            }
+        ));
+        context.current_policy_hash = "sha256:test-policy".to_owned();
+
+        let continuation_run_id = RunId::generate();
+        context.claims.insert(
+            message_id.clone(),
+            IncompleteContinuationClaim {
+                client_submission_id: "stable".to_owned(),
+                continuation_run_id: continuation_run_id.clone(),
+                continuation_turn_id: TurnId::generate(),
+                continuation_request_id: RequestId::generate(),
+            },
+        );
+        let claimed = presentation_item_from_transcript_event(event, &context).unwrap();
+        assert!(matches!(
+            claimed,
+            SessionPresentationItem::IncompleteAssistant {
+                item: IncompleteAssistantItemView {
+                    continue_action: ContinueActionView::Claimed {
+                        continuation_run_id: actual
+                    },
+                    ..
+                }
+            } if actual == continuation_run_id
+        ));
     }
 
     fn write_presentation_transcript(
@@ -3660,6 +4984,17 @@ mod presentation_paging_tests {
         }
     }
 
+    fn empty_incomplete_context() -> IncompleteProjectionContext {
+        IncompleteProjectionContext {
+            status: SessionPresentationStatus::Active,
+            execution_context_revision: 1,
+            runtime_context_revision: 1,
+            current_policy_hash: "sha256:test-policy".to_owned(),
+            claims: BTreeMap::new(),
+            current_context_messages: BTreeSet::new(),
+        }
+    }
+
     fn empty_presentation_snapshot(
         session_id: &SessionId,
         daemon_instance_id: &DaemonInstanceId,
@@ -3681,8 +5016,9 @@ mod presentation_paging_tests {
                 operation_mode: ChatToolMode::ReadOnly,
                 selected_skills: Vec::new(),
                 runtime_context_revision: 0,
-                workspace_root: "/workspace".to_owned(),
-                cwd: "/workspace".to_owned(),
+                workspace_root: SanitizedDisplayPath::from_utf8("/workspace"),
+                workspace_history_scope: workspace_history_scope(Path::new("/workspace")),
+                cwd: SanitizedDisplayPath::from_utf8("/workspace"),
                 execution_context_revision: 0,
                 context_used_tokens: None,
                 context_limit_tokens: None,
@@ -3695,6 +5031,8 @@ mod presentation_paging_tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
+            human_commands: Vec::new(),
+            activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id.clone()),
                 session_active: true,
@@ -3708,7 +5046,7 @@ fn exit_cancellation_rank(state: RunState) -> u8 {
     match state {
         RunState::Queued | RunState::Waiting => 0,
         RunState::Running => 1,
-        RunState::Succeeded | RunState::Failed | RunState::Cancelled => 2,
+        RunState::Succeeded | RunState::Incomplete | RunState::Failed | RunState::Cancelled => 2,
     }
 }
 
@@ -3755,6 +5093,19 @@ fn terminal_application_error(error: ProcessError) -> ApplicationError {
     ApplicationError::new(code, error.message().to_owned())
 }
 
+fn human_writer_lease_application_error(error: ProcessError) -> ApplicationError {
+    if matches!(
+        error.code(),
+        ProcessErrorCode::InputLeaseBusy | ProcessErrorCode::InputLeaseExpired
+    ) {
+        return ApplicationError::new(
+            ApplicationErrorCode::WriterLeaseBusy,
+            "Human terminal writer lease is expired, replaced, or not current",
+        );
+    }
+    terminal_application_error(error)
+}
+
 fn protocol_application_error(error: ApplicationError) -> ProtocolError {
     crate::surface::protocol_error(error)
 }
@@ -3797,6 +5148,18 @@ fn application_protocol_error(error: ProtocolError) -> ApplicationError {
         ProtocolErrorCode::ModelNotInstalled => ApplicationErrorCode::ModelNotInstalled,
         ProtocolErrorCode::ModelContextTooSmall => ApplicationErrorCode::ModelContextTooSmall,
         ProtocolErrorCode::SkillNotAdmitted => ApplicationErrorCode::SkillNotAdmitted,
+        ProtocolErrorCode::IncompleteOutputNotFound => {
+            ApplicationErrorCode::IncompleteOutputNotFound
+        }
+        ProtocolErrorCode::ContinuationAlreadyClaimed => {
+            ApplicationErrorCode::ContinuationAlreadyClaimed
+        }
+        ProtocolErrorCode::StaleContinuationContext => {
+            ApplicationErrorCode::StaleContinuationContext
+        }
+        ProtocolErrorCode::ActivityCapacityExceeded => {
+            ApplicationErrorCode::ActivityCapacityExceeded
+        }
         ProtocolErrorCode::ResyncRequired => ApplicationErrorCode::ResyncRequired,
         ProtocolErrorCode::OutcomeUnknown => ApplicationErrorCode::OutcomeUnknown,
     };
@@ -3813,7 +5176,7 @@ fn execution_view(status: agl_process::ExecutionStatus) -> ExecutionView {
         execution_id: status.execution_id,
         state: status.state,
         profile: status.profile,
-        cwd: status.cwd.to_string_lossy().into_owned(),
+        cwd: SanitizedDisplayPath::from_path(&status.cwd),
         exit: status.exit,
         last_sequence: status.last_sequence,
         output_truncated: status.output_truncated || status.output_expired,
@@ -4035,6 +5398,7 @@ pub struct SharedDaemonState {
     inference_client: InferenceClientHandle,
     supervisor_handle: SupervisorHandle,
     process_handle: agl_process::ProcessHandle,
+    terminal_registry: Arc<TerminalRegistry>,
     process_read_limit: usize,
     process_input_limit: usize,
 }
@@ -4044,11 +5408,13 @@ impl SharedDaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
     ) -> Self {
         Self::from_state(DaemonState::new(
             runtime,
             inference_defaults,
             inference_client,
+            inference_status,
         ))
         .expect("test daemon state executor should initialize")
     }
@@ -4057,11 +5423,13 @@ impl SharedDaemonState {
         runtime: AgentLibreRuntimeConfig,
         inference_defaults: InferenceOptions,
         inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
     ) -> Result<Self> {
         Self::from_state(DaemonState::open(
             runtime,
             inference_defaults,
             inference_client,
+            inference_status,
         )?)
     }
 
@@ -4072,6 +5440,7 @@ impl SharedDaemonState {
         let inference_client = state.inference_client.clone();
         let supervisor_handle = state.supervisor_handle();
         let process_handle = state.process_handle();
+        let terminal_registry = Arc::clone(&state.terminal_registry);
         let process_read_limit = state.process_read_limit();
         let process_input_limit = state.process_input_limit();
         let inner = DaemonStateExecutor::spawn(state)?;
@@ -4090,6 +5459,7 @@ impl SharedDaemonState {
             inference_client,
             supervisor_handle,
             process_handle,
+            terminal_registry,
             process_read_limit,
             process_input_limit,
         })
@@ -4192,6 +5562,25 @@ impl SharedDaemonState {
 
     pub fn process_handle(&self) -> Result<agl_process::ProcessHandle> {
         Ok(self.process_handle.clone())
+    }
+
+    pub(crate) fn operator_write_attached_input(
+        &self,
+        execution_id: &ExecutionId,
+        lease: InputLease,
+        bytes: agl_process::ProcessBytes,
+        eof: bool,
+    ) -> std::result::Result<(), ProcessError> {
+        if self.terminal_registry.write_raw_human_input_if_managed(
+            execution_id,
+            lease.clone(),
+            bytes.clone(),
+            eof,
+        )? {
+            return Ok(());
+        }
+        self.process_handle
+            .operator_write(execution_id, lease, bytes, eof)
     }
 
     pub fn process_read_limit(&self) -> Result<usize> {
@@ -4407,8 +5796,129 @@ pub(crate) fn protocol_run_state(state: RunState) -> ProtocolRunState {
         RunState::Running => ProtocolRunState::Running,
         RunState::Waiting => ProtocolRunState::Waiting,
         RunState::Succeeded => ProtocolRunState::Succeeded,
+        RunState::Incomplete => ProtocolRunState::Incomplete,
         RunState::Failed => ProtocolRunState::Failed,
         RunState::Cancelled => ProtocolRunState::Cancelled,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RootActivityReservation {
+    active_nodes: usize,
+    active_bytes: usize,
+    deepest_path_nodes: usize,
+}
+
+fn root_activity_reservation(
+    delegation_plan: Option<&RuntimeDelegationPlan>,
+) -> Option<RootActivityReservation> {
+    let (max_descendants, max_depth) = match delegation_plan {
+        None => (0_usize, 0_usize),
+        Some(plan) => (
+            usize::try_from(plan.budget.max_descendants).ok()?,
+            usize::try_from(plan.budget.max_depth).ok()?,
+        ),
+    };
+    let reachable_depth = max_depth.min(max_descendants);
+    let active_nodes = max_descendants
+        .checked_mul(DESCENDANT_ACTIVE_ACTIVITY_NODES)?
+        .checked_add(ROOT_ACTIVE_ACTIVITY_NODES)?;
+    let deepest_path_nodes = reachable_depth
+        .checked_mul(DESCENDANT_ACTIVITY_PATH_NODES)?
+        .checked_add(ROOT_ACTIVITY_PATH_NODES)?;
+    let active_bytes = active_nodes
+        .checked_mul(MAX_ACTIVITY_NODE_BYTES)?
+        .checked_add(
+            deepest_path_nodes.checked_mul(MAX_RESERVED_ACTIVITY_NODE_ID_BYTES.checked_add(3)?)?,
+        )?
+        .checked_add(ACTIVE_ACTIVITY_ENCODING_OVERHEAD_BYTES)?;
+    (active_nodes <= MAX_ACTIVE_ACTIVITY_NODES
+        && active_bytes <= MAX_ACTIVE_ACTIVITY_BYTES
+        && deepest_path_nodes <= MAX_ACTIVITY_PATH_NODES)
+        .then_some(RootActivityReservation {
+            active_nodes,
+            active_bytes,
+            deepest_path_nodes,
+        })
+}
+
+fn validate_root_activity_capacity_protocol(
+    delegation_plan: Option<&RuntimeDelegationPlan>,
+) -> Result<(), ProtocolError> {
+    root_activity_reservation(delegation_plan)
+        .map(|_| ())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ProtocolErrorCode::ActivityCapacityExceeded,
+                "activity_capacity_exceeded: immutable run/delegation budget cannot fit the active activity projection",
+                false,
+            )
+        })
+}
+
+fn validate_root_activity_capacity_application(
+    delegation_plan: Option<&RuntimeDelegationPlan>,
+) -> Result<(), ApplicationError> {
+    root_activity_reservation(delegation_plan)
+        .map(|_| ())
+        .ok_or_else(|| {
+            ApplicationError::new(
+                ApplicationErrorCode::ActivityCapacityExceeded,
+                "immutable run/delegation budget cannot fit the active activity projection",
+            )
+        })
+}
+
+#[cfg(test)]
+mod root_activity_capacity_tests {
+    use super::*;
+
+    fn delegation_plan(max_depth: u32, max_descendants: u32) -> RuntimeDelegationPlan {
+        RuntimeDelegationPlan {
+            budget: agl_functions::FunctionDelegationBudget {
+                max_depth,
+                max_children_per_run: 64,
+                max_descendants,
+                max_total_output_tokens: 1,
+                timeout_seconds: 1,
+            },
+            root_subagents: Vec::new(),
+            subagent_specs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn root_without_delegation_reserves_one_full_active_path() {
+        let reservation = root_activity_reservation(None).unwrap();
+
+        assert_eq!(reservation.active_nodes, ROOT_ACTIVE_ACTIVITY_NODES);
+        assert_eq!(reservation.deepest_path_nodes, ROOT_ACTIVITY_PATH_NODES);
+        assert!(reservation.active_bytes <= MAX_ACTIVE_ACTIVITY_BYTES);
+    }
+
+    #[test]
+    fn reachable_depth_not_unreachable_manifest_depth_controls_the_path() {
+        let plan = delegation_plan(16, 4);
+        let reservation = root_activity_reservation(Some(&plan)).unwrap();
+
+        assert_eq!(reservation.deepest_path_nodes, 16);
+    }
+
+    #[test]
+    fn boundary_budget_fits_but_deeper_or_wider_topology_fails_closed() {
+        let boundary = delegation_plan(9, 49);
+        let reservation = root_activity_reservation(Some(&boundary)).unwrap();
+        assert_eq!(reservation.active_nodes, 249);
+        assert_eq!(reservation.deepest_path_nodes, 31);
+
+        let too_deep = delegation_plan(10, 49);
+        assert!(root_activity_reservation(Some(&too_deep)).is_none());
+
+        let too_wide = delegation_plan(9, 50);
+        assert!(root_activity_reservation(Some(&too_wide)).is_none());
+        let error = validate_root_activity_capacity_protocol(Some(&too_wide)).unwrap_err();
+        assert_eq!(error.code, ProtocolErrorCode::ActivityCapacityExceeded);
+        assert!(!error.retryable);
     }
 }
 
@@ -4459,7 +5969,7 @@ fn chat_tool_mode(mode: ProtocolToolMode) -> ChatToolMode {
 
 fn protocol_tool_mode(value: &str) -> Result<ProtocolToolMode, ProtocolError> {
     match value {
-        "read_only" => Ok(ProtocolToolMode::ReadOnly),
+        "read-only" => Ok(ProtocolToolMode::ReadOnly),
         "write" => Ok(ProtocolToolMode::Write),
         "execute" => Ok(ProtocolToolMode::Execute),
         "approve" => Ok(ProtocolToolMode::Approve),

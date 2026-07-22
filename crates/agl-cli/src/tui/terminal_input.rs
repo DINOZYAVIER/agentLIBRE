@@ -309,6 +309,26 @@ mod tests {
     }
 
     #[test]
+    fn escape_bang_window_is_inclusive_at_exactly_750_milliseconds() {
+        let mut within = TerminalInputGate::default();
+        assert_eq!(
+            within.handle(PhysicalInput::escape(), at(10)),
+            vec![TerminalInputAction::Forward(vec![0x1b])]
+        );
+        assert_eq!(
+            within.handle(PhysicalInput::bang(), at(760)),
+            vec![TerminalInputAction::SwitchToChat]
+        );
+
+        let mut expired = TerminalInputGate::default();
+        let _ = expired.handle(PhysicalInput::escape(), at(10));
+        assert_eq!(
+            expired.handle(PhysicalInput::bang(), at(761)),
+            vec![TerminalInputAction::Forward(vec![b'!'])]
+        );
+    }
+
+    #[test]
     fn expired_escape_window_leaves_bang_literal() {
         let mut gate = TerminalInputGate::default();
         let _ = gate.handle(PhysicalInput::escape(), at(10));
@@ -358,6 +378,30 @@ mod tests {
             gate.handle_bytes(bytes, at(0)),
             vec![TerminalInputAction::Forward(bytes.to_vec())]
         );
+    }
+
+    #[test]
+    fn raw_gate_preserves_bracketed_paste_across_every_read_boundary() {
+        let bytes = b"\x1b[200~!\r\x1b!\n\x1b[201~";
+        for split in 0..=bytes.len() {
+            let mut gate = RawTerminalInputGate::default();
+            gate.prompt_ready();
+            let actions = [
+                gate.handle_bytes(&bytes[..split], at(0)),
+                gate.handle_bytes(&bytes[split..], at(1)),
+            ]
+            .concat();
+            let mut forwarded = Vec::new();
+            for action in actions {
+                match action {
+                    TerminalInputAction::Forward(chunk) => forwarded.extend_from_slice(&chunk),
+                    TerminalInputAction::SwitchToChat => {
+                        panic!("paste switched to Chat at split {split}")
+                    }
+                }
+            }
+            assert_eq!(forwarded, bytes, "split {split}");
+        }
     }
 
     #[test]

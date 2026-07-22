@@ -13,14 +13,15 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::evidence::InferenceArtifactRoot;
-use crate::llama_cpp::NativeAbortTestProbe;
-use crate::{
+use agl_inference::evidence::InferenceArtifactRoot;
+use agl_inference::{
     ContextKey, InferenceCancellation, InferenceJob, InferenceRequest, InferenceResponse,
-    LlamaCppModelRuntime, ModelGeneration, ModelKey, ModelManager, ModelManagerError,
-    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime,
-    NoopInferenceOutputSink, RuntimeFailure, RuntimeOperation,
+    ModelGeneration, ModelKey, ModelManager, ModelManagerError, ModelManagerHandle,
+    ModelManagerOptions, ModelManagerStatus, ModelRuntime, NoopInferenceOutputSink, RuntimeFailure,
+    RuntimeOperation,
 };
+
+use super::{LlamaCppModelRuntime, NativeAbortTestProbe};
 
 const SMOKE_SCHEMA: &str = "agentlibre.smoke.agl139.v1";
 const SMOKE_TASK_ID: &str = "AGL-139";
@@ -75,19 +76,24 @@ impl ModelRuntime for ObservedRuntime {
     type Model = ObservedModel;
     type Context = ObservedContext;
 
+    fn device_inventory(
+        &mut self,
+    ) -> std::result::Result<Vec<agl_inference::InferenceDeviceInfo>, RuntimeFailure> {
+        self.inner.device_inventory()
+    }
+
     fn load_model(
         &mut self,
-        key: &ModelKey,
-        config: &ResolvedInferenceConfig,
+        job: &InferenceJob,
     ) -> std::result::Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
-        let RuntimeOperation { value, log } = self.inner.load_model(key, config)?;
+        let RuntimeOperation { value, log } = self.inner.load_model(job)?;
         lock_observations(&self.observations)
             .model_load_digests
-            .push(key.digest().to_string());
+            .push(job.model_key().digest().to_string());
         Ok(RuntimeOperation::new(
             ObservedModel {
                 inner: Some(value),
-                digest: key.digest().to_string(),
+                digest: job.model_key().digest().to_string(),
                 observations: Arc::clone(&self.observations),
             },
             log,
@@ -166,6 +172,39 @@ impl ModelRuntime for ObservedRuntime {
             ));
         };
         self.inner.clear_context(native_model, native_context)
+    }
+
+    fn release_context(
+        &mut self,
+        model: &mut Self::Model,
+        context: &mut Self::Context,
+    ) -> std::result::Result<RuntimeOperation<()>, RuntimeFailure> {
+        let Some(native_model) = model.inner.as_mut() else {
+            return Err(RuntimeFailure::new(
+                "observed native model was already dropped",
+                "",
+            ));
+        };
+        let Some(native_context) = context.inner.as_mut() else {
+            return Err(RuntimeFailure::new(
+                "observed native context was already dropped",
+                "",
+            ));
+        };
+        self.inner.release_context(native_model, native_context)
+    }
+
+    fn release_model(
+        &mut self,
+        model: &mut Self::Model,
+    ) -> std::result::Result<RuntimeOperation<()>, RuntimeFailure> {
+        let Some(native_model) = model.inner.as_mut() else {
+            return Err(RuntimeFailure::new(
+                "observed native model was already dropped",
+                "",
+            ));
+        };
+        self.inner.release_model(native_model)
     }
 }
 
@@ -252,6 +291,7 @@ struct SmokeCounterSummary {
     context_loads: u64,
     cached_contexts_before_shutdown: usize,
     completed_jobs: u64,
+    incomplete_jobs: u64,
     cancellations: u64,
     deadline_exceeded: u64,
     failures: u64,
@@ -715,6 +755,10 @@ fn validate_smoke_outcomes(
         status.completed_jobs == 3,
         "unexpected successful job count"
     );
+    ensure!(
+        status.incomplete_jobs == 0,
+        "unexpected incomplete job count"
+    );
     ensure!(status.cancellations == 2, "cancellation accounting drifted");
     ensure!(
         status.deadline_exceeded == 0 && status.failures == 0,
@@ -827,6 +871,7 @@ fn build_summary(
             context_loads: status.context_loads,
             cached_contexts_before_shutdown: status.cached_contexts,
             completed_jobs: status.completed_jobs,
+            incomplete_jobs: status.incomplete_jobs,
             cancellations: status.cancellations,
             deadline_exceeded: status.deadline_exceeded,
             failures: status.failures,

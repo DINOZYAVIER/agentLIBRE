@@ -52,22 +52,28 @@ fn launch_main() -> Result<i32> {
     configure_parent_death(expected_parent)?;
     let control_fd = parse_control_fd()?;
     let (request, mut descriptors): (LauncherRequest, Vec<OwnedFd>) =
-        wire::receive_json_with_fds(control_fd, 3)?;
+        wire::receive_json_with_fds(control_fd, 4)?;
     if let Err(error) = request.validate_launcher_identity() {
         return send_failure_and_return(control_fd, error);
     }
-    if !(2..=3).contains(&descriptors.len()) {
+    let expected_descriptors = 2_usize
+        .saturating_add(usize::from(request.has_private_environment))
+        .saturating_add(usize::from(request.has_shell_integration));
+    if descriptors.len() != expected_descriptors {
         return send_failure_and_return(
             control_fd,
             ProcessError::new(
                 ProcessErrorCode::LauncherProtocol,
-                "process launcher requires admitted working-directory and executable handles plus at most one private environment handle",
+                "process launcher received the wrong admitted descriptor layout",
             ),
         );
     }
     let cwd = descriptors.remove(0);
     let program = descriptors.remove(0);
-    let mut private_environment = descriptors.pop();
+    let mut private_environment = request
+        .has_private_environment
+        .then(|| descriptors.remove(0));
+    let mut shell_integration = request.has_shell_integration.then(|| descriptors.remove(0));
     if let Err(error) = request.request.validate() {
         return send_failure_and_return(control_fd, error);
     }
@@ -128,12 +134,14 @@ fn launch_main() -> Result<i32> {
             &cwd,
             &program,
             private_environment.take(),
+            shell_integration.take(),
         );
         unsafe { libc::_exit(mirror_wait_status(status)) }
     }
 
     drop(namespace_parent_liveness);
     drop(private_environment);
+    drop(shell_integration);
     drop(exec_write);
     io.close_target_side();
     let setup = await_exec_handshake(&exec_read, Duration::from_millis(request.setup_timeout_ms));
@@ -170,6 +178,7 @@ fn namespace_init(
     cwd: &OwnedFd,
     program: &OwnedFd,
     mut private_environment: Option<OwnedFd>,
+    mut shell_integration: Option<OwnedFd>,
 ) -> i32 {
     if let Err(error) = sandbox::prepare_pid_namespace(request) {
         write_exec_failure(exec_write.as_raw_fd(), &error);
@@ -181,6 +190,50 @@ fn namespace_init(
         None
     };
     install_signal_forwarders();
+    if let Some(socket) = shell_integration.take() {
+        let Some(terminal_slave) = io.target.first().map(AsRawFd::as_raw_fd) else {
+            write_exec_failure(
+                exec_write.as_raw_fd(),
+                &ProcessError::new(
+                    ProcessErrorCode::IoModeMismatch,
+                    "managed shell integration requires one PTY slave",
+                ),
+            );
+            return exit_status(125);
+        };
+        let relay_pid = unsafe { libc::fork() };
+        if relay_pid < 0 {
+            write_exec_failure(
+                exec_write.as_raw_fd(),
+                &last_os_error(
+                    ProcessErrorCode::SpawnFailed,
+                    "failed to fork managed-shell integration relay",
+                ),
+            );
+            return exit_status(125);
+        }
+        if relay_pid == 0 {
+            drop(private_environment);
+            drop(exec_write);
+            io.close_supervisor_side();
+            close_descriptors_except(&[socket.as_raw_fd(), terminal_slave]);
+            let event_path = request
+                .private_home
+                .join("agl-terminal/integration.events.fifo");
+            let control_path = request
+                .private_home
+                .join("agl-terminal/integration.controls.fifo");
+            let status = super::shell_integration::run_shell_integration_relay(
+                socket,
+                terminal_slave,
+                &event_path,
+                &control_path,
+                crate::terminal::shell::MAX_SHELL_INTEGRATION_FRAME_BYTES,
+            );
+            unsafe { libc::_exit(status) }
+        }
+        drop(socket);
+    }
     let target_pid = unsafe { libc::fork() };
     if target_pid < 0 {
         let error = last_os_error(
@@ -1214,6 +1267,8 @@ mod tests {
             private_home: cwd.join("unused-private-home"),
             private_tmp: cwd.join("unused-private-tmp"),
             setup_timeout_ms: 1_000,
+            has_private_environment: true,
+            has_shell_integration: false,
         };
         request.request.validate().unwrap();
         request

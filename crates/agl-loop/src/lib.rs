@@ -6,9 +6,10 @@ pub use agl_capabilities::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookMessage, HookResult, HookStatus,
 };
 pub use agl_turn::{
-    HookBatchOutcome, HookBatchSummary, HookResultSummary, ModelRequest, ModelResponse, StopDetail,
-    StopReason, ToolDispatchRequest, ToolDispatchResponse, TurnHookBatch, TurnInput, TurnMessage,
-    TurnOutput, TurnPhase, TurnTransition, TurnTransitionRecord, VisibleTool,
+    HookBatchOutcome, HookBatchSummary, HookResultSummary, IncompleteOutputReason, ModelRequest,
+    ModelResponse, ModelResponseOutcome, StopDetail, StopReason, ToolDispatchRequest,
+    ToolDispatchResponse, TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnPhase,
+    TurnTransition, TurnTransitionRecord, VisibleTool,
 };
 pub use effect::{
     EffectFailure, EffectFailureCode, EffectKey, EffectOutcome, HookEffectOutput, TurnAdvance,

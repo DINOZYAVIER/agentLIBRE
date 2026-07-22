@@ -24,11 +24,16 @@ pub(crate) struct FilterReport {
 #[derive(Clone, Debug)]
 enum ParserState {
     Ground,
+    Utf8 {
+        bytes: Vec<u8>,
+        expected_len: usize,
+    },
     Escape(Vec<u8>),
     Csi(Vec<u8>),
     BlockedString {
         kind: StringKind,
         saw_escape: bool,
+        utf8_remaining: u8,
         length: usize,
         overflow_reported: bool,
     },
@@ -190,6 +195,36 @@ impl TerminalOutputFilter {
         let state = std::mem::replace(&mut self.state, ParserState::Ground);
         self.state = match state {
             ParserState::Ground => self.accept_ground(byte, output),
+            ParserState::Utf8 {
+                mut bytes,
+                expected_len,
+            } => {
+                if (0x80..=0xbf).contains(&byte) {
+                    bytes.push(byte);
+                    if bytes.len() == expected_len {
+                        match std::str::from_utf8(&bytes) {
+                            Ok(text) if !text.chars().any(char::is_control) => {
+                                output.extend_from_slice(&bytes);
+                            }
+                            Ok(_) => {
+                                self.blocked_total = self.blocked_total.saturating_add(1);
+                            }
+                            Err(_) => {
+                                self.malformed_total = self.malformed_total.saturating_add(1);
+                            }
+                        }
+                        ParserState::Ground
+                    } else {
+                        ParserState::Utf8 {
+                            bytes,
+                            expected_len,
+                        }
+                    }
+                } else {
+                    self.malformed_total = self.malformed_total.saturating_add(1);
+                    self.accept_ground(byte, output)
+                }
+            }
             ParserState::Escape(mut sequence) => {
                 if byte == b'[' {
                     sequence.push(byte);
@@ -199,6 +234,7 @@ impl TerminalOutputFilter {
                     ParserState::BlockedString {
                         kind,
                         saw_escape: false,
+                        utf8_remaining: 0,
                         length: 2,
                         overflow_reported: false,
                     }
@@ -243,6 +279,7 @@ impl TerminalOutputFilter {
             ParserState::BlockedString {
                 kind,
                 mut saw_escape,
+                mut utf8_remaining,
                 mut length,
                 mut overflow_reported,
             } => {
@@ -251,16 +288,33 @@ impl TerminalOutputFilter {
                     self.malformed_total = self.malformed_total.saturating_add(1);
                     overflow_reported = true;
                 }
-                let terminated = byte == C1_ST
-                    || (kind == StringKind::Osc && byte == BEL)
-                    || (saw_escape && byte == b'\\');
+                let byte_is_utf8_payload = if utf8_remaining > 0 {
+                    if (0x80..=0xbf).contains(&byte) {
+                        utf8_remaining -= 1;
+                        true
+                    } else {
+                        self.malformed_total = self.malformed_total.saturating_add(1);
+                        utf8_remaining = 0;
+                        false
+                    }
+                } else if let Some(remaining) = utf8_continuation_count(byte) {
+                    utf8_remaining = remaining;
+                    true
+                } else {
+                    false
+                };
+                let terminated = !byte_is_utf8_payload
+                    && (byte == C1_ST
+                        || (kind == StringKind::Osc && byte == BEL)
+                        || (saw_escape && byte == b'\\'));
                 if terminated {
                     ParserState::Ground
                 } else {
-                    saw_escape = byte == ESC;
+                    saw_escape = !byte_is_utf8_payload && byte == ESC;
                     ParserState::BlockedString {
                         kind,
                         saw_escape,
+                        utf8_remaining,
                         length,
                         overflow_reported,
                     }
@@ -284,10 +338,23 @@ impl TerminalOutputFilter {
                         _ => StringKind::Sos,
                     },
                     saw_escape: false,
+                    utf8_remaining: 0,
                     length: 1,
                     overflow_reported: false,
                 }
             }
+            0xc2..=0xdf => ParserState::Utf8 {
+                bytes: vec![byte],
+                expected_len: 2,
+            },
+            0xe0..=0xef => ParserState::Utf8 {
+                bytes: vec![byte],
+                expected_len: 3,
+            },
+            0xf0..=0xf4 => ParserState::Utf8 {
+                bytes: vec![byte],
+                expected_len: 4,
+            },
             BEL | C1_ST | 0x00 | 0x7f => {
                 self.blocked_total = self.blocked_total.saturating_add(1);
                 ParserState::Ground
@@ -298,6 +365,10 @@ impl TerminalOutputFilter {
             }
             0x01..=0x06 | 0x10..=0x1a | 0x1c..=0x1f => {
                 self.blocked_total = self.blocked_total.saturating_add(1);
+                ParserState::Ground
+            }
+            0x80..=0x9f | 0xa0..=0xbf | 0xc0..=0xc1 | 0xf5..=0xff => {
+                self.malformed_total = self.malformed_total.saturating_add(1);
                 ParserState::Ground
             }
             _ => {
@@ -384,6 +455,15 @@ impl TerminalOutputFilter {
         {
             self.modify_other_keys = Some(sequence.to_vec());
         }
+    }
+}
+
+fn utf8_continuation_count(byte: u8) -> Option<u8> {
+    match byte {
+        0xc2..=0xdf => Some(1),
+        0xe0..=0xef => Some(2),
+        0xf0..=0xf4 => Some(3),
+        _ => None,
     }
 }
 
@@ -484,6 +564,39 @@ mod tests {
     }
 
     #[test]
+    fn concrete_host_effect_protocols_are_blocked_at_every_chunk_boundary() {
+        let input = b"a\x1b]52;c;Y2xpcGJvYXJk\x07\
+                      b\x1b]0;window title\x1b\\\
+                      c\x1b]1337;File=name=dGVzdA==:cGF5bG9hZA==\x07\
+                      d\x1bPqSIXEL_PAYLOAD\x1b\\\
+                      e\x1b_Gf=100;KITTY_IMAGE\x1b\\\
+                      f\x1b^PRIVATE_MESSAGE\x1b\\\
+                      g";
+        for split in 0..=input.len() {
+            let report = filtered_in_splits(input, split, true);
+            assert_eq!(report.bytes, b"abcdefg", "split {split}");
+            assert_eq!(report.blocked_sequences, 6, "split {split}");
+            assert_eq!(report.malformed_sequences, 0, "split {split}");
+        }
+    }
+
+    #[test]
+    fn safe_terminal_queries_survive_every_chunk_boundary_only_while_visible() {
+        let input = b"a\x1b[c b\x1b[>c c\x1b[5n d\x1b[6n e\x1b[?6n f";
+        for split in 0..=input.len() {
+            let visible = filtered_in_splits(input, split, true);
+            assert_eq!(visible.bytes, input, "visible split {split}");
+            assert_eq!(visible.blocked_sequences, 0, "visible split {split}");
+            assert_eq!(visible.malformed_sequences, 0, "visible split {split}");
+
+            let hidden = filtered_in_splits(input, split, false);
+            assert_eq!(hidden.bytes, b"a b c d e f", "hidden split {split}");
+            assert_eq!(hidden.blocked_sequences, 5, "hidden split {split}");
+            assert_eq!(hidden.malformed_sequences, 0, "hidden split {split}");
+        }
+    }
+
+    #[test]
     fn device_queries_are_allowed_only_while_visible_and_window_ops_are_blocked() {
         let input = b"x\x1b[6ny\x1b[8;40;120tz";
         let mut hidden = TerminalOutputFilter::new(false);
@@ -522,12 +635,13 @@ mod tests {
     #[test]
     fn touched_interactive_modes_can_be_suspended_for_chat_and_restored() {
         let mut filter = TerminalOutputFilter::new(true);
-        let controls = b"\x1b=\x1b[?1049h\x1b[?1000;1006h\x1b[?25l\x1b[?2004h";
+        let controls = b"\x1b=\x1b[?1049h\x1b[?1000;1004;1006h\x1b[?25l\x1b[?2004h";
         assert_eq!(filter.filter(controls).bytes, controls);
 
         let chat = String::from_utf8(filter.chat_mode_restore_bytes()).unwrap();
         assert!(chat.contains("\x1b[?1049l"));
         assert!(chat.contains("\x1b[?1000l"));
+        assert!(chat.contains("\x1b[?1004l"));
         assert!(chat.contains("\x1b[?1006l"));
         assert!(chat.contains("\x1b[?25h"));
         assert!(chat.contains("\x1b[?2004h"));
@@ -536,6 +650,7 @@ mod tests {
         let terminal = String::from_utf8(filter.terminal_mode_restore_bytes()).unwrap();
         assert!(terminal.contains("\x1b[?1049h"));
         assert!(terminal.contains("\x1b[?1000h"));
+        assert!(terminal.contains("\x1b[?1004h"));
         assert!(terminal.contains("\x1b[?1006h"));
         assert!(terminal.contains("\x1b[?25l"));
         assert!(terminal.ends_with("\x1b="));
@@ -575,5 +690,63 @@ mod tests {
                 .unwrap()
                 .contains("\x1b[<u")
         );
+    }
+
+    #[test]
+    fn printable_unicode_survives_every_chunk_boundary_without_c1_reinterpretation() {
+        let input = "plain · שלום · мир · 界 · 👩‍💻\n".as_bytes();
+        assert!(input.contains(&C1_OSC));
+        for split in 0..=input.len() {
+            let report = filtered_in_splits(input, split, true);
+            assert_eq!(report.bytes, input, "split {split}");
+            assert_eq!(report.blocked_sequences, 0, "split {split}");
+            assert_eq!(report.malformed_sequences, 0, "split {split}");
+        }
+    }
+
+    #[test]
+    fn raw_c1_effects_are_blocked_but_utf8_continuation_bytes_are_data() {
+        let raw_c1 = b"before\x9d52;c;secret\x07after";
+        let report = filtered_in_splits(raw_c1, 7, true);
+        assert_eq!(report.bytes, b"beforeafter");
+        assert_eq!(report.blocked_sequences, 1);
+
+        let printable = "beforeם52;c;visible\u{7}after".as_bytes();
+        assert!(printable.windows(2).any(|bytes| bytes == [0xd7, C1_OSC]));
+        for split in 0..=printable.len() {
+            let report = filtered_in_splits(printable, split, true);
+            assert_eq!(
+                report.bytes,
+                "beforeם52;c;visibleafter".as_bytes(),
+                "split {split}"
+            );
+            assert_eq!(report.blocked_sequences, 1, "split {split}");
+            assert_eq!(report.malformed_sequences, 0, "split {split}");
+        }
+    }
+
+    #[test]
+    fn utf8_continuations_cannot_terminate_a_blocked_control_string() {
+        let input = "a\u{1b}]52;c;שלם;still-secret\u{7}z".as_bytes();
+        assert!(input.contains(&C1_ST));
+        for split in 0..=input.len() {
+            let report = filtered_in_splits(input, split, true);
+            assert_eq!(report.bytes, b"az", "split {split}");
+            assert_eq!(report.blocked_sequences, 1, "split {split}");
+            assert_eq!(report.malformed_sequences, 0, "split {split}");
+        }
+    }
+
+    #[test]
+    fn encoded_unicode_c1_and_malformed_utf8_fail_closed_without_hiding_later_controls() {
+        let mut filter = TerminalOutputFilter::new(true);
+        let report = filter.filter(b"a\xc2\x9db\xf5\x1b]0;title\x07c");
+        assert_eq!(report.bytes, b"abc");
+        assert_eq!(report.blocked_sequences, 2);
+        assert_eq!(report.malformed_sequences, 1);
+
+        let mut incomplete = TerminalOutputFilter::new(true);
+        assert!(incomplete.filter(b"ok\xf0\x9f").bytes.ends_with(b"ok"));
+        assert_eq!(incomplete.finish().malformed_sequences, 1);
     }
 }

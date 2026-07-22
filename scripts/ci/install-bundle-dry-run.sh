@@ -7,6 +7,7 @@ source "$script_dir/lib.sh"
 
 ci_cd_repo
 ci_need_tool flock
+ci_need_tool cc
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -25,21 +26,29 @@ output="$(
 )"
 
 launcher_command="--path $AGL_CI_REPO_ROOT/crates/agl-process --bin agl-process-launcher"
+worker_command="--path $AGL_CI_REPO_ROOT/crates/agl-inference-worker --bin agl-inference-worker"
 agl_command="--path $AGL_CI_REPO_ROOT/crates/agl-cli --bin agl"
 stage_root="$install_root/libexec/agentlibre/generations/.staging.DRY-RUN/.cargo-root"
 [[ "$output" == *"$launcher_command"* ]] ||
   ci_fail "install plan omitted the process launcher: $output"
+[[ "$output" == *"$worker_command"* ]] ||
+  ci_fail "install plan omitted the private inference worker: $output"
 [[ "$output" == *"$agl_command"* ]] ||
   ci_fail "install plan omitted agl: $output"
 [[ "$output" == *"--root $stage_root"* ]] ||
-  ci_fail "install plan did not stage both binaries below the selected root: $output"
+  ci_fail "install plan did not stage all runtime binaries below the selected root: $output"
+[[ "$output" == *"$AGL_CI_REPO_ROOT/target/release/agl-inference-native"* ]] ||
+  ci_fail "install plan omitted the exact native inference bundle: $output"
+[[ "$output" == *"pin exact Nix runtime references below final generation .nix-gc-roots"* ]] ||
+  ci_fail "install plan omitted Nix GC portability for external ELF references: $output"
 [[ "$output" == *"publish complete generation through $install_root/libexec/agentlibre/current"* ]] ||
   ci_fail "install plan omitted the atomic current publication: $output"
 
 launcher_line="$(printf '%s\n' "$output" | grep -n -F -- "$launcher_command" | cut -d: -f1)"
+worker_line="$(printf '%s\n' "$output" | grep -n -F -- "$worker_command" | cut -d: -f1)"
 agl_line="$(printf '%s\n' "$output" | grep -n -F -- "$agl_command" | cut -d: -f1)"
-[[ "$launcher_line" -lt "$agl_line" ]] ||
-  ci_fail "install plan must stage the launcher before agl: $output"
+[[ "$launcher_line" -lt "$worker_line" && "$worker_line" -lt "$agl_line" ]] ||
+  ci_fail "install plan must stage the launcher and worker before agl: $output"
 
 default_root="$tmp_dir/default-cargo-home"
 default_output="$(
@@ -57,7 +66,17 @@ default_output="$(
 
 fake_bin="$tmp_dir/fake-bin"
 llama_bin="$tmp_dir/llama/bin"
-mkdir -p "$fake_bin" "$llama_bin"
+fake_target="$tmp_dir/fake-target"
+fake_bundle_digest="$(printf 'a%.0s' {1..64})"
+fake_native_bundle="$fake_target/release/agl-inference-native/sha256-$fake_bundle_digest"
+fake_other_bundle="$fake_target/release/agl-inference-native/sha256-$(printf 'c%.0s' {1..64})"
+case "$(uname -m)" in
+  x86_64) fake_dynamic_linker="/lib64/ld-linux-x86-64.so.2" ;;
+  aarch64) fake_dynamic_linker="/lib/ld-linux-aarch64.so.1" ;;
+  *) ci_fail "unsupported fixture architecture: $(uname -m)" ;;
+esac
+mkdir -p "$fake_bin" "$llama_bin" "$fake_native_bundle" "$fake_other_bundle"
+printf 'unselected build variant\n' >"$fake_other_bundle/not-a-runtime-library"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -euo pipefail' \
@@ -73,8 +92,19 @@ printf '%s\n' \
   '[[ -n "$root" && -n "$bin" ]]' \
   'mkdir -p "$root/bin"' \
   'label="${FAKE_BUNDLE_LABEL:-new}"' \
-  'printf '\''#!/usr/bin/env bash\nif [[ "${AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE:-}" == "1" && "${FAKE_IDENTITY_FAIL:-}" == "1" ]]; then exit 43; fi\nprintf "%%s\\n" "%s"\n'\'' "$label" >"$root/bin/$bin"' \
-  'chmod 0755 "$root/bin/$bin"' \
+  'if [[ "$bin" == "agl-inference-worker" ]]; then' \
+  '  source_file="$CARGO_TARGET_DIR/fake-inference-worker.c"' \
+  '  compiler="${CC:-cc}"' \
+  '  nix_rpath_guard="NIX_DONT_SET_RPATH_$("$compiler" -dumpmachine | tr - _)"' \
+  '  printf '\''#include <stdio.h>\nint main(void) { puts("%s"); return 0; }\n'\'' "$label" >"$source_file"' \
+  '  env "$nix_rpath_guard=1" "$compiler" "$source_file" -Wl,--dynamic-linker,"${FAKE_DYNAMIC_LINKER:?}" -Wl,-rpath,"\$ORIGIN/agl-inference-native/sha256-${FAKE_BUNDLE_DIGEST:?}" -o "$root/bin/$bin"' \
+  'else' \
+  '  printf '\''#!/usr/bin/env bash\nif [[ "${AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE:-}" == "1" && "${FAKE_IDENTITY_FAIL:-}" == "1" ]]; then exit 43; fi\nprintf "%%s\\n" "%s"\n'\'' "$label" >"$root/bin/$bin"' \
+  '  chmod 0755 "$root/bin/$bin"' \
+  'fi' \
+  'alias_path="$CARGO_TARGET_DIR/fake-profile-alias-$bin"' \
+  'rm -f -- "$alias_path"' \
+  'ln -- "$root/bin/$bin" "$alias_path"' \
   'if [[ "${FAKE_CARGO_FAIL_BIN:-}" == "$bin" ]]; then' \
   '  exit "${FAKE_CARGO_FAIL_STATUS:-42}"' \
   'fi' \
@@ -90,6 +120,19 @@ for library in \
 do
   : >"$llama_bin/$library"
 done
+
+for library in \
+  libllama-common.so.0 \
+  libmtmd.so.0 \
+  libllama.so.0 \
+  libggml.so.0 \
+  libggml-base.so.0 \
+  libggml-cpu-test.so
+do
+  : >"$fake_native_bundle/$library"
+  chmod 0555 "$fake_native_bundle/$library"
+done
+chmod 0555 "$fake_native_bundle"
 
 write_bundle_binary() {
   local path="$1"
@@ -114,6 +157,9 @@ run_fake_installer() {
     HOME="$tmp_dir/home" \
     XDG_STATE_HOME="$tmp_dir/state" \
     AGL_LLAMA_CPP_BUILD_DIR="$tmp_dir/llama" \
+    FAKE_BUNDLE_DIGEST="$fake_bundle_digest" \
+    FAKE_DYNAMIC_LINKER="$fake_dynamic_linker" \
+    CARGO_TARGET_DIR="$fake_target" \
     "$@" \
     scripts/install-agl-cargo.sh \
       --root "$root" \
@@ -128,16 +174,47 @@ assert_current_complete() {
   local generation
   local agl_label
   local launcher_label
+  local worker_label
 
   [[ -L "$current" ]] || ci_fail "missing atomic current pointer under $root"
   generation="$(readlink -f -- "$current")"
   [[ -x "$generation/agl" ]] || ci_fail "current generation has no agl under $root"
   [[ -x "$generation/agl-process-launcher" ]] ||
     ci_fail "current generation has no launcher under $root"
+  [[ -x "$generation/agl-inference-worker" ]] ||
+    ci_fail "current generation has no private inference worker under $root"
+  for executable in \
+    "$generation/agl" \
+    "$generation/agl-process-launcher" \
+    "$generation/agl-inference-worker"
+  do
+    [[ "$(stat -c '%a' -- "$executable")" == 555 &&
+      "$(stat -c '%h' -- "$executable")" == 1 ]] ||
+      ci_fail "current generation executable retained a writable build-tree alias: $executable"
+  done
+  [[ -d "$generation/agl-inference-native" && ! -L "$generation/agl-inference-native" ]] ||
+    ci_fail "current generation has no exact native inference bundle under $root"
+  [[ "$(stat -c '%a' -- "$generation/agl-inference-native")" == 555 ]] ||
+    ci_fail "current generation native inference bundle is mutable under $root"
+  local published_leaf_count
+  published_leaf_count="$(
+    find "$generation/agl-inference-native" -mindepth 1 -maxdepth 1 -type d -printf . |
+      wc -c
+  )"
+  [[ "$published_leaf_count" -eq 1 ]] ||
+    ci_fail "current generation published an unselected native build variant under $root"
+  local selected_native_bundle="$generation/agl-inference-native/sha256-$fake_bundle_digest"
+  [[ -d "$selected_native_bundle" && ! -L "$selected_native_bundle" &&
+    "$(stat -c '%a' -- "$selected_native_bundle")" == 555 ]] ||
+    ci_fail "current generation has no sealed content-addressed native inference leaf under $root"
+  [[ -f "$selected_native_bundle/libggml-cpu-test.so" ]] ||
+    ci_fail "current generation native inference bundle has no CPU backend under $root"
   agl_label="$("$generation/agl" --version)"
   launcher_label="$("$generation/agl-process-launcher")"
-  [[ "$agl_label" == "$expected" && "$launcher_label" == "$expected" ]] ||
-    ci_fail "current resolved an incomplete or mixed pair under $root: $agl_label/$launcher_label"
+  worker_label="$("$generation/agl-inference-worker")"
+  [[ "$agl_label" == "$expected" && "$launcher_label" == "$expected" &&
+    "$worker_label" == "$expected" ]] ||
+    ci_fail "current resolved an incomplete or mixed bundle under $root: $agl_label/$launcher_label/$worker_label"
 }
 
 assert_surface_label() {
@@ -150,6 +227,8 @@ assert_surface_label() {
   launcher_label="$("$root/bin/agl-process-launcher")"
   [[ "$agl_label" == "$expected" && "$launcher_label" == "$expected" ]] ||
     ci_fail "public commands resolved an incomplete or mixed pair under $root: $agl_label/$launcher_label"
+  [[ ! -e "$root/bin/agl-inference-worker" && ! -L "$root/bin/agl-inference-worker" ]] ||
+    ci_fail "private inference worker leaked onto the public command surface under $root"
 }
 
 assert_surface_runnable_count() {
@@ -163,6 +242,8 @@ assert_surface_runnable_count() {
   if [[ -x "$root/bin/agl-process-launcher" ]]; then
     count=$((count + 1))
   fi
+  [[ ! -e "$root/bin/agl-inference-worker" && ! -L "$root/bin/agl-inference-worker" ]] ||
+    ci_fail "private inference worker leaked onto the public command surface under $root"
   [[ "$count" -eq "$expected" ]] ||
     ci_fail "expected $expected runnable public commands under $root, found $count"
 }
@@ -176,6 +257,8 @@ assert_stable_links() {
     ci_fail "process launcher is not a stable managed symlink under $root"
   [[ "$(readlink -- "$root/bin/agl-process-launcher")" == "../libexec/agentlibre/current/agl-process-launcher" ]] ||
     ci_fail "process launcher does not route through the current pointer under $root"
+  [[ ! -e "$root/bin/agl-inference-worker" && ! -L "$root/bin/agl-inference-worker" ]] ||
+    ci_fail "private inference worker has a public managed link under $root"
 }
 
 assert_managed_ancestor_security() {
@@ -280,6 +363,21 @@ assert_surface_label "$unmanaged_root" old
   ci_fail "unmanaged rejection unexpectedly published current"
 [[ -z "$(find "$unmanaged_root/libexec/agentlibre/generations" -mindepth 1 -print -quit)" ]] ||
   ci_fail "unmanaged rejection unexpectedly staged a generation"
+
+public_worker_root="$tmp_dir/public-worker"
+run_fake_installer "$public_worker_root" FAKE_BUNDLE_LABEL=old >"$tmp_dir/public-worker-seed.out"
+write_bundle_binary "$public_worker_root/bin/agl-inference-worker" leaked
+public_worker_status=0
+run_fake_installer "$public_worker_root" FAKE_BUNDLE_LABEL=new \
+  >"$tmp_dir/public-worker.out" \
+  2>"$tmp_dir/public-worker.err" || public_worker_status=$?
+[[ "$public_worker_status" -eq 1 ]] ||
+  ci_fail "installer accepted a public inference worker command"
+grep -F "refusing a public inference worker command" "$tmp_dir/public-worker.err" >/dev/null ||
+  ci_fail "public inference worker rejection was not actionable"
+rm -f -- "$public_worker_root/bin/agl-inference-worker"
+assert_current_complete "$public_worker_root" old
+assert_surface_label "$public_worker_root" old
 
 symlink_root="$tmp_dir/symlink-root"
 symlink_root_outside="$tmp_dir/symlink-root-outside"
@@ -390,9 +488,12 @@ run_fake_installer "$publish_root" FAKE_BUNDLE_LABEL=new >"$tmp_dir/publish-new.
 assert_stable_links "$publish_root"
 assert_current_complete "$publish_root" new
 assert_surface_label "$publish_root" new
-[[ -x "$old_generation/agl" && -x "$old_generation/agl-process-launcher" ]] ||
+[[ -x "$old_generation/agl" && -x "$old_generation/agl-process-launcher" &&
+  -x "$old_generation/agl-inference-worker" ]] ||
   ci_fail "managed update did not retain its prior immutable generation"
-[[ "$($old_generation/agl --version)" == old && "$($old_generation/agl-process-launcher)" == old ]] ||
+[[ "$($old_generation/agl --version)" == old &&
+  "$($old_generation/agl-process-launcher)" == old &&
+  "$($old_generation/agl-inference-worker)" == old ]] ||
   ci_fail "managed update mutated its prior immutable generation"
 [[ "$(stat -c '%a' -- "$publish_root/.agentlibre-runtime.lock")" == 600 ]] ||
   ci_fail "runtime bundle lock is not private"

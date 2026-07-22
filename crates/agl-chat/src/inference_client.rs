@@ -6,8 +6,8 @@ use agl_config::ResolvedInferenceConfig;
 use agl_ids::SessionId;
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    ContextKey, InferenceCancellation, InferenceJob, InferenceOutputSink, InferenceRequest,
-    InferenceResponse, ModelManagerHandle, ModelManagerStatus,
+    ContextKey, InferenceCancellation, InferenceDeviceInfo, InferenceJob, InferenceOutputSink,
+    InferenceRequest, InferenceResponse, ModelManagerHandle, ModelManagerStatus,
 };
 use anyhow::{Result, ensure};
 
@@ -42,6 +42,14 @@ impl std::fmt::Debug for ChatInferenceJob {
 }
 
 pub trait InferenceClient: Send + Sync + 'static {
+    #[cfg(not(test))]
+    fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>>;
+
+    #[cfg(test)]
+    fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>> {
+        Ok(Vec::new())
+    }
+
     fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse>;
 
     fn clear_context(&self, config: &ResolvedInferenceConfig, session_id: &SessionId)
@@ -72,6 +80,10 @@ impl InferenceClientHandle {
         self.inner.generate(job)
     }
 
+    pub fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>> {
+        self.inner.device_inventory()
+    }
+
     pub fn clear_context(
         &self,
         config: &ResolvedInferenceConfig,
@@ -94,6 +106,10 @@ impl InferenceClientHandle {
 }
 
 impl InferenceClient for ModelManagerHandle {
+    fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>> {
+        Ok(ModelManagerHandle::device_inventory(self)?)
+    }
+
     fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse> {
         ensure_managed_session(&job.session_id, job.request.session_id.as_ref())?;
         let context_key = ContextKey::for_conversation(&job.config, job.session_id.as_str())?;
@@ -198,5 +214,56 @@ mod tests {
         assert!(ensure_managed_session(&managed, Some(&managed)).is_ok());
         assert!(ensure_managed_session(&managed, Some(&other)).is_err());
         assert!(ensure_managed_session(&managed, None).is_err());
+    }
+
+    #[test]
+    fn handle_forwards_host_safe_device_inventory() {
+        struct InventoryClient;
+
+        impl InferenceClient for InventoryClient {
+            fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>> {
+                Ok(vec![InferenceDeviceInfo {
+                    physical_device_id: "physical-test-0".to_string(),
+                    driver_build_id: "sha256:test-driver".to_string(),
+                    backend_name: "fake0".to_string(),
+                    description: "Fake accelerator".to_string(),
+                    kind: agl_inference::InferenceDeviceKind::Accelerator,
+                    free_memory_bytes: 10,
+                    total_memory_bytes: 20,
+                    usable: true,
+                    supports_gpu_offload: true,
+                }])
+            }
+
+            fn generate(&self, _job: ChatInferenceJob) -> Result<InferenceResponse> {
+                anyhow::bail!("inventory forwarding test does not generate")
+            }
+
+            fn clear_context(
+                &self,
+                _config: &ResolvedInferenceConfig,
+                _session_id: &SessionId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            fn release_context(
+                &self,
+                _config: &ResolvedInferenceConfig,
+                _session_id: &SessionId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            fn status(&self) -> Result<ModelManagerStatus> {
+                Ok(ModelManagerStatus::default())
+            }
+        }
+
+        let devices = InferenceClientHandle::new(InventoryClient)
+            .device_inventory()
+            .unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].physical_device_id, "physical-test-0");
     }
 }

@@ -12,6 +12,8 @@ pub(crate) fn transcript_event(
             runtime_transcript_event(*envelope, include_content)
         }
         ChatSessionEvent::ContextCleared { .. } => Some(TranscriptEvent::ContextCleared),
+        ChatSessionEvent::IncompleteContinuationClaimed { .. }
+        | ChatSessionEvent::IncompleteContinuationInputStarted { .. } => None,
         ChatSessionEvent::SessionFinished { reason, .. } => {
             Some(TranscriptEvent::SessionFinished {
                 reason: match reason {
@@ -55,6 +57,29 @@ fn runtime_transcript_event(
             run_id,
             turn_id,
             message_id,
+            content: include_content.then_some(content),
+        }),
+        RuntimeEvent::AssistantIncomplete {
+            message_id,
+            content,
+            source_attempt_id,
+            reason,
+            continuation_index,
+            ..
+        } => Some(TranscriptEvent::AssistantIncomplete {
+            run_id,
+            turn_id,
+            message_id,
+            source_attempt_id,
+            reason: match reason {
+                agl_events::IncompleteOutputReasonEvent::ModelLength => {
+                    agl_protocol::IncompleteOutputReason::ModelLength
+                }
+                agl_events::IncompleteOutputReasonEvent::ContentByteLimit => {
+                    agl_protocol::IncompleteOutputReason::ContentByteLimit
+                }
+            },
+            continuation_index,
             content: include_content.then_some(content),
         }),
         RuntimeEvent::AssistantToolCall {

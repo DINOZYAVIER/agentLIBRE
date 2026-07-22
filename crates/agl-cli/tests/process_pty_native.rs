@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
 use agl_config::ResolvedInferenceConfig;
 use agl_ids::{ExecutionId, RunId, SessionId, StepId};
-use agl_inference::{InferenceResponse, ModelManagerStatus};
+use agl_inference::{InferenceResponse, ModelManagerStatus, WorkerRuntimeStatusHandle};
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
     ExecutionOwner, ExecutionProfile, ExecutionRequest, ExecutionState, TerminalSize,
@@ -25,6 +25,10 @@ const DETACH: u8 = 0x1d;
 struct NoInference;
 
 impl InferenceClient for NoInference {
+    fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
+        Ok(Vec::new())
+    }
+
     fn generate(&self, _job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
         anyhow::bail!("native process attach test never invokes inference")
     }
@@ -83,6 +87,7 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
         runtime.clone(),
         InferenceOptions::default(),
         InferenceClientHandle::new(NoInference),
+        WorkerRuntimeStatusHandle::default(),
     )
     .unwrap();
     let process = state.process_handle().unwrap();
@@ -155,6 +160,21 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
     first.wait_for(b"resized=100x40\r\n");
     first.write(b"hello\n");
     first.wait_for(b"reply:hello\r\n");
+    first.write(b"emit-terminal-effects\n");
+    first.wait_for(b"filter-beforefilter-after\r\n");
+    for private_payload in [
+        b"PRIVATE_CLIPBOARD".as_slice(),
+        b"PRIVATE_TITLE".as_slice(),
+        b"PRIVATE_DCS".as_slice(),
+        b"PRIVATE_APC".as_slice(),
+        b"PRIVATE_PM".as_slice(),
+    ] {
+        assert!(
+            !contains(&first.output, private_payload),
+            "standalone process attach exposed a blocked terminal payload: {}",
+            String::from_utf8_lossy(private_payload)
+        );
+    }
     first.write(&[DETACH]);
     let first_output = first.finish();
     first.assert_termios_restored();

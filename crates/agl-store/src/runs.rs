@@ -1502,7 +1502,9 @@ fn finish_linked_idempotency(
     now_ms: i64,
 ) -> Result<()> {
     let status = match state {
-        RunState::Succeeded | RunState::Cancelled => IdempotencyStatus::Completed,
+        RunState::Succeeded | RunState::Incomplete | RunState::Cancelled => {
+            IdempotencyStatus::Completed
+        }
         RunState::Failed => IdempotencyStatus::Failed,
         _ => return Ok(()),
     };
