@@ -819,6 +819,12 @@ echo "installed process launcher: $installed_launcher -> $resolved_launcher"
 echo "installed private inference worker: $resolved_worker"
 run "$installed_agl" --version
 
+systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
+if [[ -f "$systemd_user_dir/agentlibre-daemon.socket" ]]; then
+  echo "A preserved agentLIBRE user socket may still be stopped after a clean uninstall."
+  echo "Start it with: systemctl --user start agentlibre-daemon.socket"
+fi
+
 trap - EXIT HUP INT TERM
 if [[ ":$PATH:" != *":$install_bin:"* ]]; then
   echo "The install directory is not on PATH." >&2

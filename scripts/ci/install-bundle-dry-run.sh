@@ -544,6 +544,15 @@ assert_surface_label "$publish_root" new
 [[ "$(stat -c '%a' -- "$publish_root/.agentlibre-runtime.lock")" == 600 ]] ||
   ci_fail "runtime bundle lock is not private"
 
+mkdir -p "$tmp_dir/home/.config/systemd/user"
+: >"$tmp_dir/home/.config/systemd/user/agentlibre-daemon.socket"
+socket_hint_root="$tmp_dir/socket-hint"
+run_fake_installer "$socket_hint_root" FAKE_BUNDLE_LABEL=hint \
+  >"$tmp_dir/socket-hint.out"
+grep -F "systemctl --user start agentlibre-daemon.socket" \
+  "$tmp_dir/socket-hint.out" >/dev/null ||
+  ci_fail "installer omitted the preserved socket restart hint"
+
 declare -A fresh_fault_runnable=(
   [after-generation-ready]=0
   [before-initial-links]=0

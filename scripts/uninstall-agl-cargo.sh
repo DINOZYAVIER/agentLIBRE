@@ -392,3 +392,8 @@ rmdir -- "$runtime_dir"
 rm -f -- "$runtime_lock"
 
 echo "removed managed agentLIBRE runtime bundle from $cargo_root"
+systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
+if [[ -f "$systemd_user_dir/agentlibre-daemon.socket" ]]; then
+  echo "preserved agentlibre-daemon.socket remains stopped"
+  echo "after reinstalling, start it with: systemctl --user start agentlibre-daemon.socket"
+fi
