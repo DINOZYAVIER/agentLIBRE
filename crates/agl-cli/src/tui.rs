@@ -29,10 +29,10 @@ use agl_protocol::{
     ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest,
     HumanTerminalCommandSubmitRequest, HumanTerminalEnsureRequest, HumanTerminalEnsuredEvent,
     KillMode, ProcessBytes, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
-    RunSubscribeRequest, SessionLaunchOptions, SessionPresentationItem, SessionPresentationRequest,
-    SessionPresentationSnapshot, SessionPresentationSubscribeRequest, SessionSelector,
-    StructuredEnvironmentOverlay, TerminalOwnerView, TerminalPromptState, TerminalSessionView,
-    TerminalSize,
+    RunSubscribeRequest, RunSubscriptionFinishedEvent, SessionLaunchOptions,
+    SessionPresentationItem, SessionPresentationRequest, SessionPresentationSnapshot,
+    SessionPresentationSubscribeRequest, SessionSelector, StructuredEnvironmentOverlay,
+    TerminalOwnerView, TerminalPromptState, TerminalSessionView, TerminalSize,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context as _, Result, bail};
@@ -75,6 +75,7 @@ const MAX_LIVE_ASSISTANT_DELTAS: usize = 8;
 const MAX_LIVE_ASSISTANT_DELTA_BYTES: usize = 1024 * 1024;
 const MAX_PICKER_ENTRIES: usize = 256;
 const MAX_PICKER_PAGES: usize = 8;
+const MAX_RUN_FINISHED_NOTICE_BYTES: usize = 4 * 1024;
 const CHAT_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const CHAT_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SHELL_STARTUP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -3032,13 +3033,8 @@ fn spawn_prompt(
         };
         while let Ok(Some(event)) = run.next().await {
             if let RunSubscriptionEvent::Finished(finished) = event {
-                if finished.state != ProtocolRunState::Succeeded {
-                    let _ = sender
-                        .send(UiAsyncEvent::Notice(format!(
-                            "turn finished: {:?}",
-                            finished.state
-                        )))
-                        .await;
+                if let Some(notice) = run_finished_notice(&finished) {
+                    let _ = sender.send(UiAsyncEvent::Notice(notice)).await;
                 }
                 break;
             }
@@ -3065,6 +3061,97 @@ fn spawn_prompt(
             }
         }
     });
+}
+
+fn run_finished_notice(finished: &RunSubscriptionFinishedEvent) -> Option<String> {
+    let prefix = match finished.state {
+        ProtocolRunState::Succeeded => return None,
+        ProtocolRunState::Incomplete => "turn incomplete".to_owned(),
+        ProtocolRunState::Failed => "turn failed".to_owned(),
+        ProtocolRunState::Cancelled => "turn cancelled".to_owned(),
+        state => format!("turn finished: {state:?}"),
+    };
+    let message_budget = MAX_RUN_FINISHED_NOTICE_BYTES.saturating_sub(prefix.len() + 2);
+    if let Some(message) = finished
+        .error_message
+        .as_deref()
+        .and_then(|message| sanitize_notice_detail(message, message_budget))
+    {
+        return Some(format!("{prefix}: {message}"));
+    }
+    let code_budget = MAX_RUN_FINISHED_NOTICE_BYTES.saturating_sub(prefix.len() + 3);
+    if let Some(code) = finished
+        .error_code
+        .as_deref()
+        .and_then(|code| sanitize_notice_detail(code, code_budget))
+    {
+        return Some(format!("{prefix} ({code})"));
+    }
+    Some(prefix)
+}
+
+fn sanitize_notice_detail(value: &str, maximum_bytes: usize) -> Option<String> {
+    const ELLIPSIS: &str = "…";
+
+    let value = value.trim();
+    if value.is_empty() || maximum_bytes == 0 {
+        return None;
+    }
+    let mut output = String::new();
+    let mut truncated = false;
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        let fragment = if character.is_control() || is_unicode_format_control(character as u32) {
+            format!("\\u{{{:X}}}", character as u32)
+        } else {
+            character.to_string()
+        };
+        let truncation_reserve = if characters.peek().is_some() {
+            ELLIPSIS.len()
+        } else {
+            0
+        };
+        if output
+            .len()
+            .saturating_add(fragment.len())
+            .saturating_add(truncation_reserve)
+            > maximum_bytes
+        {
+            truncated = true;
+            break;
+        }
+        output.push_str(&fragment);
+    }
+    if truncated && output.len().saturating_add(ELLIPSIS.len()) <= maximum_bytes {
+        output.push_str(ELLIPSIS);
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+fn is_unicode_format_control(code: u32) -> bool {
+    matches!(
+        code,
+        0x00ad
+            | 0x061c
+            | 0x06dd
+            | 0x070f
+            | 0x180e
+            | 0xfeff
+            | 0x110bd
+            | 0x110cd
+            | 0xe0001
+            | 0x0600..=0x0605
+            | 0x0890..=0x0891
+            | 0x08e2
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfff9..=0xfffb
+            | 0x13430..=0x1343f
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+    )
 }
 
 async fn continue_incomplete_output(
@@ -5118,6 +5205,109 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     const PANIC_GUARD_CHILD_ENV: &str = "AGL_INTERNAL_TUI_PANIC_GUARD_CHILD";
+
+    #[test]
+    fn failed_run_notice_prefers_and_renders_the_detailed_message() {
+        let message = "inference resource admission failed (accelerator_capacity_exceeded): \
+            inference needs 23347593216 bytes with 0 already reserved, but only 23093305344 \
+            bytes are available under 2659721216 bytes of device pressure";
+        let finished = RunSubscriptionFinishedEvent {
+            run_id: RunId::generate(),
+            state: ProtocolRunState::Failed,
+            last_sequence: 4,
+            terminal_result: None,
+            error_code: Some("accelerator_capacity_exceeded".to_owned()),
+            error_message: Some(message.to_owned()),
+        };
+
+        assert_eq!(
+            run_finished_notice(&finished),
+            Some(format!("turn failed: {message}"))
+        );
+
+        let mut state = test_ui_state(SessionId::generate(), Vec::new());
+        state.notice(run_finished_notice(&finished).unwrap());
+        let backend = ratatui::backend::TestBackend::new(160, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_transcript(frame, frame.area(), &state))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("turn failed: inference resource admission failed"));
+        assert!(rendered.contains("23093305344"));
+    }
+
+    #[test]
+    fn failed_run_notice_falls_back_to_code_then_state() {
+        let mut finished = RunSubscriptionFinishedEvent {
+            run_id: RunId::generate(),
+            state: ProtocolRunState::Failed,
+            last_sequence: 0,
+            terminal_result: None,
+            error_code: Some("worker_lost".to_owned()),
+            error_message: Some("  ".to_owned()),
+        };
+
+        assert_eq!(
+            run_finished_notice(&finished),
+            Some("turn failed (worker_lost)".to_owned())
+        );
+        finished.error_code = None;
+        assert_eq!(
+            run_finished_notice(&finished),
+            Some("turn failed".to_owned())
+        );
+    }
+
+    #[test]
+    fn failed_run_notice_sanitizes_and_bounds_untrusted_protocol_text() {
+        let hostile = format!(
+            "osc=\u{1b}]52;c;secret\u{7}\ncolor=\u{1b}[31m bidi=\u{202e} {}",
+            "x".repeat(MAX_RUN_FINISHED_NOTICE_BYTES * 2)
+        );
+        let mut finished = RunSubscriptionFinishedEvent {
+            run_id: RunId::generate(),
+            state: ProtocolRunState::Failed,
+            last_sequence: 4,
+            terminal_result: None,
+            error_code: Some(hostile.clone()),
+            error_message: Some(hostile),
+        };
+
+        for use_message in [true, false] {
+            if !use_message {
+                finished.error_message = Some("  ".to_owned());
+            }
+            let notice = run_finished_notice(&finished).unwrap();
+            assert!(notice.len() <= MAX_RUN_FINISHED_NOTICE_BYTES);
+            assert!(notice.contains("\\u{1B}]52;c;secret\\u{7}\\u{A}"));
+            assert!(notice.contains("\\u{202E}"));
+            assert!(!notice.chars().any(|character| {
+                character.is_control() || is_unicode_format_control(character as u32)
+            }));
+            assert!(notice.contains('…'));
+        }
+    }
+
+    #[test]
+    fn succeeded_run_has_no_failure_notice() {
+        let finished = RunSubscriptionFinishedEvent {
+            run_id: RunId::generate(),
+            state: ProtocolRunState::Succeeded,
+            last_sequence: 1,
+            terminal_result: None,
+            error_code: Some("ignored".to_owned()),
+            error_message: Some("ignored".to_owned()),
+        };
+
+        assert_eq!(run_finished_notice(&finished), None);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
