@@ -390,6 +390,9 @@ run_fake_installer "$obsolete_root" FAKE_BUNDLE_LABEL=new \
 grep -F "agentLIBRE alpha installers do not migrate obsolete runtime generations" \
   "$tmp_dir/obsolete.err" >/dev/null ||
   ci_fail "obsolete managed-generation rejection was not actionable"
+grep -F "scripts/uninstall-agl-cargo.sh --root $obsolete_root --apply" \
+  "$tmp_dir/obsolete.err" >/dev/null ||
+  ci_fail "obsolete managed-generation rejection omitted the explicit uninstaller"
 for obsolete_artifact in \
   "$obsolete_root/bin/agl" \
   "$obsolete_root/bin/agl-process-launcher" \

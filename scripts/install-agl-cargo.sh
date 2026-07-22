@@ -446,6 +446,9 @@ reject_obsolete_two_binary_generation() {
   echo "  $installed_launcher" >&2
   echo "  $current_link" >&2
   echo "  $generation" >&2
+  echo "preview and remove the complete managed surface with:" >&2
+  printf '  %q --root %q\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
+  printf '  %q --root %q --apply\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
   fail "then rerun the installer"
 }
 
