@@ -260,6 +260,7 @@ if [[ "$dry_run" -eq 1 ]]; then
     "$native_bundle_build_base" "$dry_stage_root/bin/agl-inference-native"
   printf '+ pin exact Nix runtime references below final generation .nix-gc-roots\n'
   printf '+ publish complete generation through %q\n' "$current_link"
+  printf '+ reconcile an exact preserved agentlibre-daemon.service/socket pair after publication\n'
   exit 0
 fi
 
@@ -402,6 +403,54 @@ validate_generation() {
   validate_native_bundle \
     "$generation/agl-inference-native" \
     "$generation/agl-inference-worker"
+}
+
+is_obsolete_two_binary_generation() {
+  local generation="$1"
+  local entry
+  local name
+  local entry_count=0
+  [[ -d "$generation" && ! -L "$generation" &&
+    "$(stat -c '%a' -- "$generation")" == 555 &&
+    "$(stat -c '%u' -- "$generation")" == "$(id -u)" ]] ||
+    return 1
+  for name in agl agl-process-launcher; do
+    entry="$generation/$name"
+    [[ -f "$entry" && -x "$entry" && ! -L "$entry" &&
+      "$(stat -c '%a' -- "$entry")" == 555 &&
+      "$(stat -c '%u' -- "$entry")" == "$(id -u)" &&
+      "$(stat -c '%h' -- "$entry")" == 1 ]] ||
+      return 1
+  done
+  shopt -s nullglob
+  for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
+    case "${entry##*/}" in
+      agl | agl-process-launcher) ;;
+      *)
+        shopt -u nullglob
+        return 1
+        ;;
+    esac
+    entry_count=$((entry_count + 1))
+  done
+  shopt -u nullglob
+  (( entry_count == 2 ))
+}
+
+reject_obsolete_two_binary_generation() {
+  local generation="$1"
+  is_obsolete_two_binary_generation "$generation" || return 0
+  echo "existing managed runtime uses an obsolete two-binary alpha layout" >&2
+  echo "agentLIBRE alpha installers do not migrate obsolete runtime generations" >&2
+  echo "move or remove all of these managed artifacts before a clean install:" >&2
+  echo "  $installed_agl" >&2
+  echo "  $installed_launcher" >&2
+  echo "  $current_link" >&2
+  echo "  $generation" >&2
+  echo "preview and remove the complete managed surface with:" >&2
+  printf '  %q --root %q\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
+  printf '  %q --root %q --apply\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
+  fail "then rerun the installer"
 }
 
 validate_native_bundle() {
@@ -586,6 +635,7 @@ resolve_current_generation() {
   resolved="$(readlink -f -- "$current_link")" || fail "runtime current pointer is broken: $current_link"
   [[ "$(dirname -- "$resolved")" == "$generations_dir" ]] ||
     fail "runtime current pointer escapes the generations directory: $current_link"
+  reject_obsolete_two_binary_generation "$resolved"
   validate_generation "$resolved"
   validate_nix_runtime_roots "$resolved"
   printf '%s\n' "$resolved"
@@ -769,6 +819,90 @@ echo "installed agl: $installed_agl -> $resolved_agl"
 echo "installed process launcher: $installed_launcher -> $resolved_launcher"
 echo "installed private inference worker: $resolved_worker"
 run "$installed_agl" --version
+
+systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
+standard_service_unit="agentlibre-daemon.service"
+standard_socket_unit="agentlibre-daemon.socket"
+standard_service_file="$systemd_user_dir/$standard_service_unit"
+standard_socket_file="$systemd_user_dir/$standard_socket_unit"
+
+systemd_reconciliation_failed() {
+  fail "runtime publication succeeded; systemd reconciliation failed: $*"
+}
+
+standard_unit_file_is_safe() {
+  local path="$1"
+  local mode
+  [[ -f "$path" && ! -L "$path" && "$(stat -c '%u' -- "$path")" == "$(id -u)" ]] ||
+    return 1
+  mode="$(stat -c '%a' -- "$path")"
+  (( (8#$mode & 0022) == 0 ))
+}
+
+loaded_unit_is_exact() {
+  local unit="$1"
+  local expected_fragment="$2"
+  local expected_exec_prefix="${3:-}"
+  local details
+  local fragment=""
+  local dropins=""
+  local exec_start=""
+  local key
+  local value
+  details="$(systemctl --user show "$unit" -p FragmentPath -p DropInPaths -p ExecStart 2>/dev/null)" ||
+    return 10
+  while IFS='=' read -r key value; do
+    case "$key" in
+      FragmentPath) fragment="$value" ;;
+      DropInPaths) dropins="$value" ;;
+      ExecStart) exec_start="$value" ;;
+    esac
+  done <<<"$details"
+  [[ "$fragment" == "$expected_fragment" && -z "$dropins" ]] || return 11
+  [[ -z "$expected_exec_prefix" || "$exec_start" == "$expected_exec_prefix"* ]] || return 11
+}
+
+if [[ -e "$standard_service_file" || -L "$standard_service_file" ||
+      -e "$standard_socket_file" || -L "$standard_socket_file" ]]; then
+  if ! standard_unit_file_is_safe "$standard_service_file" ||
+    ! standard_unit_file_is_safe "$standard_socket_file" ||
+    ! grep -Fqx "Requires=$standard_socket_unit" "$standard_service_file" ||
+    ! grep -Fqx "Service=$standard_service_unit" "$standard_socket_file" ||
+    ! grep -Fqx "Accept=no" "$standard_socket_file"; then
+    echo "preserved agentLIBRE user units are customized; leaving their lifecycle unchanged"
+  elif ! command -v systemctl >/dev/null 2>&1; then
+    systemd_reconciliation_failed "systemctl is unavailable for the preserved standard unit pair"
+  else
+    expected_service_exec="{ path=$installed_agl ; argv[]=$installed_agl serve --systemd-activation "
+    loaded_pair_status=0
+    loaded_unit_is_exact "$standard_service_unit" "$standard_service_file" \
+      "$expected_service_exec" || loaded_pair_status=$?
+    if (( loaded_pair_status == 0 )); then
+      loaded_unit_is_exact "$standard_socket_unit" "$standard_socket_file" || loaded_pair_status=$?
+    fi
+    (( loaded_pair_status != 10 )) ||
+      systemd_reconciliation_failed "could not query the preserved standard unit pair"
+    if (( loaded_pair_status != 0 )); then
+      echo "preserved agentLIBRE user units are not the exact loaded standard pair; leaving their lifecycle unchanged"
+    else
+    systemctl --user daemon-reload ||
+      systemd_reconciliation_failed "daemon-reload failed"
+    loaded_unit_is_exact "$standard_service_unit" "$standard_service_file" \
+      "$expected_service_exec" &&
+      loaded_unit_is_exact "$standard_socket_unit" "$standard_socket_file" ||
+      systemd_reconciliation_failed "the loaded standard unit pair changed during daemon-reload"
+    systemctl --user reset-failed "$standard_service_unit" "$standard_socket_unit" ||
+      systemd_reconciliation_failed "reset-failed failed for the standard unit pair"
+    systemctl --user start "$standard_socket_unit" ||
+      systemd_reconciliation_failed "could not start the standard daemon socket"
+    systemctl --user try-restart "$standard_service_unit" ||
+      systemd_reconciliation_failed "could not replace the active standard daemon service"
+    systemctl --user is-active --quiet "$standard_socket_unit" ||
+      systemd_reconciliation_failed "the standard daemon socket is not active after start"
+    echo "reconciled standard agentLIBRE user units with the installed generation"
+    fi
+  fi
+fi
 
 trap - EXIT HUP INT TERM
 if [[ ":$PATH:" != *":$install_bin:"* ]]; then

@@ -8,6 +8,10 @@ Usage:
 
 Installs paired user-systemd socket and service units for `agl serve`.
 
+If VK_DRIVER_FILES is present, its explicit Vulkan driver manifest selection is
+captured in the service. VK_ICD_FILENAMES is accepted only when
+VK_DRIVER_FILES is absent and is normalized to VK_DRIVER_FILES in the unit.
+
 Options:
   --unit NAME           systemd user service unit name
   --cwd PATH            working directory for the service
@@ -55,6 +59,16 @@ workspace_root="${AGL_DAEMON_WORKSPACE_ROOT:-$cwd}"
 max_output_tokens="${AGL_DAEMON_MAX_OUTPUT_TOKENS:-256}"
 tool_mode="${AGL_DAEMON_TOOL_MODE:-read-only}"
 log_filter="${AGL_LOG:-agentlibre=info,warn}"
+vulkan_driver_files=""
+vulkan_driver_environment=""
+vulkan_environment_line="UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"$'\n'
+if [[ -v VK_DRIVER_FILES ]]; then
+  vulkan_driver_files="$VK_DRIVER_FILES"
+  vulkan_driver_environment="VK_DRIVER_FILES"
+elif [[ -v VK_ICD_FILENAMES ]]; then
+  vulkan_driver_files="$VK_ICD_FILENAMES"
+  vulkan_driver_environment="VK_ICD_FILENAMES"
+fi
 enable=0
 restart=0
 dry_run=0
@@ -404,6 +418,32 @@ case "$tool_mode" in
 esac
 
 agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
+if [[ -n "$vulkan_driver_environment" ]]; then
+  if [[ -z "$vulkan_driver_files" ||
+        "$vulkan_driver_files" == *[[:cntrl:]]* ||
+        "$vulkan_driver_files" == :* ||
+        "$vulkan_driver_files" == *: ||
+        "$vulkan_driver_files" == *::* ]]; then
+    echo "$vulkan_driver_environment must select nonempty colon-separated Vulkan manifest paths without control characters" >&2
+    exit 2
+  fi
+  vulkan_driver_files_bytes="$(LC_ALL=C printf '%s' "$vulkan_driver_files" | wc -c)"
+  if (( vulkan_driver_files_bytes > 32 * 1024 )); then
+    echo "$vulkan_driver_environment must be at most 32768 bytes" >&2
+    exit 2
+  fi
+  IFS=: read -r -a vulkan_driver_manifests <<<"$vulkan_driver_files"
+  if (( ${#vulkan_driver_manifests[@]} > 16 )); then
+    echo "$vulkan_driver_environment must select at most 16 Vulkan manifests" >&2
+    exit 2
+  fi
+  for vulkan_driver_manifest in "${vulkan_driver_manifests[@]}"; do
+    agl_systemd_validate_absolute_path "$vulkan_driver_environment entry" "$vulkan_driver_manifest"
+    agl_systemd_require_file "$dry_run" "$vulkan_driver_manifest" "Vulkan driver manifest"
+  done
+  vulkan_environment_line="Environment=$(agl_systemd_quote "VK_DRIVER_FILES=$vulkan_driver_files")"$'\n'
+  vulkan_environment_line+="UnsetEnvironment=VK_ICD_FILENAMES"$'\n'
+fi
 agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_dir "$dry_run" "$workspace_root" "workspace root"
 agl_systemd_require_executable "$dry_run" "$binary"
@@ -432,7 +472,7 @@ UMask=0077
 WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
-ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --config $(agl_systemd_quote "$config") --workspace-root $(agl_systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
+${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --config $(agl_systemd_quote "$config") --workspace-root $(agl_systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
 Restart=on-failure
 RestartSec=5
 "
@@ -469,6 +509,11 @@ echo "workspace root: $workspace_root"
 echo "max output tokens: $max_output_tokens"
 echo "tool mode: $tool_mode"
 echo "log filter: $log_filter"
+if [[ -n "$vulkan_driver_environment" ]]; then
+  echo "Vulkan driver manifests: $vulkan_driver_files (from $vulkan_driver_environment)"
+else
+  echo "Vulkan driver manifests: none (CPU-only discovery)"
+fi
 echo "unit file: $unit_file"
 echo "socket unit file: $socket_unit_file"
 
