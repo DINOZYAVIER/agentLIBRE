@@ -6,11 +6,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agl_content::Content;
 use agl_events::{EventEnvelope, RuntimeEvent, RuntimeEventEnvelope};
-use agl_ids::{MessageId, RunId, SessionId, TurnId};
+use agl_ids::{MessageId, RequestId, RunId, SessionId, TurnId};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::fsm::{ChatSessionMachine, ChatSessionTransition, ChatSessionTransitionRecord};
+use crate::fsm::{
+    ChatSessionMachine, ChatSessionPhase, ChatSessionTransition, ChatSessionTransitionRecord,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +99,20 @@ pub enum ChatSessionEvent {
     ContextCleared {
         session_id: SessionId,
     },
+    IncompleteContinuationClaimed {
+        session_id: SessionId,
+        message_id: MessageId,
+        client_submission_id: String,
+        continuation_run_id: RunId,
+        continuation_turn_id: TurnId,
+        continuation_request_id: RequestId,
+    },
+    IncompleteContinuationInputStarted {
+        session_id: SessionId,
+        source_message_id: MessageId,
+        continuation_run_id: RunId,
+        continuation_turn_id: TurnId,
+    },
     SessionFinished {
         session_id: SessionId,
         reason: AgentLibreSessionFinishReason,
@@ -118,6 +134,17 @@ pub struct ChatSessionStore {
 }
 
 const REVERSE_REPLAY_READ_CHUNK_BYTES: usize = 64 * 1024;
+
+type ContinuationClaimIdentity = (String, RunId, TurnId, RequestId);
+type ContinuationInputIdentity = (RunId, TurnId);
+
+#[derive(Default)]
+struct ContinuationReplayState {
+    incomplete_messages: BTreeSet<MessageId>,
+    available_incomplete: BTreeSet<MessageId>,
+    claims: BTreeMap<MessageId, ContinuationClaimIdentity>,
+    inputs: BTreeMap<MessageId, ContinuationInputIdentity>,
+}
 
 impl ChatSessionReverseReader {
     pub fn transcript_len(&self) -> u64 {
@@ -649,16 +676,11 @@ impl ChatSessionStore {
     }
 
     pub fn read_replay(&self) -> Result<ChatSessionReplay> {
-        let content = match std::fs::read_to_string(&self.transcript_jsonl) {
-            Ok(content) => content,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => Err(err).with_context(|| {
-                format!(
-                    "failed to read chat transcript {}",
-                    self.transcript_jsonl.display()
-                )
-            })?,
-        };
+        let content = read_transcript_text(&self.transcript_jsonl)?;
+        self.parse_replay_content(&content)
+    }
+
+    fn parse_replay_content(&self, content: &str) -> Result<ChatSessionReplay> {
         ensure!(
             content.is_empty() || content.ends_with('\n'),
             "chat transcript {} ends with an incomplete JSONL record",
@@ -668,6 +690,7 @@ impl ChatSessionStore {
         let mut events = Vec::new();
         let mut run_sequences = BTreeMap::new();
         let mut event_ids = BTreeSet::new();
+        let mut continuation_state = ContinuationReplayState::default();
         for (line_index, line) in content.lines().enumerate() {
             ensure!(
                 !line.trim().is_empty(),
@@ -695,6 +718,15 @@ impl ChatSessionStore {
                     line_index + 1
                 )
             })?;
+            validate_continuation_replay_record(&event, &mut continuation_state).with_context(
+                || {
+                    format!(
+                        "invalid chat transcript {} line {}",
+                        self.transcript_jsonl.display(),
+                        line_index + 1
+                    )
+                },
+            )?;
             events.push(event);
         }
 
@@ -748,6 +780,227 @@ impl ChatSessionStore {
         self.append_runtime_envelope(envelope)?;
         self.apply(ChatSessionTransition::PromptForInput)?;
         Ok(())
+    }
+
+    pub fn append_incomplete_assistant_message(
+        &mut self,
+        envelope: RuntimeEventEnvelope,
+    ) -> Result<()> {
+        let (message_id, content) = match &envelope.payload {
+            RuntimeEvent::AssistantIncomplete {
+                message_id,
+                content,
+                ..
+            } => (message_id.clone(), content.clone()),
+            _ => bail!("expected assistant_incomplete runtime transcript envelope"),
+        };
+        let (run_id, turn_id) = self.runtime_identity(&envelope)?;
+        self.apply(ChatSessionTransition::RecordAssistantAnswer {
+            run_id,
+            turn_id,
+            message_id,
+            content,
+        })?;
+        self.append_runtime_envelope(envelope)?;
+        self.apply(ChatSessionTransition::PromptForInput)?;
+        Ok(())
+    }
+
+    pub fn append_incomplete_continuation_claim(
+        &mut self,
+        message_id: MessageId,
+        client_submission_id: String,
+        continuation_run_id: RunId,
+        continuation_turn_id: TurnId,
+        continuation_request_id: RequestId,
+    ) -> Result<()> {
+        validate_continuation_submission_id(&client_submission_id)?;
+        let event = ChatSessionEvent::IncompleteContinuationClaimed {
+            session_id: self.session_id().clone(),
+            message_id: message_id.clone(),
+            client_submission_id: client_submission_id.clone(),
+            continuation_run_id: continuation_run_id.clone(),
+            continuation_turn_id: continuation_turn_id.clone(),
+            continuation_request_id: continuation_request_id.clone(),
+        };
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&self.transcript_jsonl).with_context(|| {
+            format!(
+                "failed to open chat transcript {}",
+                self.transcript_jsonl.display()
+            )
+        })?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &self.transcript_jsonl,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        #[cfg(unix)]
+        lock_transcript_file(&file)?;
+        let append_result = (|| {
+            file.seek(SeekFrom::Start(0))?;
+            let mut content = String::new();
+            file.read_to_string(&mut content)
+                .context("failed to read chat transcript while claiming continuation")?;
+            let replay = self.parse_replay_content(&content)?;
+            let mut continuation_state = ContinuationReplayState::default();
+            for existing in &replay.events {
+                validate_continuation_replay_record(existing, &mut continuation_state)?;
+            }
+            ensure!(
+                continuation_state.incomplete_messages.contains(&message_id),
+                "continuation claim references a missing incomplete assistant message"
+            );
+            if let Some((
+                existing_submission_id,
+                existing_run_id,
+                existing_turn_id,
+                existing_request_id,
+            )) = continuation_state.claims.get(&message_id)
+            {
+                ensure!(
+                    existing_submission_id == &client_submission_id
+                        && existing_run_id == &continuation_run_id
+                        && existing_turn_id == &continuation_turn_id
+                        && existing_request_id == &continuation_request_id,
+                    "incomplete assistant message already has a different continuation claim"
+                );
+                return Ok(());
+            }
+            ensure!(
+                continuation_state
+                    .available_incomplete
+                    .contains(&message_id),
+                "continuation claim references an unavailable incomplete assistant message"
+            );
+            let mut line = serde_json::to_vec(&event).context("failed to serialize chat event")?;
+            line.push(b'\n');
+            file.write_all(&line)
+                .context("failed to write chat event")?;
+            file.flush().context("failed to flush chat transcript")?;
+            file.sync_data()
+                .context("failed to durably sync continuation claim")
+        })();
+        #[cfg(unix)]
+        let unlock_result = unlock_transcript_file(&file);
+        append_result?;
+        #[cfg(unix)]
+        unlock_result?;
+        Ok(())
+    }
+
+    pub fn begin_incomplete_continuation_input(
+        &mut self,
+        source_message_id: MessageId,
+        continuation_run_id: RunId,
+        continuation_turn_id: TurnId,
+        continuation_request_id: &RequestId,
+    ) -> Result<()> {
+        let event = ChatSessionEvent::IncompleteContinuationInputStarted {
+            session_id: self.session_id().clone(),
+            source_message_id: source_message_id.clone(),
+            continuation_run_id: continuation_run_id.clone(),
+            continuation_turn_id: continuation_turn_id.clone(),
+        };
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&self.transcript_jsonl).with_context(|| {
+            format!(
+                "failed to open chat transcript {}",
+                self.transcript_jsonl.display()
+            )
+        })?;
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &self.transcript_jsonl,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )?;
+        #[cfg(unix)]
+        lock_transcript_file(&file)?;
+        let prepare_result = (|| {
+            file.seek(SeekFrom::Start(0))?;
+            let mut content = String::new();
+            file.read_to_string(&mut content)
+                .context("failed to read chat transcript while beginning continuation input")?;
+            let replay = self.parse_replay_content(&content)?;
+            let mut continuation_state = ContinuationReplayState::default();
+            for existing in &replay.events {
+                validate_continuation_replay_record(existing, &mut continuation_state)?;
+            }
+
+            let (_, claimed_run_id, claimed_turn_id, claimed_request_id) = continuation_state
+                .claims
+                .get(&source_message_id)
+                .context("continuation input is missing its durable continuation claim")?;
+            ensure!(
+                claimed_run_id == &continuation_run_id
+                    && claimed_turn_id == &continuation_turn_id
+                    && claimed_request_id == continuation_request_id,
+                "continuation input identity differs from its durable continuation claim"
+            );
+            if let Some((existing_run_id, existing_turn_id)) =
+                continuation_state.inputs.get(&source_message_id)
+            {
+                ensure!(
+                    existing_run_id == &continuation_run_id
+                        && existing_turn_id == &continuation_turn_id,
+                    "incomplete assistant message already began a different continuation input"
+                );
+                return Ok(false);
+            }
+            ensure!(
+                continuation_state
+                    .available_incomplete
+                    .contains(&source_message_id),
+                "continuation input must reference an available incomplete assistant message in the current context"
+            );
+            ensure!(
+                self.machine.phase() == ChatSessionPhase::AwaitingInput,
+                "cannot begin continuation input while the chat session is {}",
+                self.machine.phase().as_str()
+            );
+
+            let mut line = serde_json::to_vec(&event).context("failed to serialize chat event")?;
+            line.push(b'\n');
+            file.write_all(&line)
+                .context("failed to write chat event")?;
+            file.flush().context("failed to flush chat transcript")?;
+            file.sync_data()
+                .context("failed to durably sync continuation input")?;
+            Ok(true)
+        })();
+        #[cfg(unix)]
+        let unlock_result = unlock_transcript_file(&file);
+        let appended = prepare_result?;
+        #[cfg(unix)]
+        unlock_result?;
+
+        match self.machine.phase() {
+            ChatSessionPhase::AwaitingInput => {
+                self.apply(ChatSessionTransition::BeginIncompleteContinuation {
+                    run_id: continuation_run_id,
+                    turn_id: continuation_turn_id,
+                    source_message_id,
+                })?;
+                Ok(())
+            }
+            ChatSessionPhase::RunningTurn if !appended => Ok(()),
+            phase => bail!(
+                "cannot recover continuation input while the chat session is {}",
+                phase.as_str()
+            ),
+        }
     }
 
     pub fn append_assistant_stop_marker(&mut self, envelope: RuntimeEventEnvelope) -> Result<()> {
@@ -930,13 +1183,87 @@ impl ChatSessionStore {
             &self.transcript_jsonl,
             std::os::unix::fs::PermissionsExt::from_mode(0o600),
         )?;
-        let line = serde_json::to_string(event).context("failed to serialize chat event")?;
-        file.write_all(line.as_bytes())
-            .context("failed to write chat event")?;
-        file.write_all(b"\n")
-            .context("failed to write chat event newline")?;
-        file.flush().context("failed to flush chat transcript")
+        #[cfg(unix)]
+        lock_transcript_file(&file)?;
+        let write_result = (|| {
+            let mut line = serde_json::to_vec(event).context("failed to serialize chat event")?;
+            line.push(b'\n');
+            file.write_all(&line)
+                .context("failed to write chat event")?;
+            file.flush().context("failed to flush chat transcript")
+        })();
+        #[cfg(unix)]
+        let unlock_result = unlock_transcript_file(&file);
+        write_result?;
+        #[cfg(unix)]
+        unlock_result?;
+        Ok(())
     }
+}
+
+#[cfg(unix)]
+fn lock_transcript_file(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("failed to lock chat transcript")
+    }
+}
+
+#[cfg(unix)]
+fn lock_transcript_file_shared(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("failed to lock chat transcript for reading")
+    }
+}
+
+#[cfg(unix)]
+fn unlock_transcript_file(file: &File) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("failed to unlock chat transcript")
+    }
+}
+
+fn read_transcript_text(path: &Path) -> Result<String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read chat transcript {}", path.display()));
+        }
+    };
+    #[cfg(unix)]
+    lock_transcript_file_shared(&file)?;
+    let read_result: Result<String> = (|| {
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .with_context(|| format!("failed to read chat transcript {}", path.display()))?;
+        Ok(content)
+    })();
+    #[cfg(unix)]
+    let unlock_result = unlock_transcript_file(&file);
+    let content = read_result?;
+    #[cfg(unix)]
+    unlock_result?;
+    Ok(content)
 }
 
 fn catalog_status(path: &Path) -> Result<SessionCatalogStatus> {
@@ -1030,6 +1357,8 @@ fn validate_session_event(
         }
         ChatSessionEvent::SessionStarted { .. }
         | ChatSessionEvent::ContextCleared { .. }
+        | ChatSessionEvent::IncompleteContinuationClaimed { .. }
+        | ChatSessionEvent::IncompleteContinuationInputStarted { .. }
         | ChatSessionEvent::SessionFinished { .. }
         | ChatSessionEvent::SessionFailed { .. } => {}
     }
@@ -1057,6 +1386,7 @@ fn validate_session_event_shape(event: &ChatSessionEvent, session_id: &SessionId
                     envelope.payload,
                     RuntimeEvent::UserMessage { .. }
                         | RuntimeEvent::AssistantMessage { .. }
+                        | RuntimeEvent::AssistantIncomplete { .. }
                         | RuntimeEvent::AssistantToolCall { .. }
                         | RuntimeEvent::ToolMessage { .. }
                         | RuntimeEvent::ModelAttemptLinked
@@ -1064,6 +1394,23 @@ fn validate_session_event_shape(event: &ChatSessionEvent, session_id: &SessionId
                 "runtime transcript contains a non-transcript payload"
             );
         }
+        ChatSessionEvent::IncompleteContinuationClaimed {
+            session_id: actual,
+            client_submission_id,
+            ..
+        } => {
+            ensure!(
+                actual == session_id,
+                "session transcript control record belongs to a different session"
+            );
+            validate_continuation_submission_id(client_submission_id)?;
+        }
+        ChatSessionEvent::IncompleteContinuationInputStarted {
+            session_id: actual, ..
+        } => ensure!(
+            actual == session_id,
+            "session transcript control record belongs to a different session"
+        ),
         ChatSessionEvent::SessionStarted { session_id: actual }
         | ChatSessionEvent::ContextCleared { session_id: actual }
         | ChatSessionEvent::SessionFinished {
@@ -1075,6 +1422,115 @@ fn validate_session_event_shape(event: &ChatSessionEvent, session_id: &SessionId
             actual == session_id,
             "session transcript control record belongs to a different session"
         ),
+    }
+    Ok(())
+}
+
+fn validate_continuation_submission_id(client_submission_id: &str) -> Result<()> {
+    ensure!(
+        !client_submission_id.is_empty()
+            && client_submission_id.len() <= 256
+            && !client_submission_id.contains(['\0', '\n', '\r']),
+        "continuation client submission ID must be nonempty and bounded"
+    );
+    Ok(())
+}
+
+fn validate_continuation_replay_record(
+    event: &ChatSessionEvent,
+    state: &mut ContinuationReplayState,
+) -> Result<()> {
+    match event {
+        ChatSessionEvent::Runtime { envelope } => {
+            if let RuntimeEvent::AssistantIncomplete { message_id, .. } = &envelope.payload {
+                ensure!(
+                    state.incomplete_messages.insert(message_id.clone()),
+                    "runtime transcript contains duplicate incomplete assistant message {}",
+                    message_id
+                );
+                state.available_incomplete.insert(message_id.clone());
+            }
+        }
+        ChatSessionEvent::IncompleteContinuationClaimed {
+            message_id,
+            client_submission_id,
+            continuation_run_id,
+            continuation_turn_id,
+            continuation_request_id,
+            ..
+        } => {
+            ensure!(
+                state.incomplete_messages.contains(message_id),
+                "continuation claim references a missing incomplete assistant message"
+            );
+            ensure!(
+                state.available_incomplete.contains(message_id),
+                "continuation claim references an unavailable incomplete assistant message"
+            );
+            if let Some((
+                existing_submission_id,
+                existing_run_id,
+                existing_turn_id,
+                existing_request_id,
+            )) = state.claims.get(message_id)
+            {
+                ensure!(
+                    existing_submission_id == client_submission_id
+                        && existing_run_id == continuation_run_id
+                        && existing_turn_id == continuation_turn_id
+                        && existing_request_id == continuation_request_id,
+                    "incomplete assistant message has conflicting continuation claims"
+                );
+            } else {
+                state.claims.insert(
+                    message_id.clone(),
+                    (
+                        client_submission_id.clone(),
+                        continuation_run_id.clone(),
+                        continuation_turn_id.clone(),
+                        continuation_request_id.clone(),
+                    ),
+                );
+            }
+            if let Some((input_run_id, input_turn_id)) = state.inputs.get(message_id) {
+                ensure!(
+                    input_run_id == continuation_run_id && input_turn_id == continuation_turn_id,
+                    "continuation input identity differs from its durable continuation claim"
+                );
+            }
+        }
+        ChatSessionEvent::IncompleteContinuationInputStarted {
+            source_message_id,
+            continuation_run_id,
+            continuation_turn_id,
+            ..
+        } => {
+            ensure!(
+                state.available_incomplete.contains(source_message_id),
+                "continuation input must reference an available incomplete assistant message in the current context"
+            );
+            ensure!(
+                !state.inputs.contains_key(source_message_id),
+                "incomplete assistant message contains duplicate continuation input records"
+            );
+            let (_, claimed_run_id, claimed_turn_id, _) = state
+                .claims
+                .get(source_message_id)
+                .context("continuation input is missing its durable continuation claim")?;
+            ensure!(
+                claimed_run_id == continuation_run_id && claimed_turn_id == continuation_turn_id,
+                "continuation input identity differs from its durable continuation claim"
+            );
+            state.inputs.insert(
+                source_message_id.clone(),
+                (continuation_run_id.clone(), continuation_turn_id.clone()),
+            );
+            state.available_incomplete.remove(source_message_id);
+        }
+        ChatSessionEvent::ContextCleared { .. }
+        | ChatSessionEvent::SessionFinished { .. }
+        | ChatSessionEvent::SessionFailed { .. } => state.available_incomplete.clear(),
+        ChatSessionEvent::SessionStarted { .. } => {}
     }
     Ok(())
 }

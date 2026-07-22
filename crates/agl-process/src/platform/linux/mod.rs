@@ -4,9 +4,12 @@ mod shell_integration;
 mod wire;
 
 pub(crate) use sandbox::standard_runtime_roots;
+#[cfg(test)]
+pub(crate) use shell_integration::run_shell_integration_relay;
 pub(crate) use shell_integration::{
-    create_shell_integration_reader, interrupt_terminal_foreground, notify_terminal_resize,
-    shell_integration_path_is_intact, terminal_foreground_process_group,
+    ShellIntegrationReceive, ShellIntegrationSocketPair, create_shell_integration_transport,
+    interrupt_terminal_foreground, notify_terminal_resize, receive_shell_integration_event,
+    send_shell_integration_control, terminal_foreground_process_group,
 };
 
 const SANDBOX_HOME: &str = "/.agl-private/home";
@@ -50,6 +53,7 @@ pub(crate) fn launch(
     launcher_path: &Path,
     request: &LauncherRequest,
     private_environment: Option<PrivateTerminalEnvironment>,
+    shell_integration_relay: Option<OwnedFd>,
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
     require_launcher(launcher_path)?;
@@ -96,6 +100,9 @@ pub(crate) fn launch(
     if let Some(private_environment) = &private_environment {
         descriptors.push(private_environment.as_raw_fd());
     }
+    if let Some(shell_integration_relay) = &shell_integration_relay {
+        descriptors.push(shell_integration_relay.as_raw_fd());
+    }
     if let Err(error) = wire::send_json_with_fds(parent_socket.as_raw_fd(), request, &descriptors) {
         let _ = child.kill();
         let _ = child.wait();
@@ -103,6 +110,7 @@ pub(crate) fn launch(
     }
     drop(descriptors);
     drop(private_environment);
+    drop(shell_integration_relay);
     if let Err(error) = wait_for_launcher_response(
         parent_socket.as_raw_fd(),
         Duration::from_millis(request.setup_timeout_ms),

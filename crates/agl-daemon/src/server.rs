@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::InferenceClientHandle;
 use agl_cron::{CronJob, CronRepository, CronRunStatus};
-use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
+use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
 use agl_process::{
     ExecutionCursor, ExecutionState, InputLease, ProcessErrorCode, TerminalSize,
     WRITABLE_INPUT_LEASE_HEARTBEAT, WRITABLE_INPUT_LEASE_TTL,
@@ -37,7 +37,8 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use crate::state::{process_error, protocol_run_state};
 use crate::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions,
-    ListenerSource, SharedDaemonState, render_cron_notification_body, run_cron_tick,
+    ListenerSource, SharedDaemonState, default_socket_path, render_cron_notification_body,
+    run_cron_tick,
 };
 
 const CONNECTION_WRITER_CAPACITY: usize = 128;
@@ -76,15 +77,21 @@ impl DaemonServer {
     #[cfg(unix)]
     async fn run_async(self) -> Result<()> {
         let listener = match &self.options.listener_source {
-            ListenerSource::Bind(path) => bind_listener(path)?,
+            ListenerSource::Bind(path) => {
+                bind_listener(path, path == &default_socket_path(&self.runtime.paths))?
+            }
             ListenerSource::Systemd => crate::activation::claim_systemd_listener()?,
         };
         let store = AglStore::open_at(self.runtime.paths.store_root())
             .context("failed to open daemon cron store")?;
+        let inference_runtime =
+            WorkerModelRuntime::discover(self.runtime.paths.inference_worker_temp_root())
+                .context("failed to prepare isolated daemon inference worker")?;
+        let inference_status = inference_runtime.status_handle();
         let model_manager = ModelManager::spawn(
             ModelManagerOptions::default()
                 .with_model_lease_root(self.runtime.paths.model_lease_root()),
-            LlamaCppModelRuntime::new(),
+            inference_runtime,
         )
         .context("failed to start daemon model manager")?;
         let inference_client = InferenceClientHandle::from(model_manager.handle());
@@ -97,6 +104,7 @@ impl DaemonServer {
             self.runtime.clone(),
             self.options.inference.clone(),
             inference_client.clone(),
+            inference_status,
         )?;
         let mut cron_tick = tokio::time::interval(Duration::from_secs(
             self.options.cron_interval_seconds.max(1),
@@ -160,6 +168,7 @@ fn trace_model_manager_status(state: &SharedDaemonState) {
             model_evictions = status.model_evictions,
             context_evictions = status.context_evictions,
             completed_jobs = status.completed_jobs,
+            incomplete_jobs = status.incomplete_jobs,
             cancellations = status.cancellations,
             deadline_exceeded = status.deadline_exceeded,
             failures = status.failures,
@@ -251,6 +260,10 @@ pub(crate) fn link_cron_run(
     let result_ref = format!("run:{supervisor_run_id}");
     let (status, error) = match outcome.status.state {
         RunState::Succeeded => (CronRunStatus::Succeeded, None),
+        RunState::Incomplete => (
+            CronRunStatus::Failed,
+            Some("scheduled run produced incomplete output".to_string()),
+        ),
         RunState::Failed => (
             CronRunStatus::Failed,
             outcome
@@ -338,14 +351,14 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(unix)]
-fn bind_listener(socket_path: &Path) -> Result<TokioUnixListener> {
+fn bind_listener(socket_path: &Path, tighten_owned_parent: bool) -> Result<TokioUnixListener> {
     if !socket_path.is_absolute() || socket_path.file_name().is_none() {
         bail!("daemon socket path must be one absolute file path");
     }
     let parent = socket_path
         .parent()
         .context("daemon socket path has no parent directory")?;
-    ensure_private_socket_parent(parent)?;
+    ensure_private_socket_parent(parent, tighten_owned_parent)?;
 
     match std::fs::symlink_metadata(socket_path) {
         Ok(metadata) => {
@@ -419,7 +432,7 @@ fn bind_listener(socket_path: &Path) -> Result<TokioUnixListener> {
 }
 
 #[cfg(unix)]
-fn ensure_private_socket_parent(parent: &Path) -> Result<()> {
+fn ensure_private_socket_parent(parent: &Path, tighten_owned_mode: bool) -> Result<()> {
     if !parent.is_absolute() {
         bail!("daemon socket parent must be absolute");
     }
@@ -439,20 +452,14 @@ fn ensure_private_socket_parent(parent: &Path) -> Result<()> {
             });
         }
     };
-    if created {
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
-            || format!("failed to restrict daemon socket dir {}", parent.display()),
-        )?;
-    }
     let metadata = std::fs::symlink_metadata(parent)
         .with_context(|| format!("failed to verify daemon socket dir {}", parent.display()))?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o700
     {
         bail!(
-            "daemon socket dir must be owned by the daemon UID with mode 0700 and no symlink: {}",
+            "daemon socket dir must be owned by the daemon UID and contain no symlink: {}",
             parent.display()
         );
     }
@@ -465,6 +472,45 @@ fn ensure_private_socket_parent(parent: &Path) -> Result<()> {
     if canonical != parent {
         bail!(
             "daemon socket dir must be canonical and contain no symlink components: {}",
+            parent.display()
+        );
+    }
+    if metadata.mode() & 0o777 != 0o700 {
+        if !created && !tighten_owned_mode {
+            bail!(
+                "custom daemon socket dir must already have mode 0700: {}",
+                parent.display()
+            );
+        }
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+            || format!("failed to restrict daemon socket dir {}", parent.display()),
+        )?;
+    }
+    let metadata = std::fs::symlink_metadata(parent).with_context(|| {
+        format!(
+            "failed to re-verify daemon socket dir after restricting it {}",
+            parent.display()
+        )
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        bail!(
+            "daemon socket dir must be owned by the daemon UID with mode 0700 and no symlink: {}",
+            parent.display()
+        );
+    }
+    if parent.canonicalize().with_context(|| {
+        format!(
+            "failed to re-canonicalize daemon socket dir {}",
+            parent.display()
+        )
+    })? != parent
+    {
+        bail!(
+            "daemon socket dir changed while its permissions were being restricted: {}",
             parent.display()
         );
     }
@@ -769,6 +815,28 @@ where
                 }
                 Ok(DaemonRequest {
                     request_id,
+                    kind: DaemonRequestKind::HumanTerminalCommandSubmit(request),
+                    ..
+                }) => {
+                    if reject_connection_task_overflow(&tasks, &event_sender, &request_id)? {
+                        continue;
+                    }
+                    let state = state.clone();
+                    let attachments = attachments.clone();
+                    let sender = event_sender.clone();
+                    tasks.spawn(async move {
+                        let event = human_terminal_command_event(
+                            &state,
+                            &attachments,
+                            request_id,
+                            request,
+                        )
+                        .await;
+                        let _ = queue_event(&sender, event);
+                    });
+                }
+                Ok(DaemonRequest {
+                    request_id,
                     kind: kind @ (DaemonRequestKind::CommandCatalog(_)
                     | DaemonRequestKind::CommandSuggestions(_)
                     | DaemonRequestKind::ApplicationAction(_)
@@ -886,6 +954,25 @@ impl ConnectionAttachments {
             .get(attachment_id)
             .cloned()
             .ok_or_else(|| attachment_not_found(attachment_id))
+    }
+
+    fn get_by_writer_lease_id(
+        &self,
+        writer_lease_id: &agl_ids::WriterLeaseId,
+    ) -> std::result::Result<ConnectionAttachment, ProtocolError> {
+        self.inner
+            .lock()
+            .map_err(attachment_lock_error)?
+            .values()
+            .find(|attachment| attachment.lease.writer_lease_id.as_ref() == Some(writer_lease_id))
+            .cloned()
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ProtocolErrorCode::WriterLeaseBusy,
+                    "Human terminal command requires this connection's current writer lease",
+                    true,
+                )
+            })
     }
 
     fn insert(
@@ -1360,7 +1447,8 @@ fn stream_execution_attachment(
             DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
                 attachment_id: attachment_id.clone(),
                 status,
-                writable: request.writable,
+                writable: lease.is_writable(),
+                writer_lease_id: lease.writer_lease_id.clone(),
                 next_sequence: request.after_sequence,
                 lease_ttl_ms: request
                     .writable
@@ -1407,7 +1495,7 @@ fn stream_execution_attachment(
                 );
             }
         };
-        if attachment.lease.writable {
+        if attachment.lease.is_writable() {
             match process
                 .operator_input_lease_active(&attachment.execution_id, attachment.lease.clone())
             {
@@ -1565,6 +1653,47 @@ fn execution_lease_renew_event(
 }
 
 #[cfg(unix)]
+async fn human_terminal_command_event(
+    state: &SharedDaemonState,
+    attachments: &ConnectionAttachments,
+    request_id: agl_ids::RequestId,
+    request: agl_protocol::HumanTerminalCommandSubmitRequest,
+) -> DaemonEvent {
+    let result = match attachments.get_by_writer_lease_id(&request.writer_lease_id) {
+        Ok(_) => {
+            let application_request = agl_app::HumanTerminalCommandSubmit {
+                session_id: request.session_id,
+                terminal_id: request.terminal_id,
+                client_submission_id: request.client_submission_id,
+                writer_lease_id: request.writer_lease_id,
+                expected_command_sequence: request.expected_command_sequence,
+                expected_prompt_generation: request.expected_prompt_generation,
+                command: request.command,
+            };
+            state
+                .application()
+                .submit_human_terminal_command(application_request)
+                .await
+                .map(|accepted| {
+                    DaemonEventKind::HumanTerminalCommandAccepted(
+                        agl_protocol::HumanTerminalCommandAcceptedEvent {
+                            terminal_id: accepted.terminal_id,
+                            command_sequence: accepted.command_sequence,
+                            output_after_sequence: accepted.output_after_sequence,
+                        },
+                    )
+                })
+                .map_err(crate::surface::protocol_error)
+        }
+        Err(error) => Err(error),
+    };
+    DaemonEvent::new(
+        Some(request_id),
+        result.unwrap_or_else(DaemonEventKind::Error),
+    )
+}
+
+#[cfg(unix)]
 fn execution_input_event(
     state: &SharedDaemonState,
     attachments: &ConnectionAttachments,
@@ -1578,9 +1707,7 @@ fn execution_input_event(
             .decode(state.process_input_limit().map_err(daemon_runtime_error)?)
             .map_err(process_error)?;
         state
-            .process_handle()
-            .map_err(daemon_runtime_error)?
-            .operator_write(
+            .operator_write_attached_input(
                 &attachment.execution_id,
                 attachment.lease,
                 request.bytes,
@@ -1925,7 +2052,7 @@ mod socket_bind_security_tests {
         let root = private_test_root("socket-parent-created");
         let parent = root.join("daemon");
 
-        ensure_private_socket_parent(&parent).unwrap();
+        ensure_private_socket_parent(&parent, false).unwrap();
 
         let metadata = std::fs::symlink_metadata(&parent).unwrap();
         assert!(metadata.is_dir());
@@ -1941,18 +2068,32 @@ mod socket_bind_security_tests {
         let public = root.join("public");
         std::fs::create_dir(&public).unwrap();
         std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(ensure_private_socket_parent(&public).is_err());
+        assert!(ensure_private_socket_parent(&public, false).is_err());
 
         let private = root.join("private");
         std::fs::create_dir(&private).unwrap();
         std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
         let alias = root.join("alias");
         std::os::unix::fs::symlink(&private, &alias).unwrap();
-        assert!(ensure_private_socket_parent(&alias).is_err());
+        assert!(ensure_private_socket_parent(&alias, true).is_err());
 
         let file = root.join("file");
         std::fs::write(&file, b"not a directory").unwrap();
-        assert!(ensure_private_socket_parent(&file).is_err());
+        assert!(ensure_private_socket_parent(&file, true).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn app_owned_bind_tightens_existing_owned_canonical_parent_to_0700() {
+        let root = private_test_root("socket-parent-tightened");
+        let parent = root.join("daemon");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_socket_parent(&parent, true).unwrap();
+
+        let metadata = std::fs::symlink_metadata(&parent).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1960,11 +2101,11 @@ mod socket_bind_security_tests {
     fn manual_bind_never_removes_a_non_socket_stale_target() {
         let root = private_test_root("socket-target-rejected");
         let parent = root.join("daemon");
-        ensure_private_socket_parent(&parent).unwrap();
+        ensure_private_socket_parent(&parent, false).unwrap();
         let target = parent.join("agl.sock");
         std::fs::write(&target, b"operator data").unwrap();
 
-        let error = match bind_listener(&target) {
+        let error = match bind_listener(&target, false) {
             Ok(_) => panic!("regular target must fail"),
             Err(error) => error,
         };
@@ -2104,11 +2245,12 @@ mod connection_writer_tests {
         let attachments = ConnectionAttachments::default();
         let first_id = agl_ids::RequestId::generate();
         let first_execution_id = agl_ids::ExecutionId::generate();
+        let first_writer_id = agl_ids::WriterLeaseId::generate();
         let first = ConnectionAttachment {
             execution_id: first_execution_id.clone(),
             lease: InputLease {
                 attachment_id: first_id.clone(),
-                writable: true,
+                writer_lease_id: Some(first_writer_id.clone()),
             },
             cursor: 7,
         };
@@ -2122,7 +2264,7 @@ mod connection_writer_tests {
                     execution_id: replacement_execution_id,
                     lease: InputLease {
                         attachment_id: first_id.clone(),
-                        writable: false,
+                        writer_lease_id: None,
                     },
                     cursor: 99,
                 },
@@ -2132,7 +2274,23 @@ mod connection_writer_tests {
         let retained = attachments.get(&first_id).unwrap();
         assert_eq!(retained.execution_id, first_execution_id);
         assert_eq!(retained.cursor, 7);
-        assert!(retained.lease.writable);
+        assert!(retained.lease.is_writable());
+        assert_eq!(
+            attachments
+                .get_by_writer_lease_id(&first_writer_id)
+                .unwrap()
+                .execution_id,
+            first_execution_id
+        );
+        let missing_writer =
+            attachments.get_by_writer_lease_id(&agl_ids::WriterLeaseId::generate());
+        assert!(matches!(
+            missing_writer,
+            Err(ProtocolError {
+                code: ProtocolErrorCode::WriterLeaseBusy,
+                ..
+            })
+        ));
 
         for _ in 1..CONNECTION_ATTACHMENT_CAPACITY {
             let attachment_id = agl_ids::RequestId::generate();
@@ -2143,7 +2301,7 @@ mod connection_writer_tests {
                         execution_id: agl_ids::ExecutionId::generate(),
                         lease: InputLease {
                             attachment_id,
-                            writable: false,
+                            writer_lease_id: None,
                         },
                         cursor: 0,
                     },
@@ -2158,7 +2316,7 @@ mod connection_writer_tests {
                     execution_id: agl_ids::ExecutionId::generate(),
                     lease: InputLease {
                         attachment_id: overflow_id,
-                        writable: false,
+                        writer_lease_id: None,
                     },
                     cursor: 0,
                 },

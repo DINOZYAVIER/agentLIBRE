@@ -140,8 +140,166 @@ runtime_root="$(dirname -- "$libexec_dir")"
 generation_name="$(basename -- "$generation_dir")"
 binary="$runtime_root/bin/agl"
 surface_launcher="$runtime_root/bin/agl-process-launcher"
+surface_worker="$runtime_root/bin/agl-inference-worker"
 current_link="$runtime_dir/current"
 launcher="$generation_dir/agl-process-launcher"
+worker="$generation_dir/agl-inference-worker"
+native_bundle="$generation_dir/agl-inference-native"
+
+resolve_native_bundle_relative() {
+  local worker_elf="$1"
+  local dynamic
+  local runpath
+  local component
+  local relative
+  local -a matches=()
+  command -v readelf >/dev/null 2>&1 || return 1
+  [[ -f "$worker_elf" && ! -L "$worker_elf" ]] || return 1
+  dynamic="$(LC_ALL=C readelf -d -- "$worker_elf")" || return 1
+  while IFS= read -r runpath; do
+    IFS=: read -r -a components <<<"$runpath"
+    for component in "${components[@]}"; do
+      if [[ "$component" == '$ORIGIN/'* ]]; then
+        relative="${component#\$ORIGIN/}"
+        if [[ "$relative" == agl-inference-native/* ]]; then
+          [[ "$relative" =~ ^agl-inference-native/sha256-[0-9a-f]{64}$ ]] ||
+            return 1
+          matches+=("$relative")
+        fi
+      fi
+    done
+  done < <(sed -n -E 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+  (( ${#matches[@]} == 1 )) || return 1
+  printf '%s\n' "${matches[0]}"
+}
+
+validate_native_bundle() {
+  local base="$1"
+  local worker_elf="$2"
+  local relative
+  local leaf_name
+  local directory
+  local base_entry
+  local base_count=0
+  [[ -d "$base" && ! -L "$base" ]] || return 1
+  [[ "$(stat -c '%a' -- "$base" 2>/dev/null || true)" == 555 &&
+    "$(stat -c '%u' -- "$base" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  relative="$(resolve_native_bundle_relative "$worker_elf")" || return 1
+  leaf_name="${relative#agl-inference-native/}"
+  shopt -s nullglob
+  for base_entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+    ((base_count += 1))
+    [[ "${base_entry##*/}" == "$leaf_name" ]] || return 1
+  done
+  shopt -u nullglob
+  (( base_count == 1 )) || return 1
+  directory="$base/$leaf_name"
+  local entry
+  local name
+  local count=0
+  local cpu_count=0
+  local total_bytes=0
+  local size
+  local required
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
+  [[ "$(stat -c '%a' -- "$directory" 2>/dev/null || true)" == 555 &&
+    "$(stat -c '%u' -- "$directory" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  shopt -s nullglob
+  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    name="${entry##*/}"
+    [[ -f "$entry" && ! -L "$entry" &&
+      "$(stat -c '%a' -- "$entry" 2>/dev/null || true)" == 555 &&
+      "$(stat -c '%u' -- "$entry" 2>/dev/null || true)" == "$(id -u)" &&
+      "$(stat -c '%h' -- "$entry" 2>/dev/null || true)" == 1 ]] || return 1
+    case "$name" in
+      libllama-common.so.0 | libmtmd.so.0 | libllama.so.0 | libggml.so.0 | libggml-base.so.0 | libggml-vulkan.so) ;;
+      libggml-cpu-*.so) cpu_count=$((cpu_count + 1)) ;;
+      *) return 1 ;;
+    esac
+    size="$(stat -c '%s' -- "$entry" 2>/dev/null || true)"
+    [[ "$size" =~ ^[0-9]+$ ]] || return 1
+    (( size <= 1024 * 1024 * 1024 )) || return 1
+    total_bytes=$((total_bytes + size))
+    (( total_bytes <= 4 * 1024 * 1024 * 1024 )) || return 1
+    count=$((count + 1))
+    (( count <= 64 )) || return 1
+  done
+  shopt -u nullglob
+  (( cpu_count > 0 )) || return 1
+  for required in libllama-common.so.0 libmtmd.so.0 libllama.so.0 libggml.so.0 libggml-base.so.0; do
+    [[ -f "$directory/$required" && ! -L "$directory/$required" ]] || return 1
+  done
+}
+
+collect_nix_runtime_references() {
+  local generation="$1"
+  local output_name="$2"
+  local -n output="$output_name"
+  local object
+  local metadata
+  local reference
+  local -a objects=(
+    "$generation/agl"
+    "$generation/agl-process-launcher"
+    "$generation/agl-inference-worker"
+  )
+  shopt -s nullglob
+  objects+=("$generation/agl-inference-native"/*/*)
+  shopt -u nullglob
+  output=()
+  for object in "${objects[@]}"; do
+    if ! LC_ALL=C readelf -h "$object" >/dev/null 2>&1; then
+      continue
+    fi
+    metadata="$(
+      LC_ALL=C readelf -d "$object"
+      LC_ALL=C readelf -l "$object"
+    )" || return 1
+    while IFS= read -r reference; do
+      [[ -n "$reference" ]] && output+=("$reference")
+    done < <(
+      grep -oE '/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+' <<<"$metadata" || true
+    )
+  done
+  if (( ${#output[@]} > 0 )); then
+    mapfile -t output < <(printf '%s\n' "${output[@]}" | sort -u)
+  fi
+  return 0
+}
+
+validate_nix_runtime_roots() {
+  local generation="$1"
+  local root_directory="$generation/.nix-gc-roots"
+  local entry
+  local name
+  local remaining
+  local target
+  local -a references=()
+  local -A expected=()
+  collect_nix_runtime_references "$generation" references || return 1
+  if (( ${#references[@]} == 0 )); then
+    [[ ! -e "$root_directory" && ! -L "$root_directory" ]] || return 1
+    return 0
+  fi
+  [[ -d "$root_directory" && ! -L "$root_directory" &&
+    "$(stat -c '%a' -- "$root_directory" 2>/dev/null || true)" == 555 &&
+    "$(stat -c '%u' -- "$root_directory" 2>/dev/null || true)" == "$(id -u)" ]] || return 1
+  for target in "${references[@]}"; do
+    expected["$(basename -- "$target")"]="$target"
+  done
+  remaining=${#references[@]}
+  shopt -s nullglob
+  for entry in "$root_directory"/* "$root_directory"/.[!.]* "$root_directory"/..?*; do
+    name="${entry##*/}"
+    target="${expected[$name]:-}"
+    [[ -n "$target" && -L "$entry" && "$(readlink -- "$entry")" == "$target" &&
+      "$(readlink -f -- "$entry" 2>/dev/null || true)" == "$target" ]] || return 1
+    unset 'expected[$name]'
+    remaining=$((remaining - 1))
+  done
+  shopt -u nullglob
+  (( remaining == 0 ))
+}
 
 managed_layout_error="agl must resolve through an immutable runtime bundle installed by scripts/install-agl-cargo.sh"
 if [[ "$(basename -- "$resolved_binary")" != "agl" ||
@@ -151,6 +309,9 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(basename -- "$libexec_dir")" != "libexec" ||
       ! -f "$resolved_binary" || -L "$resolved_binary" ||
       ! -f "$launcher" || -L "$launcher" ||
+      ! -f "$worker" || -L "$worker" ||
+      ! -d "$native_bundle" || -L "$native_bundle" ||
+      -e "$surface_worker" || -L "$surface_worker" ||
       ! -L "$current_link" ||
       "$(readlink -- "$current_link")" != "generations/$generation_name" ||
       "$(readlink -f -- "$current_link" 2>/dev/null || true)" != "$generation_dir" ||
@@ -164,6 +325,13 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(stat -c '%a' -- "$generation_dir" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%a' -- "$resolved_binary" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%a' -- "$launcher" 2>/dev/null || true)" != "555" ||
+      "$(stat -c '%a' -- "$worker" 2>/dev/null || true)" != "555" ||
+      "$(stat -c '%u' -- "$resolved_binary" 2>/dev/null || true)" != "$(id -u)" ||
+      "$(stat -c '%u' -- "$launcher" 2>/dev/null || true)" != "$(id -u)" ||
+      "$(stat -c '%u' -- "$worker" 2>/dev/null || true)" != "$(id -u)" ||
+      "$(stat -c '%h' -- "$resolved_binary" 2>/dev/null || true)" != "1" ||
+      "$(stat -c '%h' -- "$launcher" 2>/dev/null || true)" != "1" ||
+      "$(stat -c '%h' -- "$worker" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%u' -- "$generation_dir" 2>/dev/null || true)" != "$(id -u)" ]]; then
   echo "$managed_layout_error: $requested_binary" >&2
   exit 1
@@ -195,12 +363,32 @@ for managed_ancestor in "${managed_ancestors[@]}"; do
   fi
 done
 
+if ! validate_native_bundle "$native_bundle" "$worker"; then
+  echo "$managed_layout_error: invalid exact native inference bundle $native_bundle" >&2
+  exit 1
+fi
+if ! command -v readelf >/dev/null 2>&1 ||
+  ! validate_nix_runtime_roots "$generation_dir"; then
+  echo "$managed_layout_error: incomplete or invalid Nix runtime GC roots in $generation_dir" >&2
+  exit 1
+fi
+
 agl_systemd_validate_unit_name "$unit"
 if [[ "$unit" != *.service ]]; then
   echo "--unit must end in .service: $unit" >&2
   exit 2
 fi
-agl_systemd_validate_absolute_vars cwd requested_binary binary resolved_binary config socket workspace_root
+agl_systemd_validate_absolute_vars \
+  cwd \
+  requested_binary \
+  binary \
+  resolved_binary \
+  launcher \
+  worker \
+  native_bundle \
+  config \
+  socket \
+  workspace_root
 
 if [[ ! "$max_output_tokens" =~ ^[1-9][0-9]*$ ]]; then
   echo "--max-output-tokens must be a positive integer: $max_output_tokens" >&2
@@ -220,9 +408,10 @@ agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_dir "$dry_run" "$workspace_root" "workspace root"
 agl_systemd_require_executable "$dry_run" "$binary"
 agl_systemd_require_executable "$dry_run" "$launcher"
+agl_systemd_require_executable "$dry_run" "$worker"
 if [[ "$dry_run" -eq 0 ]] &&
   ! env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$resolved_binary" >/dev/null; then
-  echo "agl and its sibling process launcher do not have matching build identities: $resolved_binary" >&2
+  echo "agl, its sibling process launcher, and its private inference worker do not have matching build identities: $resolved_binary" >&2
   exit 1
 fi
 agl_systemd_require_file "$dry_run" "$config" "config file"
@@ -271,6 +460,9 @@ echo "requested binary: $requested_binary"
 echo "binary: $binary"
 echo "resolved binary: $resolved_binary"
 echo "process launcher: $launcher"
+echo "private inference worker: $worker"
+echo "native inference bundle: $native_bundle"
+echo "Nix runtime roots: $generation_dir/.nix-gc-roots (required only for Nix-linked ELF objects)"
 echo "config: $config"
 echo "socket: $socket"
 echo "workspace root: $workspace_root"

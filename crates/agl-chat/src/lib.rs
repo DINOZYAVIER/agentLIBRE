@@ -11,10 +11,14 @@ mod terminal;
 mod tools;
 mod turn_runtime;
 
+pub use agl_inference::{InferenceProductStage, InferenceProgressUnit, InferenceStageEvent};
+pub use agl_turn::IncompleteOutputReason;
 pub use inference_client::{ChatInferenceJob, InferenceClient, InferenceClientHandle};
 pub use options::{ChatOptions, DEFAULT_MAX_OUTPUT_TOKENS, InferenceOptions, ToolAccessMode};
 pub use presentation::{
-    ModelAttemptOutcome, NoopTurnPresentationSink, PresentationDelivery, ToolActionOutcome,
+    CapabilityPresentationCompleteness, CapabilityPresentationDetail,
+    CapabilityPresentationExecutionProfile, ChildRunPresentation, ModelAttemptOutcome,
+    NoopTurnPresentationSink, PolicyPresentationOutcome, PresentationDelivery, ToolActionOutcome,
     TurnPresentationEvent, TurnPresentationOutcome, TurnPresentationSink,
 };
 pub use service::{

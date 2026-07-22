@@ -7,7 +7,7 @@ use agl_ids::{AttemptId, RunId, SessionId, TurnId};
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{DurableRunDraft, RunBudget, RunKind, RunState};
 use agl_supervisor::{RunSpec, Supervisor, SupervisorHandle, SupervisorOptions};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     ChatOptions, ChatRunInput, ChatService, ChatSessionSummary, ChatSupervisorFactory,
@@ -30,6 +30,20 @@ impl SupervisedChat {
         runtime: &AgentLibreRuntimeConfig,
         inference_client: InferenceClientHandle,
     ) -> Result<Self> {
+        Self::open_with_presentation_sink(
+            options,
+            runtime,
+            inference_client,
+            Arc::new(crate::NoopTurnPresentationSink),
+        )
+    }
+
+    fn open_with_presentation_sink(
+        options: ChatOptions,
+        runtime: &AgentLibreRuntimeConfig,
+        inference_client: InferenceClientHandle,
+        presentation_sink: Arc<dyn crate::TurnPresentationSink>,
+    ) -> Result<Self> {
         let service = ChatService::open(options.clone(), runtime, inference_client.clone())?;
         let session_id = service.session_id().clone();
         let execution_context = service.execution_context().clone();
@@ -41,7 +55,8 @@ impl SupervisedChat {
         };
         let store_root = runtime.paths.store_root();
         let factory =
-            ChatSupervisorFactory::with_runtime(&store_root, runtime.clone(), inference_client);
+            ChatSupervisorFactory::with_runtime(&store_root, runtime.clone(), inference_client)
+                .with_presentation_sink(presentation_sink);
         factory.register(service)?;
         let supervisor = Supervisor::spawn(
             &store_root,
@@ -203,6 +218,26 @@ impl SupervisedChat {
                 },
                 other => bail!("unknown successful run result status {other:?}"),
             },
+            RunState::Incomplete => {
+                ensure!(
+                    result.get("status").and_then(serde_json::Value::as_str)
+                        == Some("incomplete_output"),
+                    "incomplete run result has a non-incomplete status"
+                );
+                ChatTurnStatus::Incomplete {
+                    partial: result
+                        .get("partial")
+                        .and_then(serde_json::Value::as_str)
+                        .context("incomplete run has no partial output")?
+                        .to_string(),
+                    reason: serde_json::from_value(
+                        result
+                            .get("reason")
+                            .cloned()
+                            .context("incomplete run has no reason")?,
+                    )?,
+                }
+            }
             RunState::Failed => ChatTurnStatus::Failed {
                 message: outcome
                     .error_message
@@ -262,6 +297,18 @@ mod tests {
 
     struct DelegationInferenceClient {
         state: ScriptState,
+    }
+
+    #[derive(Default)]
+    struct RecordingPresentationSink {
+        events: Mutex<Vec<crate::TurnPresentationEvent>>,
+    }
+
+    impl crate::TurnPresentationSink for RecordingPresentationSink {
+        fn try_publish(&self, event: crate::TurnPresentationEvent) -> crate::PresentationDelivery {
+            self.events.lock().unwrap().push(event);
+            crate::PresentationDelivery::Delivered
+        }
     }
 
     impl InferenceClient for DelegationInferenceClient {
@@ -472,8 +519,8 @@ tool_call_format = "hermes_json"
         };
         let state = ScriptState {
             responses: Arc::new(Mutex::new(VecDeque::from([
-                r#"<tool_call>{"name":"agent.delegate","arguments":{"subagent_id":"reviewer","task":"Review patch"}}</tool_call>"#.to_string(),
-                "Child verdict".to_string(),
+                r#"<tool_call>{"name":"agent.delegate","arguments":{"subagent_id":"reviewer","task":"Review patch CHILD_TASK_PRIVATE_SENTINEL"}}</tool_call>"#.to_string(),
+                "Child verdict CHILD_VERDICT_PRIVATE_SENTINEL".to_string(),
                 "Final parent answer".to_string(),
             ]))),
             jobs: Arc::new(Mutex::new(Vec::new())),
@@ -492,6 +539,7 @@ tool_call_format = "hermes_json"
                 skills: Vec::new(),
                 memory: false,
                 model_bindings_path: None,
+                model_bindings_override: None,
                 runtime_plan_override: None,
             },
             workspace_root: Some(root.clone()),
@@ -499,12 +547,14 @@ tool_call_format = "hermes_json"
             no_history: true,
             new_session: true,
         };
-        let chat = SupervisedChat::open(
+        let presentation = Arc::new(RecordingPresentationSink::default());
+        let chat = SupervisedChat::open_with_presentation_sink(
             options,
             &runtime,
             InferenceClientHandle::new(DelegationInferenceClient {
                 state: state.clone(),
             }),
+            presentation.clone(),
         )
         .unwrap();
 
@@ -533,6 +583,64 @@ tool_call_format = "hermes_json"
                 .unwrap();
         assert!(!frozen_authority.iter().any(|id| id == "cron.add"));
         let child_record = store.run(&tree[1].run_id).unwrap().unwrap();
+        let presentation_events = presentation.events.lock().unwrap().clone();
+        let child_started = presentation_events
+            .iter()
+            .find_map(|event| match event {
+                crate::TurnPresentationEvent::ModelAttemptStarted {
+                    session_id,
+                    run_id,
+                    child_run: Some(child),
+                    ..
+                } if run_id == &child_record.run_id => Some((session_id, child)),
+                _ => None,
+            })
+            .expect("child model attempt must publish into the root activity stream");
+        assert_eq!(child_started.0, chat.session_id());
+        assert_eq!(
+            child_started.1.parent_run_id,
+            child_record.parent_run_id.clone().unwrap()
+        );
+        assert_eq!(
+            child_started.1.spawned_by_step_id,
+            child_record.spawned_by_step_id.clone().unwrap()
+        );
+        assert_eq!(
+            child_started.1.subagent_id,
+            child_record.subagent_id.clone().unwrap()
+        );
+        assert!(presentation_events.iter().any(|event| matches!(
+            event,
+            crate::TurnPresentationEvent::ToolActionFinished {
+                capability_id,
+                outcome: crate::ToolActionOutcome::Waiting,
+                ..
+            } if capability_id.as_str() == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+        )));
+        assert!(presentation_events.iter().any(|event| matches!(
+            event,
+            crate::TurnPresentationEvent::TurnFinished {
+                run_id,
+                child_run: Some(child),
+                ..
+            } if run_id == &child_record.run_id
+                && child.spawned_by_step_id == child_record.spawned_by_step_id.clone().unwrap()
+        )));
+        assert!(!presentation_events.iter().any(|event| matches!(
+            event,
+            crate::TurnPresentationEvent::AssistantTextDelta { run_id, .. }
+                | crate::TurnPresentationEvent::AssistantMessageFinal { run_id, .. }
+                | crate::TurnPresentationEvent::AssistantMessageIncomplete { run_id, .. }
+                    if run_id == &child_record.run_id
+        )));
+        let safe_presentation = format!("{presentation_events:?}");
+        for sentinel in [
+            "Parent secret phrase",
+            "CHILD_TASK_PRIVATE_SENTINEL",
+            "CHILD_VERDICT_PRIVATE_SENTINEL",
+        ] {
+            assert!(!safe_presentation.contains(sentinel));
+        }
         let child_input: ChatRunInput = serde_json::from_value(child_record.input).unwrap();
         let ChatRunInput::Subagent {
             authority_ceiling, ..
@@ -556,9 +664,17 @@ tool_call_format = "hermes_json"
         assert!(jobs[1].tools.is_empty());
         assert!(!jobs[0].rendered.contains("Only return the child verdict"));
         assert!(jobs[1].rendered.contains("Only return the child verdict"));
-        assert!(jobs[1].rendered.contains("Review patch"));
+        assert!(
+            jobs[1]
+                .rendered
+                .contains("Review patch CHILD_TASK_PRIVATE_SENTINEL")
+        );
         assert!(!jobs[1].rendered.contains("Parent secret phrase"));
-        assert!(jobs[2].rendered.contains("Child verdict"));
+        assert!(
+            jobs[2]
+                .rendered
+                .contains("Child verdict CHILD_VERDICT_PRIVATE_SENTINEL")
+        );
         assert_eq!(
             state.released_contexts.lock().unwrap().as_slice(),
             &[jobs[1].session_id.clone()]

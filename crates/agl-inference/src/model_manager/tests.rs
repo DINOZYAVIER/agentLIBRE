@@ -17,7 +17,10 @@ use agl_ids::{AttemptId, RunId, TurnId};
 use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
 
 use crate::evidence::InferenceArtifactRoot;
-use crate::{InferenceFinishReason, InferenceRequest};
+use crate::{
+    InferenceDeviceInfo, InferenceDeviceKind, InferenceFinishReason, InferenceOutputEvent,
+    InferenceOutputSink, InferenceProductStage, InferenceRequest, OutputDelivery,
+};
 
 use super::*;
 
@@ -32,6 +35,13 @@ struct FakeState {
     started_generations: usize,
     panic_on_generate: bool,
     resolved_images: Vec<Vec<u8>>,
+    finish_reason: Option<InferenceFinishReason>,
+    fail_context_release: bool,
+    fail_model_release: bool,
+    backend_lost_on_context_release: bool,
+    resource_failure_on_load: Option<(String, String)>,
+    reaped_resource_failure_on_generate: Option<(String, String)>,
+    inventory_calls: usize,
 }
 
 #[derive(Default)]
@@ -65,6 +75,18 @@ impl FakeControl {
 
 struct FakeRuntime {
     control: Arc<FakeControl>,
+}
+
+struct RecordingOutputSink {
+    events: Mutex<Vec<InferenceOutputEvent>>,
+    delivery: OutputDelivery,
+}
+
+impl InferenceOutputSink for RecordingOutputSink {
+    fn try_emit(&self, event: InferenceOutputEvent) -> OutputDelivery {
+        self.events.lock().unwrap().push(event);
+        self.delivery
+    }
 }
 
 struct FakeModel {
@@ -102,17 +124,34 @@ impl ModelRuntime for FakeRuntime {
     type Model = FakeModel;
     type Context = FakeContext;
 
+    fn device_inventory(&mut self) -> Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
+        let mut state = self.control.state.lock().unwrap();
+        state.inventory_calls += 1;
+        state.operations.push("device_inventory".to_string());
+        Ok(vec![test_device_info()])
+    }
+
     fn load_model(
         &mut self,
-        key: &ModelKey,
-        _config: &ResolvedInferenceConfig,
+        job: &InferenceJob,
     ) -> Result<RuntimeOperation<Self::Model>, RuntimeFailure> {
+        let key = job.model_key();
         self.control
             .state
             .lock()
             .unwrap()
             .operations
             .push(format!("load_model:{}", key.digest()));
+        if let Some((code, message)) = self
+            .control
+            .state
+            .lock()
+            .unwrap()
+            .resource_failure_on_load
+            .clone()
+        {
+            return Err(RuntimeFailure::resource_admission(code, message, ""));
+        }
         Ok(RuntimeOperation::new(
             FakeModel {
                 digest: key.digest().to_string(),
@@ -172,6 +211,8 @@ impl ModelRuntime for FakeRuntime {
                 .0;
         }
         let panic_on_generate = state.panic_on_generate;
+        let finish_reason = state.finish_reason.unwrap_or(InferenceFinishReason::Stop);
+        let reaped_resource_failure = state.reaped_resource_failure_on_generate.clone();
         drop(state);
         if panic_on_generate {
             panic!("injected fake worker panic");
@@ -182,10 +223,17 @@ impl ModelRuntime for FakeRuntime {
                 format!("fake aborted {attempt}"),
             ));
         }
+        if let Some((code, message)) = reaped_resource_failure {
+            return Err(RuntimeFailure::reaped_resource_generation(
+                code,
+                message,
+                "fake worker generation reaped",
+            ));
+        }
         Ok(RuntimeOperation::new(
             ModelGeneration {
                 content: format!("answer:{attempt}"),
-                finish_reason: InferenceFinishReason::Stop,
+                finish_reason,
                 selected_device: Some("fake:0".to_string()),
                 input_tokens: 4,
                 output_tokens: 1,
@@ -206,6 +254,47 @@ impl ModelRuntime for FakeRuntime {
             .operations
             .push(format!("clear_context:{}", context.digest));
         Ok(RuntimeOperation::without_log(()))
+    }
+
+    fn release_context(
+        &mut self,
+        _model: &mut Self::Model,
+        context: &mut Self::Context,
+    ) -> Result<RuntimeOperation<()>, RuntimeFailure> {
+        let mut state = self.control.state.lock().unwrap();
+        state
+            .operations
+            .push(format!("release_context:{}", context.digest));
+        if state.backend_lost_on_context_release {
+            return Err(RuntimeFailure::backend_lost(
+                "fake backend lost during context release",
+                "fake backend loss log",
+            ));
+        }
+        if state.fail_context_release {
+            return Err(RuntimeFailure::new(
+                "fake context release failed",
+                "fake context release log",
+            ));
+        }
+        Ok(RuntimeOperation::new((), "fake context release log"))
+    }
+
+    fn release_model(
+        &mut self,
+        model: &mut Self::Model,
+    ) -> Result<RuntimeOperation<()>, RuntimeFailure> {
+        let mut state = self.control.state.lock().unwrap();
+        state
+            .operations
+            .push(format!("release_model:{}", model.digest));
+        if state.fail_model_release {
+            return Err(RuntimeFailure::new(
+                "fake model release failed",
+                "fake model release log",
+            ));
+        }
+        Ok(RuntimeOperation::new((), "fake model release log"))
     }
 }
 
@@ -250,6 +339,142 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
         ModelKey::from_config(&second).unwrap()
     );
     assert!(ContextKey::for_conversation(&first, " ").is_err());
+}
+
+#[test]
+fn worker_job_payload_round_trips_only_after_host_content_resolution() {
+    let root = temp_root("worker-payload");
+    std::fs::create_dir_all(&root).unwrap();
+    let config = config("worker.gguf");
+    let mut original = job(&root, &config, "worker-session", 98);
+
+    assert!(original.worker_payload(Instant::now()).is_err());
+    original.resolve_content().unwrap();
+    let payload = original.worker_payload(Instant::now()).unwrap();
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let decoded: WorkerJobPayload = serde_json::from_slice(&bytes).unwrap();
+    let restored = InferenceJob::from_worker_payload(
+        decoded,
+        InferenceCancellation::new(),
+        Arc::new(crate::NoopInferenceOutputSink),
+        Instant::now(),
+    )
+    .unwrap();
+
+    assert_eq!(restored.config(), original.config());
+    assert_eq!(restored.request(), original.request());
+    assert_eq!(restored.model_key(), original.model_key());
+    assert_eq!(restored.context_key(), original.context_key());
+    assert_eq!(restored.resolved_content(), original.resolved_content());
+    assert_eq!(restored.max_output_tokens(), original.max_output_tokens());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn device_inventory_is_serialized_through_the_manager_fifo_and_propagated() {
+    let root = temp_root("device-inventory");
+    let control = Arc::new(FakeControl::default());
+    control.set_blocked(true);
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("inventory.gguf");
+
+    let generation_handle = handle.clone();
+    let generation_root = root.clone();
+    let generation = thread::spawn(move || {
+        generation_handle.generate(job(&generation_root, &config, "active", 1))
+    });
+    control.wait_for_started(1);
+
+    let inventory_handle = handle.clone();
+    let inventory = thread::spawn(move || inventory_handle.device_inventory());
+    wait_for_queue_depth(&handle, 1);
+    assert_eq!(control.state.lock().unwrap().inventory_calls, 0);
+
+    control.set_blocked(false);
+    generation.join().unwrap().unwrap();
+    assert_eq!(inventory.join().unwrap().unwrap(), [test_device_info()]);
+    let state = control.state.lock().unwrap();
+    assert_eq!(state.inventory_calls, 1);
+    let generation_position = state
+        .operations
+        .iter()
+        .position(|operation| operation.starts_with("generate:"))
+        .unwrap();
+    let inventory_position = state
+        .operations
+        .iter()
+        .position(|operation| operation == "device_inventory")
+        .unwrap();
+    assert!(generation_position < inventory_position);
+    drop(state);
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn manager_publishes_host_queue_admission_and_failure_in_order() {
+    let root = temp_root("host-stages");
+    let control = Arc::new(FakeControl::default());
+    control.state.lock().unwrap().resource_failure_on_load = Some((
+        "gpu_admission_capacity_exceeded".to_string(),
+        "injected admission failure".to_string(),
+    ));
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let sink = Arc::new(RecordingOutputSink {
+        events: Mutex::new(Vec::new()),
+        delivery: OutputDelivery::Delivered,
+    });
+    let mut inference_job = job(&root, &config("host-stages.gguf"), "stages", 111);
+    let output_sink: Arc<dyn InferenceOutputSink> = sink.clone();
+    inference_job.replace_output_sink(output_sink);
+
+    assert!(matches!(
+        manager.handle().generate(inference_job),
+        Err(ModelManagerError::ResourceAdmission { .. })
+    ));
+    let stages = sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            InferenceOutputEvent::Stage(event) => Some((event.stage_sequence, event.stage)),
+            InferenceOutputEvent::TextDelta { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stages,
+        [
+            (1, InferenceProductStage::Queued),
+            (2, InferenceProductStage::Admission),
+            (3, InferenceProductStage::Failed),
+        ]
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn lagged_presentation_consumer_does_not_fail_generation() {
+    let root = temp_root("lagged-presentation");
+    let control = Arc::new(FakeControl::default());
+    let mut manager = manager(ModelManagerOptions::default(), control);
+    let sink = Arc::new(RecordingOutputSink {
+        events: Mutex::new(Vec::new()),
+        delivery: OutputDelivery::Lagged,
+    });
+    let mut inference_job = job(&root, &config("lagged.gguf"), "lagged", 112);
+    let output_sink: Arc<dyn InferenceOutputSink> = sink.clone();
+    inference_job.replace_output_sink(output_sink);
+
+    assert!(manager.handle().generate(inference_job).is_ok());
+    assert_eq!(sink.events.lock().unwrap().len(), 1);
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -322,6 +547,47 @@ fn manager_reuses_weights_and_keeps_conversation_evidence_isolated() {
     assert!(!first_log.contains(attempt_id(2).as_str()));
     assert!(second_log.contains(attempt_id(2).as_str()));
     assert!(!second_log.contains(attempt_id(1).as_str()));
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn incomplete_response_has_incomplete_evidence_and_status_accounting() {
+    let root = temp_root("incomplete-evidence");
+    let control = Arc::new(FakeControl::default());
+    control.state.lock().unwrap().finish_reason = Some(InferenceFinishReason::Length);
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+
+    let response = handle
+        .generate(job(&root, &config("length.gguf"), "session-a", 1))
+        .unwrap();
+    assert_eq!(response.finish_reason, InferenceFinishReason::Length);
+    let status = handle.status().unwrap();
+    assert_eq!(status.completed_jobs, 0);
+    assert_eq!(status.incomplete_jobs, 1);
+    let status_wire = serde_json::to_value(&status).unwrap();
+    assert_eq!(status_wire["completed_jobs"], 0);
+    assert_eq!(status_wire["incomplete_jobs"], 1);
+
+    let events = std::fs::read_to_string(root.join("runs").join(RUN_ID).join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<agl_events::SafeRuntimeEventEnvelope>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        events.last().map(|event| &event.payload),
+        Some(agl_events::SafeRuntimeEvent::InferenceAttemptFinished {
+            finish_status: agl_events::InferenceFinishStatus::IncompleteOutput,
+        })
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event.payload,
+        agl_events::SafeRuntimeEvent::InferenceAttemptFinished {
+            finish_status: agl_events::InferenceFinishStatus::Succeeded,
+        }
+    )));
 
     manager.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
@@ -734,6 +1000,196 @@ fn clear_release_idle_retention_and_shutdown_are_observable() {
 }
 
 #[test]
+fn failed_explicit_context_release_keeps_host_resource_and_accounting() {
+    let root = temp_root("release-ack");
+    let control = Arc::new(FakeControl::default());
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("release-ack.gguf");
+    let context_key = ContextKey::for_conversation(&config, "kept").unwrap();
+
+    handle.generate(job(&root, &config, "kept", 1)).unwrap();
+    control.state.lock().unwrap().fail_context_release = true;
+    let error = handle.release_context(&context_key).unwrap_err();
+
+    assert!(matches!(error, ModelManagerError::ContextFailed { .. }));
+    let status = handle.status().unwrap();
+    assert_eq!(status.cached_contexts, 1);
+    assert_eq!(status.context_evictions, 0);
+    assert!(
+        status
+            .loaded_model_digests
+            .contains(&context_key.model_key().digest().to_string())
+    );
+    assert!(
+        !control
+            .operations()
+            .iter()
+            .any(|operation| operation.starts_with("drop_context:"))
+    );
+
+    control.state.lock().unwrap().fail_context_release = false;
+    handle.release_context(&context_key).unwrap();
+    assert_eq!(handle.status().unwrap().cached_contexts, 0);
+    let operations = control.operations();
+    let releases = operations
+        .iter()
+        .filter(|operation| *operation == &format!("release_context:{}", context_key.digest()))
+        .count();
+    assert_eq!(releases, 2);
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation.ends_with(context_key.digest())
+                && operation.starts_with("drop_context:"))
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn failed_lru_releases_do_not_claim_context_or_model_eviction() {
+    let root = temp_root("lru-release-ack");
+    let control = Arc::new(FakeControl::default());
+    let options = ModelManagerOptions {
+        max_contexts_per_model: 1,
+        ..ModelManagerOptions::default()
+    };
+    let mut manager = manager(options, Arc::clone(&control));
+    let handle = manager.handle();
+    let first_config = config("first-release-ack.gguf");
+
+    handle.generate(job(&root, &first_config, "a", 1)).unwrap();
+    control.state.lock().unwrap().fail_context_release = true;
+    assert!(matches!(
+        handle
+            .generate(job(&root, &first_config, "b", 2))
+            .unwrap_err(),
+        ModelManagerError::ContextFailed { .. }
+    ));
+    let status = handle.status().unwrap();
+    assert_eq!(status.cached_contexts, 1);
+    assert_eq!(status.context_loads, 1);
+    assert_eq!(status.context_evictions, 0);
+
+    control.state.lock().unwrap().fail_context_release = false;
+    handle.generate(job(&root, &first_config, "b", 3)).unwrap();
+    assert_eq!(handle.status().unwrap().context_evictions, 1);
+
+    control.state.lock().unwrap().fail_model_release = true;
+    let second_config = config("second-release-ack.gguf");
+    assert!(matches!(
+        handle
+            .generate(job(&root, &second_config, "c", 4))
+            .unwrap_err(),
+        ModelManagerError::LoadFailed { .. }
+    ));
+    let first_model = ModelKey::from_config(&first_config).unwrap();
+    let status = handle.status().unwrap();
+    assert_eq!(status.cached_contexts, 0);
+    assert_eq!(status.model_evictions, 0);
+    assert_eq!(status.context_evictions, 2);
+    assert_eq!(status.loaded_model_digests, [first_model.digest()]);
+    assert!(
+        !control
+            .operations()
+            .iter()
+            .any(|operation| operation == &format!("drop_model:{}", first_model.digest()))
+    );
+
+    control.state.lock().unwrap().fail_model_release = false;
+    handle.generate(job(&root, &second_config, "c", 5)).unwrap();
+    assert_eq!(handle.status().unwrap().model_evictions, 1);
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn backend_loss_during_release_discards_the_whole_generation_without_ack() {
+    let root = temp_root("release-backend-loss");
+    let control = Arc::new(FakeControl::default());
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("backend-loss.gguf");
+    let context_key = ContextKey::for_conversation(&config, "lost").unwrap();
+
+    handle.generate(job(&root, &config, "lost", 1)).unwrap();
+    control
+        .state
+        .lock()
+        .unwrap()
+        .backend_lost_on_context_release = true;
+    let error = handle.release_context(&context_key).unwrap_err();
+
+    assert!(matches!(error, ModelManagerError::BackendLost { .. }));
+    assert_eq!(error.code(), "manager.backend_lost");
+    assert!(!error.retryable());
+    let status = handle.status().unwrap();
+    assert_eq!(status.cached_contexts, 0);
+    assert!(status.loaded_model_digests.is_empty());
+    assert_eq!(status.context_evictions, 0);
+    assert_eq!(status.model_evictions, 0);
+    let operations = control.operations();
+    assert!(
+        operations
+            .iter()
+            .any(|operation| operation == &format!("release_context:{}", context_key.digest()))
+    );
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation.starts_with("release_model:"))
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn resource_admission_codes_survive_manager_mapping_and_reaped_generations() {
+    let root = temp_root("typed-resource-admission");
+    let control = Arc::new(FakeControl::default());
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("resource-admission.gguf");
+
+    control.state.lock().unwrap().resource_failure_on_load = Some((
+        "accelerator_capacity_exceeded".to_string(),
+        "requested profile does not fit".to_string(),
+    ));
+    let error = handle
+        .generate(job(&root, &config, "capacity", 1))
+        .unwrap_err();
+    assert!(matches!(error, ModelManagerError::ResourceAdmission { .. }));
+    assert_eq!(error.code(), "accelerator_capacity_exceeded");
+    assert!(!error.retryable());
+
+    control.state.lock().unwrap().resource_failure_on_load = None;
+    handle.generate(job(&root, &config, "receipt", 2)).unwrap();
+    control
+        .state
+        .lock()
+        .unwrap()
+        .reaped_resource_failure_on_generate = Some((
+        "resource_estimate_exceeded".to_string(),
+        "worker receipt exceeded its envelope".to_string(),
+    ));
+    let error = handle
+        .generate(job(&root, &config, "receipt", 3))
+        .unwrap_err();
+    assert!(matches!(error, ModelManagerError::ResourceAdmission { .. }));
+    assert_eq!(error.code(), "resource_estimate_exceeded");
+    let status = handle.status().unwrap();
+    assert!(status.loaded_model_digests.is_empty());
+    assert_eq!(status.cached_contexts, 0);
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn worker_panic_becomes_manager_unavailable() {
     let root = temp_root("panic");
     let control = Arc::new(FakeControl::default());
@@ -785,6 +1241,20 @@ fn config(model: &str) -> ResolvedInferenceConfig {
             tool_call_format: ToolCallFormat::HermesJson,
         },
         prompt: PromptConfig::default(),
+    }
+}
+
+fn test_device_info() -> InferenceDeviceInfo {
+    InferenceDeviceInfo {
+        physical_device_id: "0000:03:00.0".to_string(),
+        driver_build_id: "sha256:test-driver".to_string(),
+        backend_name: "Vulkan0".to_string(),
+        description: "Fake GPU".to_string(),
+        kind: InferenceDeviceKind::DiscreteGpu,
+        free_memory_bytes: 900,
+        total_memory_bytes: 1_000,
+        usable: true,
+        supports_gpu_offload: true,
     }
 }
 

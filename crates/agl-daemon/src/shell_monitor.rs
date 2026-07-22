@@ -3,8 +3,8 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use agl_app::{
-    ApplicationCallContext, ApplicationService, SessionHeader, SessionPresentationEvent, Severity,
-    TerminalSessionView,
+    ApplicationCallContext, ApplicationService, SanitizedDisplayPath, SessionHeader,
+    SessionPresentationEvent, Severity, TerminalSessionView,
 };
 use agl_ids::{SessionId, TerminalSessionId};
 use agl_process::{
@@ -72,6 +72,7 @@ fn monitor_terminal(connection: ShellMonitorConnection, spec: ShellMonitorSpec) 
     let mut tracker = TrustedCommandTracker::new(spec.initial_command_sequence);
     let mut pending_cwd = None;
     let mut next_cwd_attempt = Instant::now();
+    let mut human_command_card_active = false;
 
     loop {
         if connection.state.upgrade().is_none() {
@@ -133,6 +134,19 @@ fn monitor_terminal(connection: ShellMonitorConnection, spec: ShellMonitorSpec) 
             }
         }
 
+        // Once a typed command crosses CommandStarted, sample its bounded PTY
+        // range on the existing monitor cadence so Chat receives live card
+        // output without making PTY bytes an integration authority.
+        if !batch.events.is_empty() || human_command_card_active {
+            let Some((cards, active)) =
+                project_human_command_cards(&connection, &spec.terminal_id, &batch.events)
+            else {
+                return;
+            };
+            human_command_card_active = active;
+            presentation.extend(cards);
+        }
+
         let attempt_cwd = pending_cwd.is_some() && Instant::now() >= next_cwd_attempt;
         if terminal_changed || attempt_cwd {
             let requested_cwd = if attempt_cwd {
@@ -176,6 +190,27 @@ fn monitor_terminal(connection: ShellMonitorConnection, spec: ShellMonitorSpec) 
     }
 }
 
+fn project_human_command_cards(
+    connection: &ShellMonitorConnection,
+    terminal_id: &TerminalSessionId,
+    events: &[ShellIntegrationEvent],
+) -> Option<(Vec<SessionPresentationEvent>, bool)> {
+    let state = connection.state.upgrade()?;
+    let terminal_id = terminal_id.clone();
+    let events = events.to_vec();
+    loop {
+        let terminal_id = terminal_id.clone();
+        let events = events.clone();
+        match state.call(ApplicationCallContext::new(), move |state, _| {
+            state.human_command_card_events(&terminal_id, &events)
+        }) {
+            Ok(events) => return events.ok(),
+            Err(DaemonStateCallError::Full) => std::thread::sleep(CWD_RETRY_INTERVAL),
+            Err(DaemonStateCallError::Cancelled | DaemonStateCallError::Closed) => return None,
+        }
+    }
+}
+
 fn close_integration(
     connection: &ShellMonitorConnection,
     spec: &ShellMonitorSpec,
@@ -195,7 +230,8 @@ fn close_integration(
                 code: "shell_integration_degraded",
                 message: "private shell integration channel closed".to_owned(),
             });
-    let mut presentation = Vec::new();
+    let mut presentation =
+        project_human_command_outcome_unknown(connection, &spec.terminal_id).unwrap_or_default();
     if let Some(projection) = project_terminal(connection, &spec.terminal_id, None, true)
         && let Some(terminal) = projection.terminal
     {
@@ -203,6 +239,23 @@ fn close_integration(
     }
     presentation.push(integration_notice_event(integration_notice));
     publish_all(&connection.application, &spec.session_id, presentation);
+}
+
+fn project_human_command_outcome_unknown(
+    connection: &ShellMonitorConnection,
+    terminal_id: &TerminalSessionId,
+) -> Option<Vec<SessionPresentationEvent>> {
+    let state = connection.state.upgrade()?;
+    loop {
+        let terminal_id = terminal_id.clone();
+        match state.call(ApplicationCallContext::new(), move |state, _| {
+            state.human_command_outcome_unknown_events(&terminal_id)
+        }) {
+            Ok(events) => return Some(events),
+            Err(DaemonStateCallError::Full) => std::thread::sleep(CWD_RETRY_INTERVAL),
+            Err(DaemonStateCallError::Cancelled | DaemonStateCallError::Closed) => return None,
+        }
+    }
 }
 
 fn project_terminal(
@@ -352,7 +405,7 @@ impl TrustedCommandTracker {
                         terminal_id: terminal_id.clone(),
                         sequence: command.command_sequence,
                         exit_status: presentation_exit(exit),
-                        cwd: finished_cwd.to_string_lossy().into_owned(),
+                        cwd: SanitizedDisplayPath::from_path(finished_cwd),
                     });
                     completed_commands.push(command.command);
                     cwd = Some(finished_cwd.clone());
@@ -399,14 +452,17 @@ mod tests {
                         sequence: 1,
                         cwd: directory.clone(),
                         last_exit: None,
+                        input_pending: false,
                     },
                     ShellIntegrationEvent::CommandStarted {
                         sequence: 2,
+                        transaction_id: None,
                         command: command.to_owned(),
                         cwd: directory.clone(),
                     },
                     ShellIntegrationEvent::CommandFinished {
                         sequence: 3,
+                        transaction_id: None,
                         exit: ShellExit::Code { code: 0 },
                         cwd: directory.clone(),
                     },
@@ -432,6 +488,7 @@ mod tests {
                 &terminal_id,
                 &[ShellIntegrationEvent::CommandStarted {
                     sequence: 1,
+                    transaction_id: None,
                     command: "unfinished-secret".to_owned(),
                     cwd: directory.clone(),
                 }],
@@ -446,6 +503,7 @@ mod tests {
                     &terminal_id,
                     &[ShellIntegrationEvent::CommandFinished {
                         sequence: 2,
+                        transaction_id: None,
                         exit: ShellExit::Code { code: 1 },
                         cwd: directory,
                     }],

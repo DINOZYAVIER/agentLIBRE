@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
 use agl_capabilities::ToolAccessMode;
-use agl_ids::{ExecutionId, SessionId, TerminalSessionId};
+use agl_ids::{ExecutionId, MessageId, SessionId, TerminalSessionId};
 use agl_process::KillMode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -115,6 +115,7 @@ pub enum ApplicationActionKind {
     WorkspaceSet,
     TerminalList,
     TerminalPromote,
+    IncompleteTurnContinue,
     ExecutionList,
     ExecutionAttach,
     ExecutionKill,
@@ -301,6 +302,10 @@ pub enum ApplicationAction {
     TerminalPromote {
         terminal_id: TerminalSessionId,
     },
+    IncompleteTurnContinue {
+        message_id: MessageId,
+        expected_execution_context_revision: u64,
+    },
     ExecutionList {
         include_finished: bool,
     },
@@ -352,6 +357,7 @@ impl ApplicationActionRequest {
             | ApplicationAction::WorkspaceGet
             | ApplicationAction::TerminalList { .. }
             | ApplicationAction::TerminalPromote { .. }
+            | ApplicationAction::IncompleteTurnContinue { .. }
             | ApplicationAction::ExecutionList { .. }
             | ApplicationAction::ExecutionAttach { .. }
             | ApplicationAction::ExecutionKill { .. }

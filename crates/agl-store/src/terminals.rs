@@ -883,11 +883,11 @@ mod tests {
     }
 
     #[test]
-    fn migration_16_is_current_and_has_private_terminal_columns() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 16);
+    fn current_schema_keeps_private_terminal_columns() {
+        assert_eq!(CURRENT_SCHEMA_VERSION, 17);
         assert_eq!(
             STORE_MIGRATIONS.last().map(|migration| migration.name),
-            Some("016_terminal_sessions")
+            Some("017_incomplete_run_state")
         );
         let root = TempRoot::new("migration");
         let store = AglStore::open_at(&root.0).unwrap();
@@ -895,7 +895,7 @@ mod tests {
             .connection()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
 
         let mut statement = store
             .connection()

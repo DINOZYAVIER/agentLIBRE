@@ -37,4 +37,5 @@ pub struct InferenceResponseMetadata {
 pub enum InferenceFinishReason {
     Stop,
     Length,
+    ContentByteLimit,
 }

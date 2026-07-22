@@ -4,7 +4,7 @@ use agl_ids::{RunId, TurnId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::VisibleTool;
+use crate::{IncompleteOutputReason, VisibleTool};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case", deny_unknown_fields)]
@@ -30,4 +30,12 @@ pub struct ModelRequest {
 #[serde(deny_unknown_fields)]
 pub struct ModelResponse {
     pub content: Content,
+    pub outcome: ModelResponseOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelResponseOutcome {
+    Complete,
+    Incomplete { reason: IncompleteOutputReason },
 }

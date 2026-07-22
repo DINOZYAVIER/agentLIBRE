@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use agl_content::Content;
-use agl_ids::MessageId;
+use agl_ids::{AttemptId, MessageId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    EventEnvelope, HookBatchOutcomeEvent, InferenceFinishStatus, ParsedActionEvent,
-    SafeParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
+    EventEnvelope, HookBatchOutcomeEvent, IncompleteOutputReasonEvent, InferenceFinishStatus,
+    ParsedActionEvent, SafeParsedActionEvent, StopReasonEvent, ToolJsonMalformedKind,
+    TurnFinishStatus,
 };
 
 pub type RuntimeEventEnvelope = EventEnvelope<RuntimeEvent>;
@@ -132,6 +133,11 @@ pub enum RuntimeEvent {
     ObservationAppended { name: String, data: Value },
     #[serde(rename = "answer.final")]
     AnswerFinal { answer: String },
+    #[serde(rename = "output.incomplete")]
+    OutputIncomplete {
+        partial: Content,
+        reason: IncompleteOutputReasonEvent,
+    },
     #[serde(rename = "turn.stopped")]
     TurnStopped {
         reason: StopReasonEvent,
@@ -150,6 +156,17 @@ pub enum RuntimeEvent {
     AssistantMessage {
         message_id: MessageId,
         content: Content,
+    },
+    #[serde(rename = "assistant_incomplete")]
+    AssistantIncomplete {
+        message_id: MessageId,
+        content: Content,
+        source_attempt_id: AttemptId,
+        reason: IncompleteOutputReasonEvent,
+        continuation_index: u16,
+        execution_context_revision: u64,
+        runtime_context_revision: u64,
+        policy_hash: String,
     },
     #[serde(rename = "assistant_tool_call")]
     AssistantToolCall {
@@ -213,11 +230,13 @@ impl RuntimeEvent {
             Self::TranscriptAppendFailed { .. } => "transcript.append_failed",
             Self::ObservationAppended { .. } => "observation.appended",
             Self::AnswerFinal { .. } => "answer.final",
+            Self::OutputIncomplete { .. } => "output.incomplete",
             Self::TurnStopped { .. } => "turn.stopped",
             Self::TurnCancelled { .. } => "turn.cancelled",
             Self::TurnFinished { .. } => "turn.finished",
             Self::UserMessage { .. } => "user_message",
             Self::AssistantMessage { .. } => "assistant_message",
+            Self::AssistantIncomplete { .. } => "assistant_incomplete",
             Self::AssistantToolCall { .. } => "assistant_tool_call",
             Self::ToolMessage { .. } => "tool_message",
             Self::ModelAttemptLinked => "model_attempt_linked",
@@ -370,6 +389,11 @@ pub enum SafeRuntimeEvent {
     },
     #[serde(rename = "answer.final")]
     AnswerFinal { answer_bytes: usize },
+    #[serde(rename = "output.incomplete")]
+    OutputIncomplete {
+        partial_bytes: usize,
+        reason: IncompleteOutputReasonEvent,
+    },
     #[serde(rename = "turn.stopped")]
     TurnStopped {
         reason: StopReasonEvent,
@@ -388,6 +412,17 @@ pub enum SafeRuntimeEvent {
     AssistantMessage {
         message_id: MessageId,
         content_bytes: usize,
+    },
+    #[serde(rename = "assistant_incomplete")]
+    AssistantIncomplete {
+        message_id: MessageId,
+        content_bytes: usize,
+        source_attempt_id: AttemptId,
+        reason: IncompleteOutputReasonEvent,
+        continuation_index: u16,
+        execution_context_revision: u64,
+        runtime_context_revision: u64,
+        policy_hash: String,
     },
     #[serde(rename = "assistant_tool_call")]
     AssistantToolCall {
@@ -451,11 +486,13 @@ impl SafeRuntimeEvent {
             Self::TranscriptAppendFailed { .. } => "transcript.append_failed",
             Self::ObservationAppended { .. } => "observation.appended",
             Self::AnswerFinal { .. } => "answer.final",
+            Self::OutputIncomplete { .. } => "output.incomplete",
             Self::TurnStopped { .. } => "turn.stopped",
             Self::TurnCancelled { .. } => "turn.cancelled",
             Self::TurnFinished { .. } => "turn.finished",
             Self::UserMessage { .. } => "user_message",
             Self::AssistantMessage { .. } => "assistant_message",
+            Self::AssistantIncomplete { .. } => "assistant_incomplete",
             Self::AssistantToolCall { .. } => "assistant_tool_call",
             Self::ToolMessage { .. } => "tool_message",
             Self::ModelAttemptLinked => "model_attempt_linked",
@@ -718,6 +755,10 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
             RuntimeEvent::AnswerFinal { answer } => Self::AnswerFinal {
                 answer_bytes: answer.len(),
             },
+            RuntimeEvent::OutputIncomplete { partial, reason } => Self::OutputIncomplete {
+                partial_bytes: partial.text_byte_len(),
+                reason: *reason,
+            },
             RuntimeEvent::TurnStopped { reason, visible } => Self::TurnStopped {
                 reason: reason.clone(),
                 visible: *visible,
@@ -741,6 +782,25 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
             } => Self::AssistantMessage {
                 message_id: message_id.clone(),
                 content_bytes: content.text_byte_len(),
+            },
+            RuntimeEvent::AssistantIncomplete {
+                message_id,
+                content,
+                source_attempt_id,
+                reason,
+                continuation_index,
+                execution_context_revision,
+                runtime_context_revision,
+                policy_hash,
+            } => Self::AssistantIncomplete {
+                message_id: message_id.clone(),
+                content_bytes: content.text_byte_len(),
+                source_attempt_id: source_attempt_id.clone(),
+                reason: *reason,
+                continuation_index: *continuation_index,
+                execution_context_revision: *execution_context_revision,
+                runtime_context_revision: *runtime_context_revision,
+                policy_hash: policy_hash.clone(),
             },
             RuntimeEvent::AssistantToolCall {
                 message_id,

@@ -7,6 +7,8 @@ source "$script_dir/lib.sh"
 
 ci_cd_repo
 ci_section "Systemd service dry-run"
+ci_need_tool cc
+ci_need_tool readelf
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -14,6 +16,57 @@ cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+
+fixture_bundle_digest="$(printf 'b%.0s' {1..64})"
+
+create_worker_fixture() {
+  local worker="$1"
+  local source_file="$tmp_dir/worker-fixture.c"
+  local generation
+  local roots
+  local reference
+  local -a references=()
+  printf '#include <stdlib.h>\nint main(void) { return 0; }\n' >"$source_file"
+  cc "$source_file" \
+    -Wl,-rpath,"\$ORIGIN/agl-inference-native/sha256-$fixture_bundle_digest" \
+    -o "$worker"
+  generation="$(dirname -- "$worker")"
+  roots="$generation/.nix-gc-roots"
+  mapfile -t references < <(
+    {
+      readelf -d "$worker"
+      readelf -l "$worker"
+    } | grep -oE '/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+' | sort -u || true
+  )
+  if (( ${#references[@]} > 0 )); then
+    mkdir -p "$roots"
+    for reference in "${references[@]}"; do
+      ln -s "$reference" "$roots/$(basename -- "$reference")"
+    done
+    chmod 0555 "$roots"
+  fi
+}
+
+create_native_bundle_fixture() {
+  local generation="$1"
+  local base="$generation/agl-inference-native"
+  local bundle="$base/sha256-$fixture_bundle_digest"
+  local library
+  mkdir -p "$bundle"
+  for library in \
+    libllama-common.so.0 \
+    libmtmd.so.0 \
+    libllama.so.0 \
+    libggml.so.0 \
+    libggml-base.so.0 \
+    libggml-cpu-test.so
+  do
+    : >"$bundle/$library"
+    chmod 0555 "$bundle/$library"
+  done
+  chmod 0555 "$bundle"
+  chmod 0555 "$base"
+}
 
 runtime_root="$tmp_dir/runtime"
 runtime_generation="$runtime_root/libexec/agentlibre/generations/generation-test"
@@ -26,7 +79,12 @@ chmod 0755 \
   "$runtime_root/libexec/agentlibre/generations"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl-process-launcher"
-chmod 0555 "$runtime_generation/agl" "$runtime_generation/agl-process-launcher"
+create_worker_fixture "$runtime_generation/agl-inference-worker"
+create_native_bundle_fixture "$runtime_generation"
+chmod 0555 \
+  "$runtime_generation/agl" \
+  "$runtime_generation/agl-process-launcher" \
+  "$runtime_generation/agl-inference-worker"
 chmod 0555 "$runtime_generation"
 ln -s generations/generation-test "$runtime_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$runtime_root/bin/agl"
@@ -70,6 +128,8 @@ require_output_contains "$daemon_output" "requested binary: $tmp_dir/bin/agl"
 require_output_contains "$daemon_output" "binary: $runtime_root/bin/agl"
 require_output_contains "$daemon_output" "resolved binary: $runtime_generation/agl"
 require_output_contains "$daemon_output" "process launcher: $runtime_generation/agl-process-launcher"
+require_output_contains "$daemon_output" "private inference worker: $runtime_generation/agl-inference-worker"
+require_output_contains "$daemon_output" "native inference bundle: $runtime_generation/agl-inference-native"
 require_output_contains "$daemon_output" "unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.service"
 require_output_contains "$daemon_output" "socket unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.socket"
 require_output_contains "$daemon_output" "WorkingDirectory=$tmp_dir/workspace"
@@ -89,6 +149,85 @@ require_output_contains "$daemon_output" "WantedBy=sockets.target"
 if [[ -e "$tmp_dir/state" || -L "$tmp_dir/state" ]]; then
   ci_fail "daemon dry-run created or replaced the socket parent"
 fi
+
+expect_native_bundle_rejection() {
+  local label="$1"
+  local status=0
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+    --dry-run \
+    --unit "agl-native-$label.service" \
+    --cwd "$tmp_dir/workspace" \
+    --binary "$runtime_root/bin/agl" \
+    --config "$tmp_dir/config/local.toml" \
+    --socket "$tmp_dir/state/daemon/agl.sock" \
+    --workspace-root "$tmp_dir/workspace" \
+    >"$tmp_dir/native-$label.out" \
+    2>"$tmp_dir/native-$label.err" || status=$?
+  [[ "$status" -eq 1 ]] || ci_fail "daemon installer accepted $label native bundle"
+  grep -F "invalid exact native inference bundle" "$tmp_dir/native-$label.err" >/dev/null ||
+    ci_fail "$label native bundle rejection was not actionable"
+}
+
+native_fixture="$runtime_generation/agl-inference-native/sha256-$fixture_bundle_digest"
+chmod 0755 "$native_fixture/libggml-cpu-test.so"
+expect_native_bundle_rejection writable
+chmod 0555 "$native_fixture/libggml-cpu-test.so"
+
+ln "$native_fixture/libggml-cpu-test.so" "$tmp_dir/native-hardlink"
+expect_native_bundle_rejection hardlink
+rm -f -- "$tmp_dir/native-hardlink"
+
+chmod 0755 "$native_fixture"
+ln -s /dev/null "$native_fixture/unexpected"
+chmod 0555 "$native_fixture"
+expect_native_bundle_rejection symlink
+chmod 0755 "$native_fixture"
+rm -f -- "$native_fixture/unexpected"
+mv "$native_fixture/libmtmd.so.0" "$tmp_dir/libmtmd.so.0"
+chmod 0555 "$native_fixture"
+expect_native_bundle_rejection missing
+chmod 0755 "$native_fixture"
+mv "$tmp_dir/libmtmd.so.0" "$native_fixture/libmtmd.so.0"
+chmod 0555 "$native_fixture"
+
+ln "$runtime_generation/agl-inference-worker" "$tmp_dir/worker-hardlink"
+hardlinked_worker_status=0
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-hardlinked-worker-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$runtime_root/bin/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/hardlinked-worker.out" \
+  2>"$tmp_dir/hardlinked-worker.err" || hardlinked_worker_status=$?
+rm -f -- "$tmp_dir/worker-hardlink"
+[[ "$hardlinked_worker_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a hard-linked inference worker"
+grep -F "must resolve through an immutable runtime bundle" \
+  "$tmp_dir/hardlinked-worker.err" >/dev/null ||
+  ci_fail "hard-linked inference worker rejection was not actionable"
+
+ln -s ../libexec/agentlibre/current/agl-inference-worker \
+  "$runtime_root/bin/agl-inference-worker"
+public_worker_status=0
+"$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-public-worker-test.service \
+  --cwd "$tmp_dir/workspace" \
+  --binary "$runtime_root/bin/agl" \
+  --config "$tmp_dir/config/local.toml" \
+  --socket "$tmp_dir/state/daemon/agl.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/public-worker.out" \
+  2>"$tmp_dir/public-worker.err" || public_worker_status=$?
+rm -f -- "$runtime_root/bin/agl-inference-worker"
+[[ "$public_worker_status" -eq 1 ]] ||
+  ci_fail "daemon installer accepted a public inference worker symlink"
+grep -F "must resolve through an immutable runtime bundle" \
+  "$tmp_dir/public-worker.err" >/dev/null ||
+  ci_fail "public inference worker rejection was not actionable"
 
 writable_ancestor_status=0
 chmod 0775 "$runtime_root/libexec"
@@ -114,7 +253,12 @@ umask_runtime_generation="$umask_runtime_root/libexec/agentlibre/generations/gen
 (umask 000; mkdir -p "$umask_runtime_root/bin" "$umask_runtime_generation")
 printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl-process-launcher"
-chmod 0555 "$umask_runtime_generation/agl" "$umask_runtime_generation/agl-process-launcher"
+create_worker_fixture "$umask_runtime_generation/agl-inference-worker"
+create_native_bundle_fixture "$umask_runtime_generation"
+chmod 0555 \
+  "$umask_runtime_generation/agl" \
+  "$umask_runtime_generation/agl-process-launcher" \
+  "$umask_runtime_generation/agl-inference-worker"
 chmod 0555 "$umask_runtime_generation"
 ln -s generations/generation-test "$umask_runtime_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$umask_runtime_root/bin/agl"
@@ -176,7 +320,11 @@ grep -F -- "--unit must be a unit name" "$tmp_dir/invalid-unit.err" >/dev/null |
 mkdir -p "$tmp_dir/mutable"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl-process-launcher"
-chmod 0755 "$tmp_dir/mutable/agl" "$tmp_dir/mutable/agl-process-launcher"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl-inference-worker"
+chmod 0755 \
+  "$tmp_dir/mutable/agl" \
+  "$tmp_dir/mutable/agl-process-launcher" \
+  "$tmp_dir/mutable/agl-inference-worker"
 mutable_status=0
 "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
   --dry-run \
@@ -215,9 +363,14 @@ printf '%s\n' \
   >"$install_root/libexec/agentlibre/generations/generation-test/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' \
   >"$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher"
+create_worker_fixture \
+  "$install_root/libexec/agentlibre/generations/generation-test/agl-inference-worker"
+create_native_bundle_fixture \
+  "$install_root/libexec/agentlibre/generations/generation-test"
 chmod 0555 \
   "$install_root/libexec/agentlibre/generations/generation-test/agl" \
-  "$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher"
+  "$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher" \
+  "$install_root/libexec/agentlibre/generations/generation-test/agl-inference-worker"
 chmod 0555 "$install_root/libexec/agentlibre/generations/generation-test"
 ln -s generations/generation-test "$install_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$install_root/bin/agl"

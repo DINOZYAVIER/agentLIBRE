@@ -164,5 +164,3 @@ fn local_llama_cpp_config_has_no_executable_path() {
     assert!(value["backend"].get("executable").is_none());
     assert!(value["backend"].get("args").is_none());
 }
-
-mod agl139_native_smoke;

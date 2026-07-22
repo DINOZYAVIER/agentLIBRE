@@ -11,7 +11,9 @@ use agl_capabilities::{
 };
 use agl_config::{
     ModelConfig, ResolvedInferenceConfig, ToolCallFormat, bind_inference_preset,
-    load_inference_preset_from_str, load_local_inference_config, model_bindings_path,
+    bind_inference_preset_with_bindings, load_inference_preset_from_str,
+    load_local_inference_config, model_bindings_path, resolve_inference_preset,
+    resolve_inference_preset_with_bindings,
 };
 use agl_content::Content;
 use agl_functions::{
@@ -21,8 +23,8 @@ use agl_functions::{
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    InferenceCancellation, InferenceOutputSink, InferenceRequest, InferenceResponse,
-    LlamaCppDeviceKind, llama_cpp_device_inventory,
+    InferenceCancellation, InferenceDeviceInfo, InferenceDeviceKind, InferenceOutputSink,
+    InferenceRequest, InferenceResponse,
 };
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_models::{
@@ -166,6 +168,15 @@ impl InferenceSession {
         let use_function_embedded_config = options.config.is_none()
             && env::var_os(CONFIG_ENV).is_none()
             && function_embedded_config.is_some();
+        ensure!(
+            options.model_bindings_path.is_none() || options.model_bindings_override.is_none(),
+            "model bindings path and inline model bindings override are mutually exclusive"
+        );
+        if let Some(bindings) = &options.model_bindings_override {
+            bindings
+                .validate()
+                .context("invalid inline model bindings override")?;
+        }
         let config_path = Self::resolve_config_path(&options, runtime, function_config_path);
 
         tracing::info!(
@@ -197,7 +208,14 @@ impl InferenceSession {
                 .model_bindings_path
                 .clone()
                 .unwrap_or_else(|| model_bindings_path(&config_dir));
-            let bound = bind_inference_preset(preset, &bindings_path).with_context(|| {
+            let bindings_source = Path::new("<inline-setup-smoke-bindings>");
+            let bound = match &options.model_bindings_override {
+                Some(bindings) => {
+                    bind_inference_preset_with_bindings(preset, bindings, bindings_source)
+                }
+                None => bind_inference_preset(preset, &bindings_path),
+            }
+            .with_context(|| {
                 format!(
                     "failed to bind function inference models for {}",
                     config_path.display()
@@ -214,7 +232,9 @@ impl InferenceSession {
                                 bound.backend.model_id
                             )
                         })?;
-                    let devices = llama_cpp_device_inventory()
+                    let devices = inference_client
+                        .device_inventory()
+                        .context("failed to inspect isolated inference worker devices")?
                         .into_iter()
                         .map(model_device_info)
                         .collect();
@@ -256,13 +276,18 @@ impl InferenceSession {
                     (config, Some(plan_set))
                 }
                 agl_config::InferencePresetRuntimeConfig::Fixed(_) => {
-                    let config = agl_config::resolve_inference_preset(
-                        load_inference_preset_from_str(
-                            &config_path.display().to_string(),
-                            function_embedded_config.expect("checked above"),
-                        )?,
-                        &bindings_path,
+                    let preset = load_inference_preset_from_str(
+                        &config_path.display().to_string(),
+                        function_embedded_config.expect("checked above"),
                     )?;
+                    let config = match &options.model_bindings_override {
+                        Some(bindings) => resolve_inference_preset_with_bindings(
+                            preset,
+                            bindings,
+                            bindings_source,
+                        ),
+                        None => resolve_inference_preset(preset, &bindings_path),
+                    }?;
                     (config, None)
                 }
             }
@@ -965,17 +990,17 @@ impl InferenceSession {
     }
 }
 
-fn model_device_info(device: agl_inference::LlamaCppDeviceInfo) -> LlamaDeviceInfo {
+fn model_device_info(device: InferenceDeviceInfo) -> LlamaDeviceInfo {
     LlamaDeviceInfo {
-        name: device.name,
+        name: device.backend_name,
         description: device.description,
         kind: match device.kind {
-            LlamaCppDeviceKind::Cpu => LlamaDeviceKind::Cpu,
-            LlamaCppDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
-            LlamaCppDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
-            LlamaCppDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
-            LlamaCppDeviceKind::Metadata => LlamaDeviceKind::Metadata,
-            LlamaCppDeviceKind::Unknown => LlamaDeviceKind::Unknown,
+            InferenceDeviceKind::Cpu => LlamaDeviceKind::Cpu,
+            InferenceDeviceKind::DiscreteGpu => LlamaDeviceKind::DiscreteGpu,
+            InferenceDeviceKind::IntegratedGpu => LlamaDeviceKind::IntegratedGpu,
+            InferenceDeviceKind::Accelerator => LlamaDeviceKind::Accelerator,
+            InferenceDeviceKind::Metadata => LlamaDeviceKind::Metadata,
+            InferenceDeviceKind::Unknown => LlamaDeviceKind::Unknown,
         },
         free_memory_bytes: device.free_memory_bytes,
         total_memory_bytes: device.total_memory_bytes,

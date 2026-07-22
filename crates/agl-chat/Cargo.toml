@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-build = "build.rs"
 
 [dependencies]
 agl-capabilities.workspace = true
@@ -33,6 +32,3 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true
-
-[build-dependencies]
-agl-llama-cpp-sys.workspace = true

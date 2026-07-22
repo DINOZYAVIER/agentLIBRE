@@ -7,9 +7,9 @@ use agl_events::{EventDraft, EventScope, RuntimeEvent};
 use agl_ids::MessageId;
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
-    HookBatchOutcome, HookBatchSummary, ModelRequest, StopReason, TurnFailureOperation,
-    TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnPhase, TurnState, TurnTerminalStatus,
-    TurnTransition,
+    HookBatchOutcome, HookBatchSummary, IncompleteOutputReason, ModelRequest, ModelResponseOutcome,
+    StopReason, TurnFailureOperation, TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnPhase,
+    TurnState, TurnTerminalStatus, TurnTransition,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::json;
@@ -169,6 +169,7 @@ enum ExecutorPhase {
     ModelResponseHook {
         request_index: usize,
         content: Content,
+        outcome: ModelResponseOutcome,
         provisional_message_id: MessageId,
     },
     ParseModelResponse {
@@ -238,6 +239,7 @@ enum HookContinuation {
     ModelResponse {
         request_index: usize,
         content: Content,
+        outcome: ModelResponseOutcome,
         provisional_message_id: MessageId,
     },
     ArtifactWrite {
@@ -455,6 +457,7 @@ impl TurnExecutor {
                 ExecutorPhase::ModelResponseHook {
                     request_index,
                     content,
+                    outcome,
                     provisional_message_id,
                 } => {
                     let payload = model_response_payload(
@@ -468,16 +471,29 @@ impl TurnExecutor {
                         HookContinuation::ModelResponse {
                             request_index,
                             content: content.clone(),
+                            outcome,
                             provisional_message_id: provisional_message_id.clone(),
                         },
                         events,
                     )? {
                         return Ok(());
                     }
-                    self.checkpoint.phase = ExecutorPhase::ParseModelResponse {
-                        content,
-                        provisional_message_id,
-                    };
+                    match outcome {
+                        ModelResponseOutcome::Complete => {
+                            self.checkpoint.phase = ExecutorPhase::ParseModelResponse {
+                                content,
+                                provisional_message_id,
+                            };
+                        }
+                        ModelResponseOutcome::Incomplete { reason } => {
+                            self.schedule_incomplete_transcript(
+                                content,
+                                reason,
+                                provisional_message_id,
+                                events,
+                            )?;
+                        }
+                    }
                 }
                 ExecutorPhase::ParseModelResponse {
                     content,
@@ -590,6 +606,7 @@ impl TurnExecutor {
                     self.checkpoint.phase = ExecutorPhase::ModelResponseHook {
                         request_index,
                         content: response.content,
+                        outcome: response.outcome,
                         provisional_message_id,
                     };
                     Ok(())
@@ -645,6 +662,7 @@ impl TurnExecutor {
                 EffectOutcome::Succeeded(()) => {
                     let status = match output {
                         TurnOutput::Answered { .. } => TurnTerminalStatus::Answered,
+                        TurnOutput::Incomplete { .. } => TurnTerminalStatus::IncompleteOutput,
                         TurnOutput::Stopped { .. } => TurnTerminalStatus::Stopped,
                     };
                     self.apply(TurnTransition::Finish { status }, events)?;
@@ -718,7 +736,7 @@ impl TurnExecutor {
                 )?;
                 match summary.outcome() {
                     HookBatchOutcome::Pass | HookBatchOutcome::Warn => {
-                        self.continue_after_hook(next)
+                        self.continue_after_hook(next, events)
                     }
                     HookBatchOutcome::Repair => {
                         self.handle_hook_repair(next, summary, &result_for_repair, events)
@@ -737,7 +755,11 @@ impl TurnExecutor {
         }
     }
 
-    fn continue_after_hook(&mut self, next: HookContinuation) -> Result<(), TurnExecutorError> {
+    fn continue_after_hook(
+        &mut self,
+        next: HookContinuation,
+        events: &mut Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<(), TurnExecutorError> {
         self.checkpoint.phase = match next {
             HookContinuation::ContextPrepare => ExecutorPhase::PrepareModelRequest,
             HookContinuation::ModelRequest { request_index } => {
@@ -746,10 +768,22 @@ impl TurnExecutor {
             HookContinuation::ModelResponse {
                 request_index: _,
                 content,
+                outcome,
                 provisional_message_id,
-            } => ExecutorPhase::ParseModelResponse {
-                content,
-                provisional_message_id,
+            } => match outcome {
+                ModelResponseOutcome::Complete => ExecutorPhase::ParseModelResponse {
+                    content,
+                    provisional_message_id,
+                },
+                ModelResponseOutcome::Incomplete { reason } => {
+                    self.schedule_incomplete_transcript(
+                        content,
+                        reason,
+                        provisional_message_id,
+                        events,
+                    )?;
+                    return Ok(());
+                }
             },
             HookContinuation::ArtifactWrite {
                 answer,
@@ -990,6 +1024,35 @@ impl TurnExecutor {
         });
         self.checkpoint.phase = ExecutorPhase::ScheduleTranscript {
             output: TurnOutput::Answered { answer },
+            messages,
+            assistant_message_id: Some(provisional_message_id),
+        };
+        Ok(())
+    }
+
+    fn schedule_incomplete_transcript(
+        &mut self,
+        content: Content,
+        reason: IncompleteOutputReason,
+        provisional_message_id: MessageId,
+        events: &mut Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<(), TurnExecutorError> {
+        let partial = content.text_only().ok_or_else(|| {
+            TurnExecutorError::Transition(
+                "incomplete model output must contain text parts only".to_string(),
+            )
+        })?;
+        self.apply(
+            TurnTransition::IncompleteOutput {
+                partial: content.clone(),
+                reason,
+            },
+            events,
+        )?;
+        let mut messages = self.checkpoint.state.messages.clone();
+        messages.push(TurnMessage::Assistant { content });
+        self.checkpoint.phase = ExecutorPhase::ScheduleTranscript {
+            output: TurnOutput::Incomplete { partial, reason },
             messages,
             assistant_message_id: Some(provisional_message_id),
         };

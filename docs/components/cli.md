@@ -15,15 +15,18 @@ agl --function coding
 On Linux, bare `agl` opens the daemon-backed interactive surface. Chat and a
 persistent Unix terminal are peer views of the same durable session:
 
-- type a physical `!` and press Enter in an empty Chat composer to enter the
-  last Human terminal (creating its managed Bash/Zsh PTY on first use);
+- type a physical `!` in an empty Chat composer to enter the one-shot Shell
+  composer immediately; type a command and press Enter to run it through the
+  persistent Human PTY and show a bounded inline command card;
+- press Enter in an empty Shell composer to enter the last Human terminal
+  (creating its managed Bash/Zsh PTY on first use);
+- a second physical `!` in an empty Shell composer returns to Prompt with one
+  literal leading `!`; bracketed-pasted leading `!` never changes mode;
 - at a trusted empty shell prompt, `!` followed by Enter returns to Chat
   without sending either byte to the shell;
 - while Vim, a REPL, or another foreground program is active, press `Esc` then
   `!` within 750 ms. `Esc` reaches the program immediately, so Vim is left in
-  Normal mode while Chat is visible;
-- `!ls`, `!!`, multiline input, and pasted `!` remain literal input in their
-  current view.
+  Normal mode while Chat is visible.
 
 Changing views does not stop the shell, jobs, cwd, exports, aliases, Vim, or a
 waiting REPL. The daemon continuously drains the PTY and the CLI uses filtered
@@ -41,6 +44,15 @@ Shell navigation is native terminal behavior, so the Chat command catalog has
 no `/cd` or `/pwd`. `/processes`, `/attach`, and `/kill` operate on typed
 daemon-owned execution identities. Human terminal bytes and command history
 are private and are never added to model context automatically.
+
+While an agent turn is active, Chat keeps a compact typed activity path visible:
+run, turn, model attempt, inference stage, capability step, and delegated child
+run. `Ctrl+G` expands the bounded tree. The renderer uses deterministic arrows
+and box drawing with narrow-terminal, ASCII, and `NO_COLOR` fallbacks. Known
+capabilities expose only reviewed facts such as a repository-relative path,
+entry/match count, completeness, execution profile, exit status, or inference
+progress. Raw arguments/results, prompts, reasoning, secrets, and host paths are
+never activity fields.
 
 `/processes` also contains two visible typed actions for a separate Human
 `HOST` terminal. **Open HOST terminal** uses managed startup and is the default

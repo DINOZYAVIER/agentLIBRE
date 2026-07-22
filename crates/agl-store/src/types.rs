@@ -448,6 +448,7 @@ pub enum RunState {
     Running,
     Waiting,
     Succeeded,
+    Incomplete,
     Failed,
     Cancelled,
 }
@@ -459,13 +460,17 @@ impl RunState {
             Self::Running => "running",
             Self::Waiting => "waiting",
             Self::Succeeded => "succeeded",
+            Self::Incomplete => "incomplete",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Incomplete | Self::Failed | Self::Cancelled
+        )
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self> {
@@ -474,6 +479,7 @@ impl RunState {
             "running" => Ok(Self::Running),
             "waiting" => Ok(Self::Waiting),
             "succeeded" => Ok(Self::Succeeded),
+            "incomplete" => Ok(Self::Incomplete),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             _ => invalid_run_value("runs.state", value, "invalid run state"),

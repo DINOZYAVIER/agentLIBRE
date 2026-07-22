@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
 use agl_actions::ModelAction;
+use agl_content::MAX_TEXT_PART_BYTES;
 use agl_ids::AttemptId;
 
-use crate::{InferenceOutputEvent, InferenceOutputSink, OutputDelivery};
+use agl_inference::{InferenceOutputEvent, InferenceOutputSink, OutputDelivery};
 
 use super::decode::trim_generated_continuation;
 use super::prompt::{
@@ -29,11 +30,13 @@ pub(super) struct IncrementalResponseClassifier<'a> {
     action: bool,
     continuation: bool,
     delivery_suspended: bool,
+    content_byte_limit_reached: bool,
 }
 
 pub(super) struct ClassifiedResponse {
     pub(super) decoded_content: String,
     pub(super) content: String,
+    pub(super) content_byte_limit_reached: bool,
 }
 
 impl<'a> IncrementalResponseClassifier<'a> {
@@ -52,12 +55,22 @@ impl<'a> IncrementalResponseClassifier<'a> {
             action: false,
             continuation: false,
             delivery_suspended: false,
+            content_byte_limit_reached: false,
         }
     }
 
     pub(super) fn push(&mut self, bytes: &[u8]) -> bool {
         let decoded = self.utf8.push(bytes);
         if !decoded.is_empty() {
+            if self
+                .decoded_content
+                .len()
+                .checked_add(decoded.len())
+                .is_none_or(|length| length > MAX_TEXT_PART_BYTES)
+            {
+                self.content_byte_limit_reached = true;
+                return true;
+            }
             self.decoded_content.push_str(&decoded);
             self.refresh(false);
         }
@@ -68,10 +81,23 @@ impl<'a> IncrementalResponseClassifier<'a> {
         self.continuation
     }
 
+    pub(super) fn content_byte_limit_reached(&self) -> bool {
+        self.content_byte_limit_reached
+    }
+
     pub(super) fn finish(mut self) -> ClassifiedResponse {
         let decoded = self.utf8.finish();
         if !decoded.is_empty() {
-            self.decoded_content.push_str(&decoded);
+            if self
+                .decoded_content
+                .len()
+                .checked_add(decoded.len())
+                .is_some_and(|length| length <= MAX_TEXT_PART_BYTES)
+            {
+                self.decoded_content.push_str(&decoded);
+            } else {
+                self.content_byte_limit_reached = true;
+            }
         }
         self.refresh(true);
         if !self.action {
@@ -80,6 +106,7 @@ impl<'a> IncrementalResponseClassifier<'a> {
         ClassifiedResponse {
             decoded_content: self.decoded_content,
             content: self.content,
+            content_byte_limit_reached: self.content_byte_limit_reached,
         }
     }
 
@@ -284,10 +311,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|event| match event {
+                .filter_map(|event| match event {
                     InferenceOutputEvent::TextDelta { sequence, text, .. } => {
-                        (*sequence, text.clone())
+                        Some((*sequence, text.clone()))
                     }
+                    InferenceOutputEvent::Stage(_) => None,
                 })
                 .collect()
         }
@@ -374,6 +402,45 @@ mod tests {
             assert_eq!(response.content, "first\nsecond\n");
             assert_eq!(sink.deltas(), vec![(1, "first\n".to_string())]);
         }
+    }
+
+    #[test]
+    fn content_byte_limit_stops_before_accepting_the_crossing_piece() {
+        let sink = RecordingSink::delivered();
+        let mut classifier = IncrementalResponseClassifier::new(attempt_id(), &sink);
+        let accepted = vec![b'a'; MAX_TEXT_PART_BYTES];
+
+        assert!(!classifier.push(&accepted));
+        assert!(classifier.push(b"b"));
+        assert!(classifier.content_byte_limit_reached());
+        let response = classifier.finish();
+
+        assert_eq!(response.content.len(), MAX_TEXT_PART_BYTES);
+        assert!(response.content_byte_limit_reached);
+        assert!(response.content.bytes().all(|byte| byte == b'a'));
+        assert_eq!(
+            sink.deltas()
+                .into_iter()
+                .map(|(_, text)| text.len())
+                .sum::<usize>(),
+            MAX_TEXT_PART_BYTES
+        );
+    }
+
+    #[test]
+    fn utf8_finish_reports_byte_limit_when_buffered_replacement_would_cross_it() {
+        let sink = RecordingSink::delivered();
+        let mut classifier = IncrementalResponseClassifier::new(attempt_id(), &sink);
+        let accepted = vec![b'a'; MAX_TEXT_PART_BYTES];
+
+        assert!(!classifier.push(&accepted));
+        assert!(!classifier.push(&[0xe2]));
+        assert!(!classifier.content_byte_limit_reached());
+        let response = classifier.finish();
+
+        assert!(response.content_byte_limit_reached);
+        assert_eq!(response.content.len(), MAX_TEXT_PART_BYTES);
+        assert!(response.content.bytes().all(|byte| byte == b'a'));
     }
 
     #[test]

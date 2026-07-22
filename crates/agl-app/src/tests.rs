@@ -8,12 +8,107 @@ use std::time::{Duration, Instant};
 use agl_capabilities::ToolAccessMode;
 use agl_content::Content;
 use agl_ids::{
-    AttemptId, DaemonInstanceId, ExecutionId, MessageId, RunId, SessionId, TerminalSessionId,
-    TurnId,
+    AttemptId, DaemonInstanceId, ExecutionId, MessageId, RunId, SessionId, StepId,
+    TerminalSessionId, TurnId, WriterLeaseId,
 };
 use agl_process::{ExecutionProfile, ExecutionState, TerminalSize};
 
 use super::*;
+
+fn display_path(text: &str) -> SanitizedDisplayPath {
+    SanitizedDisplayPath::from_utf8(text)
+}
+
+fn workspace_history_scope() -> String {
+    format!("sha256:{}", "a".repeat(64))
+}
+
+#[test]
+fn human_command_card_has_typed_lifecycle_cursors_and_redacted_debug() {
+    let terminal_id = TerminalSessionId::generate();
+    let execution_id = ExecutionId::generate();
+    let command_output = agl_process::sanitize_terminal_card_output(b"printf private-value", 64);
+    let empty_output = agl_process::sanitize_terminal_card_output(b"", 64);
+    let mut card = HumanCommandCardView {
+        terminal_id,
+        execution_id,
+        command_sequence: 1,
+        command: SanitizedTerminalText::from_process_sanitized(&command_output),
+        output: SanitizedTerminalText::from_process_sanitized(&empty_output),
+        output_start: agl_process::ExecutionCursor { after_sequence: 7 },
+        output_end: agl_process::ExecutionCursor { after_sequence: 7 },
+        state: HumanCommandCardState::Starting,
+        exit_status: None,
+        cwd: display_path("/workspace"),
+        truncated: false,
+        filtered_effects: 0,
+        started_at_unix_ms: 10,
+        updated_at_unix_ms: 10,
+    };
+    card.validate().unwrap();
+    assert!(!format!("{card:?}").contains("private-value"));
+
+    card.state = HumanCommandCardState::Exited;
+    assert!(card.validate().is_err());
+    card.exit_status = Some(0);
+    card.updated_at_unix_ms = 11;
+    card.validate().unwrap();
+
+    card.state = HumanCommandCardState::OutcomeUnknown;
+    card.exit_status = None;
+    card.output_end.after_sequence = 6;
+    assert!(card.validate().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn display_paths_escape_linux_bytes_and_terminal_controls_without_round_trip_authority() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+    use std::path::PathBuf;
+
+    let mut raw = b"/workspace/line\n-tab\t-esc\x1b-del\x7f-c1\xc2\x85-bidi".to_vec();
+    raw.extend_from_slice("\u{202e}\u{2066}".as_bytes());
+    raw.extend_from_slice(b"-invalid\xff-slash\\name");
+    let path = PathBuf::from(OsString::from_vec(raw));
+    let display = SanitizedDisplayPath::from_path(&path);
+
+    display.validate().unwrap();
+    assert!(!display.truncated);
+    for escaped in [
+        "\\u{A}",
+        "\\u{9}",
+        "\\u{1B}",
+        "\\u{7F}",
+        "\\u{85}",
+        "\\u{202E}",
+        "\\u{2066}",
+        "\\xFF",
+        "\\\\name",
+    ] {
+        assert!(display.text.contains(escaped), "missing escape {escaped:?}");
+    }
+    assert!(!display.text.chars().any(char::is_control));
+
+    let mut oversized_raw = vec![b'/'];
+    oversized_raw.resize(MAX_TERMINAL_PATH_BYTES + 2, b'a');
+    let oversized = PathBuf::from(OsString::from_vec(oversized_raw));
+    let truncated = SanitizedDisplayPath::from_path(&oversized);
+    assert!(truncated.truncated);
+    assert_eq!(truncated.text.len(), MAX_TERMINAL_PATH_BYTES);
+    truncated.validate().unwrap();
+
+    for hostile in ["line\nbreak", "escape\u{1b}", "bidi\u{202e}"] {
+        assert!(
+            SanitizedDisplayPath {
+                text: hostile.to_owned(),
+                truncated: false,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}
 
 #[test]
 fn command_catalog_has_the_selected_unique_surface_and_busy_availability() {
@@ -234,6 +329,7 @@ async fn presentation_snapshot_and_live_registration_are_revision_contiguous() {
             snapshot: snapshot.clone(),
             older_page_cursor: None,
             exit_on_invoke: false,
+            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -259,6 +355,170 @@ async fn presentation_snapshot_and_live_registration_are_revision_contiguous() {
 }
 
 #[tokio::test]
+async fn human_command_submission_is_redacted_and_publishes_its_private_card() {
+    const SENTINEL: &str = "AGL_PRIVATE_HUMAN_COMMAND_148";
+    let daemon_instance_id = DaemonInstanceId::generate();
+    let session_id = SessionId::generate();
+    let terminal = terminal(&session_id);
+    let command_sequence = 1;
+    let cursor = agl_process::ExecutionCursor { after_sequence: 4 };
+    let card = HumanCommandCardView {
+        terminal_id: terminal.terminal_id.clone(),
+        execution_id: terminal.execution_id.clone(),
+        command_sequence,
+        command: SanitizedTerminalText::from_process_sanitized(
+            &agl_process::sanitize_terminal_card_output(SENTINEL.as_bytes(), 64),
+        ),
+        output: SanitizedTerminalText::from_process_sanitized(
+            &agl_process::sanitize_terminal_card_output(b"", 64),
+        ),
+        output_start: cursor,
+        output_end: cursor,
+        state: HumanCommandCardState::Starting,
+        exit_status: None,
+        cwd: display_path("/workspace"),
+        truncated: false,
+        filtered_effects: 0,
+        started_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    };
+    let accepted = HumanTerminalCommandAccepted {
+        terminal_id: terminal.terminal_id.clone(),
+        command_sequence,
+        output_after_sequence: cursor.after_sequence,
+    };
+    let mut backend_snapshot = snapshot(&daemon_instance_id, &session_id);
+    backend_snapshot.terminals.push(terminal.clone());
+    let service = ApplicationService::new(
+        daemon_instance_id,
+        Arc::new(FakeBackend {
+            snapshot: backend_snapshot,
+            older_page_cursor: None,
+            exit_on_invoke: false,
+            human_command_admission: Some(HumanTerminalCommandAdmission {
+                accepted: accepted.clone(),
+                card: card.clone(),
+            }),
+        }),
+    );
+    let mut subscription = service
+        .subscribe(PresentationSubscribe {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let request = HumanTerminalCommandSubmit {
+        session_id,
+        terminal_id: terminal.terminal_id,
+        client_submission_id: "private-command".to_owned(),
+        writer_lease_id: WriterLeaseId::generate(),
+        expected_command_sequence: 0,
+        expected_prompt_generation: 1,
+        command: SENTINEL.to_owned(),
+    };
+    let request_debug = format!("{request:?}");
+    assert!(!request_debug.contains(SENTINEL));
+    assert!(!request_debug.contains(request.writer_lease_id.as_str()));
+    assert_eq!(
+        service
+            .submit_human_terminal_command(request.clone())
+            .await
+            .unwrap(),
+        accepted
+    );
+    let first = subscription.next().await.unwrap();
+    let event = if matches!(
+        first.event,
+        SessionPresentationEvent::HumanCommandCardUpsert { .. }
+    ) {
+        first
+    } else {
+        subscription.next().await.unwrap()
+    };
+    assert!(matches!(
+        event.event,
+        SessionPresentationEvent::HumanCommandCardUpsert { card: observed }
+            if observed == card
+    ));
+
+    let mut running = card;
+    running.state = HumanCommandCardState::Running;
+    running.updated_at_unix_ms = 2;
+    service
+        .publish(
+            &request.session_id,
+            SessionPresentationEvent::HumanCommandCardUpsert {
+                card: running.clone(),
+            },
+        )
+        .unwrap();
+    let request_session_id = request.session_id.clone();
+    service
+        .submit_human_terminal_command(request)
+        .await
+        .unwrap();
+    let current = service.snapshot(&request_session_id).await.unwrap();
+    assert!(
+        current
+            .human_commands
+            .iter()
+            .any(|observed| observed == &running)
+    );
+}
+
+#[tokio::test]
+async fn non_durable_refresh_retains_final_assistant_items() {
+    let daemon_instance_id = DaemonInstanceId::generate();
+    let session_id = SessionId::generate();
+    let mut backend_snapshot = snapshot(&daemon_instance_id, &session_id);
+    backend_snapshot.header.durable = false;
+    let service = ApplicationService::new(
+        daemon_instance_id,
+        Arc::new(FakeBackend {
+            snapshot: backend_snapshot,
+            older_page_cursor: None,
+            exit_on_invoke: false,
+            human_command_admission: None,
+        }),
+    );
+    let mut subscription = service
+        .subscribe(PresentationSubscribe {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let message_id = MessageId::generate();
+    service
+        .publish(
+            &session_id,
+            SessionPresentationEvent::ItemUpsert {
+                item: SessionPresentationItem::AssistantMessage {
+                    message_id: message_id.clone(),
+                    content: Content::text("ephemeral final answer").unwrap(),
+                    state: AssistantItemState::Final,
+                },
+            },
+        )
+        .unwrap();
+    service.refresh(&session_id).await.unwrap();
+    let _upsert = subscription.next().await.unwrap();
+    let replacement = subscription.next().await.unwrap();
+    let SessionPresentationEvent::SnapshotReplaced { snapshot, .. } = replacement.event else {
+        panic!("refresh must publish a replacement snapshot");
+    };
+    assert!(snapshot.items.iter().any(|item| {
+        matches!(
+            item,
+            SessionPresentationItem::AssistantMessage {
+                message_id: id,
+                content,
+                state: AssistantItemState::Final,
+            } if id == &message_id && content.text_only().as_deref() == Some("ephemeral final answer")
+        )
+    }));
+}
+
+#[tokio::test]
 async fn presentation_page_cursor_is_preserved_on_initial_and_replacement_snapshots() {
     let daemon_instance_id = DaemonInstanceId::generate();
     let session_id = SessionId::generate();
@@ -269,6 +529,7 @@ async fn presentation_page_cursor_is_preserved_on_initial_and_replacement_snapsh
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: Some(older_page_cursor.clone()),
             exit_on_invoke: false,
+            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -448,11 +709,20 @@ async fn prompt_admission_publishes_snapshot_and_typed_queue_transition() {
             .await
             .unwrap();
 
-        assert!(matches!(
-            subscription.next().await.unwrap().event,
+        let mut transition = subscription.next().await.unwrap();
+        let mut replacement_count = 0;
+        while matches!(
+            transition.event,
             SessionPresentationEvent::SnapshotReplaced { .. }
-        ));
-        let transition = subscription.next().await.unwrap();
+        ) {
+            replacement_count += 1;
+            assert!(
+                replacement_count <= 2,
+                "prompt admission refreshed too often"
+            );
+            transition = subscription.next().await.unwrap();
+        }
+        assert!(replacement_count >= 1);
         if queued {
             assert!(matches!(
                 transition.event,
@@ -497,6 +767,7 @@ async fn session_exit_publishes_a_terminal_boundary_to_peer_subscribers() {
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: None,
             exit_on_invoke: true,
+            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -542,6 +813,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
             snapshot: snapshot(&DaemonInstanceId::generate(), &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
+            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -560,6 +832,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 turn_id: TurnId::generate(),
                 attempt_id: AttemptId::generate(),
                 provisional_message_id: MessageId::generate(),
+                child_run: None,
             },
         ),
         agl_chat::PresentationDelivery::Closed
@@ -584,6 +857,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 turn_id: turn_id.clone(),
                 attempt_id: attempt_id.clone(),
                 provisional_message_id: message_id.clone(),
+                child_run: None,
             },
         ),
         agl_chat::PresentationDelivery::Delivered
@@ -615,6 +889,29 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 && content.text_only().as_deref() == Some("привет")
         )
     }));
+    let initial_run_started_at = during_stream
+        .activity
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("run:{run_id}"))
+        .unwrap()
+        .started_at_unix_ms;
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ModelAttemptFinished {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: attempt_id.clone(),
+                provisional_message_id: message_id.clone(),
+                outcome: agl_chat::ModelAttemptOutcome::Failed,
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
     let retry_attempt_id = AttemptId::generate();
     assert_eq!(
         agl_chat::TurnPresentationSink::try_publish(
@@ -625,6 +922,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 turn_id: turn_id.clone(),
                 attempt_id: retry_attempt_id.clone(),
                 provisional_message_id: message_id.clone(),
+                child_run: None,
             },
         ),
         agl_chat::PresentationDelivery::Delivered
@@ -657,12 +955,94 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
         )
     }));
     assert_eq!(
+        during_retry
+            .activity
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|node| node.node_id == format!("run:{run_id}"))
+            .unwrap()
+            .started_at_unix_ms,
+        initial_run_started_at,
+        "activity upserts must not rewrite the original start timestamp"
+    );
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ModelAttemptFinished {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: retry_attempt_id.clone(),
+                provisional_message_id: message_id.clone(),
+                outcome: agl_chat::ModelAttemptOutcome::Completed,
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
+    let step_id = StepId::generate();
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ToolActionStarted {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: Some(retry_attempt_id.clone()),
+                provisional_message_id: Some(message_id.clone()),
+                step_id: step_id.clone(),
+                capability_id: agl_capabilities::CapabilityId::new("fs.list").unwrap(),
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered,
+        "a tool step after a terminal model attempt must remain graph-valid"
+    );
+    let during_tool = service.snapshot(&session_id).await.unwrap();
+    let tool_graph = during_tool.activity.as_ref().unwrap();
+    tool_graph.validate().unwrap();
+    let tool_node = tool_graph
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("step:{step_id}"))
+        .unwrap();
+    assert_eq!(tool_node.parent_node_id, Some(format!("turn:{turn_id}")));
+    assert_eq!(
+        tool_graph.current_path,
+        vec![
+            format!("run:{run_id}"),
+            format!("turn:{turn_id}"),
+            format!("step:{step_id}"),
+        ]
+    );
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ToolActionFinished {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: Some(retry_attempt_id.clone()),
+                provisional_message_id: Some(message_id.clone()),
+                step_id,
+                capability_id: agl_capabilities::CapabilityId::new("fs.list").unwrap(),
+                outcome: agl_chat::ToolActionOutcome::Succeeded,
+                detail: Some(agl_chat::CapabilityPresentationDetail::FilesystemList {
+                    path: "crates".to_owned(),
+                    entries: 17,
+                    completeness: agl_chat::CapabilityPresentationCompleteness::Truncated,
+                }),
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
+    assert_eq!(
         agl_chat::TurnPresentationSink::try_publish(
             &proxy,
             agl_chat::TurnPresentationEvent::AssistantMessageFinal {
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                turn_id,
+                turn_id: turn_id.clone(),
                 attempt_id: Some(retry_attempt_id),
                 message_id: message_id.clone(),
                 content: Content::text("снова").unwrap(),
@@ -671,70 +1051,376 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
         agl_chat::PresentationDelivery::Delivered
     );
 
+    let mut delivered = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(20), subscription.next()).await {
+            Ok(Ok(envelope)) => delivered.push(envelope.event),
+            Ok(Err(error)) => panic!("presentation stream lost contiguity: {error}"),
+            Err(_) => break,
+        }
+    }
     assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::PromptActivated { run_id: ref activated }
+        delivered.first(),
+        Some(SessionPresentationEvent::PromptActivated { run_id: activated })
             if activated == &run_id
     ));
     assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::ItemRemoved { ref item_key }
+        delivered.get(1),
+        Some(SessionPresentationEvent::ItemRemoved { item_key })
             if item_key == message_id.as_str()
     ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::Notice { ref code, .. } if code == "model_attempt_started"
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::AssistantTextDelta {
-            ref provisional_message_id,
-            sequence: 1,
-            ref text,
-            ..
-        } if provisional_message_id == &message_id && text == "привет"
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::SnapshotReplaced { .. }
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::PromptActivated { run_id: ref activated }
-            if activated == &run_id
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::ItemRemoved { ref item_key }
-            if item_key == message_id.as_str()
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::Notice { ref code, .. } if code == "model_attempt_started"
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::AssistantTextDelta {
-            ref provisional_message_id,
-            sequence: 1,
-            ref text,
-            ..
-        } if provisional_message_id == &message_id && text == "снова"
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
-        SessionPresentationEvent::SnapshotReplaced { .. }
-    ));
-    assert!(matches!(
-        subscription.next().await.unwrap().event,
+    let activity_kinds = delivered
+        .iter()
+        .flat_map(|event| match event {
+            SessionPresentationEvent::ActivityGraphDelta { batch } => batch
+                .upserts
+                .iter()
+                .map(|node| node.kind)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert!(activity_kinds.contains(&ActivityNodeKind::Run));
+    assert!(activity_kinds.contains(&ActivityNodeKind::Turn));
+    assert!(
+        activity_kinds
+            .iter()
+            .filter(|kind| **kind == ActivityNodeKind::Attempt)
+            .count()
+            >= 2
+    );
+    let retry_indices = delivered
+        .iter()
+        .flat_map(|event| match event {
+            SessionPresentationEvent::ActivityGraphDelta { batch } => batch
+                .upserts
+                .iter()
+                .filter(|node| node.kind == ActivityNodeKind::Attempt)
+                .map(|node| node.retry)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert!(retry_indices.contains(&0));
+    assert!(retry_indices.contains(&1));
+    let activity_revisions = delivered
+        .iter()
+        .filter_map(|event| match event {
+            SessionPresentationEvent::ActivityGraphDelta { batch } => Some(batch.graph_revision),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!activity_revisions.is_empty());
+    assert!(
+        activity_revisions
+            .windows(2)
+            .all(|pair| pair[1] == pair[0].saturating_add(1)),
+        "activity deltas must be graph-revision contiguous: {activity_revisions:?}"
+    );
+    let projected = service.snapshot(&session_id).await.unwrap();
+    let graph = projected.activity.expect("activity graph must resnapshot");
+    assert_eq!(graph.graph_revision, *activity_revisions.last().unwrap());
+    assert!(graph.nodes.windows(2).all(|pair| {
+        pair[1].parent_node_id.as_deref() != Some(pair[0].node_id.as_str())
+            || pair[0].order_index < pair[1].order_index
+    }));
+    let deltas = delivered
+        .iter()
+        .filter_map(|event| match event {
+            SessionPresentationEvent::AssistantTextDelta {
+                provisional_message_id,
+                sequence: 1,
+                text,
+                ..
+            } if provisional_message_id == &message_id => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deltas, ["привет", "снова"]);
+    assert!(delivered.iter().any(|event| matches!(
+        event,
         SessionPresentationEvent::ItemUpsert {
             item: SessionPresentationItem::AssistantMessage {
-                message_id: ref final_message_id,
+                message_id: final_message_id,
                 state: AssistantItemState::Final,
                 ..
             }
         } if final_message_id == &message_id
+    )));
+}
+
+#[tokio::test]
+async fn inference_activity_remains_current_without_a_live_subscriber() {
+    let session_id = SessionId::generate();
+    let service = ApplicationService::new(
+        DaemonInstanceId::generate(),
+        Arc::new(FakeBackend {
+            snapshot: snapshot(&DaemonInstanceId::generate(), &session_id),
+            older_page_cursor: None,
+            exit_on_invoke: false,
+            human_command_admission: None,
+        }),
+    );
+    service.snapshot(&session_id).await.unwrap();
+    let proxy = TurnPresentationProxy::new();
+    proxy.connect(service.clone()).unwrap();
+
+    let run_id = RunId::generate();
+    let turn_id = TurnId::generate();
+    let attempt_id = AttemptId::generate();
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ModelAttemptStarted {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: attempt_id.clone(),
+                provisional_message_id: MessageId::generate(),
+                child_run: None,
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::InferenceStage {
+                session_id: session_id.clone(),
+                run_id,
+                turn_id,
+                event: agl_chat::InferenceStageEvent {
+                    attempt_id: attempt_id.clone(),
+                    stage_sequence: 7,
+                    stage: agl_chat::InferenceProductStage::Generation,
+                    completed: Some(31),
+                    total: Some(64),
+                    unit: Some(agl_chat::InferenceProgressUnit::Tokens),
+                },
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
+
+    let reconnected = service.snapshot(&session_id).await.unwrap();
+    let inference = reconnected
+        .activity
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("inference:{attempt_id}"))
+        .unwrap();
+    assert!(matches!(
+        &inference.detail,
+        ActivityDetailView::Inference(InferenceActivityDetail {
+            stage: InferenceProductStageView::Generation,
+            completed: Some(31),
+            total: Some(64),
+            unit: Some(InferenceProgressUnit::Tokens),
+            ..
+        })
     ));
+}
+
+#[tokio::test]
+async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
+    let daemon_instance_id = DaemonInstanceId::generate();
+    let session_id = SessionId::generate();
+    let service = ApplicationService::new(
+        daemon_instance_id.clone(),
+        Arc::new(FakeBackend {
+            snapshot: snapshot(&daemon_instance_id, &session_id),
+            older_page_cursor: None,
+            exit_on_invoke: false,
+            human_command_admission: None,
+        }),
+    );
+    let _initial_subscription = service
+        .subscribe(PresentationSubscribe {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    let proxy = TurnPresentationProxy::new();
+    proxy.connect(service.clone()).unwrap();
+
+    let root_run_id = RunId::generate();
+    let root_turn_id = TurnId::generate();
+    let root_attempt_id = AttemptId::generate();
+    let root_message_id = MessageId::generate();
+    let spawn_step_id = StepId::generate();
+    for event in [
+        agl_chat::TurnPresentationEvent::ModelAttemptStarted {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id.clone(),
+            attempt_id: root_attempt_id.clone(),
+            provisional_message_id: root_message_id.clone(),
+            child_run: None,
+        },
+        agl_chat::TurnPresentationEvent::ModelAttemptFinished {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id.clone(),
+            attempt_id: root_attempt_id.clone(),
+            provisional_message_id: root_message_id.clone(),
+            outcome: agl_chat::ModelAttemptOutcome::Completed,
+        },
+        agl_chat::TurnPresentationEvent::ToolActionStarted {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id.clone(),
+            attempt_id: Some(root_attempt_id.clone()),
+            provisional_message_id: Some(root_message_id.clone()),
+            step_id: spawn_step_id.clone(),
+            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+        },
+        agl_chat::TurnPresentationEvent::ToolActionFinished {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id.clone(),
+            attempt_id: Some(root_attempt_id.clone()),
+            provisional_message_id: Some(root_message_id.clone()),
+            step_id: spawn_step_id.clone(),
+            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            outcome: agl_chat::ToolActionOutcome::Waiting,
+            detail: None,
+        },
+    ] {
+        assert_eq!(
+            agl_chat::TurnPresentationSink::try_publish(&proxy, event),
+            agl_chat::PresentationDelivery::Delivered
+        );
+    }
+    let waiting = service.snapshot(&session_id).await.unwrap();
+    let waiting_step = waiting
+        .activity
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("step:{spawn_step_id}"))
+        .unwrap();
+    assert_eq!(waiting_step.state, ActivityNodeState::Waiting);
+    let spawning_step_started_at = waiting_step.started_at_unix_ms;
+
+    let child_run_id = RunId::generate();
+    let child_turn_id = TurnId::generate();
+    let child_attempt_id = AttemptId::generate();
+    let child_message_id = MessageId::generate();
+    let child = agl_chat::ChildRunPresentation {
+        parent_run_id: root_run_id.clone(),
+        spawned_by_step_id: spawn_step_id.clone(),
+        subagent_id: "reviewer".to_owned(),
+    };
+    assert_eq!(
+        agl_chat::TurnPresentationSink::try_publish(
+            &proxy,
+            agl_chat::TurnPresentationEvent::ModelAttemptStarted {
+                session_id: session_id.clone(),
+                run_id: child_run_id.clone(),
+                turn_id: child_turn_id.clone(),
+                attempt_id: child_attempt_id.clone(),
+                provisional_message_id: child_message_id.clone(),
+                child_run: Some(child.clone()),
+            },
+        ),
+        agl_chat::PresentationDelivery::Delivered
+    );
+    let during_child = service.snapshot(&session_id).await.unwrap();
+    let child_graph = during_child.activity.as_ref().unwrap();
+    child_graph.validate().unwrap();
+    let child_node = child_graph
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("run:{child_run_id}"))
+        .unwrap();
+    assert_eq!(child_node.kind, ActivityNodeKind::ChildRun);
+    assert_eq!(
+        child_node.parent_node_id,
+        Some(format!("step:{spawn_step_id}"))
+    );
+    assert_eq!(
+        child_graph.current_path,
+        vec![
+            format!("run:{root_run_id}"),
+            format!("turn:{root_turn_id}"),
+            format!("step:{spawn_step_id}"),
+            format!("run:{child_run_id}"),
+            format!("turn:{child_turn_id}"),
+            format!("attempt:{child_attempt_id}"),
+        ]
+    );
+
+    let reconnected = service
+        .subscribe(PresentationSubscribe {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(reconnected.snapshot.activity.as_ref().is_some_and(|graph| {
+        graph.nodes.iter().any(|node| {
+            node.node_id == format!("run:{child_run_id}")
+                && node.parent_node_id == Some(format!("step:{spawn_step_id}"))
+        })
+    }));
+
+    for event in [
+        agl_chat::TurnPresentationEvent::ModelAttemptFinished {
+            session_id: session_id.clone(),
+            run_id: child_run_id.clone(),
+            turn_id: child_turn_id.clone(),
+            attempt_id: child_attempt_id.clone(),
+            provisional_message_id: child_message_id.clone(),
+            outcome: agl_chat::ModelAttemptOutcome::Completed,
+        },
+        agl_chat::TurnPresentationEvent::TurnFinished {
+            session_id: session_id.clone(),
+            run_id: child_run_id,
+            turn_id: child_turn_id,
+            attempt_id: Some(child_attempt_id),
+            provisional_message_id: Some(child_message_id),
+            outcome: agl_chat::TurnPresentationOutcome::Answered,
+            child_run: Some(child),
+        },
+        agl_chat::TurnPresentationEvent::ToolActionStarted {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id.clone(),
+            attempt_id: Some(root_attempt_id.clone()),
+            provisional_message_id: Some(root_message_id.clone()),
+            step_id: spawn_step_id.clone(),
+            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+        },
+        agl_chat::TurnPresentationEvent::ToolActionFinished {
+            session_id: session_id.clone(),
+            run_id: root_run_id.clone(),
+            turn_id: root_turn_id,
+            attempt_id: Some(root_attempt_id),
+            provisional_message_id: Some(root_message_id),
+            step_id: spawn_step_id.clone(),
+            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            outcome: agl_chat::ToolActionOutcome::Succeeded,
+            detail: None,
+        },
+    ] {
+        assert_eq!(
+            agl_chat::TurnPresentationSink::try_publish(&proxy, event),
+            agl_chat::PresentationDelivery::Delivered
+        );
+    }
+    let resumed = service.snapshot(&session_id).await.unwrap();
+    let resumed_step = resumed
+        .activity
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("step:{spawn_step_id}"))
+        .unwrap();
+    assert_eq!(resumed_step.state, ActivityNodeState::Succeeded);
+    assert_eq!(resumed_step.started_at_unix_ms, spawning_step_started_at);
 }
 
 #[tokio::test]
@@ -747,6 +1433,7 @@ async fn terminal_events_update_metadata_without_a_raw_output_variant() {
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
+            human_command_admission: None,
         }),
     );
     service.snapshot(&session_id).await.unwrap();
@@ -806,15 +1493,16 @@ fn terminal(session_id: &SessionId) -> TerminalSessionView {
         profile: ExecutionProfile::Workspace,
         shell: ShellProfileView {
             profile_id: "bash-managed".to_owned(),
-            program: "/bin/bash".to_owned(),
+            program: display_path("/bin/bash"),
             executable_digest: "sha256:executable".to_owned(),
             config_digest: "sha256:config".to_owned(),
         },
-        workspace_root: "/workspace".to_owned(),
-        cwd: "/workspace".to_owned(),
+        workspace_root: display_path("/workspace"),
+        cwd: display_path("/workspace"),
         initial_environment_digest: "sha256:environment".to_owned(),
         environment_names: vec!["PATH".to_owned()],
         command_sequence: 0,
+        prompt_generation: Some(1),
         prompt_state: TerminalPromptState::Ready,
         process_state: ExecutionState::Running,
         exit: None,
@@ -849,8 +1537,9 @@ fn snapshot(
             operation_mode: ToolAccessMode::ReadOnly,
             selected_skills: Vec::new(),
             runtime_context_revision: 0,
-            workspace_root: "/workspace".to_owned(),
-            cwd: "/workspace".to_owned(),
+            workspace_root: display_path("/workspace"),
+            workspace_history_scope: workspace_history_scope(),
+            cwd: display_path("/workspace"),
             execution_context_revision: 0,
             context_used_tokens: None,
             context_limit_tokens: None,
@@ -863,6 +1552,8 @@ fn snapshot(
         queued_prompts: Vec::new(),
         terminals: Vec::new(),
         executions: Vec::new(),
+        human_commands: Vec::new(),
+        activity: None,
         command_context,
     }
 }
@@ -871,6 +1562,7 @@ struct FakeBackend {
     snapshot: SessionPresentationSnapshot,
     older_page_cursor: Option<String>,
     exit_on_invoke: bool,
+    human_command_admission: Option<HumanTerminalCommandAdmission>,
 }
 
 struct SequencedSnapshotBackend {
@@ -949,6 +1641,17 @@ impl ApplicationBackend for BlockingSnapshotBackend {
         ))
     }
 
+    fn submit_human_terminal_command(
+        &self,
+        _context: ApplicationCallContext,
+        _request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::CommandUnavailable,
+            "not used",
+        ))
+    }
+
     fn suggestions(
         &self,
         _context: ApplicationCallContext,
@@ -1017,6 +1720,17 @@ impl ApplicationBackend for SequencedSnapshotBackend {
         _context: ApplicationCallContext,
         _request: HumanTerminalEnsure,
     ) -> Result<TerminalEnsured, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::CommandUnavailable,
+            "not used",
+        ))
+    }
+
+    fn submit_human_terminal_command(
+        &self,
+        _context: ApplicationCallContext,
+        _request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
         Err(ApplicationError::new(
             ApplicationErrorCode::CommandUnavailable,
             "not used",
@@ -1099,6 +1813,16 @@ impl ApplicationBackend for FakeBackend {
             ApplicationErrorCode::CommandUnavailable,
             "not used",
         ))
+    }
+
+    fn submit_human_terminal_command(
+        &self,
+        _context: ApplicationCallContext,
+        _request: HumanTerminalCommandSubmit,
+    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
+        self.human_command_admission.clone().ok_or_else(|| {
+            ApplicationError::new(ApplicationErrorCode::CommandUnavailable, "not used")
+        })
     }
 
     fn suggestions(

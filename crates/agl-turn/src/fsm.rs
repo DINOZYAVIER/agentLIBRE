@@ -8,7 +8,7 @@ use agl_content::Content;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{HookBatchSummary, HookEvent, StopReason};
+use crate::{HookBatchSummary, HookEvent, IncompleteOutputReason, StopReason};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +26,7 @@ pub enum TurnPhase {
     ToolRunning,
     ObservationAppended,
     AnswerReady,
+    IncompleteOutput,
     Stopped,
     Failed,
     Cancelled,
@@ -48,6 +49,7 @@ impl TurnPhase {
             TurnPhase::ToolRunning => "tool_running",
             TurnPhase::ObservationAppended => "observation_appended",
             TurnPhase::AnswerReady => "answer_ready",
+            TurnPhase::IncompleteOutput => "incomplete_output",
             TurnPhase::Stopped => "stopped",
             TurnPhase::Failed => "failed",
             TurnPhase::Cancelled => "cancelled",
@@ -136,6 +138,10 @@ pub enum TurnTransition {
     FinalAnswer {
         answer: String,
     },
+    IncompleteOutput {
+        partial: Content,
+        reason: IncompleteOutputReason,
+    },
     Stop {
         reason: StopReason,
         visible: bool,
@@ -176,6 +182,7 @@ impl TurnTransition {
             TurnTransition::FinishToolCall { .. } => "finish_tool_call",
             TurnTransition::AppendObservation { .. } => "append_observation",
             TurnTransition::FinalAnswer { .. } => "final_answer",
+            TurnTransition::IncompleteOutput { .. } => "incomplete_output",
             TurnTransition::Stop { .. } => "stop",
             TurnTransition::Fail { .. } => "fail",
             TurnTransition::Cancel => "cancel",
@@ -224,6 +231,7 @@ impl TurnFailureOperation {
 #[serde(rename_all = "snake_case")]
 pub enum TurnTerminalStatus {
     Answered,
+    IncompleteOutput,
     Stopped,
     Failed,
     Cancelled,
@@ -233,6 +241,7 @@ impl TurnTerminalStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             TurnTerminalStatus::Answered => "answered",
+            TurnTerminalStatus::IncompleteOutput => "incomplete_output",
             TurnTerminalStatus::Stopped => "stopped",
             TurnTerminalStatus::Failed => "failed",
             TurnTerminalStatus::Cancelled => "cancelled",
@@ -485,11 +494,20 @@ fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnP
         ) => Some(Failed),
         (ToolRunning, AppendObservation { .. }) => Some(ObservationAppended),
         (ActionParsed, FinalAnswer { .. }) => Some(AnswerReady),
+        (ModelResponded, TurnTransition::IncompleteOutput { .. }) => {
+            Some(TurnPhase::IncompleteOutput)
+        }
         (ActionParsed | RepairingToolJson, Stop { .. }) => Some(Stopped),
         (
             AnswerReady,
             Finish {
                 status: TurnTerminalStatus::Answered,
+            },
+        ) => Some(Finished),
+        (
+            TurnPhase::IncompleteOutput,
+            Finish {
+                status: TurnTerminalStatus::IncompleteOutput,
             },
         ) => Some(Finished),
         (
@@ -511,7 +529,7 @@ fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnP
             },
         ) => Some(Finished),
         (
-            AnswerReady | Stopped,
+            AnswerReady | TurnPhase::IncompleteOutput | Stopped,
             Fail {
                 operation: TurnFailureOperation::TranscriptAppend,
                 ..

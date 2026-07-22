@@ -7,7 +7,7 @@ use agl_chat::{
     ChatOptions, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
     InferenceOptions, ToolAccessMode as ChatToolAccessMode,
 };
-use agl_client::AgentLibreClient;
+use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
 use agl_cron::{
     CronJob, CronJobDraft, CronRepository, CronRun, CronTargetKind,
     STORE_STATUS_BUILTIN_CRON_TARGET, unsupported_builtin_cron_target_message,
@@ -17,7 +17,15 @@ use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
     default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
-use agl_inference::{LlamaCppModelRuntime, ModelManager, ModelManagerOptions};
+use agl_inference::{
+    InferenceDeviceInfo, InferenceDeviceKind, ModelManager, ModelManagerOptions, WorkerModelRuntime,
+};
+use agl_protocol::{
+    AssistantItemState, DaemonCapability, ProtocolInferenceDeviceKind,
+    ProtocolInferenceWorkerState, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
+    RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,
+    SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
+};
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
     read_workspace_default_function,
@@ -36,7 +44,7 @@ use agl_skills::{
     sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report_with_trust,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 mod args;
 mod config;
@@ -206,6 +214,56 @@ enum CliRuntimeProfile {
     LightBatch,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InferenceAuthoritySurface {
+    DirectRun,
+    Cron,
+    InitInventory,
+    FunctionSmoke,
+    Interactive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DaemonConnectionClass {
+    Compatible,
+    Unavailable,
+    Incompatible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InferenceAuthorityDecision {
+    Daemon,
+    Standalone,
+    Reject,
+}
+
+pub(crate) fn classify_daemon_connection<T>(
+    connection: &std::result::Result<T, ClientError>,
+) -> DaemonConnectionClass {
+    match connection {
+        Ok(_) => DaemonConnectionClass::Compatible,
+        Err(ClientError::DaemonUnavailable(_)) => DaemonConnectionClass::Unavailable,
+        Err(_) => DaemonConnectionClass::Incompatible,
+    }
+}
+
+pub(crate) const fn inference_authority_decision(
+    surface: InferenceAuthoritySurface,
+    connection: DaemonConnectionClass,
+) -> InferenceAuthorityDecision {
+    match connection {
+        DaemonConnectionClass::Compatible => InferenceAuthorityDecision::Daemon,
+        DaemonConnectionClass::Unavailable => match surface {
+            InferenceAuthoritySurface::DirectRun
+            | InferenceAuthoritySurface::Cron
+            | InferenceAuthoritySurface::InitInventory
+            | InferenceAuthoritySurface::FunctionSmoke => InferenceAuthorityDecision::Standalone,
+            InferenceAuthoritySurface::Interactive => InferenceAuthorityDecision::Reject,
+        },
+        DaemonConnectionClass::Incompatible => InferenceAuthorityDecision::Reject,
+    }
+}
+
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
         CliCommand::Interactive(_)
@@ -346,21 +404,18 @@ fn run_cron_run(
         return run_cron_preflight(&job, runtime, options.json);
     }
     validate_stored_cron_target(&job, runtime)?;
-    let model_manager = if job.target_kind == CronTargetKind::Skill && !options.mock_skill_execution
+    let mut inference = if job.target_kind == CronTargetKind::Skill && !options.mock_skill_execution
     {
-        Some(process_local_model_manager(runtime)?)
+        Some(daemon_first_cron_inference(runtime)?)
     } else {
         None
     };
-    let inference_client = model_manager
-        .as_ref()
-        .map(|manager| InferenceClientHandle::from(manager.handle()));
     let execution = execute_cron_target(
         &job,
         store,
         runtime,
         options.mock_skill_execution,
-        inference_client.as_ref(),
+        inference.as_mut(),
     );
     let (run, outcome) = cron
         .record_manual_run_result(
@@ -435,17 +490,20 @@ fn run_cron_tick_command(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let unix_seconds = options.at.unwrap_or_else(unix_now);
-    let model_manager = (!options.mock_skill_execution)
-        .then(|| process_local_model_manager(runtime))
+    let needs_inference = !options.mock_skill_execution
+        && CronRepository::new(store)
+            .due_jobs(unix_seconds)
+            .context("failed to inspect due cron jobs for inference authority")?
+            .iter()
+            .any(|due| due.job.target_kind == CronTargetKind::Skill);
+    let inference = needs_inference
+        .then(|| daemon_first_cron_inference(runtime))
         .transpose()?;
-    let inference_client = model_manager
-        .as_ref()
-        .map(|manager| InferenceClientHandle::from(manager.handle()));
     let mut executor = CliCronExecutor {
         store,
         runtime,
         mock_skill_execution: options.mock_skill_execution,
-        inference_client,
+        inference,
     };
     let mut notifier = CliStoreCronNotifier { store };
     let report = run_cron_tick(store, unix_seconds, &mut executor, &mut notifier)
@@ -526,9 +584,9 @@ fn execute_cron_target(
     store: &AglStore,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
-    inference_client: Option<&InferenceClientHandle>,
+    inference: Option<&mut CliCronInference>,
 ) -> CronExecution {
-    match run_cron_target(job, store, runtime, mock_skill_execution, inference_client) {
+    match run_cron_target(job, store, runtime, mock_skill_execution, inference) {
         Ok(result_ref) => CronExecution::succeeded(result_ref),
         Err(err) => CronExecution::failed(format!("{err:#}")),
     }
@@ -539,16 +597,14 @@ fn run_cron_target(
     store: &AglStore,
     runtime: &AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
-    inference_client: Option<&InferenceClientHandle>,
+    inference: Option<&mut CliCronInference>,
 ) -> Result<String> {
     match job.target_kind {
         CronTargetKind::Builtin => run_builtin_cron_target(job, store),
         CronTargetKind::Skill if mock_skill_execution => run_mock_skill_cron_target(job),
-        CronTargetKind::Skill => run_skill_cron_target(
-            job,
-            runtime,
-            inference_client.context("cron skill inference client is not initialized")?,
-        ),
+        CronTargetKind::Skill => inference
+            .context("cron skill inference authority is not initialized")?
+            .run_skill(job, runtime),
     }
 }
 
@@ -596,9 +652,114 @@ fn run_skill_cron_target(
             "skill:{}:session:{session_id}:run:{}",
             job.target_ref, output.run_id
         )),
+        ChatTurnStatus::Incomplete { reason, .. } => {
+            bail!("cron skill returned incomplete output: {}", reason.as_str())
+        }
         ChatTurnStatus::Stopped { reason } => bail!("cron skill stopped before answer: {reason:?}"),
         ChatTurnStatus::Failed { message } => bail!("cron skill turn failed: {message}"),
         ChatTurnStatus::Cancelled => bail!("cron skill turn was cancelled"),
+    }
+}
+
+async fn run_skill_cron_target_via_daemon(
+    client: &AgentLibreClient,
+    job: &CronJob,
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<String> {
+    let prompt = render_cron_skill_prompt(job)?;
+    let workspace_root = runtime.resolve_workspace_root(None)?;
+    let opened = client
+        .open_session(SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+            function_ref: None,
+            skills: vec![job.target_ref.clone()],
+            tool_mode: ProtocolToolMode::Write,
+        })
+        .await
+        .context("daemon rejected the cron skill session")?;
+    let session_id = opened.session_id;
+
+    let execution = async {
+        let accepted = client
+            .submit_run(RunSubmitRequest {
+                session_id: session_id.clone(),
+                content: agl_content::Content::text(prompt)
+                    .context("failed to encode cron skill prompt")?,
+                client_submission_id: format!("cli-cron-{}", agl_ids::RequestId::generate()),
+                budget: RunBudgetRequest::default(),
+            })
+            .await
+            .context("daemon rejected the cron skill run")?;
+        let run_id = accepted.run_id;
+        let mut subscription = client
+            .subscribe_run(RunSubscribeRequest {
+                run_id: run_id.clone(),
+                after_sequence: 0,
+            })
+            .await
+            .context("failed to subscribe to the cron skill run")?;
+        let finished = loop {
+            match subscription.next().await? {
+                Some(RunSubscriptionEvent::Event(_)) => {}
+                Some(RunSubscriptionEvent::Finished(finished)) => break finished,
+                None => bail!("daemon cron run subscription ended without a terminal event"),
+            }
+        };
+        if finished.state != ProtocolRunState::Succeeded {
+            let detail = finished
+                .error_message
+                .or(finished.error_code)
+                .unwrap_or_else(|| format!("{:?}", finished.state));
+            bail!("cron skill turn failed: {detail}");
+        }
+        let snapshot = client
+            .session_presentation(SessionPresentationRequest {
+                session_id: session_id.clone(),
+                page_cursor: None,
+            })
+            .await
+            .context("failed to read the completed cron skill presentation")?;
+        match snapshot.items.iter().rev().find(|item| {
+            matches!(
+                item,
+                SessionPresentationItem::AssistantMessage { .. }
+                    | SessionPresentationItem::IncompleteAssistant { .. }
+            )
+        }) {
+            Some(SessionPresentationItem::AssistantMessage { state, .. })
+                if *state == AssistantItemState::Final => {}
+            Some(SessionPresentationItem::IncompleteAssistant { item }) => {
+                bail!("cron skill returned incomplete output: {:?}", item.reason)
+            }
+            Some(SessionPresentationItem::AssistantMessage { state, .. }) => {
+                bail!("cron skill assistant result is not final: {state:?}")
+            }
+            Some(_) => unreachable!("cron assistant filter excludes non-assistant items"),
+            None => bail!("daemon completed the cron skill run without an assistant result"),
+        }
+        Ok::<_, anyhow::Error>(run_id)
+    }
+    .await;
+
+    let finish = client
+        .finish_session(SessionFinishRequest {
+            session_id: session_id.clone(),
+            reason: SessionFinishReason::Eof,
+        })
+        .await
+        .context("failed to finish the daemon cron skill session");
+    match (execution, finish) {
+        (Ok(run_id), Ok(_)) => Ok(format!(
+            "skill:{}:session:{session_id}:run:{run_id}",
+            job.target_ref
+        )),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(execution), Err(finish)) => Err(anyhow!(
+            "{execution:#}; additionally failed to finish cron session: {finish:#}"
+        )),
     }
 }
 
@@ -641,7 +802,7 @@ struct CliCronExecutor<'a> {
     store: &'a AglStore,
     runtime: &'a AgentLibreRuntimeConfig,
     mock_skill_execution: bool,
-    inference_client: Option<InferenceClientHandle>,
+    inference: Option<CliCronInference>,
 }
 
 impl CronTargetExecutor for CliCronExecutor<'_> {
@@ -651,7 +812,7 @@ impl CronTargetExecutor for CliCronExecutor<'_> {
             self.store,
             self.runtime,
             self.mock_skill_execution,
-            self.inference_client.as_ref(),
+            self.inference.as_mut(),
         )
     }
 }
@@ -1126,6 +1287,7 @@ fn inference_options_from_serve_options(
         skills: options.skills.clone(),
         memory,
         model_bindings_path: None,
+        model_bindings_override: None,
         runtime_plan_override: None,
     })
 }
@@ -1184,6 +1346,7 @@ fn inference_options_from_run_options(
         skills: options.skills.clone(),
         memory,
         model_bindings_path: None,
+        model_bindings_override: None,
         runtime_plan_override: None,
     })
 }
@@ -1298,11 +1461,166 @@ fn run_inference(command: InferenceCommand, runtime: &AgentLibreRuntimeConfig) -
 }
 
 fn process_local_model_manager(runtime: &AgentLibreRuntimeConfig) -> Result<ModelManager> {
+    let inference_runtime =
+        WorkerModelRuntime::discover(runtime.paths.inference_worker_temp_root())
+            .context("failed to prepare isolated process-local inference worker")?;
     ModelManager::spawn(
         ModelManagerOptions::default().with_model_lease_root(runtime.paths.model_lease_root()),
-        LlamaCppModelRuntime::new(),
+        inference_runtime,
     )
     .context("failed to start process-local model manager")
+}
+
+enum CliCronInference {
+    Daemon {
+        runtime: tokio::runtime::Runtime,
+        client: AgentLibreClient,
+    },
+    Standalone {
+        _manager: ModelManager,
+        client: InferenceClientHandle,
+    },
+}
+
+impl CliCronInference {
+    fn run_skill(&self, job: &CronJob, runtime: &AgentLibreRuntimeConfig) -> Result<String> {
+        match self {
+            Self::Daemon {
+                runtime: async_runtime,
+                client,
+            } => async_runtime.block_on(run_skill_cron_target_via_daemon(client, job, runtime)),
+            Self::Standalone { client, .. } => run_skill_cron_target(job, runtime, client),
+        }
+    }
+}
+
+fn daemon_first_cron_inference(runtime: &AgentLibreRuntimeConfig) -> Result<CliCronInference> {
+    let socket_path = default_socket_path(&runtime.paths);
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build daemon-first cron runtime")?;
+    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let authority = inference_authority_decision(
+        InferenceAuthoritySurface::Cron,
+        classify_daemon_connection(&connection),
+    );
+    match (authority, connection) {
+        (InferenceAuthorityDecision::Daemon, Ok(client)) => {
+            let required = [
+                DaemonCapability::SessionOpen,
+                DaemonCapability::RunSubmit,
+                DaemonCapability::RunSubscribe,
+                DaemonCapability::SessionPresentation,
+                DaemonCapability::SessionFinish,
+            ];
+            let hello = client.hello().context("failed to read daemon identity")?;
+            if let Some(missing) = required
+                .into_iter()
+                .find(|capability| !hello.capabilities.contains(capability))
+            {
+                bail!(
+                    "daemon at {} lacks required cron capability {missing:?}; refusing standalone inference while it is active",
+                    socket_path.display()
+                );
+            }
+            Ok(CliCronInference::Daemon {
+                runtime: async_runtime,
+                client,
+            })
+        }
+        (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
+            let manager = process_local_model_manager(runtime).context(
+                "no daemon is running and the isolated standalone cron inference authority failed",
+            )?;
+            let client = InferenceClientHandle::from(manager.handle());
+            Ok(CliCronInference::Standalone {
+                _manager: manager,
+                client,
+            })
+        }
+        (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
+            "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone cron inference",
+            socket_path.display()
+        ),
+        _ => unreachable!("daemon connection classification and authority decision diverged"),
+    }
+}
+
+pub(crate) fn daemon_first_inference_inventory(
+    runtime: &AgentLibreRuntimeConfig,
+) -> Result<Vec<InferenceDeviceInfo>> {
+    let socket_path = default_socket_path(&runtime.paths);
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build daemon inference inventory runtime")?;
+    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let authority = inference_authority_decision(
+        InferenceAuthoritySurface::InitInventory,
+        classify_daemon_connection(&connection),
+    );
+    match (authority, connection) {
+        (InferenceAuthorityDecision::Daemon, Ok(client)) => {
+            let hello = client.hello().context("failed to read daemon identity")?;
+            if !hello
+                .capabilities
+                .contains(&DaemonCapability::InferenceInventory)
+            {
+                bail!(
+                    "daemon at {} does not provide the current inference inventory capability; refusing process-local inference while a daemon is active",
+                    socket_path.display()
+                );
+            }
+            let inventory = async_runtime
+                .block_on(client.inference_inventory())
+                .context("daemon inference inventory failed")?;
+            Ok(inventory
+                .devices
+                .into_iter()
+                .map(|device| InferenceDeviceInfo {
+                    physical_device_id: device.physical_device_id,
+                    driver_build_id: device.driver_build_id,
+                    backend_name: device.backend_name,
+                    description: device.description,
+                    kind: match device.kind {
+                        ProtocolInferenceDeviceKind::Cpu => InferenceDeviceKind::Cpu,
+                        ProtocolInferenceDeviceKind::DiscreteGpu => {
+                            InferenceDeviceKind::DiscreteGpu
+                        }
+                        ProtocolInferenceDeviceKind::IntegratedGpu => {
+                            InferenceDeviceKind::IntegratedGpu
+                        }
+                        ProtocolInferenceDeviceKind::Accelerator => {
+                            InferenceDeviceKind::Accelerator
+                        }
+                        ProtocolInferenceDeviceKind::Metadata => InferenceDeviceKind::Metadata,
+                        ProtocolInferenceDeviceKind::Unknown => InferenceDeviceKind::Unknown,
+                    },
+                    free_memory_bytes: device.free_memory_bytes,
+                    total_memory_bytes: device.total_memory_bytes,
+                    usable: device.usable,
+                    supports_gpu_offload: device.supports_gpu_offload,
+                })
+                .collect())
+        }
+        (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
+            let manager = process_local_model_manager(runtime).context(
+                "no daemon is running and the isolated standalone inference authority failed",
+            )?;
+            let inventory = manager
+                .handle()
+                .device_inventory()
+                .context("standalone inference inventory failed")?;
+            drop(manager);
+            Ok(inventory)
+        }
+        (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
+            "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone inference",
+            socket_path.display()
+        ),
+        _ => unreachable!("daemon connection classification and authority decision diverged"),
+    }
 }
 
 fn run_one_shot(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
@@ -1312,6 +1630,179 @@ fn run_one_shot(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
 
 fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     tracing::info!(target: "agentlibre::app", command = "run", "starting command");
+    let socket_path = default_socket_path(&runtime.paths);
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build daemon-first run runtime")?;
+    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let authority = inference_authority_decision(
+        InferenceAuthoritySurface::DirectRun,
+        classify_daemon_connection(&connection),
+    );
+    match (authority, connection) {
+        (InferenceAuthorityDecision::Daemon, Ok(client)) => async_runtime.block_on(
+            run_one_shot_via_daemon(client, options, runtime, &socket_path),
+        ),
+        (InferenceAuthorityDecision::Standalone, Err(ClientError::DaemonUnavailable(_))) => {
+            run_one_shot_standalone(options, runtime)
+        }
+        (InferenceAuthorityDecision::Reject, Err(error)) => bail!(
+            "daemon at {} is active but incompatible or unhealthy ({error}); refusing standalone inference",
+            socket_path.display()
+        ),
+        _ => unreachable!("daemon connection classification and authority decision diverged"),
+    }
+}
+
+async fn run_one_shot_via_daemon(
+    client: AgentLibreClient,
+    options: RunOptions,
+    runtime: &AgentLibreRuntimeConfig,
+    socket_path: &std::path::Path,
+) -> Result<()> {
+    if options.function_ref.is_none()
+        || options.config.is_some()
+        || options.artifact_root.is_some()
+        || options.max_output_tokens.is_some()
+        || options.memory
+    {
+        bail!(
+            "the active daemon at {} cannot represent this direct-run override; stop it explicitly before using standalone --config/--artifact-root/--max-output-tokens/--memory or raw `agl inference run`",
+            socket_path.display()
+        );
+    }
+    let required = [
+        DaemonCapability::SessionOpen,
+        DaemonCapability::RunSubmit,
+        DaemonCapability::RunSubscribe,
+        DaemonCapability::SessionPresentation,
+        DaemonCapability::SessionFinish,
+    ];
+    let hello = client.hello().context("failed to read daemon identity")?;
+    if let Some(missing) = required
+        .into_iter()
+        .find(|capability| !hello.capabilities.contains(capability))
+    {
+        bail!(
+            "daemon at {} lacks required capability {missing:?}; refusing standalone inference while it is active",
+            socket_path.display()
+        );
+    }
+
+    let prompt = options
+        .prompt
+        .clone()
+        .context("run requires PROMPT or --prompt TEXT")?;
+    let resolved = inference_options_from_run_options(&options, runtime)?;
+    let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
+    let opened = client
+        .open_session(SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+            function_ref: options.function_ref.clone(),
+            skills: resolved.skills.clone(),
+            tool_mode: protocol_tool_mode_from_chat(resolved.tool_mode),
+        })
+        .await
+        .context("daemon rejected the one-shot session")?;
+    let session_id = opened.session_id;
+
+    let turn = async {
+        let accepted = client
+            .submit_run(RunSubmitRequest {
+                session_id: session_id.clone(),
+                content: agl_content::Content::text(prompt)
+                    .context("failed to encode one-shot prompt")?,
+                client_submission_id: format!("cli-run-{}", agl_ids::RequestId::generate()),
+                budget: RunBudgetRequest::default(),
+            })
+            .await
+            .context("daemon rejected the one-shot run")?;
+        let mut subscription = client
+            .subscribe_run(RunSubscribeRequest {
+                run_id: accepted.run_id.clone(),
+                after_sequence: 0,
+            })
+            .await
+            .context("failed to subscribe to the one-shot run")?;
+        let finished = loop {
+            match subscription.next().await? {
+                Some(RunSubscriptionEvent::Event(_)) => {}
+                Some(RunSubscriptionEvent::Finished(finished)) => break finished,
+                None => bail!("daemon run subscription ended without a terminal event"),
+            }
+        };
+        if finished.state != ProtocolRunState::Succeeded {
+            let detail = finished
+                .error_message
+                .or(finished.error_code)
+                .unwrap_or_else(|| format!("{:?}", finished.state));
+            bail!("turn failed: {detail}");
+        }
+        let snapshot = client
+            .session_presentation(SessionPresentationRequest {
+                session_id: session_id.clone(),
+                page_cursor: None,
+            })
+            .await
+            .context("failed to read the completed one-shot presentation")?;
+        let item = snapshot
+            .items
+            .iter()
+            .rev()
+            .find(|item| {
+                matches!(
+                    item,
+                    SessionPresentationItem::AssistantMessage { .. }
+                        | SessionPresentationItem::IncompleteAssistant { .. }
+                )
+            })
+            .context("daemon completed the run without an assistant result")?;
+        match item {
+            SessionPresentationItem::AssistantMessage { content, state, .. }
+                if *state == AssistantItemState::Final =>
+            {
+                content
+                    .text_only()
+                    .context("one-shot assistant result is not text-only")
+            }
+            SessionPresentationItem::IncompleteAssistant { item } => {
+                let partial = item
+                    .content
+                    .text_only()
+                    .context("incomplete assistant result is not text-only")?;
+                println!("{partial}");
+                bail!("turn output is incomplete: {:?}", item.reason)
+            }
+            SessionPresentationItem::AssistantMessage { state, .. } => {
+                bail!("assistant result is not final: {state:?}")
+            }
+            _ => unreachable!("assistant result filter only admits assistant items"),
+        }
+    }
+    .await;
+
+    let finish = client
+        .finish_session(SessionFinishRequest {
+            session_id,
+            reason: SessionFinishReason::Eof,
+        })
+        .await
+        .context("failed to finish the daemon one-shot session");
+    match (turn, finish) {
+        (Ok(answer), Ok(_)) => {
+            println!("{answer}");
+            Ok(())
+        }
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(turn), Err(finish)) => Err(anyhow!("{turn:#}; additionally {finish:#}")),
+    }
+}
+
+fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     let prompt = options
         .prompt
         .clone()
@@ -1344,6 +1835,10 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
     );
     match output.status {
         ChatTurnStatus::Answered { answer } => println!("{answer}"),
+        ChatTurnStatus::Incomplete { partial, reason } => {
+            println!("{partial}");
+            bail!("turn output is incomplete: {}", reason.as_str());
+        }
         ChatTurnStatus::Stopped { reason } => {
             println!("stopped=true reason={}", reason.as_str());
         }
@@ -1363,6 +1858,16 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
         ChatTurnStatus::Cancelled => bail!("turn cancelled"),
     }
     Ok(())
+}
+
+fn protocol_tool_mode_from_chat(mode: ChatToolAccessMode) -> ProtocolToolMode {
+    match mode {
+        ChatToolAccessMode::ReadOnly => ProtocolToolMode::ReadOnly,
+        ChatToolAccessMode::Write => ProtocolToolMode::Write,
+        ChatToolAccessMode::Execute => ProtocolToolMode::Execute,
+        ChatToolAccessMode::Approve => ProtocolToolMode::Approve,
+        ChatToolAccessMode::Admin => ProtocolToolMode::Admin,
+    }
 }
 
 fn run_serve(mut options: ServeOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
@@ -1400,22 +1905,49 @@ fn run_daemon_status(
         .build()
         .context("failed to build daemon status runtime")?;
     match async_runtime.block_on(AgentLibreClient::connect(&socket_path)) {
-        Ok(client) => match client.hello() {
-            Ok(hello) => {
-                println!("state=running");
-                println!("socket_path={}", socket_path.display());
-                println!("protocol_version={}", hello.protocol_version);
-                println!("product_version={}", hello.product_version);
-                Ok(())
+        Ok(client) => {
+            let inspection = client.hello().and_then(|hello| {
+                async_runtime
+                    .block_on(client.inference_status())
+                    .map(|status| (hello, status))
+            });
+            match inspection {
+                Ok((hello, status)) => {
+                    println!("state=running");
+                    println!("socket_path={}", socket_path.display());
+                    println!("daemon_instance_id={}", hello.daemon_instance_id);
+                    println!("protocol_version={}", hello.protocol_version);
+                    println!("product_version={}", hello.product_version);
+                    println!("worker_build_id={}", status.worker_build_id);
+                    println!(
+                        "worker_state={}",
+                        inference_worker_state_label(status.worker_state)
+                    );
+                    println!("worker_pid={}", optional_status_value(status.worker_pid));
+                    println!(
+                        "worker_launch_generation={}",
+                        optional_status_value(status.launch_generation)
+                    );
+                    println!(
+                        "accelerator_physical_device_id={}",
+                        status.physical_device_id.as_deref().unwrap_or("none")
+                    );
+                    println!("accelerator_reserved_bytes={}", status.reserved_bytes);
+                    println!(
+                        "accelerator_cooldown_not_before_unix_ms={}",
+                        optional_status_value(status.cooldown_not_before_unix_ms)
+                    );
+                    Ok(())
+                }
+                Err(err) => {
+                    println!("state=unhealthy");
+                    println!("socket_path={}", socket_path.display());
+                    println!("error={err:#}");
+                    Ok(())
+                }
             }
-            Err(err) => {
-                println!("state=unhealthy");
-                println!("socket_path={}", socket_path.display());
-                println!("error={err:#}");
-                Ok(())
-            }
-        },
-        Err(err) => {
+        }
+        Err(ClientError::DaemonUnavailable(err)) => {
             println!("state=not_running");
             println!("socket_path={}", socket_path.display());
             println!("error={err}");
@@ -1428,7 +1960,34 @@ fn run_daemon_status(
             );
             Ok(())
         }
+        Err(err) => {
+            println!("state=unhealthy");
+            println!("socket_path={}", socket_path.display());
+            println!("error={err}");
+            println!("next_step=restart the daemon with the current `agl serve` binary");
+            tracing::warn!(
+                target: "agentlibre::app",
+                socket_path = %socket_path.display(),
+                error = %err,
+                "daemon socket accepted a connection but the current protocol handshake failed"
+            );
+            Ok(())
+        }
     }
+}
+
+fn inference_worker_state_label(state: ProtocolInferenceWorkerState) -> &'static str {
+    match state {
+        ProtocolInferenceWorkerState::Cold => "cold",
+        ProtocolInferenceWorkerState::Starting => "starting",
+        ProtocolInferenceWorkerState::Ready => "ready",
+        ProtocolInferenceWorkerState::Busy => "busy",
+        ProtocolInferenceWorkerState::CoolingDown => "cooling_down",
+    }
+}
+
+fn optional_status_value<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
 }
 
 fn print_workspace_skill_report(report: &WorkspaceSkillReport) {
@@ -1906,6 +2465,23 @@ fn is_gpu_load_failure_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::sync::Arc;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
+    use std::time::Duration;
+
+    #[cfg(unix)]
+    use agl_chat::{ChatInferenceJob, InferenceClient};
+    #[cfg(unix)]
+    use agl_config::ResolvedInferenceConfig;
+    #[cfg(unix)]
+    use agl_inference::{
+        InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
+        WorkerRuntimeStatusHandle,
+    };
+
     use crate::args::ConfigCommand;
 
     use super::*;
@@ -1925,6 +2501,257 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct DaemonTestInference {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl InferenceClient for DaemonTestInference {
+        fn generate(&self, job: ChatInferenceJob) -> anyhow::Result<InferenceResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(InferenceResponse {
+                attempt_id: job.request.attempt_id,
+                content: "fake daemon answer".to_owned(),
+                finish_reason: InferenceFinishReason::Stop,
+                metadata: InferenceResponseMetadata {
+                    model_state: Some("fake-daemon".to_owned()),
+                    selected_device: None,
+                    duration_ms: 1,
+                    input_tokens: 4,
+                    output_tokens: 4,
+                },
+            })
+        }
+
+        fn clear_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &agl_ids::SessionId,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &agl_ids::SessionId,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> anyhow::Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+
+        fn device_inventory(&self) -> anyhow::Result<Vec<InferenceDeviceInfo>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[cfg(unix)]
+    fn daemon_test_runtime(root: &std::path::Path) -> AgentLibreRuntimeConfig {
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(root.join("home")),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig {
+                root: Some(workspace),
+            },
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_daemon_test_model(runtime: &AgentLibreRuntimeConfig) {
+        let model_path = runtime.paths.data_dir.join("fake-model.gguf");
+        std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        std::fs::write(&model_path, b"fake model fixture").unwrap();
+        let config_path = runtime.paths.default_local_inference_config();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            config_path,
+            format!(
+                r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 4096
+threads = 2
+batch_size = 128
+ubatch_size = 64
+
+[model]
+dialect = "gemma4"
+tool_call_format = "gemma_function_call"
+"#,
+                model_path.display()
+            ),
+        )
+        .unwrap();
+        agl_config::write_model_bindings(
+            agl_config::model_bindings_path(&runtime.paths.config_dir),
+            &agl_config::ModelBindings {
+                version: 1,
+                models: std::collections::BTreeMap::from([(
+                    agl_config::ModelId::new("fake-daemon-model").unwrap(),
+                    agl_config::ModelBinding { path: model_path },
+                )]),
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_test_daemon(
+        runtime: AgentLibreRuntimeConfig,
+        calls: Arc<AtomicUsize>,
+    ) -> (
+        std::thread::JoinHandle<anyhow::Result<()>>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        let socket_path = default_socket_path(&runtime.paths);
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || -> anyhow::Result<()> {
+            let async_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            async_runtime.block_on(async move {
+                let listener = tokio::net::UnixListener::bind(&socket_path)?;
+                ready_tx.send(()).unwrap();
+                let (stream, _) = listener.accept().await?;
+                let state = agl_daemon::SharedDaemonState::new(
+                    runtime,
+                    InferenceOptions::default(),
+                    InferenceClientHandle::new(DaemonTestInference { calls }),
+                    WorkerRuntimeStatusHandle::default(),
+                );
+                agl_daemon::serve_connection(stream, &state).await
+            })
+        });
+        (server, ready_rx)
+    }
+
+    #[cfg(unix)]
+    fn spawn_incompatible_daemon(
+        runtime: &AgentLibreRuntimeConfig,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<()>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::net::UnixListener;
+
+        let socket_path = default_socket_path(&runtime.paths);
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: agl_protocol::DaemonRequest = serde_json::from_str(&line).unwrap();
+            assert!(matches!(
+                request.kind,
+                agl_protocol::DaemonRequestKind::Hello(_)
+            ));
+            stream.write_all(b"not-json\n").unwrap();
+            stream.flush().unwrap();
+        });
+        (server, ready_rx)
+    }
+
+    #[test]
+    fn inference_authority_matrix_is_daemon_first_with_an_exact_standalone_allowlist() {
+        let surfaces = [
+            InferenceAuthoritySurface::DirectRun,
+            InferenceAuthoritySurface::Cron,
+            InferenceAuthoritySurface::InitInventory,
+            InferenceAuthoritySurface::FunctionSmoke,
+            InferenceAuthoritySurface::Interactive,
+        ];
+        for surface in surfaces {
+            assert_eq!(
+                inference_authority_decision(surface, DaemonConnectionClass::Compatible),
+                InferenceAuthorityDecision::Daemon
+            );
+            assert_eq!(
+                inference_authority_decision(surface, DaemonConnectionClass::Incompatible),
+                InferenceAuthorityDecision::Reject
+            );
+        }
+
+        for surface in [
+            InferenceAuthoritySurface::DirectRun,
+            InferenceAuthoritySurface::Cron,
+            InferenceAuthoritySurface::InitInventory,
+            InferenceAuthoritySurface::FunctionSmoke,
+        ] {
+            assert_eq!(
+                inference_authority_decision(surface, DaemonConnectionClass::Unavailable),
+                InferenceAuthorityDecision::Standalone
+            );
+        }
+        assert_eq!(
+            inference_authority_decision(
+                InferenceAuthoritySurface::Interactive,
+                DaemonConnectionClass::Unavailable
+            ),
+            InferenceAuthorityDecision::Reject
+        );
+
+        let available: std::result::Result<(), ClientError> = Ok(());
+        let unavailable: std::result::Result<(), ClientError> =
+            Err(ClientError::DaemonUnavailable("absent".to_owned()));
+        let incompatible: std::result::Result<(), ClientError> = Err(ClientError::SchemaMismatch {
+            expected: "agentlibre.event.v6alpha",
+        });
+        assert_eq!(
+            classify_daemon_connection(&available),
+            DaemonConnectionClass::Compatible
+        );
+        assert_eq!(
+            classify_daemon_connection(&unavailable),
+            DaemonConnectionClass::Unavailable
+        );
+        assert_eq!(
+            classify_daemon_connection(&incompatible),
+            DaemonConnectionClass::Incompatible
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incompatible_daemon_blocks_direct_run_before_standalone_worker_creation() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-run-incompatible-daemon-{}",
+            agl_ids::RequestId::generate()
+        ));
+        let runtime = daemon_test_runtime(&root);
+        let (server, ready) = spawn_incompatible_daemon(&runtime);
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let error = run_one_shot_raw(
+            RunOptions {
+                prompt: Some("must not run".to_owned()),
+                ..RunOptions::default()
+            },
+            &runtime,
+        )
+        .expect_err("incompatible daemon must fail closed");
+
+        assert!(format!("{error:#}").contains("refusing standalone inference"));
+        assert!(!runtime.paths.inference_worker_temp_root().exists());
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cpu_fallback_classifier_accepts_load_device_failures_only() {
         assert!(is_gpu_load_failure_message(
@@ -1936,6 +2763,155 @@ mod tests {
         assert!(!is_gpu_load_failure_message(
             "inference generation failed: malformed tool output"
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cron_inference_never_falls_back_from_an_active_incomplete_daemon() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        use std::os::unix::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-cron-daemon-first-{}",
+            agl_ids::RequestId::generate()
+        ));
+        let paths = AgentLibrePaths::from_agl_home(root.join("home"));
+        let socket_path = default_socket_path(&paths);
+        std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: agl_protocol::DaemonRequest = serde_json::from_str(&line).unwrap();
+            assert!(matches!(
+                request.kind,
+                agl_protocol::DaemonRequestKind::Hello(_)
+            ));
+            serde_json::to_writer(
+                &mut stream,
+                &agl_protocol::DaemonEvent::new(
+                    Some(request.request_id),
+                    agl_protocol::DaemonEventKind::Hello(agl_protocol::HelloEvent {
+                        protocol_version: agl_protocol::PROTOCOL_VERSION.to_owned(),
+                        product_version: "test".to_owned(),
+                        daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
+                        capabilities: Vec::new(),
+                    }),
+                ),
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+            stream.flush().unwrap();
+        });
+        let runtime = AgentLibreRuntimeConfig {
+            paths,
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        };
+
+        let error = match daemon_first_cron_inference(&runtime) {
+            Ok(_) => panic!("incomplete daemon unexpectedly admitted cron inference"),
+            Err(error) => error,
+        };
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("lacks required cron capability SessionOpen"));
+        assert!(rendered.contains("refusing standalone inference"));
+        assert!(!runtime.paths.inference_worker_temp_root().exists());
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_run_uses_a_compatible_daemon_for_inference() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-run-compatible-daemon-{}",
+            agl_ids::RequestId::generate()
+        ));
+        let runtime = daemon_test_runtime(&root);
+        install_daemon_test_model(&runtime);
+        let workspace = runtime.workspace.root.clone().unwrap();
+        let function_root = workspace.join(".agl/functions/daemon-test");
+        std::fs::create_dir_all(&function_root).unwrap();
+        std::fs::write(
+            function_root.join("FUNCTION.md"),
+            r#"---
+schema: agentfunction/v1
+id: daemon-test
+title: Daemon test
+runtime:
+  tool_mode: read-only
+skills:
+  use: []
+subagents:
+  use: []
+---
+"#,
+        )
+        .unwrap();
+        std::fs::write(function_root.join("SYSTEM.md"), "Answer the test prompt.\n").unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let function_ref = function_root
+            .join("FUNCTION.md")
+            .to_string_lossy()
+            .into_owned();
+        let (server, ready) = spawn_test_daemon(runtime.clone(), Arc::clone(&calls));
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        run_one_shot_raw(
+            RunOptions {
+                function_ref: Some(function_ref),
+                workspace_root: Some(workspace),
+                prompt: Some("hello from direct run".to_owned()),
+                ..RunOptions::default()
+            },
+            &runtime,
+        )
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!runtime.paths.inference_worker_temp_root().exists());
+        server.join().unwrap().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cron_skill_uses_a_compatible_daemon_for_inference() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-cron-compatible-daemon-{}",
+            agl_ids::RequestId::generate()
+        ));
+        let runtime = daemon_test_runtime(&root);
+        install_daemon_test_model(&runtime);
+        let store = AglStore::open_at(runtime.paths.store_root()).unwrap();
+        let mut draft = CronJobDraft::new(
+            "Daemon cron test",
+            CronTargetKind::Skill,
+            "process",
+            "hourly",
+        );
+        draft.prompt = Some("Report repository status.".to_owned());
+        let job = CronRepository::new(&store).add_job(draft).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (server, ready) = spawn_test_daemon(runtime.clone(), Arc::clone(&calls));
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let inference = daemon_first_cron_inference(&runtime).unwrap();
+        let result = inference.run_skill(&job, &runtime).unwrap();
+
+        assert!(result.starts_with("skill:process:session:"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!runtime.paths.inference_worker_temp_root().exists());
+        drop(inference);
+        server.join().unwrap().unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

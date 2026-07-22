@@ -1,12 +1,12 @@
 use agl_actions::MalformedToolJsonKind;
 use agl_events::{
-    HookBatchOutcomeEvent, HookResultEvent, ParsedActionEvent, RuntimeEvent, StopReasonEvent,
-    ToolJsonMalformedKind, TurnFinishStatus,
+    HookBatchOutcomeEvent, HookResultEvent, IncompleteOutputReasonEvent, ParsedActionEvent,
+    RuntimeEvent, StopReasonEvent, ToolJsonMalformedKind, TurnFinishStatus,
 };
 use agl_turn::{
-    HookBatchOutcome, HookBatchSummary, HookId, HookResultSummary, StopReason,
-    ToolJsonMalformedClassification, TurnFailureOperation, TurnTerminalStatus, TurnTransition,
-    TurnTransitionRecord,
+    HookBatchOutcome, HookBatchSummary, HookId, HookResultSummary, IncompleteOutputReason,
+    StopReason, ToolJsonMalformedClassification, TurnFailureOperation, TurnTerminalStatus,
+    TurnTransition, TurnTransitionRecord,
 };
 
 pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> RuntimeEvent {
@@ -129,6 +129,10 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> RuntimeEvent {
         TurnTransition::FinalAnswer { answer } => RuntimeEvent::AnswerFinal {
             answer: answer.clone(),
         },
+        TurnTransition::IncompleteOutput { partial, reason } => RuntimeEvent::OutputIncomplete {
+            partial: partial.clone(),
+            reason: incomplete_output_reason_event(*reason),
+        },
         TurnTransition::Stop { reason, visible } => RuntimeEvent::TurnStopped {
             reason: stop_reason_event(reason),
             visible: *visible,
@@ -219,8 +223,16 @@ fn hook_outcome_event(outcome: HookBatchOutcome) -> HookBatchOutcomeEvent {
 fn finish_status_event(status: TurnTerminalStatus) -> TurnFinishStatus {
     match status {
         TurnTerminalStatus::Answered => TurnFinishStatus::Answered,
+        TurnTerminalStatus::IncompleteOutput => TurnFinishStatus::IncompleteOutput,
         TurnTerminalStatus::Stopped => TurnFinishStatus::Stopped,
         TurnTerminalStatus::Failed => TurnFinishStatus::Failed,
         TurnTerminalStatus::Cancelled => TurnFinishStatus::Cancelled,
+    }
+}
+
+fn incomplete_output_reason_event(reason: IncompleteOutputReason) -> IncompleteOutputReasonEvent {
+    match reason {
+        IncompleteOutputReason::ModelLength => IncompleteOutputReasonEvent::ModelLength,
+        IncompleteOutputReason::ContentByteLimit => IncompleteOutputReasonEvent::ContentByteLimit,
     }
 }

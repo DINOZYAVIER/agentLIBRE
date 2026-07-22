@@ -42,8 +42,9 @@ pub use status::{
 };
 pub use supervisor::{ProcessHandle, ProcessSupervisor};
 pub use terminal::command::{
-    AgentTerminalCommandQueue, QueuedTerminalCommand, TerminalCommandOutputRange,
-    TerminalCommandResult,
+    AgentTerminalCommandQueue, CommandCardSanitizer, HumanTerminalCommandAdmission,
+    QueuedTerminalCommand, SanitizedTerminalOutput, TerminalCommandOutputRange,
+    TerminalCommandResult, human_terminal_command_submission, sanitize_terminal_card_output,
 };
 pub use terminal::environment::{
     RejectTerminalSecrets, ResolvedTerminalEnvironment, TerminalEnvironmentDigest,
@@ -61,9 +62,10 @@ pub use terminal::repository::{
     terminal_slot_key, validate_terminal_replacement, validate_terminal_reservation,
 };
 pub use terminal::shell::{
-    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, HostStartupPolicy,
-    IntegrationBatch, ShellExit, ShellIntegrationEvent, ShellIntegrationHealth,
-    ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState,
+    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, CommandBoundary,
+    HostStartupPolicy, IntegrationBatch, ShellExit, ShellIntegrationControl, ShellIntegrationEvent,
+    ShellIntegrationHealth, ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState,
+    TypedCommandAbortReason, TypedCommandTransactionId,
 };
 
 #[doc(hidden)]

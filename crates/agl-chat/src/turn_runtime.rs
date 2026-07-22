@@ -11,10 +11,10 @@ use agl_events::{
     RuntimeEventWriter, SafeRuntimeEventEnvelope,
 };
 use agl_ids::{AttemptId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
-use agl_inference::{InferenceCancellation, InferenceOutputSink};
+use agl_inference::{InferenceCancellation, InferenceFinishReason, InferenceOutputSink};
 use agl_loop::{
-    HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, ModelRequest,
-    ModelResponse, ToolDispatchRequest, ToolDispatchResponse,
+    HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, IncompleteOutputReason,
+    ModelRequest, ModelResponse, ModelResponseOutcome, ToolDispatchRequest, ToolDispatchResponse,
 };
 use agl_store::EffectDeliveryClass;
 use agl_tools::ToolRuntime;
@@ -23,9 +23,11 @@ use anyhow::{Context, Result, ensure};
 use crate::session::{InferenceExecutionControl, InferenceSession};
 use crate::tools::{ChatToolRuntimeConfig, chat_tool_runtime};
 use crate::{
-    ModelAttemptOutcome, NoopTurnPresentationSink, PresentationDelivery, ToolActionOutcome,
+    CapabilityPresentationCompleteness, CapabilityPresentationDetail,
+    CapabilityPresentationExecutionProfile, ChildRunPresentation, ModelAttemptOutcome,
+    NoopTurnPresentationSink, PolicyPresentationOutcome, PresentationDelivery, ToolActionOutcome,
     TurnPresentationEvent, TurnPresentationOutcome, TurnPresentationSink,
-    presentation::InferencePresentationSink,
+    presentation::{InferencePresentationSink, InferencePresentationTarget},
 };
 
 struct CapabilityCancellation(InferenceCancellation);
@@ -177,6 +179,8 @@ pub struct ChatTurnRuntime {
     model_input_tokens: u64,
     model_output_tokens: u64,
     presentation_sink: Arc<dyn TurnPresentationSink>,
+    presentation_session_id: SessionId,
+    presentation_child_run: Option<ChildRunPresentation>,
     presentation_attempt_id: Option<AttemptId>,
     presentation_message_id: Option<agl_ids::MessageId>,
 }
@@ -215,6 +219,7 @@ impl ChatTurnRuntime {
             &process_tools,
             &execution_context_state,
         )?;
+        let presentation_session_id = session.session_id().clone();
         Ok(Self {
             session,
             execution_context,
@@ -233,6 +238,8 @@ impl ChatTurnRuntime {
             model_input_tokens: 0,
             model_output_tokens: 0,
             presentation_sink: Arc::new(NoopTurnPresentationSink),
+            presentation_session_id,
+            presentation_child_run: None,
             presentation_attempt_id: None,
             presentation_message_id: None,
         })
@@ -240,6 +247,15 @@ impl ChatTurnRuntime {
 
     pub(crate) fn set_presentation_sink(&mut self, sink: Arc<dyn TurnPresentationSink>) {
         self.presentation_sink = sink;
+    }
+
+    pub(crate) fn set_presentation_context(
+        &mut self,
+        session_id: SessionId,
+        child_run: ChildRunPresentation,
+    ) {
+        self.presentation_session_id = session_id;
+        self.presentation_child_run = Some(child_run);
     }
 
     pub(crate) fn publish_turn_finished(
@@ -250,12 +266,13 @@ impl ChatTurnRuntime {
     ) {
         self.presentation_sink
             .try_publish(TurnPresentationEvent::TurnFinished {
-                session_id: self.session.session_id().clone(),
+                session_id: self.presentation_session_id.clone(),
                 run_id,
                 turn_id,
                 attempt_id: self.presentation_attempt_id.clone(),
                 provisional_message_id: self.presentation_message_id.clone(),
                 outcome,
+                child_run: self.presentation_child_run.clone(),
             });
     }
 
@@ -264,6 +281,9 @@ impl ChatTurnRuntime {
         message_id: MessageId,
         content: agl_content::Content,
     ) {
+        if self.presentation_child_run.is_some() {
+            return;
+        }
         let Some(scope) = self.event_scope.as_ref() else {
             return;
         };
@@ -272,12 +292,42 @@ impl ChatTurnRuntime {
         };
         self.presentation_sink
             .try_publish(TurnPresentationEvent::AssistantMessageFinal {
-                session_id: self.session.session_id().clone(),
+                session_id: self.presentation_session_id.clone(),
                 run_id: scope.run_id().clone(),
                 turn_id,
                 attempt_id: self.presentation_attempt_id.clone(),
                 message_id,
                 content,
+            });
+    }
+
+    pub(crate) fn publish_incomplete_assistant_message(
+        &self,
+        message_id: MessageId,
+        content: agl_content::Content,
+        source_attempt_id: AttemptId,
+        reason: IncompleteOutputReason,
+        continuation_index: u16,
+    ) {
+        if self.presentation_child_run.is_some() {
+            return;
+        }
+        let Some(scope) = self.event_scope.as_ref() else {
+            return;
+        };
+        let Some(turn_id) = scope.turn_id().cloned() else {
+            return;
+        };
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::AssistantMessageIncomplete {
+                session_id: self.presentation_session_id.clone(),
+                run_id: scope.run_id().clone(),
+                turn_id,
+                message_id,
+                content,
+                source_attempt_id,
+                reason,
+                continuation_index,
             });
     }
 
@@ -725,7 +775,7 @@ impl ChatTurnRuntime {
         self.attempt_ids.push(attempt_id.clone());
         self.presentation_attempt_id = Some(attempt_id.clone());
         self.presentation_message_id = Some(provisional_message_id.clone());
-        let presentation_session_id = self.session.session_id().clone();
+        let presentation_session_id = self.presentation_session_id.clone();
         let run_id = request.run_id.clone();
         let turn_id = request.turn_id.clone();
         let started_delivery =
@@ -736,15 +786,19 @@ impl ChatTurnRuntime {
                     turn_id: turn_id.clone(),
                     attempt_id: attempt_id.clone(),
                     provisional_message_id: provisional_message_id.clone(),
+                    child_run: self.presentation_child_run.clone(),
                 });
         let output_sink: Arc<dyn InferenceOutputSink> = Arc::new(InferencePresentationSink::new(
             Arc::clone(&self.presentation_sink),
-            presentation_session_id,
-            run_id.clone(),
-            turn_id.clone(),
-            attempt_id.clone(),
-            provisional_message_id.clone(),
+            InferencePresentationTarget {
+                session_id: presentation_session_id,
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: attempt_id.clone(),
+                provisional_message_id: provisional_message_id.clone(),
+            },
             started_delivery == PresentationDelivery::Delivered,
+            self.presentation_child_run.is_none(),
         ));
         let response = self
             .session
@@ -771,15 +825,22 @@ impl ChatTurnRuntime {
             });
         self.presentation_sink
             .try_publish(TurnPresentationEvent::ModelAttemptFinished {
-                session_id: self.session.session_id().clone(),
+                session_id: self.presentation_session_id.clone(),
                 run_id,
                 turn_id,
                 attempt_id: attempt_id.clone(),
                 provisional_message_id,
-                outcome: if response.is_ok() {
-                    ModelAttemptOutcome::Completed
-                } else {
-                    ModelAttemptOutcome::Failed
+                outcome: match &response {
+                    Ok(response)
+                        if matches!(
+                            response.finish_reason,
+                            InferenceFinishReason::Length | InferenceFinishReason::ContentByteLimit
+                        ) =>
+                    {
+                        ModelAttemptOutcome::Incomplete
+                    }
+                    Ok(_) => ModelAttemptOutcome::Completed,
+                    Err(_) => ModelAttemptOutcome::Failed,
                 },
             });
         let response = response?;
@@ -791,6 +852,15 @@ impl ChatTurnRuntime {
             .saturating_add(response.metadata.output_tokens);
         Ok(ModelResponse {
             content: agl_content::Content::text(response.content)?,
+            outcome: match response.finish_reason {
+                InferenceFinishReason::Stop => ModelResponseOutcome::Complete,
+                InferenceFinishReason::Length => ModelResponseOutcome::Incomplete {
+                    reason: IncompleteOutputReason::ModelLength,
+                },
+                InferenceFinishReason::ContentByteLimit => ModelResponseOutcome::Incomplete {
+                    reason: IncompleteOutputReason::ContentByteLimit,
+                },
+            },
         })
     }
 
@@ -804,10 +874,11 @@ impl ChatTurnRuntime {
         let run_id = request.run_id.clone();
         let turn_id = request.turn_id.clone();
         let capability_id = request.capability_id.clone();
+        let arguments = request.arguments.clone();
         let presentation_step_id = step_id.cloned().unwrap_or_else(StepId::generate);
         self.presentation_sink
             .try_publish(TurnPresentationEvent::ToolActionStarted {
-                session_id: self.session.session_id().clone(),
+                session_id: self.presentation_session_id.clone(),
                 run_id: run_id.clone(),
                 turn_id: turn_id.clone(),
                 attempt_id: self.presentation_attempt_id.clone(),
@@ -815,21 +886,46 @@ impl ChatTurnRuntime {
                 step_id: presentation_step_id.clone(),
                 capability_id: capability_id.clone(),
             });
-        let result = self.execute_capability_inner(request, step_id, cancellation, deadline);
+        let result = self.execute_capability_inner(
+            request,
+            step_id,
+            &presentation_step_id,
+            cancellation,
+            deadline,
+        );
+        let outcome = match &result {
+            Ok(response)
+                if capability_id.as_str() == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+                    && response
+                        .result
+                        .data
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("waiting") =>
+            {
+                ToolActionOutcome::Waiting
+            }
+            Ok(_) => ToolActionOutcome::Succeeded,
+            Err(_) => ToolActionOutcome::Failed,
+        };
+        let detail = result.as_ref().ok().and_then(|response| {
+            capability_presentation_detail(
+                capability_id.as_str(),
+                &arguments,
+                &response.result.data,
+            )
+        });
         self.presentation_sink
             .try_publish(TurnPresentationEvent::ToolActionFinished {
-                session_id: self.session.session_id().clone(),
+                session_id: self.presentation_session_id.clone(),
                 run_id,
                 turn_id,
                 attempt_id: self.presentation_attempt_id.clone(),
                 provisional_message_id: self.presentation_message_id.clone(),
                 step_id: presentation_step_id,
                 capability_id,
-                outcome: if result.is_ok() {
-                    ToolActionOutcome::Succeeded
-                } else {
-                    ToolActionOutcome::Failed
-                },
+                outcome,
+                detail,
             });
         result
     }
@@ -838,6 +934,7 @@ impl ChatTurnRuntime {
         &mut self,
         request: ToolDispatchRequest,
         step_id: Option<&StepId>,
+        presentation_step_id: &StepId,
         cancellation: InferenceCancellation,
         deadline: Option<std::time::Instant>,
     ) -> Result<ToolDispatchResponse> {
@@ -868,6 +965,13 @@ impl ChatTurnRuntime {
                 capability_id: Some(capability_id.as_str().to_string()),
                 reason_code: denial.code.as_str().to_string(),
             })?;
+            self.publish_policy_check(
+                &request.run_id,
+                &request.turn_id,
+                presentation_step_id,
+                capability_id,
+                PolicyPresentationOutcome::Denied,
+            );
             return Err(denial).context("capability dispatch was denied");
         };
         let scope = execution_scope(&active_scope, step_id)?;
@@ -890,8 +994,22 @@ impl ChatTurnRuntime {
                 capability_id: Some(capability_id.as_str().to_string()),
                 reason_code: denial.code.as_str().to_string(),
             })?;
+            self.publish_policy_check(
+                &request.run_id,
+                &request.turn_id,
+                presentation_step_id,
+                capability_id,
+                PolicyPresentationOutcome::Denied,
+            );
             return Err(denial).context("capability dispatch was denied");
         }
+        self.publish_policy_check(
+            &request.run_id,
+            &request.turn_id,
+            presentation_step_id,
+            capability_id.clone(),
+            PolicyPresentationOutcome::Allowed,
+        );
         self.append_runtime_event(RuntimeEvent::CapabilityCallAdmitted {
             policy_hash,
             capability_id: capability_id.as_str().to_string(),
@@ -924,6 +1042,111 @@ impl ChatTurnRuntime {
             .clone();
         Ok(ToolDispatchResponse { result: output })
     }
+
+    fn publish_policy_check(
+        &self,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        step_id: &StepId,
+        capability_id: CapabilityId,
+        outcome: PolicyPresentationOutcome,
+    ) {
+        self.presentation_sink
+            .try_publish(TurnPresentationEvent::PolicyCheck {
+                session_id: self.presentation_session_id.clone(),
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                attempt_id: self.presentation_attempt_id.clone(),
+                step_id: step_id.clone(),
+                capability_id,
+                outcome,
+            });
+    }
+}
+
+fn capability_presentation_detail(
+    capability_id: &str,
+    arguments: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<CapabilityPresentationDetail> {
+    match capability_id {
+        agl_tools::FS_LIST_TOOL_ID => {
+            let path = safe_repository_path(result.get("path")?.as_str()?)?;
+            let entries = u32::try_from(result.get("entry_count")?.as_u64()?).ok()?;
+            let completeness = match result.get("outcome")?.get("state")?.as_str()? {
+                "complete" => CapabilityPresentationCompleteness::Complete,
+                "truncated" => CapabilityPresentationCompleteness::Truncated,
+                _ => return None,
+            };
+            Some(CapabilityPresentationDetail::FilesystemList {
+                path,
+                entries,
+                completeness,
+            })
+        }
+        agl_tools::FS_READ_TOOL_ID => {
+            let path = safe_repository_path(result.get("path")?.as_str()?)?;
+            let bytes = result
+                .get("lines")?
+                .as_array()?
+                .iter()
+                .filter_map(|line| line.get("text").and_then(serde_json::Value::as_str))
+                .fold(0u64, |total, line| {
+                    total.saturating_add(u64::try_from(line.len()).unwrap_or(u64::MAX))
+                });
+            Some(CapabilityPresentationDetail::FilesystemRead { path, bytes })
+        }
+        agl_tools::FS_SEARCH_TOOL_ID => {
+            let scope = safe_repository_path(result.get("path")?.as_str()?)?;
+            let matches = u32::try_from(result.get("match_count")?.as_u64()?).ok()?;
+            let complete = !result.get("truncated")?.as_bool()?;
+            Some(CapabilityPresentationDetail::RepositorySearch {
+                scope,
+                matches,
+                complete,
+            })
+        }
+        agl_tools::PROCESS_EXEC_TOOL_ID
+        | agl_tools::PROCESS_START_TOOL_ID
+        | agl_tools::SHELL_EXEC_TOOL_ID => {
+            let profile = match arguments.get("profile").and_then(serde_json::Value::as_str) {
+                Some("host") => CapabilityPresentationExecutionProfile::Host,
+                None | Some("workspace") => CapabilityPresentationExecutionProfile::Workspace,
+                Some(_) => return None,
+            };
+            let exit_status = result
+                .get("exit")
+                .and_then(serde_json::Value::as_object)
+                .filter(|exit| exit.get("kind").and_then(serde_json::Value::as_str) == Some("code"))
+                .and_then(|exit| exit.get("code"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            Some(CapabilityPresentationDetail::ProcessExecution {
+                profile,
+                exit_status,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn safe_repository_path(path: &str) -> Option<String> {
+    if path == "." {
+        return Some("workspace".to_owned());
+    }
+    if path.is_empty()
+        || path.len() > 4_096
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return None;
+    }
+    Some(path.to_owned())
 }
 
 fn inference_correlation(
@@ -1195,5 +1418,121 @@ mod tests {
                 .to_string()
                 .contains("model request identity does not match")
         );
+    }
+
+    #[test]
+    fn capability_presentation_details_are_closed_redacted_facts() {
+        let list = capability_presentation_detail(
+            agl_tools::FS_LIST_TOOL_ID,
+            &serde_json::json!({"path": "IGNORED_ARGUMENT_SENTINEL"}),
+            &serde_json::json!({
+                "path": ".",
+                "entry_count": 17,
+                "entries": [{"name": "PRIVATE_ENTRY_SENTINEL"}],
+                "outcome": {"state": "truncated", "next_cursor": "PRIVATE_CURSOR"},
+            }),
+        );
+        assert_eq!(
+            list,
+            Some(CapabilityPresentationDetail::FilesystemList {
+                path: "workspace".to_owned(),
+                entries: 17,
+                completeness: CapabilityPresentationCompleteness::Truncated,
+            })
+        );
+
+        let read = capability_presentation_detail(
+            agl_tools::FS_READ_TOOL_ID,
+            &serde_json::json!({"path": "ignored"}),
+            &serde_json::json!({
+                "path": "src/lib.rs",
+                "lines": [
+                    {"line": 1, "text": "PRIVATE_FILE_SENTINEL"},
+                    {"line": 2, "text": "ok"},
+                ],
+            }),
+        );
+        assert_eq!(
+            read,
+            Some(CapabilityPresentationDetail::FilesystemRead {
+                path: "src/lib.rs".to_owned(),
+                bytes: 23,
+            })
+        );
+
+        let search = capability_presentation_detail(
+            agl_tools::FS_SEARCH_TOOL_ID,
+            &serde_json::json!({"pattern": "PRIVATE_PATTERN_SENTINEL"}),
+            &serde_json::json!({
+                "path": "crates",
+                "match_count": 4,
+                "truncated": false,
+                "matches": [{"text": "PRIVATE_MATCH_SENTINEL"}],
+            }),
+        );
+        assert_eq!(
+            search,
+            Some(CapabilityPresentationDetail::RepositorySearch {
+                scope: "crates".to_owned(),
+                matches: 4,
+                complete: true,
+            })
+        );
+
+        let process = capability_presentation_detail(
+            agl_tools::PROCESS_EXEC_TOOL_ID,
+            &serde_json::json!({
+                "program": "/PRIVATE/HOST/PROGRAM_SENTINEL",
+                "args": ["PRIVATE_ARG_SENTINEL"],
+                "env": {"TOKEN": "PRIVATE_SECRET_SENTINEL"},
+                "profile": "host",
+            }),
+            &serde_json::json!({
+                "exit": {"kind": "code", "code": 7},
+                "chunks": [{"bytes": "PRIVATE_OUTPUT_SENTINEL"}],
+            }),
+        );
+        assert_eq!(
+            process,
+            Some(CapabilityPresentationDetail::ProcessExecution {
+                profile: CapabilityPresentationExecutionProfile::Host,
+                exit_status: Some(7),
+            })
+        );
+
+        let safe = format!("{list:?}{read:?}{search:?}{process:?}");
+        for sentinel in [
+            "IGNORED_ARGUMENT_SENTINEL",
+            "PRIVATE_ENTRY_SENTINEL",
+            "PRIVATE_CURSOR",
+            "PRIVATE_FILE_SENTINEL",
+            "PRIVATE_PATTERN_SENTINEL",
+            "PRIVATE_MATCH_SENTINEL",
+            "PRIVATE_SECRET_SENTINEL",
+            "PRIVATE_OUTPUT_SENTINEL",
+            "/PRIVATE/HOST/PROGRAM_SENTINEL",
+        ] {
+            assert!(!safe.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn capability_presentation_paths_fail_closed_on_host_or_unnormalized_values() {
+        for path in [
+            "/home/user/private",
+            "../private",
+            "safe/../private",
+            "safe\\private",
+            "safe\nprivate",
+        ] {
+            assert_eq!(
+                capability_presentation_detail(
+                    agl_tools::FS_READ_TOOL_ID,
+                    &serde_json::json!({}),
+                    &serde_json::json!({"path": path, "lines": []}),
+                ),
+                None
+            );
+        }
     }
 }

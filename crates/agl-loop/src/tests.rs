@@ -6,7 +6,10 @@ use agl_capabilities::{
 };
 use agl_content::Content;
 use agl_ids::{RunId, TurnId};
-use agl_turn::{ModelResponse, StopReason, TurnHookBatch, TurnInput, TurnOutput, VisibleTool};
+use agl_turn::{
+    IncompleteOutputReason, ModelResponse, ModelResponseOutcome, StopReason, TurnHookBatch,
+    TurnInput, TurnOutput, VisibleTool,
+};
 use serde_json::json;
 
 use crate::*;
@@ -27,6 +30,7 @@ impl Script {
         self.model
             .push_back(EffectOutcome::Succeeded(ModelResponse {
                 content: Content::text(content).unwrap(),
+                outcome: agl_turn::ModelResponseOutcome::Complete,
             }));
         self
     }
@@ -36,6 +40,17 @@ impl Script {
             .push_back(EffectOutcome::Failed(EffectFailure::new(
                 code, message, false,
             )));
+        self
+    }
+
+    fn incomplete_model(mut self, content: impl Into<String>) -> Self {
+        self.model
+            .push_back(EffectOutcome::Succeeded(ModelResponse {
+                content: Content::text(content).unwrap(),
+                outcome: ModelResponseOutcome::Incomplete {
+                    reason: IncompleteOutputReason::ModelLength,
+                },
+            }));
         self
     }
 
@@ -234,6 +249,38 @@ fn answer_path_is_effect_driven_and_checkpoint_equivalent() {
             "turn.finished",
         ]
     );
+}
+
+#[test]
+fn model_length_is_a_typed_incomplete_turn_and_never_an_answer() {
+    let partial = "token ".repeat(256);
+    let result = run_script(
+        input(),
+        Script::default().incomplete_model(partial.clone()),
+        true,
+    );
+
+    assert_eq!(
+        result.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Incomplete {
+                partial,
+                reason: IncompleteOutputReason::ModelLength,
+            },
+        }
+    );
+    assert_eq!(
+        event_kinds(&result.events),
+        [
+            "turn.started",
+            "model.request_prepared",
+            "model.requested",
+            "model.response_received",
+            "output.incomplete",
+            "turn.finished",
+        ]
+    );
+    assert!(!event_kinds(&result.events).contains(&"answer.final"));
 }
 
 #[test]
@@ -528,7 +575,8 @@ fn pending_effect_is_stable_and_results_are_exactly_once() {
         executor.resume(TurnEffectResult::ModelGeneration {
             key: stale,
             outcome: EffectOutcome::Succeeded(ModelResponse {
-                content: Content::text("done").unwrap()
+                content: Content::text("done").unwrap(),
+                outcome: agl_turn::ModelResponseOutcome::Complete,
             }),
         }),
         Err(TurnExecutorError::StaleEffectKey { .. })
@@ -545,6 +593,7 @@ fn pending_effect_is_stable_and_results_are_exactly_once() {
         key: effect.key().clone(),
         outcome: EffectOutcome::Succeeded(ModelResponse {
             content: Content::text("done").unwrap(),
+            outcome: agl_turn::ModelResponseOutcome::Complete,
         }),
     };
     executor.resume(result.clone()).unwrap();
@@ -609,6 +658,7 @@ fn cancellation_is_terminal_before_during_and_between_effects() {
             key: effect.key().clone(),
             outcome: EffectOutcome::Succeeded(ModelResponse {
                 content: Content::text("completed concurrently").unwrap(),
+                outcome: agl_turn::ModelResponseOutcome::Complete,
             }),
         })
         .unwrap();

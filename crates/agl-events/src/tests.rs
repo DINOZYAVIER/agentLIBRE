@@ -205,6 +205,56 @@ fn redaction_covers_turn_transcript_and_inference_content() {
 }
 
 #[test]
+fn incomplete_output_and_durable_item_have_stable_names_and_redact_content() {
+    let output = RuntimeEvent::OutputIncomplete {
+        partial: text("private partial"),
+        reason: IncompleteOutputReasonEvent::ModelLength,
+    };
+    assert_eq!(
+        serde_json::to_value(&output).unwrap(),
+        json!({
+            "kind": "output.incomplete",
+            "partial": {"parts": [{"kind": "text", "text": "private partial"}]},
+            "reason": "model_length",
+        })
+    );
+    let safe_output = serde_json::to_value(SafeRuntimeEvent::from(&output)).unwrap();
+    assert_eq!(
+        safe_output,
+        json!({
+            "kind": "output.incomplete",
+            "partial_bytes": 15,
+            "reason": "model_length",
+        })
+    );
+
+    let incomplete = RuntimeEvent::AssistantIncomplete {
+        message_id: MessageId::parse(MESSAGE_ID).unwrap(),
+        content: text("private durable partial"),
+        source_attempt_id: AttemptId::parse(ATTEMPT_ID).unwrap(),
+        reason: IncompleteOutputReasonEvent::ContentByteLimit,
+        continuation_index: 2,
+        execution_context_revision: 7,
+        runtime_context_revision: 9,
+        policy_hash: "sha256:policy".to_owned(),
+    };
+    let full = serde_json::to_value(&incomplete).unwrap();
+    assert_eq!(full["kind"], "assistant_incomplete");
+    assert_eq!(full["reason"], "content_byte_limit");
+    let safe = serde_json::to_value(SafeRuntimeEvent::from(&incomplete)).unwrap();
+    assert_eq!(safe["kind"], "assistant_incomplete");
+    assert_eq!(safe["content_bytes"], 23);
+    assert_eq!(safe["reason"], "content_byte_limit");
+    assert!(safe.get("content").is_none());
+    assert!(!safe.to_string().contains("private durable partial"));
+
+    assert_eq!(
+        serde_json::from_value::<RuntimeEvent>(full).unwrap(),
+        incomplete
+    );
+}
+
+#[test]
 fn invalid_capability_names_are_not_copied_into_safe_denial_events() {
     let model_controlled_name = "SECRET invalid capability name";
     let event = RuntimeEvent::CapabilityCallDenied {
@@ -335,6 +385,32 @@ fn writer_returns_full_and_safe_views_of_one_envelope() {
     assert_eq!(decoded, safe);
 
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn incomplete_inference_finish_has_a_stable_safe_status() {
+    let full = RuntimeEvent::InferenceAttemptFinished {
+        finish_status: InferenceFinishStatus::IncompleteOutput,
+    };
+    let safe = SafeRuntimeEvent::from(&full);
+
+    assert_eq!(
+        serde_json::to_value(&full).unwrap(),
+        json!({
+            "kind": "inference.attempt_finished",
+            "finish_status": "incomplete_output",
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&safe).unwrap(),
+        serde_json::to_value(&full).unwrap()
+    );
+    assert!(matches!(
+        safe,
+        SafeRuntimeEvent::InferenceAttemptFinished {
+            finish_status: InferenceFinishStatus::IncompleteOutput
+        }
+    ));
 }
 
 #[test]

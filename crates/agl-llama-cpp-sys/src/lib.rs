@@ -138,6 +138,15 @@ pub struct agl_llama_mtp_stats {
     pub accepted_tokens: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct agl_llama_device_memory_breakdown {
+    pub model_bytes: u64,
+    pub context_bytes: u64,
+    pub compute_bytes: u64,
+    pub found: u32,
+}
+
 unsafe extern "C" {
     pub fn ggml_backend_load_all_from_path(dir_path: *const c_char);
     pub fn ggml_backend_dev_count() -> usize;
@@ -147,6 +156,12 @@ unsafe extern "C" {
     pub fn ggml_backend_dev_description(device: ggml_backend_dev_t) -> *const c_char;
     pub fn ggml_backend_dev_memory(device: ggml_backend_dev_t, free: *mut usize, total: *mut usize);
     pub fn ggml_backend_dev_type(device: ggml_backend_dev_t) -> c_int;
+    pub fn agl_ggml_backend_dev_id(device: ggml_backend_dev_t) -> *const c_char;
+    pub fn agl_llama_context_device_memory_breakdown(
+        context: *const c_void,
+        device: ggml_backend_dev_t,
+        output: *mut agl_llama_device_memory_breakdown,
+    ) -> c_int;
 
     pub fn llama_backend_init();
     pub fn llama_log_set(

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agl_ids::{ExecutionId, RequestId, RunId};
+use agl_ids::{ExecutionId, RequestId, RunId, WriterLeaseId};
 
 use crate::terminal::shell::ManagedShellStartup;
 use crate::{
@@ -193,6 +193,14 @@ impl ProcessHandle {
         _execution_id: &ExecutionId,
         _lease: InputLease,
     ) -> Result<bool> {
+        unsupported()
+    }
+
+    pub fn operator_resolve_writer_lease(
+        &self,
+        _execution_id: &ExecutionId,
+        _writer_lease_id: WriterLeaseId,
+    ) -> Result<InputLease> {
         unsupported()
     }
 

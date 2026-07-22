@@ -71,14 +71,25 @@ diagnose() {
   else
     echo "target/debug/agl native links: target/debug/agl is not built"
   fi
+  echo
+
+  if [[ -x "$repo_root/target/debug/agl-inference-worker" ]]; then
+    echo "target/debug/agl-inference-worker native links:"
+    readelf -d "$repo_root/target/debug/agl-inference-worker" |
+      grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true
+  else
+    echo "target/debug/agl-inference-worker native links: target/debug/agl-inference-worker is not built"
+  fi
 }
 
 build_local() {
   "$repo_root/scripts/build-llama-cpp.sh"
   cargo build \
     -p agl-cli \
+    -p agl-inference-worker \
     -p agl-process \
     --bin agl \
+    --bin agl-inference-worker \
     --bin agl-process-launcher
 }
 

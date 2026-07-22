@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use agl_ids::ExecutionId;
+use agl_ids::{ExecutionId, WriterLeaseId};
 
 use crate::{
     ExecutionChannel, ExecutionExit, ExecutionListFilter, ExecutionOutputChunk,
@@ -223,7 +223,7 @@ struct InMemoryRecord {
     status: ExecutionStatus,
     request: ExecutionRequest,
     supervisor_id: String,
-    input_lease: Option<InputLease>,
+    writer_lease_id: Option<WriterLeaseId>,
     accepted_input_bytes: u64,
     committed_output: Vec<CommittedOutputFrame>,
 }
@@ -347,7 +347,7 @@ impl ExecutionRepository for InMemoryExecutionRepository {
                 status: status.clone(),
                 request: request.clone(),
                 supervisor_id: supervisor_id.to_owned(),
-                input_lease: None,
+                writer_lease_id: None,
                 accepted_input_bytes,
                 committed_output: Vec::new(),
             },
@@ -478,13 +478,19 @@ impl ExecutionRepository for InMemoryExecutionRepository {
         _occurred_at_unix_ms: i64,
     ) -> Result<()> {
         self.with_record(execution_id, supervisor_id, |record| {
-            if record.input_lease.is_some() {
+            let writer_lease_id = lease.writer_lease_id().ok_or_else(|| {
+                ProcessError::new(
+                    ProcessErrorCode::InvalidRequest,
+                    "only writable attachments can bind the input lease",
+                )
+            })?;
+            if record.writer_lease_id.is_some() {
                 return Err(ProcessError::new(
                     ProcessErrorCode::InputLeaseBusy,
                     "execution already has a writable input lease",
                 ));
             }
-            record.input_lease = Some(lease.clone());
+            record.writer_lease_id = Some(writer_lease_id.clone());
             Ok(())
         })
     }
@@ -497,13 +503,13 @@ impl ExecutionRepository for InMemoryExecutionRepository {
         _occurred_at_unix_ms: i64,
     ) -> Result<()> {
         self.with_record(execution_id, supervisor_id, |record| {
-            if record.input_lease.as_ref() != Some(lease) {
+            if record.writer_lease_id.as_ref() != lease.writer_lease_id() {
                 return Err(ProcessError::new(
                     ProcessErrorCode::InputLeaseBusy,
                     "input lease is not owned by this attachment",
                 ));
             }
-            record.input_lease = None;
+            record.writer_lease_id = None;
             Ok(())
         })
     }
@@ -516,7 +522,7 @@ impl ExecutionRepository for InMemoryExecutionRepository {
         _occurred_at_unix_ms: i64,
     ) -> Result<()> {
         self.with_record(execution_id, supervisor_id, |record| {
-            if record.input_lease.as_ref() != Some(lease) {
+            if record.writer_lease_id.as_ref() != lease.writer_lease_id() {
                 return Err(ProcessError::new(
                     ProcessErrorCode::InputLeaseBusy,
                     "input lease is not owned by this attachment",
@@ -536,7 +542,7 @@ impl ExecutionRepository for InMemoryExecutionRepository {
         _occurred_at_unix_ms: i64,
     ) -> Result<()> {
         self.with_record(execution_id, supervisor_id, |record| {
-            if record.input_lease.as_ref() != Some(lease) {
+            if record.writer_lease_id.as_ref() != lease.writer_lease_id() {
                 return Err(ProcessError::new(
                     ProcessErrorCode::InputLeaseBusy,
                     "input lease is not owned by this attachment",
@@ -573,7 +579,7 @@ impl ExecutionRepository for InMemoryExecutionRepository {
                 .discarded_output_bytes
                 .saturating_add(update.discarded_output_bytes);
             record.status.last_sequence = sequence;
-            record.input_lease = None;
+            record.writer_lease_id = None;
             Ok(())
         })?;
         #[cfg(test)]

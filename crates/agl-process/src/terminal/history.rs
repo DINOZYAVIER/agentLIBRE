@@ -14,7 +14,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{ProcessError, ProcessErrorCode, Result};
 
-pub const MAX_HISTORY_COMMAND_BYTES: usize = 32 * 1024;
+pub const MAX_HISTORY_COMMAND_BYTES: usize =
+    crate::terminal::command::MAX_TYPED_TERMINAL_COMMAND_BYTES;
 pub const DEFAULT_HUMAN_HISTORY_ENTRIES: usize = 2_000;
 pub const DEFAULT_HUMAN_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_AGENT_HISTORY_ENTRIES: usize = 256;

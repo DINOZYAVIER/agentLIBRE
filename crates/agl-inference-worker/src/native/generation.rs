@@ -3,11 +3,10 @@ use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 #[cfg(test)]
@@ -15,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-use crate::InferenceFinishReason;
+use agl_inference::{InferenceCancellation, InferenceFinishReason};
 
 use super::ffi;
 
@@ -24,7 +23,7 @@ pub(crate) struct LlamaCppGenerationControl<'a> {
 }
 
 struct NativeAbortSignal<'a> {
-    cancellation: &'a AtomicBool,
+    cancellation: &'a InferenceCancellation,
     deadline: Option<Instant>,
     #[cfg(test)]
     probe: Option<Arc<NativeAbortTestProbe>>,
@@ -32,12 +31,12 @@ struct NativeAbortSignal<'a> {
 
 impl NativeAbortSignal<'_> {
     fn is_cancelled(&self) -> bool {
-        self.cancellation.load(Ordering::Acquire)
+        self.cancellation.is_cancelled()
     }
 }
 
 impl<'a> LlamaCppGenerationControl<'a> {
-    pub(crate) fn cancellable(cancellation: &'a AtomicBool) -> Self {
+    pub(crate) fn cancellable(cancellation: &'a InferenceCancellation) -> Self {
         Self {
             signal: Some(NativeAbortSignal {
                 cancellation,
@@ -49,7 +48,7 @@ impl<'a> LlamaCppGenerationControl<'a> {
     }
 
     pub(crate) fn cancellable_until(
-        cancellation: &'a AtomicBool,
+        cancellation: &'a InferenceCancellation,
         deadline: Option<Instant>,
     ) -> Self {
         let mut control = Self::cancellable(cancellation);
@@ -191,7 +190,7 @@ impl NativeAbortTestProbe {
         self.install_wait_timed_out.load(Ordering::Acquire)
     }
 
-    fn record_install_and_wait_for_cancellation(&self, cancellation: &AtomicBool) {
+    fn record_install_and_wait_for_cancellation(&self, cancellation: &InferenceCancellation) {
         self.installed.fetch_add(1, Ordering::AcqRel);
         self.changed.notify_all();
 
@@ -200,7 +199,7 @@ impl NativeAbortTestProbe {
             .wait_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !cancellation.load(Ordering::Acquire) {
+        while !cancellation.is_cancelled() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 self.install_wait_timed_out.store(true, Ordering::Release);
@@ -326,17 +325,15 @@ unsafe extern "C" fn llama_abort_callback(data: *mut c_void) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
-
     use super::*;
 
     #[test]
     fn cancellation_control_observes_admitted_job_flag() {
-        let cancelled = AtomicBool::new(false);
+        let cancelled = InferenceCancellation::new();
         let control = LlamaCppGenerationControl::cancellable(&cancelled);
 
         assert!(control.ensure_running().is_ok());
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
 
         let error = control.ensure_running().unwrap_err();
         assert!(
@@ -348,7 +345,7 @@ mod tests {
 
     #[test]
     fn native_abort_callback_reads_the_current_flag_value() {
-        let cancelled = AtomicBool::new(false);
+        let cancelled = InferenceCancellation::new();
         let signal = NativeAbortSignal {
             cancellation: &cancelled,
             deadline: None,
@@ -357,13 +354,13 @@ mod tests {
         let data = std::ptr::from_ref(&signal).cast_mut().cast::<c_void>();
 
         assert!(!unsafe { llama_abort_callback(data) });
-        cancelled.store(true, Ordering::Release);
+        cancelled.cancel();
         assert!(unsafe { llama_abort_callback(data) });
     }
 
     #[test]
     fn native_abort_callback_observes_expired_deadline() {
-        let cancelled = AtomicBool::new(false);
+        let cancelled = InferenceCancellation::new();
         let signal = NativeAbortSignal {
             cancellation: &cancelled,
             deadline: Some(Instant::now()),

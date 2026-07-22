@@ -10,9 +10,9 @@ use agl_functions::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
 use agl_loop::{
-    EffectFailure, EffectFailureCode, EffectOutcome, HookEffectOutput, TurnAdvance,
-    TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor, TurnInput,
-    TurnOutput, TurnTerminal,
+    EffectFailure, EffectFailureCode, EffectOutcome, HookEffectOutput, IncompleteOutputReason,
+    TurnAdvance, TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor,
+    TurnInput, TurnOutput, TurnTerminal,
 };
 use agl_models::RuntimePlanSet;
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
@@ -51,9 +51,19 @@ pub struct ChatTurnOutput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChatTurnStatus {
-    Answered { answer: String },
-    Stopped { reason: StopReason },
-    Failed { message: String },
+    Answered {
+        answer: String,
+    },
+    Incomplete {
+        partial: String,
+        reason: IncompleteOutputReason,
+    },
+    Stopped {
+        reason: StopReason,
+    },
+    Failed {
+        message: String,
+    },
     Cancelled,
 }
 
@@ -68,6 +78,8 @@ pub struct ChatTurnExecution {
     attempt_ids: Vec<AttemptId>,
     emitted_events: Vec<SafeRuntimeEventEnvelope>,
     event_sequence: u64,
+    continuation_index: u16,
+    internal_continuation: bool,
     output: Option<ChatTurnOutput>,
 }
 
@@ -140,6 +152,9 @@ pub(crate) struct DurableTurnResume {
     pub event_sequence: u64,
     pub attempt_ids: Vec<AttemptId>,
     pub delegation_authority_ceiling: BTreeSet<CapabilityId>,
+    pub continuation_index: u16,
+    pub internal_continuation: bool,
+    pub continuation_source_message_id: Option<MessageId>,
 }
 
 pub struct ChatService {
@@ -323,6 +338,15 @@ impl ChatService {
 
     pub(crate) fn set_presentation_sink(&mut self, sink: Arc<dyn crate::TurnPresentationSink>) {
         self.turn_runtime.set_presentation_sink(sink);
+    }
+
+    pub(crate) fn set_presentation_context(
+        &mut self,
+        session_id: SessionId,
+        child_run: crate::ChildRunPresentation,
+    ) {
+        self.turn_runtime
+            .set_presentation_context(session_id, child_run);
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -727,6 +751,51 @@ impl ChatService {
         request_id: Option<RequestId>,
         input: Content,
     ) -> Result<ChatTurnExecution> {
+        self.start_turn_with_ids(run_id, turn_id, request_id, input, 0, false)
+    }
+
+    pub(crate) fn start_incomplete_continuation_with_ids(
+        &mut self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        source_message_id: MessageId,
+        continuation_index: u16,
+    ) -> Result<ChatTurnExecution> {
+        let continuation_request_id = request_id
+            .as_ref()
+            .context("internal continuation requires a durable request ID")?;
+        self.chat_history
+            .as_mut()
+            .context("internal continuation requires durable chat history")?
+            .begin_incomplete_continuation_input(
+                source_message_id,
+                run_id.clone(),
+                turn_id.clone(),
+                continuation_request_id,
+            )?;
+        let instruction = Content::text(
+            "Continue the earlier incomplete assistant response in this conversation without repeating it.",
+        )?;
+        self.start_turn_with_ids(
+            run_id,
+            turn_id,
+            request_id,
+            instruction,
+            continuation_index,
+            true,
+        )
+    }
+
+    fn start_turn_with_ids(
+        &mut self,
+        run_id: RunId,
+        turn_id: TurnId,
+        request_id: Option<RequestId>,
+        input: Content,
+        continuation_index: u16,
+        internal_continuation: bool,
+    ) -> Result<ChatTurnExecution> {
         if self.context_released {
             bail!("cannot run a turn after the chat session context was released");
         }
@@ -736,24 +805,26 @@ impl ChatService {
             &turn_id,
             request_id,
         )?;
-        let user_message_id = MessageId::generate();
-        log_message_metadata(
-            "user",
-            &self.session_id,
-            &user_message_id,
-            &input,
-            &self.runtime,
-        );
-        let envelope = self
-            .turn_runtime
-            .append_runtime_event(RuntimeEvent::UserMessage {
-                message_id: user_message_id,
-                content: input.clone(),
-            })?;
-        if let Some(history) = &mut self.chat_history
-            && let Err(error) = history.append_user_message(envelope)
-        {
-            bail!("failed to record user message: {error:#}");
+        if !internal_continuation {
+            let user_message_id = MessageId::generate();
+            log_message_metadata(
+                "user",
+                &self.session_id,
+                &user_message_id,
+                &input,
+                &self.runtime,
+            );
+            let envelope = self
+                .turn_runtime
+                .append_runtime_event(RuntimeEvent::UserMessage {
+                    message_id: user_message_id,
+                    content: input.clone(),
+                })?;
+            if let Some(history) = &mut self.chat_history
+                && let Err(error) = history.append_user_message(envelope)
+            {
+                bail!("failed to record user message: {error:#}");
+            }
         }
         let capability_policy_hash = Some(self.turn_runtime.policy_hash()?);
         let turn_input = build_turn_input(TurnInputSpec {
@@ -787,6 +858,8 @@ impl ChatService {
             attempt_ids: Vec::new(),
             emitted_events,
             event_sequence,
+            continuation_index,
+            internal_continuation,
             output: None,
         })
     }
@@ -803,6 +876,9 @@ impl ChatService {
             event_sequence,
             attempt_ids,
             delegation_authority_ceiling,
+            continuation_index,
+            internal_continuation,
+            continuation_source_message_id,
         } = resume;
         if self.context_released {
             bail!("cannot resume a turn after the chat session context was released");
@@ -810,6 +886,22 @@ impl ChatService {
         if checkpoint.state().input.run_id != run_id || checkpoint.state().input.turn_id != turn_id
         {
             bail!("turn checkpoint identity does not match the durable run");
+        }
+        if internal_continuation {
+            let source_message_id = continuation_source_message_id
+                .context("durable internal continuation is missing its source message ID")?;
+            let continuation_request_id = request_id
+                .as_ref()
+                .context("durable internal continuation is missing its request ID")?;
+            self.chat_history
+                .as_mut()
+                .context("internal continuation requires durable chat history")?
+                .begin_incomplete_continuation_input(
+                    source_message_id,
+                    run_id.clone(),
+                    turn_id.clone(),
+                    continuation_request_id,
+                )?;
         }
         self.turn_runtime.resume_turn(
             self.scope_session_id.as_ref(),
@@ -833,6 +925,8 @@ impl ChatService {
             attempt_ids,
             emitted_events: Vec::new(),
             event_sequence,
+            continuation_index,
+            internal_continuation,
             output: None,
         };
         if execution.is_terminal() {
@@ -989,13 +1083,17 @@ impl ChatService {
         mut messages: Vec<TurnMessage>,
         output: &TurnOutput,
     ) -> Result<()> {
-        let stop_reason = match output {
+        let (stop_reason, incomplete_reason) = match output {
             TurnOutput::Answered { answer } => {
                 ensure_final_assistant_message(
                     &mut messages,
                     Content::text(assistant_text_for_terminal(answer))?,
                 );
-                None
+                (None, None)
+            }
+            TurnOutput::Incomplete { partial, reason } => {
+                ensure_final_assistant_message(&mut messages, Content::text(partial.clone())?);
+                (None, Some(*reason))
             }
             TurnOutput::Stopped { reason, detail } => {
                 messages.push(TurnMessage::Assistant {
@@ -1005,14 +1103,31 @@ impl ChatService {
                         self.turn_runtime.session().turn_visible_tools(),
                     ))?,
                 });
-                Some(*reason)
+                (Some(*reason), None)
             }
+        };
+        let incomplete = if let Some(reason) = incomplete_reason {
+            Some(IncompleteTurnRecording {
+                reason,
+                source_attempt_id: execution
+                    .attempt_ids
+                    .last()
+                    .cloned()
+                    .context("incomplete output has no source model attempt")?,
+                continuation_index: execution.continuation_index,
+                execution_context_revision: self.execution_context().revision,
+                runtime_context_revision: self.runtime_selection_revision(),
+                policy_hash: self.effective_policy_hash(),
+            })
+        } else {
+            None
         };
         let mut recording = CompletedTurnRecording {
             session_id: &self.session_id,
             remaining_attempt_ids: execution.attempt_ids.iter(),
             final_assistant_message_id: assistant_message_id,
             runtime: &self.runtime,
+            incomplete,
         };
         record_completed_turn_messages(
             &mut self.chat_history,
@@ -1024,6 +1139,14 @@ impl ChatService {
             stop_reason,
         )?;
         self.messages = messages;
+        if execution.internal_continuation
+            && matches!(
+                self.messages.get(execution.previous_message_count),
+                Some(TurnMessage::User { .. })
+            )
+        {
+            self.messages.remove(execution.previous_message_count);
+        }
         Ok(())
     }
 
@@ -1050,6 +1173,9 @@ impl ChatService {
                     TurnOutput::Answered { answer } => ChatTurnStatus::Answered {
                         answer: assistant_text_for_terminal(&answer),
                     },
+                    TurnOutput::Incomplete { partial, reason } => {
+                        ChatTurnStatus::Incomplete { partial, reason }
+                    }
                     TurnOutput::Stopped { reason, .. } => ChatTurnStatus::Stopped { reason },
                 };
                 let runtime_events = self.turn_runtime.take_runtime_events()?;
@@ -1088,6 +1214,7 @@ impl ChatService {
         };
         let presentation_outcome = match &output.status {
             ChatTurnStatus::Answered { .. } => crate::TurnPresentationOutcome::Answered,
+            ChatTurnStatus::Incomplete { .. } => crate::TurnPresentationOutcome::IncompleteOutput,
             ChatTurnStatus::Stopped { .. } => crate::TurnPresentationOutcome::Stopped,
             ChatTurnStatus::Failed { .. } => crate::TurnPresentationOutcome::Failed,
             ChatTurnStatus::Cancelled => crate::TurnPresentationOutcome::Cancelled,
@@ -1264,11 +1391,32 @@ fn ensure_final_assistant_message(messages: &mut Vec<TurnMessage>, content: Cont
     }
 }
 
+fn incomplete_output_reason_event(
+    reason: IncompleteOutputReason,
+) -> agl_events::IncompleteOutputReasonEvent {
+    match reason {
+        IncompleteOutputReason::ModelLength => agl_events::IncompleteOutputReasonEvent::ModelLength,
+        IncompleteOutputReason::ContentByteLimit => {
+            agl_events::IncompleteOutputReasonEvent::ContentByteLimit
+        }
+    }
+}
+
 struct CompletedTurnRecording<'a> {
     session_id: &'a SessionId,
     remaining_attempt_ids: std::slice::Iter<'a, AttemptId>,
     final_assistant_message_id: Option<MessageId>,
     runtime: &'a AgentLibreRuntimeConfig,
+    incomplete: Option<IncompleteTurnRecording>,
+}
+
+struct IncompleteTurnRecording {
+    reason: IncompleteOutputReason,
+    source_attempt_id: AttemptId,
+    continuation_index: u16,
+    execution_context_revision: u64,
+    runtime_context_revision: u64,
+    policy_hash: String,
 }
 
 fn record_completed_turn_messages(
@@ -1300,19 +1448,43 @@ fn record_completed_turn_messages(
                     content,
                     recording.runtime,
                 );
-                let envelope =
-                    turn_runtime.append_runtime_event(RuntimeEvent::AssistantMessage {
-                        message_id: message_id.clone(),
-                        content: content.clone(),
-                    })?;
-                if let Some(history) = chat_history.as_mut() {
-                    if is_stop_marker {
-                        history.append_assistant_stop_marker(envelope)?;
-                    } else {
-                        history.append_assistant_message(envelope)?;
+                if let Some(incomplete) = recording.incomplete.take() {
+                    let envelope =
+                        turn_runtime.append_runtime_event(RuntimeEvent::AssistantIncomplete {
+                            message_id: message_id.clone(),
+                            content: content.clone(),
+                            source_attempt_id: incomplete.source_attempt_id.clone(),
+                            reason: incomplete_output_reason_event(incomplete.reason),
+                            continuation_index: incomplete.continuation_index,
+                            execution_context_revision: incomplete.execution_context_revision,
+                            runtime_context_revision: incomplete.runtime_context_revision,
+                            policy_hash: incomplete.policy_hash,
+                        })?;
+                    if let Some(history) = chat_history.as_mut() {
+                        history.append_incomplete_assistant_message(envelope)?;
                     }
+                    turn_runtime.publish_incomplete_assistant_message(
+                        message_id,
+                        content.clone(),
+                        incomplete.source_attempt_id,
+                        incomplete.reason,
+                        incomplete.continuation_index,
+                    );
+                } else {
+                    let envelope =
+                        turn_runtime.append_runtime_event(RuntimeEvent::AssistantMessage {
+                            message_id: message_id.clone(),
+                            content: content.clone(),
+                        })?;
+                    if let Some(history) = chat_history.as_mut() {
+                        if is_stop_marker {
+                            history.append_assistant_stop_marker(envelope)?;
+                        } else {
+                            history.append_assistant_message(envelope)?;
+                        }
+                    }
+                    turn_runtime.publish_final_assistant_message(message_id, content.clone());
                 }
-                turn_runtime.publish_final_assistant_message(message_id, content.clone());
             }
             TurnMessage::AssistantToolCall { name, arguments } => {
                 link_next_attempt(chat_history, turn_runtime, recording)?;
@@ -1447,6 +1619,11 @@ pub fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
                     content: content.clone(),
                 }),
                 RuntimeEvent::AssistantMessage { content, .. } => {
+                    messages.push(TurnMessage::Assistant {
+                        content: content.clone(),
+                    });
+                }
+                RuntimeEvent::AssistantIncomplete { content, .. } => {
                     messages.push(TurnMessage::Assistant {
                         content: content.clone(),
                     });
@@ -1802,6 +1979,208 @@ tool_call_format = "hermes_json"
         })
     }
 
+    type CapturedModelMessage = (agl_oven::RenderedMessageRole, Option<String>);
+    type CapturedModelInputs = Arc<Mutex<Vec<Vec<CapturedModelMessage>>>>;
+
+    struct ContinuationCaptureClient {
+        responses: Mutex<VecDeque<(String, InferenceFinishReason)>>,
+        model_inputs: CapturedModelInputs,
+    }
+
+    impl InferenceClient for ContinuationCaptureClient {
+        fn generate(&self, job: ChatInferenceJob) -> Result<InferenceResponse> {
+            self.model_inputs.lock().unwrap().push(
+                job.request
+                    .rendered
+                    .messages
+                    .iter()
+                    .map(|message| {
+                        (
+                            message.role,
+                            message.content.as_ref().and_then(Content::text_only),
+                        )
+                    })
+                    .collect(),
+            );
+            let (content, finish_reason) = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .context("continuation inference response was not configured")?;
+            Ok(InferenceResponse {
+                attempt_id: job.request.attempt_id,
+                content,
+                finish_reason,
+                metadata: InferenceResponseMetadata {
+                    model_state: Some("continuation-capture".to_string()),
+                    selected_device: None,
+                    duration_ms: 0,
+                    input_tokens: 4,
+                    output_tokens: 2,
+                },
+            })
+        }
+
+        fn clear_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn release_context(
+            &self,
+            _config: &ResolvedInferenceConfig,
+            _session_id: &SessionId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn status(&self) -> Result<ModelManagerStatus> {
+            Ok(ModelManagerStatus::default())
+        }
+    }
+
+    #[test]
+    fn internal_continuation_uses_one_partial_and_does_not_retain_synthetic_user_message() {
+        const PARTIAL: &str = "partial answer";
+        const CONTINUATION_INSTRUCTION: &str = "Continue the earlier incomplete assistant response in this conversation without repeating it.";
+
+        let model_inputs = Arc::new(Mutex::new(Vec::new()));
+        let client = InferenceClientHandle::new(ContinuationCaptureClient {
+            responses: Mutex::new(VecDeque::from([
+                (PARTIAL.to_string(), InferenceFinishReason::Length),
+                ("later answer".to_string(), InferenceFinishReason::Stop),
+                ("completed answer".to_string(), InferenceFinishReason::Stop),
+            ])),
+            model_inputs: Arc::clone(&model_inputs),
+        });
+        let mut chat = test_chat_service_with_client("internal-continuation-input", true, client);
+
+        let first = chat
+            .service
+            .run_user_turn_with_ids(run_id(), turn_id(), Some(request_id()), "initial question")
+            .unwrap();
+        assert!(matches!(
+            first.status,
+            ChatTurnStatus::Incomplete {
+                ref partial,
+                reason: IncompleteOutputReason::ModelLength,
+            } if partial == PARTIAL
+        ));
+
+        let source_message_id = first
+            .runtime_events
+            .iter()
+            .find_map(|event| match &event.payload {
+                SafeRuntimeEvent::AssistantIncomplete { message_id, .. } => {
+                    Some(message_id.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let continuation_run_id = RunId::generate();
+        let continuation_turn_id = TurnId::generate();
+        let continuation_request_id = RequestId::generate();
+        chat.service
+            .chat_history
+            .as_mut()
+            .unwrap()
+            .append_incomplete_continuation_claim(
+                source_message_id.clone(),
+                "test-continuation-submission".to_string(),
+                continuation_run_id.clone(),
+                continuation_turn_id.clone(),
+                continuation_request_id.clone(),
+            )
+            .unwrap();
+
+        let later = chat
+            .service
+            .run_user_turn_with_ids(
+                RunId::generate(),
+                TurnId::generate(),
+                Some(RequestId::generate()),
+                "later queued prompt",
+            )
+            .unwrap();
+        assert!(matches!(later.status, ChatTurnStatus::Answered { .. }));
+
+        let mut continuation = chat
+            .service
+            .start_incomplete_continuation_with_ids(
+                continuation_run_id,
+                continuation_turn_id,
+                Some(continuation_request_id),
+                source_message_id,
+                1,
+            )
+            .unwrap();
+        while !continuation.is_terminal() {
+            chat.service.advance_user_turn(&mut continuation).unwrap();
+        }
+        let output = continuation.take_output().unwrap();
+        assert!(
+            matches!(output.status, ChatTurnStatus::Answered { .. }),
+            "unexpected continuation outcome: {:?}",
+            output.status
+        );
+
+        let captured = model_inputs.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        let continuation_input = &captured[2];
+        assert_eq!(
+            continuation_input
+                .iter()
+                .filter(|(_, content)| content.as_deref() == Some(PARTIAL))
+                .count(),
+            1,
+            "the incomplete assistant partial must appear exactly once in canonical model input"
+        );
+        assert!(continuation_input.iter().any(|(role, content)| {
+            *role == agl_oven::RenderedMessageRole::Assistant && content.as_deref() == Some(PARTIAL)
+        }));
+        assert_eq!(
+            continuation_input
+                .iter()
+                .filter(|(role, content)| {
+                    *role == agl_oven::RenderedMessageRole::User
+                        && content.as_deref() == Some(CONTINUATION_INSTRUCTION)
+                })
+                .count(),
+            1
+        );
+        assert!(continuation_input.iter().any(|(role, content)| {
+            *role == agl_oven::RenderedMessageRole::Assistant
+                && content.as_deref() == Some("later answer")
+        }));
+        drop(captured);
+
+        assert!(!chat.service.messages.iter().any(|message| {
+            matches!(
+                message,
+                TurnMessage::User { content }
+                    if content.text_only().as_deref() == Some(CONTINUATION_INSTRUCTION)
+            )
+        }));
+        let replay = chat
+            .service
+            .chat_history
+            .as_ref()
+            .unwrap()
+            .read_replay()
+            .unwrap();
+        assert!(!replay_turn_messages(&replay).iter().any(|message| {
+            matches!(
+                message,
+                TurnMessage::User { content }
+                    if content.text_only().as_deref() == Some(CONTINUATION_INSTRUCTION)
+            )
+        }));
+    }
+
     struct RecordingInferenceClient {
         attempt_ids: Arc<Mutex<Vec<AttemptId>>>,
     }
@@ -2038,7 +2417,14 @@ tool_call_format = "hermes_json"
                 "tool complete",
             ]),
         );
-        let tool_output = tool_chat.service.run_user_turn("read config").unwrap();
+        let presentation = Arc::new(RecordingTurnPresentationSink::default());
+        tool_chat
+            .service
+            .set_presentation_sink(presentation.clone());
+        let tool_output = tool_chat
+            .service
+            .run_user_turn("read config; PRIVATE_PROMPT_SENTINEL")
+            .unwrap();
         assert!(matches!(
             tool_output.status,
             ChatTurnStatus::Answered { ref answer } if answer == "tool complete"
@@ -2048,6 +2434,32 @@ tool_call_format = "hermes_json"
             SafeRuntimeEvent::ToolCallFinished { .. }
                 | SafeRuntimeEvent::CapabilityCallAdmitted { .. }
         )));
+        let presentation_events = presentation.events.lock().unwrap().clone();
+        assert!(presentation_events.iter().any(|event| matches!(
+            event,
+            crate::TurnPresentationEvent::PolicyCheck {
+                capability_id,
+                outcome: crate::PolicyPresentationOutcome::Allowed,
+                ..
+            } if capability_id.as_str() == agl_tools::FS_READ_TOOL_ID
+        )));
+        assert!(presentation_events.iter().any(|event| matches!(
+            event,
+            crate::TurnPresentationEvent::ToolActionFinished {
+                capability_id,
+                detail: Some(crate::CapabilityPresentationDetail::FilesystemRead {
+                    path,
+                    bytes,
+                }),
+                ..
+            } if capability_id.as_str() == agl_tools::FS_READ_TOOL_ID
+                && path == "inference.toml"
+                && *bytes > 0
+        )));
+        let safe_presentation = format!("{presentation_events:?}");
+        assert!(!safe_presentation.contains("PRIVATE_PROMPT_SENTINEL"));
+        assert!(!safe_presentation.contains("missing-model.gguf"));
+        assert!(!safe_presentation.contains(&tool_chat.root.to_string_lossy().to_string()));
 
         let mut stop_chat = test_chat_service_with_client(
             "stepping-stop",

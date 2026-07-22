@@ -8,21 +8,31 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use self::composer::{Composer, ComposerMode, MAX_COMPOSER_BYTES};
+use self::reducer::{UiEffect, UiEvent, update};
+use self::render_model::{ComposerRenderModel, PickerRenderModel, view};
+use self::terminal_filter::TerminalOutputFilter;
+use self::terminal_input::{RawTerminalInputGate, TerminalInputAction};
+#[cfg(target_os = "linux")]
+use self::terminal_view::RawTtyInput;
 use agl_client::{
     AgentLibreClient, ClientError, ExecutionAttachment, ExecutionAttachmentEvent,
     PresentationSubscription, PresentationSubscriptionEvent, RunSubscriptionEvent,
 };
-use agl_ids::{ExecutionId, MessageId, RunId, SessionId, TerminalSessionId};
+use agl_ids::{
+    ExecutionId, MessageId, RequestId, RunId, SessionId, TerminalSessionId, WriterLeaseId,
+};
 use agl_protocol::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationActionResult,
     ClientEffectKind, CommandAvailability, CommandCatalogRequest, CommandDescriptor,
     CommandSuggestion, CommandSuggestionsRequest, ExecutionProfile, ExecutionStatusRequest,
-    ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest, HumanTerminalEnsureRequest,
-    HumanTerminalEnsuredEvent, KillMode, ProcessBytes, ProtocolRunState, ProtocolToolMode,
-    RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest, SessionLaunchOptions,
-    SessionPresentationItem, SessionPresentationRequest, SessionPresentationSnapshot,
-    SessionPresentationSubscribeRequest, SessionSelector, StructuredEnvironmentOverlay,
-    TerminalOwnerView, TerminalPromptState, TerminalSessionView, TerminalSize,
+    ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest,
+    HumanTerminalCommandSubmitRequest, HumanTerminalEnsureRequest, HumanTerminalEnsuredEvent,
+    KillMode, ProcessBytes, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
+    RunSubscribeRequest, SessionLaunchOptions, SessionPresentationItem, SessionPresentationRequest,
+    SessionPresentationSnapshot, SessionPresentationSubscribeRequest, SessionSelector,
+    StructuredEnvironmentOverlay, TerminalOwnerView, TerminalPromptState, TerminalSessionView,
+    TerminalSize,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context as _, Result, bail};
@@ -36,7 +46,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use fs2::FileExt as _;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -44,22 +54,21 @@ use ratatui::{TerminalOptions, Viewport};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
-use unicode_segmentation::UnicodeSegmentation as _;
-
-use self::terminal_filter::TerminalOutputFilter;
-use self::terminal_input::{RawTerminalInputGate, TerminalInputAction};
-#[cfg(target_os = "linux")]
-use self::terminal_view::RawTtyInput;
 
 use crate::args::InteractiveOptions;
+use crate::{
+    InferenceAuthorityDecision, InferenceAuthoritySurface, classify_daemon_connection,
+    inference_authority_decision,
+};
 
+mod composer;
+mod reducer;
+mod render_model;
 pub(crate) mod terminal_filter;
 mod terminal_input;
 mod terminal_view;
 
 const UI_EVENT_CAPACITY: usize = 256;
-const MAX_COMPOSER_BYTES: usize = 64 * 1024;
-const MAX_COMPOSER_LINES: usize = 2_000;
 const MAX_HISTORY_ENTRIES: usize = 1_000;
 const MAX_HISTORY_BYTES: usize = 1024 * 1024;
 const MAX_LIVE_ASSISTANT_DELTAS: usize = 8;
@@ -68,6 +77,8 @@ const MAX_PICKER_ENTRIES: usize = 256;
 const MAX_PICKER_PAGES: usize = 8;
 const CHAT_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const CHAT_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SHELL_STARTUP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const SHELL_STARTUP_OBSERVE_INTERVAL: Duration = Duration::from_millis(25);
 
 struct ChatInput {
     receiver: mpsc::UnboundedReceiver<io::Result<Event>>,
@@ -125,233 +136,35 @@ impl Drop for ChatInput {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ComposerMode {
-    Prompt,
-    Command,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ComposerSubmission {
     Prompt(String),
+    Shell(String),
     SwitchTerminal,
     Command(String),
     Picker(PickerSubmit),
 }
 
-#[derive(Debug)]
-struct Composer {
-    mode: ComposerMode,
-    buffer: String,
-    cursor: usize,
-    selected_command: usize,
-    history_position: Option<usize>,
-    history_draft: String,
-    terminal_switch_eligible: bool,
-}
-
-impl Default for Composer {
-    fn default() -> Self {
-        Self {
-            mode: ComposerMode::Prompt,
-            buffer: String::new(),
-            cursor: 0,
-            selected_command: 0,
-            history_position: None,
-            history_draft: String::new(),
-            terminal_switch_eligible: false,
-        }
-    }
-}
-
 impl Composer {
-    fn label(&self) -> &'static str {
-        match self.mode {
-            ComposerMode::Prompt => "Prompt >",
-            ComposerMode::Command => "Command /",
-        }
-    }
-
-    fn insert_char(&mut self, character: char) {
-        self.history_position = None;
-        self.history_draft.clear();
-        if self.buffer.len().saturating_add(character.len_utf8()) > MAX_COMPOSER_BYTES
-            || (character == '\n'
-                && self.buffer.bytes().filter(|byte| *byte == b'\n').count() + 1
-                    >= MAX_COMPOSER_LINES)
-        {
-            return;
-        }
-        let terminal_switch_eligible = self.mode == ComposerMode::Prompt
-            && self.buffer.is_empty()
-            && self.cursor == 0
-            && character == '!';
-        if self.mode == ComposerMode::Prompt && self.buffer.is_empty() {
-            if character == '/' {
-                self.mode = ComposerMode::Command;
-                self.terminal_switch_eligible = false;
-                return;
-            }
-        } else if self.buffer.is_empty()
-            && let (ComposerMode::Command, '/') = (self.mode, character)
-        {
-            self.mode = ComposerMode::Prompt;
-            self.buffer.push('/');
-            self.cursor = 1;
-            return;
-        }
-        self.buffer.insert(self.cursor, character);
-        self.cursor += character.len_utf8();
-        self.terminal_switch_eligible = terminal_switch_eligible;
-        self.selected_command = 0;
-    }
-
-    #[cfg(test)]
-    fn insert_text(&mut self, text: &str) {
-        for character in text.chars() {
-            self.insert_char(character);
-        }
-    }
-
-    fn insert_paste(&mut self, text: &str) {
-        self.history_position = None;
-        self.history_draft.clear();
-        self.terminal_switch_eligible = false;
-        let available = MAX_COMPOSER_BYTES.saturating_sub(self.buffer.len());
-        let mut accepted = String::new();
-        let mut line_count = self.buffer.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        for character in text.chars() {
-            if accepted.len().saturating_add(character.len_utf8()) > available {
-                break;
-            }
-            if character == '\n' {
-                if line_count >= MAX_COMPOSER_LINES {
-                    break;
-                }
-                line_count += 1;
-            }
-            accepted.push(character);
-        }
-        self.buffer.insert_str(self.cursor, &accepted);
-        self.cursor += accepted.len();
-        self.selected_command = 0;
-    }
-
-    fn move_left(&mut self) {
-        self.cursor = self.buffer[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(index, _)| index);
-    }
-
-    fn move_right(&mut self) {
-        let suffix = &self.buffer[self.cursor..];
-        self.cursor += suffix.graphemes(true).next().map_or(0, str::len);
-    }
-
-    fn backspace(&mut self) {
-        self.history_position = None;
-        self.history_draft.clear();
-        self.terminal_switch_eligible = false;
-        if self.cursor == 0 {
-            if self.buffer.is_empty() && self.mode != ComposerMode::Prompt {
-                self.reset();
-            }
-            return;
-        }
-        let previous = self.buffer[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(index, _)| index);
-        self.buffer.replace_range(previous..self.cursor, "");
-        self.cursor = previous;
-        self.selected_command = 0;
-    }
-
-    fn delete(&mut self) {
-        self.history_position = None;
-        self.history_draft.clear();
-        self.terminal_switch_eligible = false;
-        if self.cursor == self.buffer.len() {
-            return;
-        }
-        let length = self.buffer[self.cursor..]
-            .graphemes(true)
-            .next()
-            .map_or(0, str::len);
-        self.buffer
-            .replace_range(self.cursor..self.cursor + length, "");
-    }
-
     fn submit(&mut self) -> Option<ComposerSubmission> {
-        let text = self.buffer.trim_end_matches(['\r', '\n']).to_owned();
-        if text.trim().is_empty() {
+        if self.buffer.trim().is_empty() {
+            if self.mode == ComposerMode::Shell {
+                self.reset();
+                return Some(ComposerSubmission::SwitchTerminal);
+            }
             return None;
         }
+        if self.mode == ComposerMode::Shell {
+            return Some(ComposerSubmission::Shell(self.buffer.clone()));
+        }
+        let text = self.buffer.trim_end_matches(['\r', '\n']).to_owned();
         let submission = match self.mode {
-            ComposerMode::Prompt if text == "!" && self.terminal_switch_eligible => {
-                ComposerSubmission::SwitchTerminal
-            }
             ComposerMode::Prompt => ComposerSubmission::Prompt(text),
             ComposerMode::Command => ComposerSubmission::Command(text),
+            ComposerMode::Shell => unreachable!("Shell submission returns without clearing"),
         };
         self.reset();
         Some(submission)
-    }
-
-    fn reset(&mut self) {
-        self.mode = ComposerMode::Prompt;
-        self.buffer.clear();
-        self.cursor = 0;
-        self.selected_command = 0;
-        self.history_position = None;
-        self.history_draft.clear();
-        self.terminal_switch_eligible = false;
-    }
-
-    fn history_previous(&mut self, entries: &[String]) {
-        if entries.is_empty() {
-            return;
-        }
-        let position = match self.history_position {
-            None => {
-                self.history_draft = self.buffer.clone();
-                entries.len() - 1
-            }
-            Some(position) => position.saturating_sub(1),
-        };
-        self.history_position = Some(position);
-        self.terminal_switch_eligible = false;
-        self.buffer = entries[position].clone();
-        self.cursor = self.buffer.len();
-    }
-
-    fn history_next(&mut self, entries: &[String]) {
-        let Some(position) = self.history_position else {
-            return;
-        };
-        if position + 1 < entries.len() {
-            self.history_position = Some(position + 1);
-            self.buffer = entries[position + 1].clone();
-        } else {
-            self.history_position = None;
-            self.buffer = std::mem::take(&mut self.history_draft);
-        }
-        self.terminal_switch_eligible = false;
-        self.cursor = self.buffer.len();
-    }
-}
-
-#[derive(Clone, Copy)]
-enum HistoryMode {
-    Prompt,
-}
-
-impl HistoryMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-        }
     }
 }
 
@@ -370,7 +183,7 @@ struct InputHistory {
 }
 
 impl InputHistory {
-    fn load(state_dir: &Path, workspace: &str, enabled: bool) -> (Self, Vec<String>) {
+    fn load(state_dir: &Path, workspace_history_scope: &str, enabled: bool) -> (Self, Vec<String>) {
         if !enabled {
             return (
                 Self {
@@ -380,7 +193,7 @@ impl InputHistory {
                 Vec::new(),
             );
         }
-        let digest = Sha256::digest(workspace.as_bytes())
+        let digest = Sha256::digest(workspace_history_scope.as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
@@ -396,11 +209,7 @@ impl InputHistory {
                 warnings,
             );
         }
-        let prompt = read_history_file(
-            &root.join("prompt.jsonl"),
-            HistoryMode::Prompt,
-            &mut warnings,
-        );
+        let prompt = read_history_file(&root.join("prompt.jsonl"), &mut warnings);
         (
             Self {
                 root: Some(root),
@@ -413,17 +222,15 @@ impl InputHistory {
     fn entries(&self, mode: ComposerMode) -> &[String] {
         match mode {
             ComposerMode::Prompt => &self.prompt,
-            ComposerMode::Command => &[],
+            ComposerMode::Shell | ComposerMode::Command => &[],
         }
     }
 
-    fn record(&mut self, mode: HistoryMode, input: &str) -> Result<()> {
+    fn record_prompt(&mut self, input: &str) -> Result<()> {
         let Some(root) = &self.root else {
             return Ok(());
         };
-        let entries = match mode {
-            HistoryMode::Prompt => &mut self.prompt,
-        };
+        let entries = &mut self.prompt;
         if entries.last().is_some_and(|last| last == input) {
             return Ok(());
         }
@@ -431,8 +238,8 @@ impl InputHistory {
         if entries.len() > MAX_HISTORY_ENTRIES {
             entries.drain(..entries.len() - MAX_HISTORY_ENTRIES);
         }
-        let path = root.join(format!("{}.jsonl", mode.as_str()));
-        let lock_path = root.join(format!("{}.lock", mode.as_str()));
+        let path = root.join("prompt.jsonl");
+        let lock_path = root.join("prompt.lock");
         let lock = open_private_file(&lock_path, false)?;
         lock.lock_exclusive()
             .context("failed to lock input history")?;
@@ -442,7 +249,7 @@ impl InputHistory {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis(),
-            mode: mode.as_str().to_owned(),
+            mode: "prompt".to_owned(),
             input: input.to_owned(),
         };
         let line = serde_json::to_vec(&record).context("failed to encode input history")?;
@@ -453,7 +260,7 @@ impl InputHistory {
         let metadata = file.metadata()?;
         drop(file);
         if metadata.len() as usize > MAX_HISTORY_BYTES {
-            compact_history(&path, entries, mode)?;
+            compact_history(&path, entries)?;
         }
         fs2::FileExt::unlock(&lock).context("failed to unlock input history")?;
         Ok(())
@@ -490,7 +297,7 @@ fn open_private_file(path: &Path, append: bool) -> Result<std::fs::File> {
     Ok(file)
 }
 
-fn read_history_file(path: &Path, mode: HistoryMode, warnings: &mut Vec<String>) -> Vec<String> {
+fn read_history_file(path: &Path, warnings: &mut Vec<String>) -> Vec<String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -542,7 +349,7 @@ fn read_history_file(path: &Path, mode: HistoryMode, warnings: &mut Vec<String>)
             continue;
         };
         if record.schema == "agentlibre.cli.input_history.v1"
-            && record.mode == mode.as_str()
+            && record.mode == "prompt"
             && record.input.len() <= MAX_COMPOSER_BYTES
             && entries.last() != Some(&record.input)
         {
@@ -555,7 +362,7 @@ fn read_history_file(path: &Path, mode: HistoryMode, warnings: &mut Vec<String>)
     entries
 }
 
-fn compact_history(path: &Path, entries: &[String], mode: HistoryMode) -> Result<()> {
+fn compact_history(path: &Path, entries: &[String]) -> Result<()> {
     let temporary = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
     let mut file = open_private_file(&temporary, false)?;
     file.set_len(0)?;
@@ -563,7 +370,7 @@ fn compact_history(path: &Path, entries: &[String], mode: HistoryMode) -> Result
         let record = HistoryRecord {
             schema: "agentlibre.cli.input_history.v1".to_owned(),
             timestamp_unix_ms: 0,
-            mode: mode.as_str().to_owned(),
+            mode: "prompt".to_owned(),
             input: input.clone(),
         };
         serde_json::to_writer(&mut file, &record)?;
@@ -748,7 +555,7 @@ impl PickerState {
     }
 }
 
-struct UiState {
+struct InteractiveState {
     snapshot: SessionPresentationSnapshot,
     catalog: Vec<CommandDescriptor>,
     composer: Composer,
@@ -756,6 +563,7 @@ struct UiState {
     terminal_cursors: BTreeMap<ExecutionId, u64>,
     seen_terminals: BTreeSet<TerminalSessionId>,
     assistant_deltas: BTreeMap<MessageId, AssistantDeltaState>,
+    continuation_submission_ids: BTreeMap<MessageId, String>,
     picker: Option<PickerState>,
     notices: Vec<String>,
     active_run: Option<agl_ids::RunId>,
@@ -763,6 +571,56 @@ struct UiState {
     workspace_change_armed: Option<String>,
     shell_profile_id: Option<String>,
     history: InputHistory,
+    activity_expanded: bool,
+    pending_shell_submission: Option<PendingShellSubmission>,
+    no_color: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingShellSubmission {
+    command: String,
+    client_submission_id: String,
+    terminal_ensure_submission_id: String,
+    in_flight: bool,
+    outcome_uncertain: bool,
+}
+
+#[derive(Clone)]
+struct ShellSubmissionTask {
+    session_id: SessionId,
+    command: String,
+    client_submission_id: String,
+    terminal_ensure_submission_id: String,
+    execution_context_revision: u64,
+    shell_profile_id: Option<String>,
+    terminal_size: TerminalSize,
+    agl_env: StructuredEnvironmentOverlay,
+    selected_terminal: Option<TerminalSessionView>,
+    reusable_writer_lease_id: Option<WriterLeaseId>,
+    attach_after_sequence: u64,
+}
+
+struct ShellSubmissionAttachment {
+    terminal: TerminalSessionView,
+    attachment: ExecutionAttachment,
+    after_sequence: u64,
+}
+
+struct ShellSubmissionFailure {
+    message: String,
+    outcome_uncertain: bool,
+}
+
+struct ShellSubmissionCompletion {
+    session_id: SessionId,
+    command: String,
+    client_submission_id: String,
+    terminal: Option<TerminalSessionView>,
+    attachment: Option<ShellSubmissionAttachment>,
+    outcome: std::result::Result<
+        agl_protocol::HumanTerminalCommandAcceptedEvent,
+        ShellSubmissionFailure,
+    >,
 }
 
 struct AssistantDeltaState {
@@ -780,7 +638,20 @@ enum AssistantDeltaApply {
     BoundExceeded,
 }
 
-impl UiState {
+impl InteractiveState {
+    fn latest_available_incomplete(&self) -> Option<MessageId> {
+        self.snapshot.items.iter().rev().find_map(|item| {
+            let SessionPresentationItem::IncompleteAssistant { item } = item else {
+                return None;
+            };
+            matches!(
+                item.continue_action,
+                agl_protocol::ContinueActionView::Available
+            )
+            .then(|| item.message_id.clone())
+        })
+    }
+
     fn matching_commands(&self) -> Vec<&CommandDescriptor> {
         let query = self
             .composer
@@ -812,6 +683,8 @@ impl UiState {
     }
 }
 
+type UiState = InteractiveState;
+
 enum UiAsyncEvent {
     RunAccepted {
         session_id: SessionId,
@@ -822,6 +695,7 @@ enum UiAsyncEvent {
         session_id: SessionId,
         snapshot: Box<SessionPresentationSnapshot>,
     },
+    ShellSubmission(Box<ShellSubmissionCompletion>),
     Notice(String),
 }
 
@@ -849,9 +723,18 @@ async fn run_interactive_async(
         .socket_path
         .clone()
         .unwrap_or_else(|| agl_daemon::default_socket_path(&runtime.paths));
-    let client = AgentLibreClient::connect(&socket_path)
-        .await
-        .map_err(|error| interactive_connect_error(&socket_path, error))?;
+    let connection = AgentLibreClient::connect(&socket_path).await;
+    let authority = inference_authority_decision(
+        InferenceAuthoritySurface::Interactive,
+        classify_daemon_connection(&connection),
+    );
+    let client = match (authority, connection) {
+        (InferenceAuthorityDecision::Daemon, Ok(client)) => client,
+        (InferenceAuthorityDecision::Reject, Err(error)) => {
+            return Err(interactive_connect_error(&socket_path, error));
+        }
+        _ => unreachable!("daemon connection classification and authority decision diverged"),
+    };
     let mut session_id = resolve_session(&client, &options).await?;
     let mut presentation = client
         .subscribe_presentation(SessionPresentationSubscribeRequest {
@@ -874,12 +757,11 @@ async fn run_interactive_async(
         .descriptors;
     let (history, history_warnings) = InputHistory::load(
         &runtime.paths.state_dir,
-        &presentation.snapshot.header.workspace_root,
+        &presentation.snapshot.header.workspace_history_scope,
         options.input_history,
     );
-    let mut notices = vec![
-        "Type exact ! then Enter for Terminal, / for commands, Ctrl+D to disconnect".to_owned(),
-    ];
+    let mut notices =
+        vec!["Type ! for Shell commands, / for product commands, Ctrl+D to disconnect".to_owned()];
     notices.extend(history_warnings);
     let seen_terminals = presentation
         .snapshot
@@ -899,6 +781,7 @@ async fn run_interactive_async(
         terminal_cursors: BTreeMap::new(),
         seen_terminals,
         assistant_deltas: BTreeMap::new(),
+        continuation_submission_ids: BTreeMap::new(),
         picker: None,
         notices,
         active_run: None,
@@ -907,6 +790,9 @@ async fn run_interactive_async(
         shell_profile_id: managed_shell_profile_id(&runtime.execution.shell.program)
             .map(str::to_owned),
         history,
+        activity_expanded: false,
+        pending_shell_submission: None,
+        no_color: std::env::var_os("NO_COLOR").is_some(),
     };
     let (async_sender, mut async_events) = mpsc::channel(UI_EVENT_CAPACITY);
     let mut pending_terminal: Option<Box<TerminalViewRequest>> = None;
@@ -997,21 +883,61 @@ async fn run_interactive_async(
                                         Err(error) => state.notice(format!("cancel failed: {error}")),
                                     }
                                 }
+                                UiControl::ContinueIncomplete(message_id) => {
+                                    if let Err(error) = continue_incomplete_output(
+                                        &client,
+                                        &session_id,
+                                        &mut state,
+                                        message_id,
+                                    )
+                                    .await
+                                    {
+                                        state.notice(format!(
+                                            "Continue failed; retry keeps the same request identity: {error:#}"
+                                        ));
+                                    }
+                                }
                                 UiControl::Notice(message) => state.notice(message),
                                 UiControl::Submission(submission) => {
+                                    if let ComposerSubmission::Shell(command) = &submission {
+                                        match begin_shell_submission(
+                                            &session_id,
+                                            &mut state,
+                                            command.clone(),
+                                            &terminal_stream,
+                                        ) {
+                                            Ok(Some(task)) => {
+                                                spawn_shell_submission(
+                                                    client.clone(),
+                                                    task,
+                                                    async_sender.clone(),
+                                                );
+                                            }
+                                            Ok(None) => state.notice(
+                                                "Shell command admission is already pending",
+                                            ),
+                                            Err(error) => state.notice(format!(
+                                                "Shell submission was not started: {error:#}"
+                                            )),
+                                        }
+                                        continue;
+                                    }
                                     match handle_submission(
                                         &client,
                                         &session_id,
                                         &mut state,
                                         submission,
                                         &async_sender,
-                                    ).await? {
-                                        SubmissionOutcome::Continue => {}
-                                        SubmissionOutcome::Disconnect => break Ok(()),
-                                        SubmissionOutcome::EnterTerminal(request) => {
+                                    ).await {
+                                        Err(error) => state.notice(format!(
+                                            "submission failed; session remains active: {error:#}"
+                                        )),
+                                        Ok(SubmissionOutcome::Continue) => {}
+                                        Ok(SubmissionOutcome::Disconnect) => break Ok(()),
+                                        Ok(SubmissionOutcome::EnterTerminal(request)) => {
                                             pending_terminal = Some(request);
                                         }
-                                        SubmissionOutcome::SwitchSession { session_id: next_session_id } => {
+                                        Ok(SubmissionOutcome::SwitchSession { session_id: next_session_id }) => {
                                             match prepare_session_switch(
                                                 &client,
                                                 next_session_id,
@@ -1060,7 +986,7 @@ async fn run_interactive_async(
                                 picker.push_query(character);
                             }
                         } else {
-                            state.composer.insert_paste(&text);
+                            let _ = update(&mut state, UiEvent::Paste(text));
                         }
                     }
                     Event::Resize(_, _) => {
@@ -1083,7 +1009,12 @@ async fn run_interactive_async(
                         reload_command_catalog(&client, &mut state).await?;
                     }
                     Ok(Some(PresentationSubscriptionEvent::Event(event))) => {
-                        if apply_presentation_event(&mut state, event.event.clone()) {
+                        let outcome = apply_presentation_event(&mut state, event.event.clone());
+                        if outcome.resync_required {
+                            state.notice("presentation delta gap; installing a fresh snapshot");
+                            resubscribe_presentation(&client, &mut state, &mut presentation)
+                                .await?;
+                        } else if outcome.command_catalog_changed {
                             reload_command_catalog(&client, &mut state).await?;
                         }
                     }
@@ -1106,7 +1037,12 @@ async fn run_interactive_async(
             }
             event = async_events.recv() => {
                 if let Some(event) = event {
-                    apply_async_event(&mut state, &session_id, event);
+                    apply_async_event(
+                        &mut state,
+                        &session_id,
+                        event,
+                        Some(&mut terminal_stream),
+                    );
                 }
             }
             event = next_hidden_terminal_event(&mut terminal_stream) => {
@@ -1252,7 +1188,7 @@ fn missing_daemon_message(socket_path: &Path) -> String {
 
 fn interactive_connect_error(socket_path: &Path, error: ClientError) -> anyhow::Error {
     let context = match &error {
-        ClientError::Io(_) | ClientError::ConnectionClosed => missing_daemon_message(socket_path),
+        ClientError::DaemonUnavailable(_) => missing_daemon_message(socket_path),
         _ => format!(
             "daemon at {} is running an incompatible protocol; restart it with the current `agl serve` binary",
             socket_path.display()
@@ -1264,6 +1200,7 @@ fn interactive_connect_error(socket_path: &Path, error: ClientError) -> anyhow::
 enum UiControl {
     Disconnect,
     CancelRun(agl_ids::RunId),
+    ContinueIncomplete(MessageId),
     Submission(ComposerSubmission),
     Notice(String),
 }
@@ -1340,8 +1277,11 @@ async fn prepare_session_switch(
         .context("failed to load the selected session command catalog")?
         .descriptors;
     let snapshot = presentation.snapshot.clone();
-    let (history, warnings) =
-        InputHistory::load(state_dir, &snapshot.header.workspace_root, input_history);
+    let (history, warnings) = InputHistory::load(
+        state_dir,
+        &snapshot.header.workspace_history_scope,
+        input_history,
+    );
     Ok(PreparedSessionSwitch {
         session_id,
         presentation,
@@ -1375,6 +1315,7 @@ fn install_session_switch(
         .map(|terminal| terminal.terminal_id.clone())
         .collect();
     state.assistant_deltas.clear();
+    state.continuation_submission_ids.clear();
     state.picker = None;
     state.active_run = state
         .snapshot
@@ -1383,6 +1324,7 @@ fn install_session_switch(
         .map(|active| active.run_id.clone());
     state.exit_armed = false;
     state.workspace_change_armed = None;
+    state.pending_shell_submission = None;
     for warning in warnings {
         state.notice(warning);
     }
@@ -1401,6 +1343,15 @@ fn install_presentation_snapshot(state: &mut UiState, snapshot: SessionPresentat
         .map(|active| active.run_id.clone());
     state.snapshot = snapshot;
     state.assistant_deltas.clear();
+    state.continuation_submission_ids.retain(|message_id, _| {
+        state.snapshot.items.iter().any(|item| {
+            matches!(
+                item,
+                SessionPresentationItem::IncompleteAssistant { item }
+                    if &item.message_id == message_id
+            )
+        })
+    });
 }
 
 type TerminalPhysicalIo<'a> = (
@@ -1411,75 +1362,50 @@ type TerminalPhysicalIo<'a> = (
     &'a mut tokio::signal::unix::Signal,
 );
 
+fn shell_submission_allows_edit(state: &mut UiState) -> bool {
+    let Some(pending) = state.pending_shell_submission.as_ref() else {
+        return true;
+    };
+    if pending.in_flight || pending.outcome_uncertain {
+        state.notice(if pending.outcome_uncertain {
+            "Shell command outcome is uncertain; retry with Enter keeps the same request identity"
+        } else {
+            "Shell command admission is pending; the exact command remains read-only"
+        });
+        return false;
+    }
+    state.pending_shell_submission = None;
+    true
+}
+
 fn handle_key(state: &mut UiState, key: KeyEvent) -> Option<UiControl> {
     if state.picker.is_some() {
         return handle_picker_key(state, key);
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('d') => return Some(UiControl::Disconnect),
-            KeyCode::Char('c') => {
-                if state.composer.buffer.is_empty() {
-                    if let Some(run_id) = state.active_run.take() {
-                        return Some(UiControl::CancelRun(run_id));
-                    } else {
-                        state.notice("Ctrl+D disconnects this UI; /exit finishes the session");
-                    }
-                } else {
-                    state.composer.reset();
-                }
-                return None;
+    update(state, UiEvent::Key(key))
+        .into_iter()
+        .next()
+        .map(|effect| match effect {
+            UiEffect::Disconnect => UiControl::Disconnect,
+            UiEffect::CancelRun(run_id) => UiControl::CancelRun(run_id),
+            UiEffect::ContinueIncomplete(message_id) => UiControl::ContinueIncomplete(message_id),
+            UiEffect::SubmitPrompt(prompt) => {
+                UiControl::Submission(ComposerSubmission::Prompt(prompt))
             }
-            _ => {}
-        }
-    }
-    match key.code {
-        KeyCode::Char(character)
-            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-        {
-            state.composer.insert_char(character)
-        }
-        KeyCode::Left => state.composer.move_left(),
-        KeyCode::Right => state.composer.move_right(),
-        KeyCode::Home => state.composer.cursor = 0,
-        KeyCode::End => state.composer.cursor = state.composer.buffer.len(),
-        KeyCode::Backspace => state.composer.backspace(),
-        KeyCode::Delete => state.composer.delete(),
-        KeyCode::Esc => state.composer.reset(),
-        KeyCode::Up if state.composer.mode == ComposerMode::Command => {
-            state.composer.selected_command = state.composer.selected_command.saturating_sub(1)
-        }
-        KeyCode::Down if state.composer.mode == ComposerMode::Command => {
-            state.composer.selected_command = state.composer.selected_command.saturating_add(1)
-        }
-        KeyCode::Up => {
-            let entries = state.history.entries(state.composer.mode).to_vec();
-            state.composer.history_previous(&entries);
-        }
-        KeyCode::Down => {
-            let entries = state.history.entries(state.composer.mode).to_vec();
-            state.composer.history_next(&entries);
-        }
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            state.composer.insert_char('\n')
-        }
-        KeyCode::Enter => {
-            if state.composer.mode == ComposerMode::Command
-                && !state.matching_commands().is_empty()
-                && !state.composer.buffer.contains(char::is_whitespace)
-            {
-                let selected = state
-                    .composer
-                    .selected_command
-                    .min(state.matching_commands().len() - 1);
-                state.composer.buffer = state.matching_commands()[selected].name.clone();
-                state.composer.cursor = state.composer.buffer.len();
+            UiEffect::SubmitHumanTerminalCommand(command) => {
+                UiControl::Submission(ComposerSubmission::Shell(command))
             }
-            return state.composer.submit().map(UiControl::Submission);
-        }
-        _ => {}
-    }
-    None
+            UiEffect::AttachHumanTerminal => {
+                UiControl::Submission(ComposerSubmission::SwitchTerminal)
+            }
+            UiEffect::InvokeCommand(command) => {
+                UiControl::Submission(ComposerSubmission::Command(command))
+            }
+            UiEffect::SubmitPicker(picker) => {
+                UiControl::Submission(ComposerSubmission::Picker(picker))
+            }
+            UiEffect::Notice(message) => UiControl::Notice(message),
+        })
 }
 
 fn handle_picker_key(state: &mut UiState, key: KeyEvent) -> Option<UiControl> {
@@ -1768,6 +1694,359 @@ fn picker_default_submit(picker: &PickerState) -> std::result::Result<PickerSubm
     })
 }
 
+fn canonical_human_command(command: &str) -> Result<String> {
+    let command = command.replace("\r\n", "\n");
+    if command.contains('\r') {
+        bail!("Shell command contains a lone carriage return");
+    }
+    Ok(command)
+}
+
+fn selected_live_human_terminal(state: &UiState) -> Option<TerminalSessionView> {
+    state
+        .last_terminal
+        .as_ref()
+        .and_then(|terminal_id| {
+            state.snapshot.terminals.iter().find(|terminal| {
+                &terminal.terminal_id == terminal_id
+                    && terminal.process_state.is_live()
+                    && matches!(terminal.owner, TerminalOwnerView::Human { .. })
+            })
+        })
+        .or_else(|| {
+            state.snapshot.terminals.iter().find(|terminal| {
+                terminal.process_state.is_live()
+                    && matches!(terminal.owner, TerminalOwnerView::Human { .. })
+            })
+        })
+        .cloned()
+}
+
+fn begin_shell_submission(
+    session_id: &SessionId,
+    state: &mut UiState,
+    command: String,
+    terminal_stream: &Option<TerminalStreamState>,
+) -> Result<Option<ShellSubmissionTask>> {
+    let command = canonical_human_command(&command)?;
+    if let Some(pending) = state.pending_shell_submission.as_mut() {
+        if pending.command != command {
+            bail!("Shell command changed while its submission identity was retained");
+        }
+        if pending.in_flight {
+            return Ok(None);
+        }
+        pending.in_flight = true;
+    } else {
+        state.pending_shell_submission = Some(PendingShellSubmission {
+            command: command.clone(),
+            client_submission_id: format!("cli-shell-{}", RequestId::generate()),
+            terminal_ensure_submission_id: format!("cli-terminal-{}", RequestId::generate()),
+            in_flight: true,
+            outcome_uncertain: false,
+        });
+    }
+
+    let pending = state
+        .pending_shell_submission
+        .as_ref()
+        .expect("pending Shell submission was installed")
+        .clone();
+    let selected_terminal = selected_live_human_terminal(state);
+    if selected_terminal.is_none() && state.shell_profile_id.is_none() {
+        if let Some(pending) = state.pending_shell_submission.as_mut() {
+            pending.in_flight = false;
+        }
+        bail!("configured shell is not an admitted managed Bash/Zsh profile");
+    }
+    let reusable_writer_lease_id = selected_terminal.as_ref().and_then(|terminal| {
+        terminal_stream.as_ref().and_then(|stream| {
+            (stream.terminal.terminal_id == terminal.terminal_id && stream.writable)
+                .then(|| stream.attachment.writer_lease_id().cloned())
+                .flatten()
+        })
+    });
+    let attach_after_sequence = selected_terminal.as_ref().map_or(0, |terminal| {
+        terminal_stream
+            .as_ref()
+            .filter(|stream| stream.terminal.terminal_id == terminal.terminal_id)
+            .map(|stream| stream.drained_cursor)
+            .or_else(|| state.terminal_cursors.get(&terminal.execution_id).copied())
+            .unwrap_or_default()
+    });
+    Ok(Some(ShellSubmissionTask {
+        session_id: session_id.clone(),
+        command,
+        client_submission_id: pending.client_submission_id,
+        terminal_ensure_submission_id: pending.terminal_ensure_submission_id,
+        execution_context_revision: state.snapshot.header.execution_context_revision,
+        shell_profile_id: state.shell_profile_id.clone(),
+        terminal_size: current_terminal_size(),
+        agl_env: current_terminal_environment(),
+        selected_terminal,
+        reusable_writer_lease_id,
+        attach_after_sequence,
+    }))
+}
+
+fn shell_submission_failure(
+    task: &ShellSubmissionTask,
+    terminal: Option<TerminalSessionView>,
+    attachment: Option<ShellSubmissionAttachment>,
+    message: impl Into<String>,
+    outcome_uncertain: bool,
+) -> ShellSubmissionCompletion {
+    ShellSubmissionCompletion {
+        session_id: task.session_id.clone(),
+        command: task.command.clone(),
+        client_submission_id: task.client_submission_id.clone(),
+        terminal,
+        attachment,
+        outcome: Err(ShellSubmissionFailure {
+            message: message.into(),
+            outcome_uncertain,
+        }),
+    }
+}
+
+fn shell_submit_outcome_uncertain(error: &ClientError) -> bool {
+    !matches!(
+        error,
+        ClientError::Protocol { .. }
+            | ClientError::InputBackpressure
+            | ClientError::FrameTooLarge
+            | ClientError::InvalidRequest(_)
+    )
+}
+
+async fn execute_shell_submission(
+    client: AgentLibreClient,
+    task: ShellSubmissionTask,
+) -> ShellSubmissionCompletion {
+    let (mut terminal, newly_created) = if let Some(terminal) = task.selected_terminal.clone() {
+        (terminal, false)
+    } else {
+        let Some(shell_profile_id) = task.shell_profile_id.clone() else {
+            return shell_submission_failure(
+                &task,
+                None,
+                None,
+                "configured shell is not an admitted managed Bash/Zsh profile",
+                false,
+            );
+        };
+        match client
+            .ensure_human_terminal(HumanTerminalEnsureRequest {
+                session_id: task.session_id.clone(),
+                client_submission_id: task.terminal_ensure_submission_id.clone(),
+                execution_context_revision: task.execution_context_revision,
+                profile: ExecutionProfile::Workspace,
+                shell_profile_id,
+                terminal_size: task.terminal_size,
+                agl_env: task.agl_env.clone(),
+                host_startup: HostStartupPolicy::ManagedOnly,
+            })
+            .await
+        {
+            Ok(ensured) => (
+                ensured.terminal,
+                ensured.disposition == agl_protocol::TerminalEnsureDisposition::Created,
+            ),
+            Err(error) => {
+                return shell_submission_failure(
+                    &task,
+                    None,
+                    None,
+                    format!("failed to ensure the Human workspace terminal: {error}"),
+                    false,
+                );
+            }
+        }
+    };
+
+    if terminal.prompt_state == TerminalPromptState::Starting && newly_created {
+        let deadline = tokio::time::Instant::now() + SHELL_STARTUP_HANDSHAKE_TIMEOUT;
+        while terminal.prompt_state == TerminalPromptState::Starting {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return shell_submission_failure(
+                    &task,
+                    Some(terminal),
+                    None,
+                    "new Human terminal did not reach a trusted prompt before the startup deadline",
+                    false,
+                );
+            }
+            tokio::time::sleep(SHELL_STARTUP_OBSERVE_INTERVAL.min(deadline - now)).await;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let snapshot = match tokio::time::timeout(
+                remaining,
+                client.session_presentation(SessionPresentationRequest {
+                    session_id: task.session_id.clone(),
+                    page_cursor: None,
+                }),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => snapshot,
+                Ok(Err(error)) => {
+                    return shell_submission_failure(
+                        &task,
+                        Some(terminal),
+                        None,
+                        format!("failed to observe the new Human terminal startup: {error}"),
+                        false,
+                    );
+                }
+                Err(_) => {
+                    return shell_submission_failure(
+                        &task,
+                        Some(terminal),
+                        None,
+                        "new Human terminal startup observation timed out",
+                        false,
+                    );
+                }
+            };
+            let Some(latest) = snapshot
+                .terminals
+                .into_iter()
+                .find(|candidate| candidate.terminal_id == terminal.terminal_id)
+            else {
+                return shell_submission_failure(
+                    &task,
+                    Some(terminal),
+                    None,
+                    "new Human terminal disappeared during startup",
+                    false,
+                );
+            };
+            terminal = latest;
+        }
+    }
+
+    if terminal.prompt_state != TerminalPromptState::Ready {
+        return shell_submission_failure(
+            &task,
+            Some(terminal),
+            None,
+            "Shell is busy or owns a foreground program; no bytes were sent. Attach Terminal to interact with it.",
+            false,
+        );
+    }
+    let Some(prompt_generation) = terminal.prompt_generation else {
+        return shell_submission_failure(
+            &task,
+            Some(terminal),
+            None,
+            "Shell prompt readiness is stale; no bytes were sent",
+            false,
+        );
+    };
+
+    let (writer_lease_id, attachment) =
+        if let Some(writer_lease_id) = task.reusable_writer_lease_id.clone() {
+            (writer_lease_id, None)
+        } else {
+            let after_sequence = match client
+                .execution_status(ExecutionStatusRequest {
+                    execution_id: terminal.execution_id.clone(),
+                    include_private_command: false,
+                })
+                .await
+            {
+                Ok(status) => status.status.last_sequence,
+                Err(_) => task.attach_after_sequence,
+            };
+            match client
+                .attach_execution(terminal.execution_id.clone(), after_sequence, true)
+                .await
+            {
+                Ok(attachment) if attachment.writer_lease_id().is_some() => {
+                    let writer_lease_id = attachment
+                        .writer_lease_id()
+                        .expect("guarded writable attachment has a writer lease")
+                        .clone();
+                    (
+                        writer_lease_id,
+                        Some(ShellSubmissionAttachment {
+                            terminal: terminal.clone(),
+                            attachment,
+                            after_sequence,
+                        }),
+                    )
+                }
+                Ok(attachment) => {
+                    return shell_submission_failure(
+                        &task,
+                        Some(terminal.clone()),
+                        Some(ShellSubmissionAttachment {
+                            terminal,
+                            attachment,
+                            after_sequence,
+                        }),
+                        "Human terminal writer lease is not writable; no bytes were sent",
+                        false,
+                    );
+                }
+                Err(error) => {
+                    return shell_submission_failure(
+                        &task,
+                        Some(terminal),
+                        None,
+                        format!("failed to attach the Human terminal writer: {error}"),
+                        false,
+                    );
+                }
+            }
+        };
+
+    let outcome = client
+        .submit_human_terminal_command(HumanTerminalCommandSubmitRequest {
+            session_id: task.session_id.clone(),
+            terminal_id: terminal.terminal_id.clone(),
+            client_submission_id: task.client_submission_id.clone(),
+            writer_lease_id,
+            expected_command_sequence: terminal.command_sequence,
+            expected_prompt_generation: prompt_generation,
+            command: task.command.clone(),
+        })
+        .await;
+    match outcome {
+        Ok(accepted) => ShellSubmissionCompletion {
+            session_id: task.session_id,
+            command: task.command,
+            client_submission_id: task.client_submission_id,
+            terminal: Some(terminal),
+            attachment,
+            outcome: Ok(accepted),
+        },
+        Err(error) => {
+            let outcome_uncertain = shell_submit_outcome_uncertain(&error);
+            shell_submission_failure(
+                &task,
+                Some(terminal),
+                attachment,
+                format!("Shell command was not admitted: {error}"),
+                outcome_uncertain,
+            )
+        }
+    }
+}
+
+fn spawn_shell_submission(
+    client: AgentLibreClient,
+    task: ShellSubmissionTask,
+    sender: mpsc::Sender<UiAsyncEvent>,
+) {
+    tokio::spawn(async move {
+        let completion = execute_shell_submission(client, task).await;
+        let _ = sender
+            .send(UiAsyncEvent::ShellSubmission(Box::new(completion)))
+            .await;
+    });
+}
+
 async fn handle_submission(
     client: &AgentLibreClient,
     session_id: &SessionId,
@@ -1775,19 +2054,17 @@ async fn handle_submission(
     submission: ComposerSubmission,
     sender: &mpsc::Sender<UiAsyncEvent>,
 ) -> Result<SubmissionOutcome> {
-    match &submission {
-        ComposerSubmission::Prompt(input) => {
-            if let Err(error) = state.history.record(HistoryMode::Prompt, input) {
-                state.notice(format!("prompt history write failed: {error:#}"));
-            }
-        }
-        ComposerSubmission::SwitchTerminal => {}
-        ComposerSubmission::Command(_) => {}
-        ComposerSubmission::Picker(_) => {}
+    if let ComposerSubmission::Prompt(input) = &submission
+        && let Err(error) = state.history.record_prompt(input)
+    {
+        state.notice(format!("prompt history write failed: {error:#}"));
     }
     match submission {
         ComposerSubmission::Prompt(content) => {
             spawn_prompt(client.clone(), session_id.clone(), content, sender.clone());
+        }
+        ComposerSubmission::Shell(_) => {
+            unreachable!("Shell submissions use the nonblocking admission path")
         }
         ComposerSubmission::SwitchTerminal => {
             if let Some(terminal) = state.last_terminal.as_ref().and_then(|terminal_id| {
@@ -2267,7 +2544,11 @@ async fn run_terminal_passthrough_inner(
                     }
                     Ok(Some(PresentationSubscriptionEvent::Event(event))) => {
                         let prompt_state = terminal_prompt_from_event(&event.event, &terminal_id);
-                        if apply_presentation_event(state, event.event.clone()) {
+                        let outcome = apply_presentation_event(state, event.event.clone());
+                        if outcome.resync_required {
+                            state.notice("presentation delta gap; installing a fresh snapshot");
+                            resubscribe_presentation(client, state, presentation).await?;
+                        } else if outcome.command_catalog_changed {
                             reload_command_catalog(client, state).await?;
                         }
                         if let Some(prompt_state) = prompt_state {
@@ -2317,7 +2598,7 @@ async fn run_terminal_passthrough_inner(
                     let before = state.snapshot.terminals.iter()
                         .find(|terminal| terminal.terminal_id == terminal_id)
                         .map(|terminal| terminal.prompt_state);
-                    apply_async_event(state, &session_id, event);
+                    apply_async_event(state, &session_id, event, None);
                     let after = state.snapshot.terminals.iter()
                         .find(|terminal| terminal.terminal_id == terminal_id)
                         .map(|terminal| terminal.prompt_state);
@@ -2620,10 +2901,6 @@ fn terminal_prompt_from_event(
             terminal_id: changed,
             ..
         } if changed == terminal_id => Some(TerminalPromptState::CommandRunning),
-        agl_protocol::SessionPresentationEventPayload::TerminalCommandFinished {
-            terminal_id: changed,
-            ..
-        } if changed == terminal_id => Some(TerminalPromptState::Ready),
         _ => None,
     }
 }
@@ -2651,8 +2928,7 @@ async fn resubscribe_presentation(
         })
         .await
         .context("failed to resubscribe to the session presentation")?;
-    state.snapshot = replacement.snapshot.clone();
-    state.assistant_deltas.clear();
+    install_presentation_snapshot(state, replacement.snapshot.clone());
     *presentation = replacement;
     reload_command_catalog(client, state).await?;
     Ok(())
@@ -2789,6 +3065,71 @@ fn spawn_prompt(
             }
         }
     });
+}
+
+async fn continue_incomplete_output(
+    client: &AgentLibreClient,
+    session_id: &SessionId,
+    state: &mut UiState,
+    message_id: MessageId,
+) -> Result<()> {
+    let available = state.snapshot.items.iter().any(|item| {
+        matches!(
+            item,
+            SessionPresentationItem::IncompleteAssistant { item }
+                if item.message_id == message_id
+                    && matches!(
+                        item.continue_action,
+                        agl_protocol::ContinueActionView::Available
+                    )
+        )
+    });
+    if !available {
+        state.notice("incomplete output is no longer available to continue");
+        return Ok(());
+    }
+    let client_submission_id = state
+        .continuation_submission_ids
+        .entry(message_id.clone())
+        .or_insert_with(|| format!("cli-incomplete-continue-{}", agl_ids::RequestId::generate()))
+        .clone();
+    let response = client
+        .application_action(ApplicationActionRequest {
+            session_id: Some(session_id.clone()),
+            client_submission_id,
+            action: ApplicationAction::IncompleteTurnContinue {
+                message_id: message_id.clone(),
+                expected_execution_context_revision: state
+                    .snapshot
+                    .header
+                    .execution_context_revision,
+            },
+        })
+        .await
+        .context("daemon rejected incomplete-output continuation")?;
+    let ApplicationActionResult::IncompleteTurnContinued { admission } = response.result else {
+        bail!("daemon returned an invalid incomplete-output continuation result")
+    };
+    if admission.session_id != *session_id {
+        bail!("daemon returned a continuation for a different session");
+    }
+    for item in &mut state.snapshot.items {
+        if let SessionPresentationItem::IncompleteAssistant { item } = item
+            && item.message_id == message_id
+        {
+            item.continue_action = agl_protocol::ContinueActionView::Claimed {
+                continuation_run_id: admission.run_id.clone(),
+            };
+        }
+    }
+    if admission.state == agl_protocol::PromptAdmissionState::Running {
+        state.active_run = Some(admission.run_id.clone());
+    }
+    state.notice(format!(
+        "Continue admitted as {} ({:?}, position {})",
+        admission.run_id, admission.state, admission.ordinal
+    ));
+    Ok(())
 }
 
 async fn picker_suggestions(
@@ -3026,7 +3367,7 @@ async fn open_process_picker(
                 execution_id: terminal.execution_id.clone(),
                 state: terminal.process_state,
                 profile: terminal.profile,
-                cwd: terminal.cwd.clone(),
+                cwd: display_path(&terminal.cwd),
                 terminal: Some(terminal),
             });
     }
@@ -3097,7 +3438,7 @@ fn process_picker_item(
             execution_id,
             state: execution.state,
             profile: execution.profile,
-            cwd: execution.cwd,
+            cwd: display_path(&execution.cwd),
             terminal,
         },
     )
@@ -3113,7 +3454,7 @@ fn process_picker_entry(process: ProcessPickerItem) -> PickerEntry {
                 terminal_owner_label(&terminal.owner),
                 terminal.process_state,
                 terminal.writer,
-                terminal.cwd,
+                display_path(&terminal.cwd),
             ),
         )
     } else {
@@ -3262,7 +3603,10 @@ async fn handle_command(
         }
         "new" => ApplicationAction::SessionNew {
             launch: SessionLaunchOptions {
-                workspace_root: Some(state.snapshot.header.workspace_root.clone()),
+                // A presentation-only display path must never round-trip into
+                // authority. The daemon inherits the source session's
+                // canonical workspace for this session-scoped action.
+                workspace_root: None,
                 function_ref: None,
                 model_id: state.snapshot.header.model_id.clone(),
                 operation_mode: Some(state.snapshot.header.operation_mode),
@@ -3346,7 +3690,7 @@ async fn handle_command(
             }
             ApplicationActionResult::Status { header } => {
                 let notice = match name.as_str() {
-                    "workspace" => Some(header.workspace_root.clone()),
+                    "workspace" => Some(display_path(&header.workspace_root)),
                     _ => None,
                 };
                 state.snapshot.header = header;
@@ -3486,37 +3830,153 @@ fn parse_protocol_tool_mode(value: &str) -> Result<ProtocolToolMode> {
     }
 }
 
-fn apply_async_event(state: &mut UiState, session_id: &SessionId, event: UiAsyncEvent) {
+fn install_shell_submission_attachment(
+    state: &mut UiState,
+    terminal_stream: &mut Option<TerminalStreamState>,
+    returned: ShellSubmissionAttachment,
+) {
+    finish_terminal_stream(terminal_stream, state);
+    state
+        .seen_terminals
+        .insert(returned.terminal.terminal_id.clone());
+    state.terminal_cursors.insert(
+        returned.terminal.execution_id.clone(),
+        returned.after_sequence,
+    );
+    let writable = returned.attachment.started.writable;
+    *terminal_stream = Some(TerminalStreamState {
+        terminal: returned.terminal,
+        attachment: returned.attachment,
+        filter: TerminalOutputFilter::new(false),
+        visible_cursor: returned.after_sequence,
+        drained_cursor: returned.after_sequence,
+        hidden_normal_output: false,
+        replay_through_cursor: None,
+        physical_alternate_screen: Arc::new(AtomicBool::new(false)),
+        panic_restore_bytes: Arc::new(Mutex::new(Vec::new())),
+        writable,
+    });
+}
+
+fn apply_shell_submission_completion(
+    state: &mut UiState,
+    session_id: &SessionId,
+    terminal_stream: Option<&mut Option<TerminalStreamState>>,
+    mut completion: ShellSubmissionCompletion,
+) {
+    let matches_pending = &completion.session_id == session_id
+        && state
+            .pending_shell_submission
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.command == completion.command
+                    && pending.client_submission_id == completion.client_submission_id
+            });
+    if !matches_pending {
+        return;
+    }
+    if let Some(terminal) = completion.terminal.as_ref() {
+        state.last_terminal = Some(terminal.terminal_id.clone());
+    }
+    if let (Some(terminal_stream), Some(attachment)) =
+        (terminal_stream, completion.attachment.take())
+    {
+        install_shell_submission_attachment(state, terminal_stream, attachment);
+    }
+
+    match completion.outcome {
+        Ok(accepted) => {
+            let accepted_matches = completion
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.terminal_id == accepted.terminal_id);
+            if !accepted_matches {
+                let _ = update(
+                    state,
+                    UiEvent::ShellRejected {
+                        message: "Shell acceptance named a different terminal; exact command and request identity retained".to_owned(),
+                        client_submission_id: completion.client_submission_id,
+                        outcome_uncertain: true,
+                    },
+                );
+                return;
+            }
+            state.last_terminal = Some(accepted.terminal_id);
+            let _ = update(
+                state,
+                UiEvent::ShellAccepted {
+                    command_sequence: accepted.command_sequence,
+                },
+            );
+        }
+        Err(failure) => {
+            let _ = update(
+                state,
+                UiEvent::ShellRejected {
+                    message: failure.message,
+                    client_submission_id: completion.client_submission_id,
+                    outcome_uncertain: failure.outcome_uncertain,
+                },
+            );
+        }
+    }
+}
+
+fn apply_async_event(
+    state: &mut UiState,
+    session_id: &SessionId,
+    event: UiAsyncEvent,
+    terminal_stream: Option<&mut Option<TerminalStreamState>>,
+) {
     match event {
+        UiAsyncEvent::ShellSubmission(completion) => {
+            apply_shell_submission_completion(state, session_id, terminal_stream, *completion)
+        }
         UiAsyncEvent::RunAccepted {
             session_id: event_session_id,
-            run_id,
-            state: ProtocolRunState::Running,
-        } if &event_session_id == session_id => state.active_run = Some(run_id),
-        UiAsyncEvent::Snapshot {
-            session_id: event_session_id,
-            snapshot,
-        } if &event_session_id == session_id => {
-            state.active_run = snapshot
-                .active_run
-                .as_ref()
-                .map(|active| active.run_id.clone());
-            state.snapshot = *snapshot;
-            state.assistant_deltas.clear();
+            ..
         }
-        UiAsyncEvent::RunAccepted { .. } | UiAsyncEvent::Snapshot { .. } => {}
-        UiAsyncEvent::Notice(message) => state.notice(message),
+        | UiAsyncEvent::Snapshot {
+            session_id: event_session_id,
+            ..
+        } if &event_session_id != session_id => {}
+        UiAsyncEvent::RunAccepted {
+            run_id,
+            state: run_state,
+            ..
+        } => {
+            let _ = update(
+                state,
+                UiEvent::RunAccepted {
+                    run_id,
+                    state: run_state,
+                },
+            );
+        }
+        UiAsyncEvent::Snapshot { snapshot, .. } => {
+            let _ = update(state, UiEvent::Snapshot(snapshot));
+        }
+        UiAsyncEvent::Notice(message) => {
+            let _ = update(state, UiEvent::Notice(message));
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PresentationApplyOutcome {
+    command_catalog_changed: bool,
+    resync_required: bool,
 }
 
 fn apply_presentation_event(
     state: &mut UiState,
     event: agl_protocol::SessionPresentationEventPayload,
-) -> bool {
+) -> PresentationApplyOutcome {
     let command_catalog_changed = matches!(
         &event,
         agl_protocol::SessionPresentationEventPayload::CommandAvailabilityChanged
     );
+    let mut resync_required = false;
     match event {
         agl_protocol::SessionPresentationEventPayload::HeaderChanged { header } => {
             state.snapshot.header = header
@@ -3560,9 +4020,10 @@ fn apply_presentation_event(
                 sequence,
                 &text,
             ) {
-                AssistantDeltaApply::SequenceGap => state.notice(
-                    "assistant presentation delta gap; waiting for the durable final message",
-                ),
+                AssistantDeltaApply::SequenceGap => {
+                    resync_required = true;
+                    state.notice("assistant presentation delta gap; fresh snapshot required");
+                }
                 AssistantDeltaApply::BoundExceeded => state.notice(
                     "assistant presentation delta exceeded its private display bound; waiting for the durable final message",
                 ),
@@ -3654,12 +4115,202 @@ fn apply_presentation_event(
                 state.snapshot.executions.push(execution);
             }
         }
+        agl_protocol::SessionPresentationEventPayload::HumanCommandCardUpsert { card } => {
+            if let Some(existing) = state.snapshot.human_commands.iter_mut().find(|existing| {
+                existing.terminal_id == card.terminal_id
+                    && existing.command_sequence == card.command_sequence
+            }) {
+                *existing = card;
+            } else {
+                state.snapshot.human_commands.push(card);
+            }
+            while state.snapshot.human_commands.len() > agl_protocol::MAX_HUMAN_COMMAND_CARDS
+                || state
+                    .snapshot
+                    .human_commands
+                    .iter()
+                    .map(|card| card.output.as_str().len())
+                    .sum::<usize>()
+                    > agl_protocol::MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES
+            {
+                let position = state
+                    .snapshot
+                    .human_commands
+                    .iter()
+                    .position(|card| {
+                        matches!(
+                            card.state,
+                            agl_protocol::HumanCommandCardState::Exited
+                                | agl_protocol::HumanCommandCardState::OutcomeUnknown
+                        )
+                    })
+                    .unwrap_or(0);
+                state.snapshot.human_commands.remove(position);
+            }
+        }
+        agl_protocol::SessionPresentationEventPayload::HumanCommandCardRemoved {
+            terminal_id,
+            command_sequence,
+        } => state.snapshot.human_commands.retain(|card| {
+            card.terminal_id != terminal_id || card.command_sequence != command_sequence
+        }),
+        agl_protocol::SessionPresentationEventPayload::ActivityGraphDelta { batch } => {
+            match apply_activity_graph_delta(state.snapshot.activity.as_ref(), &batch) {
+                Ok(graph) => state.snapshot.activity = Some(graph),
+                Err(error) => {
+                    state.snapshot.activity = None;
+                    resync_required = true;
+                    state.notice(format!("activity graph needs a fresh snapshot: {error}"));
+                }
+            }
+        }
         agl_protocol::SessionPresentationEventPayload::Notice { message, .. } => {
             state.notice(message)
         }
         _ => {}
     }
-    command_catalog_changed
+    PresentationApplyOutcome {
+        command_catalog_changed,
+        resync_required,
+    }
+}
+
+fn apply_activity_graph_delta(
+    current: Option<&agl_protocol::ActivityGraphView>,
+    batch: &agl_protocol::ActivityGraphDeltaBatch,
+) -> std::result::Result<agl_protocol::ActivityGraphView, String> {
+    let current_revision = current.map_or(0, |graph| graph.graph_revision);
+    if batch.graph_revision == current_revision {
+        let duplicate = current.is_some_and(|graph| {
+            batch.upserts.iter().all(|node| graph.nodes.contains(node))
+                && batch.removals.iter().all(|removal| {
+                    graph
+                        .nodes
+                        .iter()
+                        .all(|node| node.node_id != removal.subtree_root_id)
+                })
+                && batch
+                    .current_path
+                    .as_ref()
+                    .is_none_or(|path| path == &graph.current_path)
+                && (!batch.truncated || graph.truncated)
+        });
+        return duplicate
+            .then(|| {
+                current
+                    .expect("duplicate requires an installed graph")
+                    .clone()
+            })
+            .ok_or_else(|| "same revision carried a different batch".to_owned());
+    }
+    if batch.graph_revision != current_revision.saturating_add(1) {
+        return Err(format!(
+            "expected revision {}, received {}",
+            current_revision.saturating_add(1),
+            batch.graph_revision
+        ));
+    }
+    let mut graph = current.cloned().unwrap_or(agl_protocol::ActivityGraphView {
+        graph_revision: 0,
+        roots: Vec::new(),
+        nodes: Vec::new(),
+        current_path: Vec::new(),
+        truncated: false,
+    });
+    for node in &batch.upserts {
+        if let Some(existing) = graph
+            .nodes
+            .iter_mut()
+            .find(|existing| existing.node_id == node.node_id)
+        {
+            *existing = node.clone();
+        } else {
+            graph.nodes.push(node.clone());
+        }
+    }
+    if let Some(path) = &batch.current_path {
+        graph.current_path = path.clone();
+    }
+    for removal in &batch.removals {
+        let mut removed = BTreeSet::from([removal.subtree_root_id.clone()]);
+        if graph
+            .nodes
+            .iter()
+            .all(|node| node.node_id != removal.subtree_root_id)
+        {
+            return Err(format!(
+                "removal references unknown node {}",
+                removal.subtree_root_id
+            ));
+        }
+        loop {
+            let before = removed.len();
+            for node in &graph.nodes {
+                if node
+                    .parent_node_id
+                    .as_ref()
+                    .is_some_and(|parent| removed.contains(parent))
+                {
+                    removed.insert(node.node_id.clone());
+                }
+            }
+            if removed.len() == before {
+                break;
+            }
+        }
+        if graph.current_path.iter().any(|id| removed.contains(id)) {
+            return Err("removal intersects the current activity path".to_owned());
+        }
+        graph.nodes.retain(|node| !removed.contains(&node.node_id));
+    }
+    let mut by_id = graph
+        .nodes
+        .drain(..)
+        .map(|node| (node.node_id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = BTreeMap::<Option<String>, Vec<String>>::new();
+    for node in by_id.values() {
+        children
+            .entry(node.parent_node_id.clone())
+            .or_default()
+            .push(node.node_id.clone());
+    }
+    for ids in children.values_mut() {
+        ids.sort_by(|left, right| {
+            let left = by_id.get(left).expect("activity child exists");
+            let right = by_id.get(right).expect("activity child exists");
+            (left.order_index, left.node_id.as_str())
+                .cmp(&(right.order_index, right.node_id.as_str()))
+        });
+    }
+    fn visit(
+        parent: Option<String>,
+        children: &BTreeMap<Option<String>, Vec<String>>,
+        by_id: &mut BTreeMap<String, agl_protocol::ActivityNodeView>,
+        output: &mut Vec<agl_protocol::ActivityNodeView>,
+    ) {
+        for id in children.get(&parent).into_iter().flatten() {
+            let Some(node) = by_id.remove(id) else {
+                continue;
+            };
+            output.push(node);
+            visit(Some(id.clone()), children, by_id, output);
+        }
+    }
+    visit(None, &children, &mut by_id, &mut graph.nodes);
+    if !by_id.is_empty() {
+        return Err("graph contains a cycle or disconnected nodes".to_owned());
+    }
+    graph.roots = graph
+        .nodes
+        .iter()
+        .filter(|node| node.parent_node_id.is_none())
+        .map(|node| node.node_id.clone())
+        .collect();
+    graph.graph_revision = batch.graph_revision;
+    graph.truncated |= batch.truncated;
+    graph.validate().map_err(|error| error.to_string())?;
+    Ok(graph)
 }
 
 fn sync_ui_prompt_counts(snapshot: &mut SessionPresentationSnapshot) {
@@ -3715,6 +4366,7 @@ fn presentation_item_key(item: &SessionPresentationItem) -> String {
     match item {
         SessionPresentationItem::UserMessage { message_id, .. }
         | SessionPresentationItem::AssistantMessage { message_id, .. } => message_id.to_string(),
+        SessionPresentationItem::IncompleteAssistant { item } => item.message_id.to_string(),
         SessionPresentationItem::AgentAction {
             run_id, step_id, ..
         } => format!("{run_id}:{step_id}"),
@@ -3724,143 +4376,42 @@ fn presentation_item_key(item: &SessionPresentationItem) -> String {
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, state: &UiState) {
-    let palette_height = if state.composer.mode == ComposerMode::Command {
-        state.matching_commands().len().min(6) as u16 + 2
-    } else {
-        0
-    };
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(4),
-            Constraint::Length(palette_height),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-    draw_header(frame, layout[0], state);
-    draw_transcript(frame, layout[1], state);
-    if palette_height > 0 {
-        draw_palette(frame, layout[2], state);
-    }
-    draw_composer(frame, layout[3], state);
+    let model = view(state, frame.area());
+    frame.render_widget(Paragraph::new(model.header_text.clone()), model.header);
     frame.render_widget(
-        Paragraph::new(
-            "Enter submit  exact ! opens Terminal  Shift+Enter newline  Ctrl+D disconnect",
-        )
-        .style(Style::default().fg(Color::DarkGray)),
-        layout[4],
+        Paragraph::new(model.transcript_text.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((model.transcript_scroll, 0)),
+        model.transcript,
     );
-    if let Some(picker) = &state.picker {
+    if let (Some(area), Some(text)) = (model.palette, model.palette_text.as_ref()) {
+        frame.render_widget(
+            Paragraph::new(text.clone())
+                .block(Block::default().borders(Borders::ALL).title(" Commands ")),
+            area,
+        );
+    }
+    draw_composer(frame, model.composer, &model.composer_content);
+    frame.render_widget(
+        Paragraph::new(model.footer_text).style(model.footer_style),
+        model.footer,
+    );
+    if let Some(picker) = &model.picker {
         draw_picker(frame, picker);
     }
 }
 
-fn draw_picker(frame: &mut ratatui::Frame<'_>, picker: &PickerState) {
-    let frame_area = frame.area();
-    let width = frame_area.width.saturating_sub(2).clamp(1, 110);
-    let height = frame_area.height.saturating_sub(2).clamp(1, 24);
-    let area = Rect::new(
-        frame_area.x + frame_area.width.saturating_sub(width) / 2,
-        frame_area.y + frame_area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    );
-    let title = if matches!(&picker.kind, PickerKind::Skills) {
-        format!(
-            " {} · {} selected ",
-            picker.title,
-            picker.selected_values.len()
-        )
-    } else {
-        format!(" {} ", picker.title)
-    };
-    let query_prefix = "filter: ";
-    let mut lines = vec![Line::from(vec![
-        Span::styled(query_prefix, Style::default().fg(Color::DarkGray)),
-        Span::raw(picker.query.clone()),
-    ])];
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    if let Some(confirmation) = &picker.confirmation {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            confirmation.prompt.clone(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-        lines.push(Line::styled(
-            "Enter confirm  Esc cancel",
-            Style::default().fg(Color::DarkGray),
-        ));
-    } else {
-        let filtered = picker.filtered_indices();
-        let visible_entries = inner_height.saturating_sub(2).max(1);
-        let selected = picker.selected.min(filtered.len().saturating_sub(1));
-        let first = selected
-            .saturating_add(1)
-            .saturating_sub(visible_entries)
-            .min(filtered.len().saturating_sub(visible_entries));
-        if filtered.is_empty() {
-            lines.push(Line::styled(
-                "no matching entries",
-                Style::default().fg(Color::DarkGray),
-            ));
-        } else {
-            for (rank, entry_index) in filtered
-                .iter()
-                .enumerate()
-                .skip(first)
-                .take(visible_entries)
-            {
-                let entry = &picker.entries[*entry_index];
-                let selection = match &entry.payload {
-                    PickerPayload::Skill(skill_id) => {
-                        if picker.selected_values.contains(skill_id) {
-                            "[x] "
-                        } else {
-                            "[ ] "
-                        }
-                    }
-                    _ => "",
-                };
-                let detail = entry
-                    .detail
-                    .as_deref()
-                    .map(|detail| format!(" · {detail}"))
-                    .unwrap_or_default();
-                let style = if rank == selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::styled(
-                    format!("{selection}{}{detail}", entry.label),
-                    style,
-                ));
-            }
-        }
-        lines.push(Line::styled(
-            picker_help(&picker.kind),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-
-    frame.render_widget(Clear, area);
+fn draw_picker(frame: &mut ratatui::Frame<'_>, picker: &PickerRenderModel) {
+    frame.render_widget(Clear, picker.area);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
-        area,
+        Paragraph::new(picker.text.clone()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(picker.title.clone()),
+        ),
+        picker.area,
     );
-    let max_cursor_x = area.right().saturating_sub(1).max(area.x);
-    let cursor_x = area
-        .x
-        .saturating_add(1)
-        .saturating_add(query_prefix.len() as u16)
-        .saturating_add(picker.query.graphemes(true).count() as u16)
-        .min(max_cursor_x);
-    frame.set_cursor_position((cursor_x, area.y.saturating_add(1)));
+    frame.set_cursor_position(picker.cursor);
 }
 
 fn picker_help(kind: &PickerKind) -> &'static str {
@@ -3875,64 +4426,190 @@ fn picker_help(kind: &PickerKind) -> &'static str {
     }
 }
 
-fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
+fn header_text(state: &UiState) -> Text<'static> {
     let header = &state.snapshot.header;
     let model = header.model_id.as_deref().unwrap_or("local");
-    let status = if state.active_run.is_some() {
-        "thinking"
-    } else {
-        "ready"
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("agentLIBRE", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(
-                    "  {status}  model:{model}  mode:{:?}",
-                    header.operation_mode
-                )),
-            ]),
-            Line::from(format!(
-                "{}  cwd:{}  session:{}",
-                workspace_label(&header.workspace_root),
-                header.cwd,
-                header.session_id
+    let status = state
+        .snapshot
+        .activity
+        .as_ref()
+        .and_then(|graph| {
+            graph.current_path.last().and_then(|id| {
+                graph
+                    .nodes
+                    .iter()
+                    .find(|node| &node.node_id == id)
+                    .map(|node| activity_phase_label(node.phase).to_owned())
+            })
+        })
+        .unwrap_or_else(|| {
+            if state.active_run.is_some() {
+                "working".to_owned()
+            } else {
+                "ready".to_owned()
+            }
+        });
+    Text::from(vec![
+        Line::from(vec![
+            Span::styled("agentLIBRE", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "  {status}  model:{model}  mode:{:?}",
+                header.operation_mode
             )),
         ]),
-        area,
-    );
+        Line::from(format!(
+            "{}  cwd:{}  session:{}",
+            workspace_label(&header.workspace_root),
+            display_path(&header.cwd),
+            header.session_id
+        )),
+    ])
 }
 
+#[cfg(test)]
 fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
+    draw_transcript_with_activity_mode(frame, area, state, state.no_color);
+}
+
+fn transcript_model(
+    state: &UiState,
+    width: u16,
+    height: u16,
+    no_color: bool,
+) -> (Text<'static>, u16) {
+    let presentation_style = |style| {
+        if no_color { Style::default() } else { style }
+    };
     let mut lines = Vec::new();
+    append_activity_lines(&mut lines, state, width, no_color);
     for item in &state.snapshot.items {
         match item {
             SessionPresentationItem::UserMessage { content, .. } => {
-                lines.push(Line::styled("you", Style::default().fg(Color::Cyan)));
+                lines.push(Line::styled(
+                    "you",
+                    presentation_style(Style::default().fg(Color::Cyan)),
+                ));
                 lines.extend(text_lines(content_text(content)));
             }
             SessionPresentationItem::AssistantMessage { content, .. } => {
                 lines.push(Line::styled(
                     "agentLIBRE",
-                    Style::default().fg(Color::Green),
+                    presentation_style(Style::default().fg(Color::Green)),
                 ));
                 lines.extend(text_lines(content_text(content)));
             }
+            SessionPresentationItem::IncompleteAssistant { item } => {
+                lines.push(Line::styled(
+                    "agentLIBRE · incomplete · output limit",
+                    presentation_style(
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ));
+                lines.extend(text_lines(content_text(&item.content)));
+                let reason = match item.reason {
+                    agl_protocol::IncompleteOutputReason::ModelLength => "model length limit",
+                    agl_protocol::IncompleteOutputReason::ContentByteLimit => "content byte limit",
+                };
+                let action = match &item.continue_action {
+                    agl_protocol::ContinueActionView::Available
+                        if state.latest_available_incomplete().as_ref()
+                            == Some(&item.message_id) =>
+                    {
+                        "Ctrl+Y Continue".to_owned()
+                    }
+                    agl_protocol::ContinueActionView::Available => {
+                        "Continue available · Ctrl+Y targets the newest incomplete output"
+                            .to_owned()
+                    }
+                    agl_protocol::ContinueActionView::Claimed {
+                        continuation_run_id,
+                    } => format!("Continue claimed · run {continuation_run_id}"),
+                    agl_protocol::ContinueActionView::Unavailable { reason } => match reason {
+                        agl_protocol::ContinueUnavailableReason::StaleContext => {
+                            "Continue unavailable · context changed".to_owned()
+                        }
+                        agl_protocol::ContinueUnavailableReason::PolicyDenied => {
+                            "Continue unavailable · policy denied".to_owned()
+                        }
+                        agl_protocol::ContinueUnavailableReason::SessionFinished => {
+                            "Continue unavailable · session finished".to_owned()
+                        }
+                    },
+                };
+                lines.push(Line::styled(
+                    format!("{reason} · {action}"),
+                    presentation_style(Style::default().fg(Color::Yellow)),
+                ));
+            }
             SessionPresentationItem::ContextBoundary { .. } => lines.push(Line::styled(
                 "──────── context cleared ────────",
-                Style::default().fg(Color::DarkGray),
+                presentation_style(Style::default().fg(Color::DarkGray)),
             )),
             SessionPresentationItem::Notice { message, .. } => lines.push(Line::styled(
                 message.clone(),
-                Style::default().fg(Color::Yellow),
+                presentation_style(Style::default().fg(Color::Yellow)),
             )),
             SessionPresentationItem::AgentAction { summary, state, .. } => {
                 lines.push(Line::styled(
                     format!("agent action · {summary} · {state:?}"),
-                    Style::default().fg(Color::Magenta),
+                    presentation_style(Style::default().fg(Color::Magenta)),
                 ))
             }
         }
+        lines.push(Line::raw(""));
+    }
+    for card in &state.snapshot.human_commands {
+        let (status, style) = match card.state {
+            agl_protocol::HumanCommandCardState::Starting => {
+                ("starting", Style::default().fg(Color::Yellow))
+            }
+            agl_protocol::HumanCommandCardState::Running => {
+                ("running", Style::default().fg(Color::Cyan))
+            }
+            agl_protocol::HumanCommandCardState::Exited if card.exit_status == Some(0) => {
+                ("exited", Style::default().fg(Color::Green))
+            }
+            agl_protocol::HumanCommandCardState::Exited => {
+                ("failed", Style::default().fg(Color::Red))
+            }
+            agl_protocol::HumanCommandCardState::OutcomeUnknown => {
+                ("outcome unknown", Style::default().fg(Color::Yellow))
+            }
+        };
+        lines.push(Line::styled(
+            format!("! #{} · {status}", card.command_sequence),
+            presentation_style(style.add_modifier(Modifier::BOLD)),
+        ));
+        lines.extend(text_lines(format!("$ {}", card.command.as_str())));
+        if !card.output.as_str().is_empty() {
+            lines.extend(text_lines(card.output.as_str().to_owned()));
+        }
+        let mut outcome = match card.state {
+            agl_protocol::HumanCommandCardState::Starting => "waiting for shell start".to_owned(),
+            agl_protocol::HumanCommandCardState::Running => "running".to_owned(),
+            agl_protocol::HumanCommandCardState::Exited => card
+                .exit_status
+                .map(|status| format!("exit {status}"))
+                .unwrap_or_else(|| "exit status unavailable".to_owned()),
+            agl_protocol::HumanCommandCardState::OutcomeUnknown => "outcome unknown".to_owned(),
+        };
+        outcome.push_str(&format!(" · cwd:{}", display_path(&card.cwd)));
+        if card.truncated {
+            outcome.push_str(" · output truncated");
+        }
+        if card.filtered_effects > 0 {
+            outcome.push_str(&format!(
+                " · {} terminal effect(s) filtered",
+                card.filtered_effects
+            ));
+        }
+        outcome.push_str(" · empty Shell Enter to Attach");
+        lines.push(Line::styled(
+            outcome,
+            presentation_style(Style::default().fg(Color::DarkGray)),
+        ));
         lines.push(Line::raw(""));
     }
     for terminal in &state.snapshot.terminals {
@@ -3941,23 +4618,23 @@ fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) 
             format!(
                 "! {} · {authority} · cwd:{} · {:?} · {:?}",
                 terminal_owner_label(&terminal.owner),
-                terminal.cwd,
+                display_path(&terminal.cwd),
                 terminal.prompt_state,
                 terminal.process_state,
             ),
-            if terminal.profile == ExecutionProfile::Host {
+            presentation_style(if terminal.profile == ExecutionProfile::Host {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Magenta)
-            },
+            }),
         ));
     }
     for delta in state.assistant_deltas.values().filter(|delta| delta.valid) {
         lines.push(Line::styled(
             "agentLIBRE · streaming",
-            Style::default().fg(Color::Green),
+            presentation_style(Style::default().fg(Color::Green)),
         ));
         lines.extend(text_lines(delta.text.clone()));
         lines.push(Line::raw(""));
@@ -3965,18 +4642,303 @@ fn draw_transcript(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) 
     for notice in &state.notices {
         lines.push(Line::styled(
             format!("· {notice}"),
-            Style::default().fg(Color::Yellow),
+            presentation_style(Style::default().fg(Color::Yellow)),
         ));
     }
-    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
     let scroll = paragraph
-        .line_count(area.width)
-        .saturating_sub(area.height as usize)
+        .line_count(width)
+        .saturating_sub(height as usize)
         .min(u16::MAX as usize) as u16;
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
+    (text, scroll)
 }
 
-fn draw_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
+#[cfg(test)]
+fn draw_transcript_with_activity_mode(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    no_color: bool,
+) {
+    let (text, scroll) = transcript_model(state, area.width, area.height, no_color);
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn append_activity_lines(
+    lines: &mut Vec<Line<'static>>,
+    state: &UiState,
+    width: u16,
+    no_color: bool,
+) {
+    let Some(graph) = &state.snapshot.activity else {
+        return;
+    };
+    let ascii = width < 50 || no_color;
+    let arrow = if ascii { " -> " } else { " → " };
+    let current = graph
+        .current_path
+        .iter()
+        .filter_map(|id| graph.nodes.iter().find(|node| &node.node_id == id))
+        .map(activity_node_label)
+        .collect::<Vec<_>>();
+    if !current.is_empty() {
+        lines.push(Line::styled(
+            format!("activity · {}", current.join(arrow)),
+            if no_color {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD)
+            },
+        ));
+    }
+    if state.activity_expanded {
+        for node in &graph.nodes {
+            let prefix = activity_tree_prefix(graph, node, ascii, 8);
+            let marker = match node.state {
+                agl_protocol::ActivityNodeState::Pending => "○",
+                agl_protocol::ActivityNodeState::Waiting => "○",
+                agl_protocol::ActivityNodeState::Running => "▶",
+                agl_protocol::ActivityNodeState::Succeeded => "✓",
+                agl_protocol::ActivityNodeState::Failed => "!",
+                agl_protocol::ActivityNodeState::Cancelled => "×",
+                agl_protocol::ActivityNodeState::Incomplete => "…",
+                agl_protocol::ActivityNodeState::Truncated => "…",
+            };
+            let marker = if ascii {
+                match node.state {
+                    agl_protocol::ActivityNodeState::Pending => "o",
+                    agl_protocol::ActivityNodeState::Waiting => "o",
+                    agl_protocol::ActivityNodeState::Running => ">",
+                    agl_protocol::ActivityNodeState::Succeeded => "+",
+                    agl_protocol::ActivityNodeState::Failed => "!",
+                    agl_protocol::ActivityNodeState::Cancelled => "x",
+                    agl_protocol::ActivityNodeState::Incomplete => "...",
+                    agl_protocol::ActivityNodeState::Truncated => "...",
+                }
+            } else {
+                marker
+            };
+            lines.push(Line::styled(
+                format!("{prefix}{marker} {}", activity_node_label(node)),
+                if no_color {
+                    Style::default()
+                } else if matches!(
+                    node.state,
+                    agl_protocol::ActivityNodeState::Failed
+                        | agl_protocol::ActivityNodeState::Incomplete
+                        | agl_protocol::ActivityNodeState::Truncated
+                ) {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
+        }
+        lines.push(Line::styled(
+            "Ctrl+G collapse activity",
+            if no_color {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    } else if !graph.nodes.is_empty() {
+        for node in graph.nodes.iter().filter(|node| {
+            matches!(
+                node.state,
+                agl_protocol::ActivityNodeState::Waiting
+                    | agl_protocol::ActivityNodeState::Failed
+                    | agl_protocol::ActivityNodeState::Incomplete
+                    | agl_protocol::ActivityNodeState::Truncated
+            ) && !graph.current_path.iter().any(|id| id == &node.node_id)
+        }) {
+            let marker = if ascii { "!" } else { "↳" };
+            lines.push(Line::styled(
+                format!("{marker} {}", activity_node_label(node)),
+                if no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(Color::Yellow)
+                },
+            ));
+        }
+        lines.push(Line::styled(
+            if graph.truncated {
+                "Ctrl+G expand activity graph · retained history truncated"
+            } else {
+                "Ctrl+G expand activity graph"
+            },
+            if no_color {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
+    }
+    lines.push(Line::raw(""));
+}
+
+fn activity_node_label(node: &agl_protocol::ActivityNodeView) -> String {
+    let mut label = format!("{} · {}", activity_phase_label(node.phase), node.summary);
+    use agl_protocol::{ActivityDetailView as Detail, CapabilityActivityDetail as Capability};
+    match &node.detail {
+        Detail::None => {}
+        Detail::Capability(Capability::FilesystemList {
+            path,
+            entries,
+            completeness,
+        }) => label.push_str(&format!(
+            " · {} · {entries} entries · {}",
+            display_path(path),
+            format!("{completeness:?}").to_ascii_lowercase()
+        )),
+        Detail::Capability(Capability::FilesystemRead { path, bytes }) => {
+            label.push_str(&format!(" · {} · {bytes} bytes", display_path(path)));
+        }
+        Detail::Capability(Capability::RepositorySearch {
+            scope,
+            matches,
+            complete,
+        }) => label.push_str(&format!(
+            " · {} · {matches} matches · {}",
+            display_path(scope),
+            if *complete { "complete" } else { "partial" }
+        )),
+        Detail::Capability(Capability::ProcessExecution {
+            profile,
+            exit_status,
+        }) => label.push_str(&format!(" · {profile:?} · exit {exit_status:?}")),
+        Detail::Capability(Capability::PolicyCheck {
+            capability_id,
+            outcome,
+        }) => label.push_str(&format!(
+            " · {capability_id} · {}",
+            format!("{outcome:?}").to_ascii_lowercase()
+        )),
+        Detail::Inference(detail) => {
+            label.push_str(&format!(
+                " · {}",
+                format!("{:?}", detail.stage).to_ascii_lowercase()
+            ));
+            if let Some(completed) = detail.completed {
+                let unit = match detail.unit {
+                    Some(agl_protocol::InferenceProgressUnit::Tokens) => "tokens",
+                    Some(agl_protocol::InferenceProgressUnit::Chunks) => "chunks",
+                    None => "units",
+                };
+                label.push_str(&format!(
+                    " · {completed}/{} {unit}",
+                    detail.total.unwrap_or(completed),
+                ));
+            }
+            if detail.cache != agl_protocol::ActivityCacheDisposition::NotApplicable {
+                label.push_str(&format!(
+                    " · {}",
+                    format!("{:?}", detail.cache).to_ascii_lowercase()
+                ));
+            }
+        }
+        Detail::Aggregate(detail) => label.push_str(&format!(
+            " · {} collapsed · {} failed · {} incomplete",
+            detail.collapsed_nodes, detail.failed, detail.incomplete
+        )),
+        Detail::UnknownCapability { capability_id } => {
+            label.push_str(&format!(" · {capability_id}"));
+        }
+    }
+    if node.elapsed_ms > 0 {
+        label.push_str(&format!(" · {:.1}s", node.elapsed_ms as f64 / 1000.0));
+    }
+    label
+}
+
+fn activity_tree_prefix(
+    graph: &agl_protocol::ActivityGraphView,
+    node: &agl_protocol::ActivityNodeView,
+    ascii: bool,
+    maximum_depth: usize,
+) -> String {
+    let mut ancestors = Vec::new();
+    let mut parent = node.parent_node_id.as_deref();
+    while let Some(parent_id) = parent {
+        let Some(parent_node) = graph
+            .nodes
+            .iter()
+            .find(|candidate| candidate.node_id == parent_id)
+        else {
+            break;
+        };
+        ancestors.push(parent_node);
+        parent = parent_node.parent_node_id.as_deref();
+    }
+    ancestors.reverse();
+
+    let omitted = ancestors.len().saturating_sub(maximum_depth);
+    let mut prefix = if omitted > 0 {
+        if ascii { ".. " } else { "… " }.to_owned()
+    } else {
+        String::new()
+    };
+    for ancestor in ancestors.into_iter().skip(omitted) {
+        let connector = if activity_node_is_last_sibling(graph, ancestor) {
+            "  "
+        } else if ascii {
+            "| "
+        } else {
+            "│ "
+        };
+        prefix.push_str(connector);
+    }
+    prefix.push_str(if activity_node_is_last_sibling(graph, node) {
+        if ascii { "`- " } else { "└─ " }
+    } else if ascii {
+        "+- "
+    } else {
+        "├─ "
+    });
+    prefix
+}
+
+fn activity_node_is_last_sibling(
+    graph: &agl_protocol::ActivityGraphView,
+    node: &agl_protocol::ActivityNodeView,
+) -> bool {
+    graph
+        .nodes
+        .iter()
+        .rev()
+        .find(|candidate| candidate.parent_node_id == node.parent_node_id)
+        .is_some_and(|candidate| candidate.node_id == node.node_id)
+}
+
+fn activity_phase_label(phase: agl_protocol::ActivityPhase) -> &'static str {
+    match phase {
+        agl_protocol::ActivityPhase::Queued => "queued",
+        agl_protocol::ActivityPhase::Policy => "policy",
+        agl_protocol::ActivityPhase::Model => "model",
+        agl_protocol::ActivityPhase::Tool => "tool",
+        agl_protocol::ActivityPhase::ChildRun => "child run",
+        agl_protocol::ActivityPhase::InferenceQueue => "inference queue",
+        agl_protocol::ActivityPhase::InferenceAdmission => "inference admission",
+        agl_protocol::ActivityPhase::ModelLoad => "model load",
+        agl_protocol::ActivityPhase::Context => "context",
+        agl_protocol::ActivityPhase::Prefill => "prefill",
+        agl_protocol::ActivityPhase::Generation => "generation",
+        agl_protocol::ActivityPhase::OutputParsing => "output parsing",
+        agl_protocol::ActivityPhase::Terminal => "terminal",
+        agl_protocol::ActivityPhase::Retention => "retention",
+    }
+}
+
+fn palette_text(state: &UiState) -> Text<'static> {
     let commands = state.matching_commands();
     let selected = state
         .composer
@@ -3992,9 +4954,17 @@ fn draw_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
                 CommandAvailability::Hidden => "hidden",
             };
             let style = if index == selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
+                if state.no_color {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                }
             } else if matches!(command.availability, CommandAvailability::Disabled { .. }) {
-                Style::default().fg(Color::DarkGray)
+                if state.no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                }
             } else {
                 Style::default()
             };
@@ -4007,27 +4977,22 @@ fn draw_palette(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
             )
         })
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Commands ")),
-        area,
-    );
+    Text::from(lines)
 }
 
-fn draw_composer(frame: &mut ratatui::Frame<'_>, area: Rect, state: &UiState) {
-    let mode_style = match state.composer.mode {
-        ComposerMode::Prompt => Style::default().fg(Color::Cyan),
-        ComposerMode::Command => Style::default().fg(Color::Blue),
-    };
-    let paragraph = Paragraph::new(state.composer.buffer.as_str()).block(
-        Block::default().borders(Borders::ALL).title(Span::styled(
-            format!(" {} ", state.composer.label()),
-            mode_style,
-        )),
+fn draw_composer(frame: &mut ratatui::Frame<'_>, area: Rect, model: &ComposerRenderModel) {
+    let paragraph = Paragraph::new(model.text.clone()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(model.title.clone(), model.title_style)),
     );
     frame.render_widget(paragraph, area);
-    let prefix = &state.composer.buffer[..state.composer.cursor];
-    let cursor_x = area.x + 1 + prefix.graphemes(true).count() as u16;
-    frame.set_cursor_position((cursor_x.min(area.right().saturating_sub(1)), area.y + 1));
+    let cursor_x = area.x.saturating_add(1).saturating_add(model.cursor.0);
+    let cursor_y = area.y.saturating_add(1).saturating_add(model.cursor.1);
+    frame.set_cursor_position((
+        cursor_x.min(area.right().saturating_sub(1)),
+        cursor_y.min(area.bottom().saturating_sub(1)),
+    ));
 }
 
 fn text_lines(text: String) -> Vec<Line<'static>> {
@@ -4043,11 +5008,25 @@ fn content_text(content: &agl_content::Content) -> String {
         .unwrap_or_else(|| "[multimodal content]".to_owned())
 }
 
-fn workspace_label(workspace: &str) -> &str {
-    Path::new(workspace)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(workspace)
+fn display_path(path: &agl_protocol::SanitizedDisplayPath) -> String {
+    if path.truncated {
+        format!("{}…", path.text)
+    } else {
+        path.text.clone()
+    }
+}
+
+fn workspace_label(workspace: &agl_protocol::SanitizedDisplayPath) -> String {
+    let label = workspace
+        .text
+        .rsplit('/')
+        .find(|component| !component.is_empty())
+        .unwrap_or(&workspace.text);
+    if workspace.truncated {
+        format!("{label}…")
+    } else {
+        label.to_owned()
+    }
 }
 
 fn managed_shell_profile_id(program: &Path) -> Option<&'static str> {
@@ -4334,35 +5313,96 @@ mod tests {
     }
 
     #[test]
-    fn exact_typed_bang_switches_and_other_bang_inputs_remain_prompts() {
+    fn physical_bang_enters_shell_and_second_bang_escapes_to_prompt() {
         let mut composer = Composer::default();
         composer.insert_char('!');
+        assert_eq!(composer.mode, ComposerMode::Shell);
+        assert!(composer.buffer.is_empty());
         assert_eq!(composer.submit(), Some(ComposerSubmission::SwitchTerminal));
 
-        composer.insert_text("!ls");
+        composer.insert_char('!');
+        composer.insert_text("ls");
         assert_eq!(
             composer.submit(),
-            Some(ComposerSubmission::Prompt("!ls".to_owned()))
+            Some(ComposerSubmission::Shell("ls".to_owned()))
         );
-
-        composer.insert_text("!!");
-        assert_eq!(
-            composer.submit(),
-            Some(ComposerSubmission::Prompt("!!".to_owned()))
-        );
+        assert_eq!(composer.mode, ComposerMode::Shell);
+        assert_eq!(composer.buffer, "ls");
+        composer.reset();
 
         composer.insert_char('!');
-        composer.insert_char('\n');
+        composer.insert_char('!');
+        assert_eq!(composer.mode, ComposerMode::Prompt);
+        assert_eq!(composer.buffer, "!");
         assert_eq!(
             composer.submit(),
             Some(ComposerSubmission::Prompt("!".to_owned()))
         );
+
+        composer.insert_char('!');
+        composer.backspace();
+        assert_eq!(composer.mode, ComposerMode::Prompt);
+        assert!(composer.buffer.is_empty());
+
+        composer.insert_char('!');
+        composer.insert_char('e');
+        composer.insert_char('\n');
+        assert_eq!(
+            composer.submit(),
+            Some(ComposerSubmission::Shell("e\n".to_owned()))
+        );
+        composer.reset();
 
         composer.insert_char('/');
         assert_eq!(composer.mode, ComposerMode::Command);
         composer.insert_char('/');
         assert_eq!(composer.mode, ComposerMode::Prompt);
         assert_eq!(composer.buffer, "/");
+    }
+
+    #[test]
+    fn empty_shell_editor_key_reducer_escapes_or_attaches_exactly() {
+        let mut state = test_ui_state(SessionId::generate(), Vec::new());
+
+        assert!(
+            handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)
+            )
+            .is_none()
+        );
+        assert_eq!(state.composer.mode, ComposerMode::Shell);
+        assert!(handle_key(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_none());
+        assert_eq!(state.composer.mode, ComposerMode::Prompt);
+        assert!(state.composer.buffer.is_empty());
+
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+        );
+        assert!(
+            handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+            )
+            .is_none()
+        );
+        assert_eq!(state.composer.mode, ComposerMode::Prompt);
+        assert!(state.composer.buffer.is_empty());
+
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            handle_key(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Some(UiControl::Submission(ComposerSubmission::SwitchTerminal))
+        ));
+        assert_eq!(state.composer.mode, ComposerMode::Prompt);
+        assert!(state.composer.buffer.is_empty());
     }
 
     #[test]
@@ -4377,16 +5417,178 @@ mod tests {
             composer.submit(),
             Some(ComposerSubmission::Prompt("!".to_owned()))
         );
+
+        composer.insert_char('!');
+        composer.insert_paste("!printf shell-paste");
+        assert_eq!(composer.mode, ComposerMode::Shell);
+        assert_eq!(composer.buffer, "!printf shell-paste");
+        assert_eq!(
+            composer.submit(),
+            Some(ComposerSubmission::Shell("!printf shell-paste".to_owned()))
+        );
+        assert_eq!(composer.buffer, "!printf shell-paste");
+    }
+
+    #[test]
+    fn sanitized_display_paths_mark_truncation_without_becoming_authority_paths() {
+        let complete = test_display_path("/workspace/repository");
+        assert_eq!(display_path(&complete), "/workspace/repository");
+        assert_eq!(workspace_label(&complete), "repository");
+
+        let truncated = agl_protocol::SanitizedDisplayPath {
+            text: "/workspace/partial".to_owned(),
+            truncated: true,
+        };
+        assert_eq!(display_path(&truncated), "/workspace/partial…");
+        assert_eq!(workspace_label(&truncated), "partial…");
+    }
+
+    #[test]
+    fn shell_submission_keeps_exact_buffer_and_identity_until_explicit_acceptance() {
+        let session_id = SessionId::generate();
+        let terminal = test_terminal(
+            TerminalOwnerView::Human {
+                session_id: session_id.clone(),
+            },
+            ExecutionProfile::Workspace,
+        );
+        let mut state = test_ui_state(session_id.clone(), vec![terminal.clone()]);
+        let command = "printf 'λ'\nprintf done".to_owned();
+        state.composer.mode = ComposerMode::Shell;
+        state.composer.buffer = command.clone();
+        state.composer.cursor = command.len();
+
+        let first = begin_shell_submission(&session_id, &mut state, command.clone(), &None)
+            .unwrap()
+            .unwrap();
+        let submission_id = first.client_submission_id.clone();
+        let ensure_id = first.terminal_ensure_submission_id.clone();
+        assert_eq!(first.command, command);
+        assert_eq!(state.composer.buffer, command);
+        assert_eq!(state.composer.mode, ComposerMode::Shell);
+
+        let busy = shell_submission_failure(&first, Some(terminal.clone()), None, "busy", false);
+        apply_shell_submission_completion(&mut state, &session_id, None, busy);
+        let pending = state.pending_shell_submission.as_ref().unwrap();
+        assert_eq!(pending.command, command);
+        assert_eq!(pending.client_submission_id, submission_id);
+        assert!(!pending.in_flight);
+        assert!(!pending.outcome_uncertain);
+        assert_eq!(state.composer.buffer, command);
+
+        let second = begin_shell_submission(&session_id, &mut state, command.clone(), &None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.client_submission_id, submission_id);
+        assert_eq!(second.terminal_ensure_submission_id, ensure_id);
+        let uncertain = shell_submission_failure(
+            &second,
+            Some(terminal.clone()),
+            None,
+            "connection closed",
+            true,
+        );
+        apply_shell_submission_completion(&mut state, &session_id, None, uncertain);
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert_eq!(state.composer.buffer, command);
+        assert_eq!(
+            state
+                .pending_shell_submission
+                .as_ref()
+                .unwrap()
+                .client_submission_id,
+            submission_id
+        );
+
+        let retry = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let Some(UiControl::Submission(ComposerSubmission::Shell(retry_command))) = retry else {
+            panic!("uncertain Shell command did not remain retryable");
+        };
+        let third = begin_shell_submission(&session_id, &mut state, retry_command, &None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.client_submission_id, submission_id);
+        let accepted = ShellSubmissionCompletion {
+            session_id: session_id.clone(),
+            command: command.clone(),
+            client_submission_id: submission_id,
+            terminal: Some(terminal.clone()),
+            attachment: None,
+            outcome: Ok(agl_protocol::HumanTerminalCommandAcceptedEvent {
+                terminal_id: terminal.terminal_id,
+                command_sequence: 1,
+                output_after_sequence: 0,
+            }),
+        };
+        apply_shell_submission_completion(&mut state, &session_id, None, accepted);
+        assert!(state.pending_shell_submission.is_none());
+        assert_eq!(state.composer.mode, ComposerMode::Prompt);
+        assert!(state.composer.buffer.is_empty());
     }
 
     #[test]
     fn unicode_editing_moves_and_deletes_whole_graphemes() {
         let mut composer = Composer::default();
         composer.insert_text("a👩‍💻б");
-        composer.move_left();
+        composer.move_left(false);
         composer.backspace();
         assert_eq!(composer.buffer, "aб");
         assert_eq!(composer.cursor, 1);
+    }
+
+    #[test]
+    fn composer_render_goldens_cover_wide_narrow_no_color_and_selection() {
+        let render = |width: u16, no_color: bool| {
+            let mut state = test_ui_state(SessionId::generate(), Vec::new());
+            state.no_color = no_color;
+            state.composer.insert_paste("alpha\t界\n👩‍💻 beta");
+            state.composer.move_word_left(false);
+            state.composer.move_word_right(true);
+            let backend = ratatui::backend::TestBackend::new(width, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, &state)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let has_color = buffer
+                .content
+                .iter()
+                .any(|cell| cell.fg != Color::Reset || cell.bg != Color::Reset);
+            let has_selection = buffer
+                .content
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::REVERSED) || cell.bg == Color::Cyan);
+            (rows, has_color, has_selection)
+        };
+
+        let (wide, wide_color, wide_selection) = render(80, false);
+        assert!(wide_color);
+        assert!(wide_selection);
+        assert!(wide.iter().any(|row| row.contains("Prompt >")));
+        assert!(wide.iter().any(|row| row.contains("alpha   界")));
+        assert!(wide.iter().any(|row| row.contains("👩‍💻")));
+        assert!(wide.iter().any(|row| row.contains("beta")));
+
+        let (narrow, _, narrow_selection) = render(28, false);
+        assert!(narrow_selection);
+        assert_eq!(narrow.iter().map(String::len).min(), Some(28));
+        assert!(narrow.iter().any(|row| row.contains("Prompt >")));
+
+        let (no_color, has_color, no_color_selection) = render(80, true);
+        assert!(!has_color);
+        assert!(no_color_selection);
+        assert!(no_color.iter().any(|row| row.contains("alpha   界")));
     }
 
     #[test]
@@ -4859,7 +6061,17 @@ mod tests {
         }
     }
 
-    fn test_ui_state(session_id: SessionId, terminals: Vec<TerminalSessionView>) -> UiState {
+    fn test_display_path(text: &str) -> agl_protocol::SanitizedDisplayPath {
+        agl_protocol::SanitizedDisplayPath {
+            text: text.to_owned(),
+            truncated: false,
+        }
+    }
+
+    pub(super) fn test_ui_state(
+        session_id: SessionId,
+        terminals: Vec<TerminalSessionView>,
+    ) -> UiState {
         let last_terminal = terminals
             .first()
             .map(|terminal| terminal.terminal_id.clone());
@@ -4882,8 +6094,9 @@ mod tests {
                     operation_mode: ProtocolToolMode::Execute,
                     selected_skills: Vec::new(),
                     runtime_context_revision: 1,
-                    workspace_root: "/workspace".to_owned(),
-                    cwd: "/workspace".to_owned(),
+                    workspace_root: test_display_path("/workspace"),
+                    cwd: test_display_path("/workspace"),
+                    workspace_history_scope: format!("sha256:{}", "a".repeat(64)),
                     execution_context_revision: 41,
                     context_used_tokens: None,
                     context_limit_tokens: None,
@@ -4896,6 +6109,8 @@ mod tests {
                 queued_prompts: Vec::new(),
                 terminals,
                 executions: Vec::new(),
+                human_commands: Vec::new(),
+                activity: None,
                 command_context: agl_protocol::CommandContext {
                     session_id: Some(session_id),
                     session_active: true,
@@ -4911,6 +6126,7 @@ mod tests {
             terminal_cursors: BTreeMap::new(),
             seen_terminals: BTreeSet::new(),
             assistant_deltas: BTreeMap::new(),
+            continuation_submission_ids: BTreeMap::new(),
             picker: None,
             notices: Vec::new(),
             active_run: None,
@@ -4921,6 +6137,9 @@ mod tests {
                 root: None,
                 prompt: Vec::new(),
             },
+            activity_expanded: false,
+            pending_shell_submission: None,
+            no_color: false,
         }
     }
 
@@ -4948,21 +6167,56 @@ mod tests {
             profile,
             shell: agl_protocol::ShellProfileView {
                 profile_id: "bash-managed".to_owned(),
-                program: "/bin/bash".to_owned(),
+                program: test_display_path("/bin/bash"),
                 executable_digest: "sha256:executable".to_owned(),
                 config_digest: "sha256:config".to_owned(),
             },
-            workspace_root: "/workspace".to_owned(),
-            cwd: "/workspace".to_owned(),
+            workspace_root: test_display_path("/workspace"),
+            cwd: test_display_path("/workspace"),
             initial_environment_digest: "sha256:environment".to_owned(),
             environment_names: vec!["PATH".to_owned()],
             command_sequence: 0,
+            prompt_generation: Some(1),
             prompt_state: TerminalPromptState::Ready,
             process_state: agl_protocol::ExecutionState::Running,
             exit: None,
             writer: agl_protocol::TerminalWriterView::Owner,
             promoted: false,
         }
+    }
+
+    #[test]
+    fn command_finished_does_not_synthesize_a_trusted_prompt() {
+        let session_id = SessionId::generate();
+        let mut terminal = test_terminal(
+            TerminalOwnerView::Human {
+                session_id: session_id.clone(),
+            },
+            ExecutionProfile::Workspace,
+        );
+        terminal.prompt_state = TerminalPromptState::ForegroundProcess;
+        terminal.prompt_generation = None;
+
+        let finished = agl_protocol::SessionPresentationEventPayload::TerminalCommandFinished {
+            terminal_id: terminal.terminal_id.clone(),
+            sequence: 1,
+            exit_status: 0,
+            cwd: test_display_path("/workspace"),
+        };
+        assert_eq!(
+            terminal_prompt_from_event(&finished, &terminal.terminal_id),
+            None
+        );
+
+        terminal.prompt_state = TerminalPromptState::Ready;
+        terminal.prompt_generation = Some(2);
+        let changed = agl_protocol::SessionPresentationEventPayload::TerminalChanged {
+            terminal: terminal.clone(),
+        };
+        assert_eq!(
+            terminal_prompt_from_event(&changed, &terminal.terminal_id),
+            Some(TerminalPromptState::Ready)
+        );
     }
 
     #[test]
@@ -4994,6 +6248,64 @@ mod tests {
     }
 
     #[test]
+    fn presentation_delta_gaps_require_fresh_snapshot_without_losing_pending_shell() {
+        let session_id = SessionId::generate();
+        let mut state = test_ui_state(session_id, Vec::new());
+        let pending = PendingShellSubmission {
+            command: "printf safe".to_owned(),
+            client_submission_id: "stable-shell-id".to_owned(),
+            terminal_ensure_submission_id: "stable-terminal-id".to_owned(),
+            in_flight: true,
+            outcome_uncertain: false,
+        };
+        state.pending_shell_submission = Some(pending.clone());
+        let run_id = RunId::generate();
+        let turn_id = agl_ids::TurnId::generate();
+        let message_id = MessageId::generate();
+        let first = apply_presentation_event(
+            &mut state,
+            agl_protocol::SessionPresentationEventPayload::AssistantTextDelta {
+                run_id: run_id.clone(),
+                turn_id: turn_id.clone(),
+                provisional_message_id: message_id.clone(),
+                sequence: 1,
+                text: "one".to_owned(),
+            },
+        );
+        assert!(!first.resync_required);
+        let gap = apply_presentation_event(
+            &mut state,
+            agl_protocol::SessionPresentationEventPayload::AssistantTextDelta {
+                run_id,
+                turn_id,
+                provisional_message_id: message_id,
+                sequence: 3,
+                text: "three".to_owned(),
+            },
+        );
+        assert!(gap.resync_required);
+
+        let activity_gap = apply_presentation_event(
+            &mut state,
+            agl_protocol::SessionPresentationEventPayload::ActivityGraphDelta {
+                batch: agl_protocol::ActivityGraphDeltaBatch {
+                    graph_revision: 3,
+                    upserts: Vec::new(),
+                    removals: Vec::new(),
+                    current_path: None,
+                    truncated: false,
+                },
+            },
+        );
+        assert!(activity_gap.resync_required);
+
+        let mut fresh = state.snapshot.clone();
+        fresh.cursor.revision = fresh.cursor.revision.saturating_add(1);
+        install_presentation_snapshot(&mut state, fresh);
+        assert_eq!(state.pending_shell_submission, Some(pending));
+    }
+
+    #[test]
     fn assembled_snapshot_replacement_is_installed_as_one_projection() {
         let session_id = SessionId::generate();
         let terminal = test_terminal(
@@ -5018,7 +6330,7 @@ mod tests {
         );
         let mut replacement = state.snapshot.clone();
         replacement.cursor.revision += 1;
-        replacement.header.cwd = "/workspace/replaced".to_owned();
+        replacement.header.cwd = test_display_path("/workspace/replaced");
         replacement.terminals.clear();
 
         install_presentation_snapshot(&mut state, replacement.clone());
@@ -5103,37 +6415,422 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_output_is_visible_without_color_and_targets_the_newest_available_item() {
+        let session_id = SessionId::generate();
+        let mut state = test_ui_state(session_id, Vec::new());
+        let older_message_id = MessageId::generate();
+        let newest_message_id = MessageId::generate();
+        let continuation_run_id = RunId::generate();
+        let incomplete_item =
+            |message_id: MessageId,
+             content: &str,
+             continue_action: agl_protocol::ContinueActionView| {
+                SessionPresentationItem::IncompleteAssistant {
+                    item: agl_protocol::IncompleteAssistantItemView {
+                        message_id,
+                        content: agl_content::Content::text(content).unwrap(),
+                        source_run_id: RunId::generate(),
+                        source_turn_id: agl_ids::TurnId::generate(),
+                        source_attempt_id: agl_ids::AttemptId::generate(),
+                        reason: agl_protocol::IncompleteOutputReason::ContentByteLimit,
+                        continuation_index: 0,
+                        continue_action,
+                    },
+                }
+            };
+        state.snapshot.items = vec![
+            incomplete_item(
+                older_message_id,
+                "older partial",
+                agl_protocol::ContinueActionView::Claimed {
+                    continuation_run_id,
+                },
+            ),
+            incomplete_item(
+                newest_message_id.clone(),
+                "newest partial survives",
+                agl_protocol::ContinueActionView::Available,
+            ),
+        ];
+
+        assert_eq!(state.latest_available_incomplete(), Some(newest_message_id));
+        let backend = ratatui::backend::TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_transcript(frame, area, &state);
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("agentLIBRE · incomplete · output limit"));
+        assert!(rendered.contains("newest partial survives"));
+        assert!(rendered.contains("content byte limit · Ctrl+Y Continue"));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn test_activity_node(
+        run_id: &RunId,
+        node_id: String,
+        parent_node_id: Option<String>,
+        order_index: u64,
+        kind: agl_protocol::ActivityNodeKind,
+        phase: agl_protocol::ActivityPhase,
+        state: agl_protocol::ActivityNodeState,
+        summary: &str,
+        detail: agl_protocol::ActivityDetailView,
+    ) -> agl_protocol::ActivityNodeView {
+        let terminal = state.is_terminal();
+        agl_protocol::ActivityNodeView {
+            node_id,
+            parent_node_id,
+            order_index,
+            run_id: run_id.clone(),
+            turn_id: None,
+            attempt_id: None,
+            step_id: None,
+            kind,
+            phase,
+            state,
+            retry: 0,
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 5,
+            finished_at_unix_ms: terminal.then_some(5),
+            elapsed_ms: if terminal { 4 } else { 0 },
+            summary: summary.to_owned(),
+            detail,
+        }
+    }
+
+    #[test]
+    fn activity_delta_is_atomic_revisioned_idempotent_and_parent_ordered() {
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let step_id = "step:safe".to_owned();
+        let root = test_activity_node(
+            &run_id,
+            root_id.clone(),
+            None,
+            1,
+            agl_protocol::ActivityNodeKind::Run,
+            agl_protocol::ActivityPhase::Model,
+            agl_protocol::ActivityNodeState::Running,
+            "run",
+            agl_protocol::ActivityDetailView::None,
+        );
+        let step = test_activity_node(
+            &run_id,
+            step_id.clone(),
+            Some(root_id.clone()),
+            2,
+            agl_protocol::ActivityNodeKind::Step,
+            agl_protocol::ActivityPhase::Tool,
+            agl_protocol::ActivityNodeState::Waiting,
+            "fs.list",
+            agl_protocol::ActivityDetailView::UnknownCapability {
+                capability_id: "fs.list".to_owned(),
+            },
+        );
+        let first = agl_protocol::ActivityGraphDeltaBatch {
+            graph_revision: 1,
+            upserts: vec![root, step],
+            removals: Vec::new(),
+            current_path: Some(vec![root_id.clone(), step_id.clone()]),
+            truncated: false,
+        };
+        let graph = apply_activity_graph_delta(None, &first).unwrap();
+        assert_eq!(graph.graph_revision, 1);
+        assert_eq!(graph.roots, std::slice::from_ref(&root_id));
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<Vec<_>>(),
+            [root_id.as_str(), step_id.as_str()]
+        );
+
+        let duplicate = apply_activity_graph_delta(Some(&graph), &first).unwrap();
+        assert_eq!(duplicate, graph);
+        let mut conflicting = first.clone();
+        conflicting.upserts[1].summary = "different".to_owned();
+        assert!(apply_activity_graph_delta(Some(&graph), &conflicting).is_err());
+        let mut gap = first;
+        gap.graph_revision = 3;
+        assert!(apply_activity_graph_delta(Some(&graph), &gap).is_err());
+    }
+
+    #[test]
+    fn activity_render_has_compact_and_expanded_unicode_ascii_fallbacks() {
+        let session_id = SessionId::generate();
+        let mut state = test_ui_state(session_id, Vec::new());
+        let run_id = RunId::generate();
+        let root_id = format!("run:{run_id}");
+        let failed_id = "step:failed".to_owned();
+        let root = test_activity_node(
+            &run_id,
+            root_id.clone(),
+            None,
+            1,
+            agl_protocol::ActivityNodeKind::Run,
+            agl_protocol::ActivityPhase::Model,
+            agl_protocol::ActivityNodeState::Running,
+            "turn",
+            agl_protocol::ActivityDetailView::None,
+        );
+        let failed = test_activity_node(
+            &run_id,
+            failed_id.clone(),
+            Some(root_id.clone()),
+            2,
+            agl_protocol::ActivityNodeKind::Step,
+            agl_protocol::ActivityPhase::Tool,
+            agl_protocol::ActivityNodeState::Failed,
+            "repository search",
+            agl_protocol::ActivityDetailView::Capability(
+                agl_protocol::CapabilityActivityDetail::RepositorySearch {
+                    scope: test_display_path("crates/agl-app"),
+                    matches: 7,
+                    complete: false,
+                },
+            ),
+        );
+        state.snapshot.activity = Some(agl_protocol::ActivityGraphView {
+            graph_revision: 9,
+            roots: vec![root_id.clone()],
+            nodes: vec![root, failed],
+            current_path: vec![root_id],
+            truncated: true,
+        });
+        state
+            .notices
+            .push("NO_COLOR must cover the complete Chat surface".to_owned());
+
+        let render = |state: &UiState, width: u16, no_color: bool| {
+            let backend = ratatui::backend::TestBackend::new(width, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    draw_transcript_with_activity_mode(frame, area, state, no_color);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered = buffer
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            let has_color = buffer.content.iter().any(|cell| cell.fg != Color::Reset);
+            (rendered, has_color)
+        };
+
+        let (compact, _) = render(&state, 120, false);
+        assert!(compact.contains("activity · model · turn"));
+        assert!(compact.contains("repository search"));
+        assert!(compact.contains("retained history truncated"));
+        assert!(!compact.contains("├─"));
+
+        state.activity_expanded = true;
+        let (unicode, _) = render(&state, 120, false);
+        assert!(unicode.contains("├─") || unicode.contains("└─"));
+        assert!(unicode.contains("crates/agl-app · 7 matches · partial"));
+        let (narrow, _) = render(&state, 42, false);
+        let (no_color, has_no_color_style) = render(&state, 120, true);
+        assert!(!has_no_color_style);
+        for fallback in [&narrow, &no_color] {
+            assert!(fallback.contains("+- ") || fallback.contains("`- "));
+            for forbidden in [" → ", "├─", "└─", "\u{1b}_G", "\u{1b}Pq"] {
+                assert!(!fallback.contains(forbidden));
+            }
+        }
+        for sentinel in ["raw prompt", "super-secret-token", "/home/private"] {
+            assert!(!unicode.contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn activity_tree_connectors_follow_siblings_instead_of_global_node_order() {
+        let first_run = RunId::generate();
+        let second_run = RunId::generate();
+        let first_root_id = format!("run:{first_run}");
+        let first_child_id = "step:first-child".to_owned();
+        let grandchild_id = "step:grandchild".to_owned();
+        let second_child_id = "step:second-child".to_owned();
+        let second_root_id = format!("run:{second_run}");
+        let nodes = vec![
+            test_activity_node(
+                &first_run,
+                first_root_id.clone(),
+                None,
+                1,
+                agl_protocol::ActivityNodeKind::Run,
+                agl_protocol::ActivityPhase::Model,
+                agl_protocol::ActivityNodeState::Running,
+                "first root",
+                agl_protocol::ActivityDetailView::None,
+            ),
+            test_activity_node(
+                &first_run,
+                first_child_id.clone(),
+                Some(first_root_id.clone()),
+                2,
+                agl_protocol::ActivityNodeKind::Step,
+                agl_protocol::ActivityPhase::Tool,
+                agl_protocol::ActivityNodeState::Running,
+                "first child",
+                agl_protocol::ActivityDetailView::None,
+            ),
+            test_activity_node(
+                &first_run,
+                grandchild_id.clone(),
+                Some(first_child_id.clone()),
+                3,
+                agl_protocol::ActivityNodeKind::Step,
+                agl_protocol::ActivityPhase::Tool,
+                agl_protocol::ActivityNodeState::Running,
+                "grandchild",
+                agl_protocol::ActivityDetailView::None,
+            ),
+            test_activity_node(
+                &first_run,
+                second_child_id.clone(),
+                Some(first_root_id.clone()),
+                4,
+                agl_protocol::ActivityNodeKind::Step,
+                agl_protocol::ActivityPhase::Tool,
+                agl_protocol::ActivityNodeState::Waiting,
+                "second child",
+                agl_protocol::ActivityDetailView::None,
+            ),
+            test_activity_node(
+                &second_run,
+                second_root_id.clone(),
+                None,
+                5,
+                agl_protocol::ActivityNodeKind::Run,
+                agl_protocol::ActivityPhase::Queued,
+                agl_protocol::ActivityNodeState::Pending,
+                "second root",
+                agl_protocol::ActivityDetailView::None,
+            ),
+        ];
+        let graph = agl_protocol::ActivityGraphView {
+            graph_revision: 1,
+            roots: vec![first_root_id, second_root_id],
+            nodes,
+            current_path: Vec::new(),
+            truncated: false,
+        };
+
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[0], false, 8),
+            "├─ "
+        );
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[1], false, 8),
+            "│ ├─ "
+        );
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[2], false, 8),
+            "│ │ └─ "
+        );
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[3], false, 8),
+            "│ └─ "
+        );
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[4], false, 8),
+            "└─ "
+        );
+        assert_eq!(
+            activity_tree_prefix(&graph, &graph.nodes[2], true, 8),
+            "| | `- "
+        );
+    }
+
+    #[test]
     fn daemon_connection_errors_distinguish_missing_and_incompatible_servers() {
         let socket = Path::new("/tmp/agentlibre-test.sock");
-        let missing = interactive_connect_error(socket, ClientError::Io("refused".to_owned()));
+        let missing =
+            interactive_connect_error(socket, ClientError::DaemonUnavailable("refused".to_owned()));
         assert!(missing.to_string().contains("daemon is unavailable"));
 
         let incompatible = interactive_connect_error(
             socket,
             ClientError::SchemaMismatch {
-                expected: "agentlibre.event.v5alpha",
+                expected: "agentlibre.event.v6alpha",
             },
         );
         assert!(incompatible.to_string().contains("incompatible protocol"));
-        assert!(format!("{incompatible:#}").contains("v5alpha"));
+        assert!(format!("{incompatible:#}").contains("v6alpha"));
     }
 
     #[test]
-    fn private_history_is_bounded_per_workspace_and_hides_workspace_path() {
+    fn interactive_unavailable_never_falls_back_to_a_process_local_worker() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-interactive-no-fallback-{}",
+            agl_ids::RequestId::generate()
+        ));
+        let runtime = AgentLibreRuntimeConfig {
+            paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
+            logging: agl_runtime::AgentLibreLoggingConfig::default(),
+            history: agl_runtime::AgentLibreHistoryConfig::default(),
+            workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        };
+        let options = InteractiveOptions {
+            resume: None,
+            input_history: false,
+            socket_path: Some(root.join("missing-daemon.sock")),
+            workspace_root: None,
+            function_ref: None,
+            model_id: None,
+            operation_mode: None,
+            skills: Vec::new(),
+        };
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run_interactive_async(options, &runtime))
+            .expect_err("interactive mode must require its daemon");
+
+        assert!(format!("{error:#}").contains("daemon is unavailable"));
+        assert!(!runtime.paths.inference_worker_temp_root().exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_history_is_bounded_and_uses_only_opaque_workspace_scope() {
         let root = std::env::temp_dir().join(format!(
             "agl-cli-history-test-{}",
             agl_ids::RequestId::generate()
         ));
         let state_dir = root.join("state");
-        let workspace = "/private/workspace/name";
-        let (mut history, warnings) = InputHistory::load(&state_dir, workspace, true);
+        let workspace_history_scope = format!("sha256:{}", "b".repeat(64));
+        let (mut history, warnings) =
+            InputHistory::load(&state_dir, &workspace_history_scope, true);
         assert!(warnings.is_empty());
-        history.record(HistoryMode::Prompt, "hello").unwrap();
-        history.record(HistoryMode::Prompt, "hello").unwrap();
+        history.record_prompt("hello").unwrap();
+        history.record_prompt("hello").unwrap();
         let history_root = history.root.clone().unwrap();
-        assert!(!history_root.to_string_lossy().contains("workspace"));
+        assert!(
+            !history_root
+                .to_string_lossy()
+                .contains(&workspace_history_scope)
+        );
         assert_eq!(history.prompt, vec!["hello"]);
-        let (reloaded, warnings) = InputHistory::load(&state_dir, workspace, true);
+        assert!(history.entries(ComposerMode::Shell).is_empty());
+        assert!(!history_root.join("shell.jsonl").exists());
+        let (reloaded, warnings) = InputHistory::load(&state_dir, &workspace_history_scope, true);
         assert!(warnings.is_empty());
         assert_eq!(reloaded.prompt, vec!["hello"]);
         #[cfg(unix)]

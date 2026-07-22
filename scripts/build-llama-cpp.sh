@@ -108,6 +108,24 @@ if [[ -n "$spirv_include_dir" ]]; then
   export CXXFLAGS="$cxx_flags"
 fi
 
+# `mkShell` injects a synthetic `*-nix-shell/lib` rpath which may disappear as
+# soon as the shell exits. Keep concrete store outputs and linker search flags,
+# but never bake that ephemeral aggregate into the distributable plugins.
+if [[ -n "${NIX_LDFLAGS:-}" ]]; then
+  read -r -a agl_nix_ldflags <<<"$NIX_LDFLAGS"
+  agl_filtered_nix_ldflags=()
+  for ((agl_flag_index = 0; agl_flag_index < ${#agl_nix_ldflags[@]}; agl_flag_index++)); do
+    if [[ "${agl_nix_ldflags[$agl_flag_index]}" == -rpath &&
+      "${agl_nix_ldflags[$((agl_flag_index + 1))]:-}" == /nix/store/*-nix-shell/lib ]]; then
+      agl_flag_index=$((agl_flag_index + 1))
+      continue
+    fi
+    agl_filtered_nix_ldflags+=("${agl_nix_ldflags[$agl_flag_index]}")
+  done
+  NIX_LDFLAGS="${agl_filtered_nix_ldflags[*]}"
+  export NIX_LDFLAGS
+fi
+
 vulkan_enabled=OFF
 if [[ -n "$vulkan_include_dir" && -n "$vulkan_library" && \
       ( -n "$vulkan_glslc" || -n "$vulkan_glslang_validator" ) ]]; then
@@ -121,6 +139,9 @@ cmake_args=(
   -DGGML_CPU_ALL_VARIANTS=ON \
   -DGGML_NATIVE=OFF \
   -DGGML_VULKAN="$vulkan_enabled" \
+  -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON \
+  -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+  '-DCMAKE_INSTALL_RPATH=$ORIGIN' \
   -DLLAMA_BUILD_TESTS=OFF \
   -DLLAMA_BUILD_EXAMPLES=OFF \
   -DLLAMA_BUILD_TOOLS=ON \
@@ -131,13 +152,18 @@ cmake_args=(
 
 printf 'llama.cpp dynamic backends: CPU=ON Vulkan=%s\n' "$vulkan_enabled"
 
-# The old statically linked backend build used these same output names. Remove
-# them before configuring dynamic modules so a disabled backend cannot survive
-# as a stale load candidate in an incremental build directory.
+# Relink every bundled object under the current toolchain environment. Besides
+# removing disabled backends, this prevents an incremental build from retaining
+# a vanished Nix shell aggregate or another stale runtime search path.
 shopt -s nullglob
 stale_backend_libraries=(
-  "$build_dir"/bin/libggml-cpu.so*
+  "$build_dir"/bin/libggml-base.so*
+  "$build_dir"/bin/libggml.so*
+  "$build_dir"/bin/libggml-cpu-*.so*
   "$build_dir"/bin/libggml-vulkan.so*
+  "$build_dir"/bin/libllama.so*
+  "$build_dir"/bin/libllama-common.so*
+  "$build_dir"/bin/libmtmd.so*
 )
 shopt -u nullglob
 if [[ ${#stale_backend_libraries[@]} -gt 0 ]]; then
