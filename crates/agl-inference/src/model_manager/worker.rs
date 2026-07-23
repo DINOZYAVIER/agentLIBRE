@@ -16,10 +16,16 @@ use agl_config::ResolvedInferenceConfig;
 use serde::Serialize;
 
 use super::evidence::AttemptEvidence;
-use super::queue::{PendingQueue, PendingWaitGuard, QueueCommand, WaitAbandonReason};
+use super::queue::{
+    ActiveModelTarget, EnqueueResult, ManagerClock, PendingQueue, PendingWaitGuard, QueueCommand,
+    QueueWake, SystemManagerClock, WaitAbandonReason,
+};
+use super::types::SharedManagerStatus;
 use super::{
-    ContextKey, InferenceJob, ModelGeneration, ModelKey, ModelManagerError, ModelManagerOptions,
-    ModelManagerStatus, RuntimeFailure, RuntimeOperation,
+    ContextKey, InferenceJob, MAX_STATUS_MODEL_DIGESTS, ModelGeneration, ModelKey,
+    ModelManagerError, ModelManagerOptions, ModelManagerStatus, ModelManagerStatusDetail,
+    ModelReleaseOutcome, ModelReleaseReason, ModelUnloadOutcome, ModelUnloadResult,
+    ModelUnloadTarget, RuntimeFailure, RuntimeOperation,
 };
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -77,20 +83,33 @@ impl ModelManager {
     where
         R: ModelRuntime,
     {
+        Self::spawn_with_clock(options, runtime, Arc::new(SystemManagerClock))
+    }
+
+    fn spawn_with_clock<R>(
+        options: ModelManagerOptions,
+        runtime: R,
+        clock: Arc<dyn ManagerClock>,
+    ) -> Result<Self, ModelManagerError>
+    where
+        R: ModelRuntime,
+    {
         options.validate()?;
-        let status = Arc::new(Mutex::new(ModelManagerStatus::default()));
-        let queue = Arc::new(PendingQueue::new(
+        let status = Arc::new(Mutex::new(SharedManagerStatus::default()));
+        let queue = Arc::new(PendingQueue::with_clock(
             options.queue_capacity,
             Arc::clone(&status),
+            Arc::clone(&clock),
         ));
         let worker_status = Arc::clone(&status);
         let worker_queue = Arc::clone(&queue);
         let worker_options = options.clone();
+        let worker_clock = Arc::clone(&clock);
         let worker = thread::Builder::new()
             .name("agl-model-manager".to_string())
             .spawn(move || {
                 let mut availability = AvailabilityGuard::new(Arc::clone(&worker_queue));
-                if Worker::new(runtime, worker_options, worker_status)
+                if Worker::new(runtime, worker_options, worker_status, worker_clock)
                     .run(worker_queue)
                     .is_ok()
                 {
@@ -100,10 +119,26 @@ impl ModelManager {
             .map_err(|_| ModelManagerError::ManagerUnavailable)?;
         Ok(Self {
             handle: ModelManagerHandle {
-                inner: Arc::new(HandleInner { queue, status }),
+                inner: Arc::new(HandleInner {
+                    queue,
+                    status,
+                    clock,
+                }),
             },
             worker: Some(worker),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn spawn_for_test<R>(
+        options: ModelManagerOptions,
+        runtime: R,
+        clock: Arc<dyn ManagerClock>,
+    ) -> Result<Self, ModelManagerError>
+    where
+        R: ModelRuntime,
+    {
+        Self::spawn_with_clock(options, runtime, clock)
     }
 
     pub fn handle(&self) -> ModelManagerHandle {
@@ -134,7 +169,8 @@ pub struct ModelManagerHandle {
 
 struct HandleInner {
     queue: Arc<PendingQueue<Command>>,
-    status: Arc<Mutex<ModelManagerStatus>>,
+    status: Arc<Mutex<SharedManagerStatus>>,
+    clock: Arc<dyn ManagerClock>,
 }
 
 impl ModelManagerHandle {
@@ -244,12 +280,80 @@ impl ModelManagerHandle {
         result
     }
 
+    pub fn unload(
+        &self,
+        target: ModelUnloadTarget,
+    ) -> Result<ModelUnloadResult, ModelManagerError> {
+        target.validate()?;
+        let conflict_target = target.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let command = Command::Unload { target, reply };
+        let id = match self
+            .inner
+            .queue
+            .enqueue_with_active_check(command, |active| {
+                active.is_some_and(|active| match active {
+                    ActiveModelTarget::All => true,
+                    ActiveModelTarget::Digest(digest) => conflict_target.matches_digest(digest),
+                })
+            })? {
+            EnqueueResult::Queued(id) => id,
+            EnqueueResult::ActiveConflict(Command::Unload { reply, .. }) => {
+                let _ = reply.send(Ok(ModelUnloadResult::busy()));
+                return receiver
+                    .recv()
+                    .map_err(|_| ModelManagerError::ManagerUnavailable)?;
+            }
+            EnqueueResult::ActiveConflict(_) => unreachable!("only unload was admitted"),
+        };
+        let mut guard = PendingWaitGuard::new(Arc::clone(&self.inner.queue), id);
+        let result = receiver
+            .recv()
+            .map_err(|_| ModelManagerError::ManagerUnavailable)?;
+        guard.disarm();
+        result
+    }
+
     pub fn status(&self) -> Result<ModelManagerStatus, ModelManagerError> {
+        self.status_with_detail(ModelManagerStatusDetail::Aggregate)
+    }
+
+    pub fn status_with_detail(
+        &self,
+        detail: ModelManagerStatusDetail,
+    ) -> Result<ModelManagerStatus, ModelManagerError> {
         let queue = self.inner.queue.snapshot()?;
-        let mut status = lock_status(&self.inner.status).clone();
+        let shared = lock_status(&self.inner.status);
+        let mut status = shared.status.clone();
         status.queue_depth = queue.depth;
         status.active_scope = queue.active_scope;
+        status.next_residency_deadline_after_ms = shared.next_residency_deadline.map(|deadline| {
+            u64::try_from(
+                deadline
+                    .saturating_duration_since(self.inner.clock.now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX)
+        });
+        if detail == ModelManagerStatusDetail::ModelDigests {
+            status.resident_model_digests = shared
+                .resident_model_digests
+                .iter()
+                .take(MAX_STATUS_MODEL_DIGESTS)
+                .cloned()
+                .collect();
+            status.resident_model_digests_truncated =
+                shared.resident_model_digests.len() > MAX_STATUS_MODEL_DIGESTS;
+        } else {
+            status.resident_model_digests.clear();
+            status.resident_model_digests_truncated = false;
+        }
         Ok(status)
+    }
+
+    #[cfg(test)]
+    pub(super) fn wake_for_test(&self) {
+        self.inner.queue.wake();
     }
 
     pub fn shutdown(&self) -> Result<(), ModelManagerError> {
@@ -302,6 +406,10 @@ enum Command {
         key: ContextKey,
         reply: mpsc::Sender<Result<(), ModelManagerError>>,
     },
+    Unload {
+        target: ModelUnloadTarget,
+        reply: mpsc::SyncSender<Result<ModelUnloadResult, ModelManagerError>>,
+    },
 }
 
 impl QueueCommand for Command {
@@ -314,7 +422,8 @@ impl QueueCommand for Command {
             Self::Generate { job, .. } => Some(job.cancellation()),
             Self::DeviceInventory { .. }
             | Self::ClearContext { .. }
-            | Self::ReleaseContext { .. } => None,
+            | Self::ReleaseContext { .. }
+            | Self::Unload { .. } => None,
         }
     }
 
@@ -323,7 +432,8 @@ impl QueueCommand for Command {
             Self::Generate { job, .. } => job.deadline(),
             Self::DeviceInventory { .. }
             | Self::ClearContext { .. }
-            | Self::ReleaseContext { .. } => None,
+            | Self::ReleaseContext { .. }
+            | Self::Unload { .. } => None,
         }
     }
 
@@ -332,7 +442,26 @@ impl QueueCommand for Command {
             Self::Generate { job, .. } => Some(job.scope()),
             Self::DeviceInventory { .. }
             | Self::ClearContext { .. }
-            | Self::ReleaseContext { .. } => None,
+            | Self::ReleaseContext { .. }
+            | Self::Unload { .. } => None,
+        }
+    }
+
+    fn active_model_target(&self) -> Option<ActiveModelTarget<'_>> {
+        match self {
+            Self::Generate { job, .. } => Some(ActiveModelTarget::Digest(job.model_key().digest())),
+            Self::ClearContext { key, .. } | Self::ReleaseContext { key, .. } => {
+                Some(ActiveModelTarget::Digest(key.model_key().digest()))
+            }
+            Self::Unload {
+                target: ModelUnloadTarget::All,
+                ..
+            } => Some(ActiveModelTarget::All),
+            Self::Unload {
+                target: ModelUnloadTarget::Digest(digest),
+                ..
+            } => Some(ActiveModelTarget::Digest(digest)),
+            Self::DeviceInventory { .. } => None,
         }
     }
 
@@ -358,6 +487,9 @@ impl QueueCommand for Command {
                 let _ = reply.send(Err(error));
             }
             Self::ClearContext { reply, .. } | Self::ReleaseContext { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Unload { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
         }
@@ -391,7 +523,8 @@ fn emit_terminal_stage(
 struct Worker<R: ModelRuntime> {
     runtime: R,
     options: ModelManagerOptions,
-    status: Arc<Mutex<ModelManagerStatus>>,
+    status: Arc<Mutex<SharedManagerStatus>>,
+    clock: Arc<dyn ManagerClock>,
     models: BTreeMap<ModelKey, ModelEntry<R::Model, R::Context>>,
     lru_clock: u64,
 }
@@ -403,63 +536,90 @@ struct ModelEntry<M, C> {
     // The cache lease outlives the native model and every native context.
     _lease: Option<ModelLease>,
     last_used: u64,
+    idle: Option<IdleState>,
 }
 
 struct ContextEntry<C> {
     context: C,
     last_used: u64,
-    idle_since: Instant,
+    idle: Option<IdleState>,
+}
+
+#[derive(Clone, Copy)]
+struct IdleState {
+    _since: Instant,
+    deadline: Instant,
+    automatic_attempt_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ReleaseAccounting {
+    None,
+    Capacity,
+    IdleContext,
+    IdleModel,
+    Manual,
+    Shutdown,
 }
 
 impl<R: ModelRuntime> Worker<R> {
     fn new(
         runtime: R,
         options: ModelManagerOptions,
-        status: Arc<Mutex<ModelManagerStatus>>,
+        status: Arc<Mutex<SharedManagerStatus>>,
+        clock: Arc<dyn ManagerClock>,
     ) -> Self {
         Self {
             runtime,
             options,
             status,
+            clock,
             models: BTreeMap::new(),
             lru_clock: 0,
         }
     }
 
     fn run(mut self, queue: Arc<PendingQueue<Command>>) -> Result<(), ModelManagerError> {
-        while let Some(active) = queue.pop() {
-            let id = active.id;
-            active.command.on_active();
-            if let Err(error) = self.prune_expired_contexts() {
-                queue.complete_active(id);
-                active.command.complete(error);
-                continue;
-            }
-            match active.command {
-                Command::DeviceInventory { reply } => {
-                    let result = self.device_inventory();
-                    queue.complete_active(id);
-                    let _ = reply.send(result);
+        loop {
+            self.refresh_resource_status();
+            match queue.pop_until(self.earliest_deadline()) {
+                QueueWake::Command(active) => {
+                    let id = active.id;
+                    active.command.on_active();
+                    match active.command {
+                        Command::DeviceInventory { reply } => {
+                            let result = self.device_inventory();
+                            queue.complete_active(id);
+                            let _ = reply.send(result);
+                        }
+                        Command::Generate { job, stages, reply } => {
+                            let result = self.process_job(*job);
+                            emit_terminal_stage(&stages, &result);
+                            queue.complete_active(id);
+                            let _ = reply.send(result);
+                        }
+                        Command::ClearContext { key, reply } => {
+                            let result = self.clear_context(&key);
+                            queue.complete_active(id);
+                            let _ = reply.send(result);
+                        }
+                        Command::ReleaseContext { key, reply } => {
+                            let result = self.release_context(&key);
+                            queue.complete_active(id);
+                            let _ = reply.send(result);
+                        }
+                        Command::Unload { target, reply } => {
+                            let result = self.unload(&target);
+                            queue.complete_active(id);
+                            let _ = reply.send(result);
+                        }
+                    }
                 }
-                Command::Generate { job, stages, reply } => {
-                    let result = self.process_job(*job);
-                    emit_terminal_stage(&stages, &result);
-                    queue.complete_active(id);
-                    let _ = reply.send(result);
-                }
-                Command::ClearContext { key, reply } => {
-                    let result = self.clear_context(&key);
-                    queue.complete_active(id);
-                    let _ = reply.send(result);
-                }
-                Command::ReleaseContext { key, reply } => {
-                    let result = self.release_context(&key);
-                    queue.complete_active(id);
-                    let _ = reply.send(result);
-                }
+                QueueWake::Deadline => self.release_due_resources(),
+                QueueWake::Shutdown => break,
             }
         }
-        self.release_all()?;
+        self.release_all(ReleaseAccounting::Shutdown)?;
         self.refresh_resource_status();
         Ok(())
     }
@@ -535,7 +695,8 @@ impl<R: ModelRuntime> Worker<R> {
             Err(error) => Err(error),
         };
         {
-            let mut status = lock_status(&self.status);
+            let mut shared = lock_status(&self.status);
+            let status = &mut shared.status;
             match &result {
                 Ok(response) => match response.finish_reason {
                     crate::InferenceFinishReason::Stop => {
@@ -568,23 +729,35 @@ impl<R: ModelRuntime> Worker<R> {
         let model_loaded = self.ensure_model(job, log)?;
         if let Err(error) = check_job_gate(job) {
             if model_loaded {
-                self.release_model_resource(job.model_key(), Some(log), false)?;
+                self.release_model_resource(job.model_key(), Some(log), ReleaseAccounting::None)?;
             }
             return Err(error);
         }
         let context_loaded = self.ensure_context(job, log)?;
         if let Err(error) = check_job_gate(job) {
             if context_loaded {
-                self.release_context_resource(job.context_key(), Some(log), false)?;
+                self.release_context_resource(
+                    job.context_key(),
+                    Some(log),
+                    ReleaseAccounting::None,
+                )?;
             }
             if model_loaded {
-                self.release_model_resource(job.model_key(), Some(log), false)?;
+                self.release_model_resource(job.model_key(), Some(log), ReleaseAccounting::None)?;
             }
             return Err(error);
         }
 
         let model_key = job.model_key().clone();
         let context_key = job.context_key().clone();
+        if let Some(context) = self
+            .models
+            .get_mut(&model_key)
+            .and_then(|entry| entry.contexts.get_mut(&context_key))
+        {
+            context.idle = None;
+        }
+        self.refresh_resource_status();
         let generation = {
             let entry = self
                 .models
@@ -643,11 +816,12 @@ impl<R: ModelRuntime> Worker<R> {
         };
 
         let tick = self.next_tick();
+        let idle = self.new_idle_state_after_native_commit(self.options.context_idle_duration)?;
         if let Some(entry) = self.models.get_mut(&model_key) {
             entry.last_used = tick;
             if let Some(context) = entry.contexts.get_mut(&context_key) {
                 context.last_used = tick;
-                context.idle_since = Instant::now();
+                context.idle = Some(idle);
             }
         }
         if context_loaded {
@@ -715,10 +889,12 @@ impl<R: ModelRuntime> Worker<R> {
                 model,
                 _lease: lease,
                 last_used: tick,
+                idle: None,
             },
         );
         {
-            let mut status = lock_status(&self.status);
+            let mut shared = lock_status(&self.status);
+            let status = &mut shared.status;
             status.model_loads = status.model_loads.saturating_add(1);
         }
         self.refresh_resource_status();
@@ -745,6 +921,9 @@ impl<R: ModelRuntime> Worker<R> {
         {
             self.evict_lru_context(&model_key, log)?;
         }
+        if let Some(entry) = self.models.get_mut(&model_key) {
+            entry.idle = None;
+        }
         let context = {
             let entry = self
                 .models
@@ -757,6 +936,7 @@ impl<R: ModelRuntime> Worker<R> {
                 }
                 Err(error) => {
                     append_operation_log(log, "context_create", error.log());
+                    self.mark_model_idle_if_empty(&model_key)?;
                     check_job_gate(job)?;
                     if error.is_backend_lost() {
                         let outcome = resource_admission_error(&error).unwrap_or_else(|| {
@@ -779,6 +959,7 @@ impl<R: ModelRuntime> Worker<R> {
             }
         };
         let tick = self.next_tick();
+        let idle = self.new_idle_state_after_native_commit(self.options.context_idle_duration)?;
         self.models
             .get_mut(&model_key)
             .expect("model remains present after context creation")
@@ -788,11 +969,12 @@ impl<R: ModelRuntime> Worker<R> {
                 ContextEntry {
                     context,
                     last_used: tick,
-                    idle_since: Instant::now(),
+                    idle: Some(idle),
                 },
             );
         {
-            let mut status = lock_status(&self.status);
+            let mut shared = lock_status(&self.status);
+            let status = &mut shared.status;
             status.context_loads = status.context_loads.saturating_add(1);
         }
         self.refresh_resource_status();
@@ -800,6 +982,12 @@ impl<R: ModelRuntime> Worker<R> {
     }
 
     fn clear_context(&mut self, key: &ContextKey) -> Result<(), ModelManagerError> {
+        let previous_idle = self
+            .models
+            .get_mut(key.model_key())
+            .and_then(|entry| entry.contexts.get_mut(key))
+            .map(|context| context.idle.take());
+        self.refresh_resource_status();
         let outcome = {
             let Some(entry) = self.models.get_mut(key.model_key()) else {
                 return Ok(());
@@ -812,11 +1000,14 @@ impl<R: ModelRuntime> Worker<R> {
         };
         match outcome {
             Ok(_) => {
+                let idle =
+                    self.new_idle_state_after_native_commit(self.options.context_idle_duration)?;
                 self.models
                     .get_mut(key.model_key())
                     .and_then(|entry| entry.contexts.get_mut(key))
                     .expect("cleared context remains present")
-                    .idle_since = Instant::now();
+                    .idle = Some(idle);
+                self.refresh_resource_status();
                 Ok(())
             }
             Err(error) if error.is_backend_lost() => {
@@ -831,15 +1022,27 @@ impl<R: ModelRuntime> Worker<R> {
             Err(error) if error.is_resource_admission() => {
                 Err(resource_admission_error(&error).expect("resource failure was classified"))
             }
-            Err(error) => Err(ModelManagerError::ContextFailed {
-                context_digest: key.digest().to_string(),
-                message: error.message().to_string(),
-            }),
+            Err(error) => {
+                if let Some(previous_idle) = previous_idle
+                    && let Some(context) = self
+                        .models
+                        .get_mut(key.model_key())
+                        .and_then(|entry| entry.contexts.get_mut(key))
+                {
+                    context.idle = previous_idle;
+                }
+                self.refresh_resource_status();
+                Err(ModelManagerError::ContextFailed {
+                    context_digest: key.digest().to_string(),
+                    message: error.message().to_string(),
+                })
+            }
         }
     }
 
     fn release_context(&mut self, key: &ContextKey) -> Result<(), ModelManagerError> {
-        self.release_context_resource(key, None, false).map(|_| ())
+        self.release_context_resource(key, None, ReleaseAccounting::None)
+            .map(|_| ())
     }
 
     fn invalidate_context(
@@ -848,7 +1051,7 @@ impl<R: ModelRuntime> Worker<R> {
         context_key: &ContextKey,
         log: &mut String,
     ) -> Result<(), ModelManagerError> {
-        self.release_context_resource(context_key, Some(log), true)
+        self.release_context_resource(context_key, Some(log), ReleaseAccounting::None)
             .map(|_| ())
     }
 
@@ -856,7 +1059,7 @@ impl<R: ModelRuntime> Worker<R> {
         &mut self,
         key: &ContextKey,
         mut log: Option<&mut String>,
-        count_eviction: bool,
+        accounting: ReleaseAccounting,
     ) -> Result<bool, ModelManagerError> {
         let outcome = {
             let Some(entry) = self.models.get_mut(key.model_key()) else {
@@ -903,32 +1106,219 @@ impl<R: ModelRuntime> Worker<R> {
             .contexts
             .remove(key)
             .expect("acknowledged context remains present until removal");
-        if count_eviction {
-            let mut status = lock_status(&self.status);
-            status.context_evictions = status.context_evictions.saturating_add(1);
+        self.mark_model_idle_if_empty(key.model_key())?;
+        {
+            let mut shared = lock_status(&self.status);
+            let status = &mut shared.status;
+            match accounting {
+                ReleaseAccounting::Capacity => {
+                    status.context_evictions = status.context_evictions.saturating_add(1);
+                }
+                ReleaseAccounting::IdleContext => {
+                    status.automatic_context_unloads =
+                        status.automatic_context_unloads.saturating_add(1);
+                }
+                ReleaseAccounting::None
+                | ReleaseAccounting::IdleModel
+                | ReleaseAccounting::Manual
+                | ReleaseAccounting::Shutdown => {}
+            }
+            if let Some(reason) = release_reason(accounting) {
+                status.last_release_reason = Some(reason);
+                status.last_release_outcome = Some(ModelReleaseOutcome::Released);
+            }
         }
         self.refresh_resource_status();
         Ok(true)
     }
 
-    fn prune_expired_contexts(&mut self) -> Result<(), ModelManagerError> {
-        let now = Instant::now();
-        let retention = self.options.idle_context_retention;
-        let expired = self
+    fn new_idle_state(&self, duration: Duration) -> Result<IdleState, ModelManagerError> {
+        let now = self.clock.now();
+        let deadline =
+            now.checked_add(duration)
+                .ok_or_else(|| ModelManagerError::InvalidOptions {
+                    message: "manager residency deadline overflowed the monotonic clock"
+                        .to_string(),
+                })?;
+        Ok(IdleState {
+            _since: now,
+            deadline,
+            automatic_attempt_failed: false,
+        })
+    }
+
+    fn new_idle_state_after_native_commit(
+        &mut self,
+        duration: Duration,
+    ) -> Result<IdleState, ModelManagerError> {
+        match self.new_idle_state(duration) {
+            Ok(idle) => Ok(idle),
+            Err(error) => {
+                self.discard_generation();
+                Err(error)
+            }
+        }
+    }
+
+    fn mark_model_idle_if_empty(&mut self, key: &ModelKey) -> Result<(), ModelManagerError> {
+        let should_mark = self
             .models
+            .get(key)
+            .is_some_and(|entry| entry.contexts.is_empty() && entry.idle.is_none());
+        if should_mark {
+            let idle = self.new_idle_state_after_native_commit(self.options.model_idle_duration)?;
+            self.models
+                .get_mut(key)
+                .expect("empty model remains present")
+                .idle = Some(idle);
+        }
+        Ok(())
+    }
+
+    fn earliest_deadline(&self) -> Option<Instant> {
+        self.models
             .values()
             .flat_map(|entry| {
                 entry
                     .contexts
-                    .iter()
-                    .filter(|(_, context)| now.duration_since(context.idle_since) >= retention)
-                    .map(|(key, _)| key.clone())
+                    .values()
+                    .filter_map(|context| context.idle)
+                    .chain(entry.idle)
+            })
+            .filter(|idle| !idle.automatic_attempt_failed)
+            .map(|idle| idle.deadline)
+            .min()
+    }
+
+    fn release_due_resources(&mut self) {
+        let now = self.clock.now();
+        let mut contexts = self
+            .models
+            .values()
+            .flat_map(|entry| entry.contexts.iter())
+            .filter_map(|(key, context)| {
+                context
+                    .idle
+                    .filter(|idle| !idle.automatic_attempt_failed && idle.deadline <= now)
+                    .map(|idle| (idle.deadline, key.digest().to_string(), key.clone()))
             })
             .collect::<Vec<_>>();
-        for key in expired {
-            self.release_context_resource(&key, None, true)?;
+        contexts.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+        for (_, _, key) in contexts {
+            if let Err(error) =
+                self.release_context_resource(&key, None, ReleaseAccounting::IdleContext)
+            {
+                if let Some(context) = self
+                    .models
+                    .get_mut(key.model_key())
+                    .and_then(|entry| entry.contexts.get_mut(&key))
+                    && let Some(idle) = context.idle.as_mut()
+                {
+                    idle.automatic_attempt_failed = true;
+                }
+                self.record_release_failure(ModelReleaseReason::IdleContext, &error);
+            }
         }
-        Ok(())
+
+        let now = self.clock.now();
+        let mut models = self
+            .models
+            .iter()
+            .filter_map(|(key, entry)| {
+                entry
+                    .idle
+                    .filter(|idle| {
+                        entry.contexts.is_empty()
+                            && !idle.automatic_attempt_failed
+                            && idle.deadline <= now
+                    })
+                    .map(|idle| (idle.deadline, key.digest().to_string(), key.clone()))
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+        for (_, _, key) in models {
+            if let Err(error) =
+                self.release_model_resource(&key, None, ReleaseAccounting::IdleModel)
+            {
+                if let Some(idle) = self
+                    .models
+                    .get_mut(&key)
+                    .and_then(|entry| entry.idle.as_mut())
+                {
+                    idle.automatic_attempt_failed = true;
+                }
+                self.record_release_failure(ModelReleaseReason::IdleModel, &error);
+            }
+        }
+        self.refresh_resource_status();
+    }
+
+    fn record_release_failure(&self, reason: ModelReleaseReason, error: &ModelManagerError) {
+        let mut shared = lock_status(&self.status);
+        shared.status.last_release_reason = Some(reason);
+        shared.status.last_release_outcome =
+            Some(if matches!(error, ModelManagerError::BackendLost { .. }) {
+                ModelReleaseOutcome::BackendLost
+            } else {
+                ModelReleaseOutcome::Failed
+            });
+        shared.status.unload_failures = shared.status.unload_failures.saturating_add(1);
+    }
+
+    fn unload(
+        &mut self,
+        target: &ModelUnloadTarget,
+    ) -> Result<ModelUnloadResult, ModelManagerError> {
+        let model_keys = self
+            .models
+            .keys()
+            .filter(|key| target.matches_digest(key.digest()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut model_keys = model_keys;
+        model_keys.sort_by(|left, right| left.digest().cmp(right.digest()));
+        if model_keys.is_empty() {
+            return Ok(ModelUnloadResult::not_resident());
+        }
+        let matched_models = u32::try_from(model_keys.len()).unwrap_or(u32::MAX);
+        let mut released_contexts = 0_u32;
+        let mut released_models = 0_u32;
+        for model_key in model_keys {
+            let context_keys = self
+                .models
+                .get(&model_key)
+                .into_iter()
+                .flat_map(|entry| entry.contexts.keys().cloned())
+                .collect::<Vec<_>>();
+            let mut context_keys = context_keys;
+            context_keys.sort_by(|left, right| left.digest().cmp(right.digest()));
+            for context_key in context_keys {
+                match self.release_context_resource(&context_key, None, ReleaseAccounting::Manual) {
+                    Ok(true) => released_contexts = released_contexts.saturating_add(1),
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.record_release_failure(ModelReleaseReason::Manual, &error);
+                        return Err(error);
+                    }
+                }
+            }
+            match self.release_model_resource(&model_key, None, ReleaseAccounting::Manual) {
+                Ok(true) => released_models = released_models.saturating_add(1),
+                Ok(false) => {}
+                Err(error) => {
+                    self.record_release_failure(ModelReleaseReason::Manual, &error);
+                    return Err(error);
+                }
+            }
+        }
+        let mut shared = lock_status(&self.status);
+        shared.status.manual_unloads = shared.status.manual_unloads.saturating_add(1);
+        Ok(ModelUnloadResult {
+            matched_models,
+            released_models,
+            released_contexts,
+            outcome: ModelUnloadOutcome::Released,
+        })
     }
 
     fn evict_lru_model(&mut self, log: &mut String) -> Result<(), ModelManagerError> {
@@ -947,9 +1337,9 @@ impl<R: ModelRuntime> Worker<R> {
             .cloned()
             .collect::<Vec<_>>();
         for context_key in contexts {
-            self.release_context_resource(&context_key, Some(log), true)?;
+            self.release_context_resource(&context_key, Some(log), ReleaseAccounting::Capacity)?;
         }
-        self.release_model_resource(&key, Some(log), true)?;
+        self.release_model_resource(&key, Some(log), ReleaseAccounting::Capacity)?;
         Ok(())
     }
 
@@ -968,7 +1358,7 @@ impl<R: ModelRuntime> Worker<R> {
             .min_by_key(|(key, context)| (context.last_used, *key))
             .map(|(key, _)| key.clone())
             .expect("context limit requires an eviction candidate");
-        self.release_context_resource(&key, Some(log), true)?;
+        self.release_context_resource(&key, Some(log), ReleaseAccounting::Capacity)?;
         Ok(())
     }
 
@@ -976,7 +1366,7 @@ impl<R: ModelRuntime> Worker<R> {
         &mut self,
         key: &ModelKey,
         mut log: Option<&mut String>,
-        count_eviction: bool,
+        accounting: ReleaseAccounting,
     ) -> Result<bool, ModelManagerError> {
         let outcome = {
             let Some(entry) = self.models.get_mut(key) else {
@@ -1017,15 +1407,32 @@ impl<R: ModelRuntime> Worker<R> {
         self.models
             .remove(key)
             .expect("acknowledged model remains present until removal");
-        if count_eviction {
-            let mut status = lock_status(&self.status);
-            status.model_evictions = status.model_evictions.saturating_add(1);
+        {
+            let mut shared = lock_status(&self.status);
+            let status = &mut shared.status;
+            match accounting {
+                ReleaseAccounting::Capacity => {
+                    status.model_evictions = status.model_evictions.saturating_add(1);
+                }
+                ReleaseAccounting::IdleModel => {
+                    status.automatic_model_unloads =
+                        status.automatic_model_unloads.saturating_add(1);
+                }
+                ReleaseAccounting::None
+                | ReleaseAccounting::IdleContext
+                | ReleaseAccounting::Manual
+                | ReleaseAccounting::Shutdown => {}
+            }
+            if let Some(reason) = release_reason(accounting) {
+                status.last_release_reason = Some(reason);
+                status.last_release_outcome = Some(ModelReleaseOutcome::Released);
+            }
         }
         self.refresh_resource_status();
         Ok(true)
     }
 
-    fn release_all(&mut self) -> Result<(), ModelManagerError> {
+    fn release_all(&mut self, accounting: ReleaseAccounting) -> Result<(), ModelManagerError> {
         let model_keys = self.models.keys().cloned().collect::<Vec<_>>();
         for model_key in model_keys {
             let context_keys = self
@@ -1035,9 +1442,9 @@ impl<R: ModelRuntime> Worker<R> {
                 .flat_map(|entry| entry.contexts.keys().cloned())
                 .collect::<Vec<_>>();
             for context_key in context_keys {
-                self.release_context_resource(&context_key, None, false)?;
+                self.release_context_resource(&context_key, None, accounting)?;
             }
-            self.release_model_resource(&model_key, None, false)?;
+            self.release_model_resource(&model_key, None, accounting)?;
         }
         Ok(())
     }
@@ -1049,13 +1456,17 @@ impl<R: ModelRuntime> Worker<R> {
     }
 
     fn refresh_resource_status(&self) {
-        let mut status = lock_status(&self.status);
-        status.loaded_model_digests = self
+        let mut shared = lock_status(&self.status);
+        shared.resident_model_digests = self
             .models
             .keys()
             .map(|key| key.digest().to_string())
             .collect();
-        status.cached_contexts = self.models.values().map(|entry| entry.contexts.len()).sum();
+        shared.resident_model_digests.sort();
+        shared.status.resident_models = self.models.len();
+        shared.status.resident_contexts =
+            self.models.values().map(|entry| entry.contexts.len()).sum();
+        shared.next_residency_deadline = self.earliest_deadline();
     }
 
     fn next_tick(&mut self) -> u64 {
@@ -1209,9 +1620,20 @@ fn elapsed_millis(started: Instant) -> u64 {
 }
 
 fn lock_status(
-    status: &Mutex<ModelManagerStatus>,
-) -> std::sync::MutexGuard<'_, ModelManagerStatus> {
+    status: &Mutex<SharedManagerStatus>,
+) -> std::sync::MutexGuard<'_, SharedManagerStatus> {
     status
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn release_reason(accounting: ReleaseAccounting) -> Option<ModelReleaseReason> {
+    match accounting {
+        ReleaseAccounting::None => None,
+        ReleaseAccounting::Capacity => Some(ModelReleaseReason::Capacity),
+        ReleaseAccounting::IdleContext => Some(ModelReleaseReason::IdleContext),
+        ReleaseAccounting::IdleModel => Some(ModelReleaseReason::IdleModel),
+        ReleaseAccounting::Manual => Some(ModelReleaseReason::Manual),
+        ReleaseAccounting::Shutdown => Some(ModelReleaseReason::Shutdown),
+    }
 }

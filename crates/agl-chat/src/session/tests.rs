@@ -905,6 +905,7 @@ tool_call_format = "hermes_json"
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
         history: agl_runtime::AgentLibreHistoryConfig::default(),
         workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        inference: agl_runtime::AgentLibreInferenceConfig::default(),
         execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
     let catalog = full_tool_catalog();
@@ -1981,6 +1982,7 @@ fn resolves_default_paths_from_runtime_config() {
         logging: agl_runtime::AgentLibreLoggingConfig::default(),
         history: agl_runtime::AgentLibreHistoryConfig::default(),
         workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        inference: agl_runtime::AgentLibreInferenceConfig::default(),
         execution: agl_runtime::AgentLibreExecutionConfig::default(),
     };
     let options = InferenceOptions::default();

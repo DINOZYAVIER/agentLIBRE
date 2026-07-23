@@ -352,15 +352,29 @@ impl AgentLibreClient {
         }
     }
 
-    pub async fn inference_status(&self) -> Result<InferenceStatusEvent, ClientError> {
+    pub async fn inference_status(
+        &self,
+        request: InferenceStatusRequest,
+    ) -> Result<InferenceStatusEvent, ClientError> {
         match self
-            .request(DaemonRequestKind::InferenceStatus(
-                InferenceStatusRequest::default(),
-            ))
+            .request(DaemonRequestKind::InferenceStatus(request))
             .await?
         {
             DaemonEventKind::InferenceStatus(event) => Ok(event),
             other => Err(unexpected("inference_status", &other)),
+        }
+    }
+
+    pub async fn model_unload(
+        &self,
+        request: ModelUnloadRequest,
+    ) -> Result<ModelUnloadEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::ModelUnload(request))
+            .await?
+        {
+            DaemonEventKind::ModelUnload(event) => Ok(event),
+            other => Err(unexpected("model_unload", &other)),
         }
     }
 
@@ -1429,6 +1443,7 @@ enum Expected {
     HumanTerminalCommandAccepted,
     InferenceInventory,
     InferenceStatus,
+    ModelUnload,
     RunStream,
     PresentationStream,
     ExecutionStream,
@@ -1458,6 +1473,7 @@ impl Expected {
             DaemonRequestKind::RunSubscribe(_) if stream => Self::RunStream,
             DaemonRequestKind::InferenceInventory(_) if !stream => Self::InferenceInventory,
             DaemonRequestKind::InferenceStatus(_) if !stream => Self::InferenceStatus,
+            DaemonRequestKind::ModelUnload(_) if !stream => Self::ModelUnload,
             DaemonRequestKind::ExecutionList(_) if !stream => Self::ExecutionList,
             DaemonRequestKind::ExecutionStatus(_) if !stream => Self::ExecutionStatus,
             DaemonRequestKind::ExecutionRead(_) if !stream => Self::ExecutionRead,
@@ -1501,6 +1517,7 @@ impl Expected {
                     matches!(event, DaemonEventKind::InferenceInventory(_))
                 }
                 Self::InferenceStatus => matches!(event, DaemonEventKind::InferenceStatus(_)),
+                Self::ModelUnload => matches!(event, DaemonEventKind::ModelUnload(_)),
                 Self::ExecutionList => matches!(event, DaemonEventKind::ExecutionList(_)),
                 Self::ExecutionStatus => matches!(event, DaemonEventKind::ExecutionStatus(_)),
                 Self::ExecutionRead => matches!(event, DaemonEventKind::ExecutionRead(_)),
@@ -1842,6 +1859,7 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::RunSubscriptionFinished(_) => "run_subscription_finished",
         DaemonEventKind::InferenceInventory(_) => "inference_inventory",
         DaemonEventKind::InferenceStatus(_) => "inference_status",
+        DaemonEventKind::ModelUnload(_) => "model_unload",
         DaemonEventKind::CommandCatalog(_) => "command_catalog",
         DaemonEventKind::CommandSuggestions(_) => "command_suggestions",
         DaemonEventKind::ApplicationActionResult(_) => "application_action_result",
@@ -2082,7 +2100,7 @@ mod tests {
                 serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
             assert!(matches!(
                 request.kind,
-                DaemonRequestKind::InferenceStatus(InferenceStatusRequest {})
+                DaemonRequestKind::InferenceStatus(InferenceStatusRequest { detail: true })
             ));
             server
                 .send(
@@ -2096,6 +2114,17 @@ mod tests {
                             physical_device_id: Some("pci:0000:03:00.0".to_owned()),
                             reserved_bytes: 0,
                             cooldown_not_before_unix_ms: Some(9_000),
+                            resident_models: 1,
+                            resident_contexts: 2,
+                            next_residency_deadline_after_ms: Some(500),
+                            last_release_reason: Some(ModelReleaseReason::Manual),
+                            last_release_outcome: Some(ModelReleaseOutcome::Released),
+                            automatic_context_unloads: 3,
+                            automatic_model_unloads: 2,
+                            manual_unloads: 1,
+                            unload_failures: 0,
+                            resident_model_digests: Some(vec!["a".repeat(64)]),
+                            resident_model_digests_truncated: Some(false),
                         }),
                     ))
                     .unwrap(),
@@ -2107,13 +2136,119 @@ mod tests {
         let client = AgentLibreClient::from_test_stream(client_stream)
             .await
             .unwrap();
-        let status = client.inference_status().await.unwrap();
+        let status = client
+            .inference_status(InferenceStatusRequest { detail: true })
+            .await
+            .unwrap();
         assert_eq!(status.worker_build_id, "sha256:test-worker");
         assert_eq!(
             status.worker_state,
             ProtocolInferenceWorkerState::CoolingDown
         );
         assert_eq!(status.cooldown_not_before_unix_ms, Some(9_000));
+        assert_eq!(status.resident_models, 1);
+        assert_eq!(status.resident_model_digests, Some(vec!["a".repeat(64)]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_unload_routes_targets_results_and_busy_errors() {
+        for (target, response) in [
+            (
+                ModelUnloadTarget::All,
+                DaemonEventKind::ModelUnload(ModelUnloadEvent {
+                    matched_models: 2,
+                    released_models: 2,
+                    released_contexts: 3,
+                    outcome: ModelUnloadOutcome::Released,
+                }),
+            ),
+            (
+                ModelUnloadTarget::Digest {
+                    digest: "a".repeat(64),
+                },
+                DaemonEventKind::ModelUnload(ModelUnloadEvent {
+                    matched_models: 0,
+                    released_models: 0,
+                    released_contexts: 0,
+                    outcome: ModelUnloadOutcome::NotResident,
+                }),
+            ),
+        ] {
+            let (client_stream, server_stream) = UnixStream::pair().unwrap();
+            let expected_target = target.clone();
+            let server = tokio::spawn(async move {
+                let mut server =
+                    handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+                let request: DaemonRequest =
+                    serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+                assert_eq!(
+                    request.kind,
+                    DaemonRequestKind::ModelUnload(ModelUnloadRequest {
+                        target: expected_target,
+                    })
+                );
+                server
+                    .send(
+                        serde_json::to_string(&DaemonEvent::new(
+                            Some(request.request_id),
+                            response,
+                        ))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            });
+
+            let client = AgentLibreClient::from_test_stream(client_stream)
+                .await
+                .unwrap();
+            let event = client
+                .model_unload(ModelUnloadRequest { target })
+                .await
+                .unwrap();
+            assert!(matches!(
+                event.outcome,
+                ModelUnloadOutcome::Released | ModelUnloadOutcome::NotResident
+            ));
+            server.await.unwrap();
+        }
+
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
+            let request: DaemonRequest =
+                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
+            server
+                .send(
+                    serde_json::to_string(&DaemonEvent::new(
+                        Some(request.request_id),
+                        DaemonEventKind::Error(ProtocolError::new(
+                            ProtocolErrorCode::Busy,
+                            "active model cannot be unloaded",
+                            true,
+                        )),
+                    ))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = AgentLibreClient::from_test_stream(client_stream)
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .model_unload(ModelUnloadRequest {
+                    target: ModelUnloadTarget::All,
+                })
+                .await
+                .unwrap_err(),
+            ClientError::Protocol {
+                code: ProtocolErrorCode::Busy,
+                retryable: true,
+            }
+        );
         server.await.unwrap();
     }
 

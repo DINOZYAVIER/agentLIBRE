@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_chat::{
     ChatOptions, ChatTurnStatus, DEFAULT_MAX_OUTPUT_TOKENS, InferenceClientHandle,
@@ -21,10 +21,11 @@ use agl_inference::{
     InferenceDeviceInfo, InferenceDeviceKind, ModelManager, ModelManagerOptions, WorkerModelRuntime,
 };
 use agl_protocol::{
-    AssistantItemState, DaemonCapability, ProtocolInferenceDeviceKind,
-    ProtocolInferenceWorkerState, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
-    RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,
-    SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
+    AssistantItemState, DaemonCapability, InferenceStatusRequest, ModelReleaseOutcome,
+    ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState,
+    ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
+    SessionFinishReason, SessionFinishRequest, SessionOpenRequest, SessionPresentationItem,
+    SessionPresentationRequest,
 };
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
@@ -190,6 +191,7 @@ fn runtime_for_command_paths(
             logging: AgentLibreLoggingConfig::from_env(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         }),
         CliRuntimeProfile::FullBatch | CliRuntimeProfile::Interactive => {
@@ -1465,7 +1467,12 @@ fn process_local_model_manager(runtime: &AgentLibreRuntimeConfig) -> Result<Mode
         WorkerModelRuntime::discover(runtime.paths.inference_worker_temp_root())
             .context("failed to prepare isolated process-local inference worker")?;
     ModelManager::spawn(
-        ModelManagerOptions::default().with_model_lease_root(runtime.paths.model_lease_root()),
+        ModelManagerOptions::default()
+            .with_residency_durations(
+                Duration::from_secs(runtime.inference.residency.context_idle_seconds),
+                Duration::from_secs(runtime.inference.residency.model_idle_seconds),
+            )
+            .with_model_lease_root(runtime.paths.model_lease_root()),
         inference_runtime,
     )
     .context("failed to start process-local model manager")
@@ -1910,7 +1917,9 @@ fn run_daemon_status(
         Ok(client) => {
             let inspection = client.hello().and_then(|hello| {
                 async_runtime
-                    .block_on(client.inference_status())
+                    .block_on(client.inference_status(InferenceStatusRequest {
+                        detail: options.detail,
+                    }))
                     .map(|status| (hello, status))
             });
             match inspection {
@@ -1939,6 +1948,42 @@ fn run_daemon_status(
                         "accelerator_cooldown_not_before_unix_ms={}",
                         optional_status_value(status.cooldown_not_before_unix_ms)
                     );
+                    println!("resident_models={}", status.resident_models);
+                    println!("resident_contexts={}", status.resident_contexts);
+                    println!(
+                        "next_residency_deadline_after_ms={}",
+                        optional_status_value(status.next_residency_deadline_after_ms)
+                    );
+                    println!(
+                        "last_release_reason={}",
+                        status
+                            .last_release_reason
+                            .map(model_release_reason_label)
+                            .unwrap_or("none")
+                    );
+                    println!(
+                        "last_release_outcome={}",
+                        status
+                            .last_release_outcome
+                            .map(model_release_outcome_label)
+                            .unwrap_or("none")
+                    );
+                    println!(
+                        "automatic_context_unloads={}",
+                        status.automatic_context_unloads
+                    );
+                    println!("automatic_model_unloads={}", status.automatic_model_unloads);
+                    println!("manual_unloads={}", status.manual_unloads);
+                    println!("unload_failures={}", status.unload_failures);
+                    if let Some(digests) = status.resident_model_digests {
+                        for (index, digest) in digests.iter().enumerate() {
+                            println!("resident_model_digest.{index}={digest}");
+                        }
+                        println!(
+                            "resident_model_digests_truncated={}",
+                            status.resident_model_digests_truncated.unwrap_or(false)
+                        );
+                    }
                     Ok(())
                 }
                 Err(err) => {
@@ -1975,6 +2020,24 @@ fn run_daemon_status(
             );
             Ok(())
         }
+    }
+}
+
+fn model_release_reason_label(reason: ModelReleaseReason) -> &'static str {
+    match reason {
+        ModelReleaseReason::IdleContext => "idle_context",
+        ModelReleaseReason::IdleModel => "idle_model",
+        ModelReleaseReason::Manual => "manual",
+        ModelReleaseReason::Shutdown => "shutdown",
+        ModelReleaseReason::Capacity => "capacity",
+    }
+}
+
+fn model_release_outcome_label(outcome: ModelReleaseOutcome) -> &'static str {
+    match outcome {
+        ModelReleaseOutcome::Released => "released",
+        ModelReleaseOutcome::Failed => "failed",
+        ModelReleaseOutcome::BackendLost => "backend_lost",
     }
 }
 
@@ -2563,6 +2626,7 @@ mod tests {
             workspace: AgentLibreWorkspaceConfig {
                 root: Some(workspace),
             },
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         }
     }
@@ -2813,6 +2877,7 @@ tool_call_format = "gemma_function_call"
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
 
@@ -2972,6 +3037,7 @@ default = "coding"
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let mut options = RunOptions {
@@ -2998,6 +3064,7 @@ default = "coding"
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let mut options = RunOptions {
@@ -3045,6 +3112,7 @@ memory:
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let options = ServeOptions {
@@ -3077,6 +3145,7 @@ memory:
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
 

@@ -1641,22 +1641,36 @@ fn daemon_status_without_daemon_reports_not_running_without_model_config() {
 #[test]
 fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads() {
     let home = TempHome::new("status-worker-state");
-    let (output, request) = run_agl_with_fake_daemon(&home, &["daemon", "status"], |_| {
-        agl_protocol::DaemonEventKind::InferenceStatus(agl_protocol::InferenceStatusEvent {
-            worker_build_id: "sha256:test-worker".to_owned(),
-            worker_state: agl_protocol::ProtocolInferenceWorkerState::CoolingDown,
-            worker_pid: None,
-            launch_generation: None,
-            physical_device_id: Some("pci:0000:03:00.0".to_owned()),
-            reserved_bytes: 64 * 1024 * 1024,
-            cooldown_not_before_unix_ms: Some(12_345),
-        })
-    });
+    let (output, request) =
+        run_agl_with_fake_daemon(&home, &["daemon", "status", "--detail"], |_| {
+            agl_protocol::DaemonEventKind::InferenceStatus(agl_protocol::InferenceStatusEvent {
+                worker_build_id: "sha256:test-worker".to_owned(),
+                worker_state: agl_protocol::ProtocolInferenceWorkerState::CoolingDown,
+                worker_pid: None,
+                launch_generation: None,
+                physical_device_id: Some("pci:0000:03:00.0".to_owned()),
+                reserved_bytes: 64 * 1024 * 1024,
+                cooldown_not_before_unix_ms: Some(12_345),
+                resident_models: 2,
+                resident_contexts: 1,
+                next_residency_deadline_after_ms: Some(30_000),
+                last_release_reason: Some(agl_protocol::ModelReleaseReason::IdleContext),
+                last_release_outcome: Some(agl_protocol::ModelReleaseOutcome::Released),
+                automatic_context_unloads: 3,
+                automatic_model_unloads: 4,
+                manual_unloads: 5,
+                unload_failures: 1,
+                resident_model_digests: Some(vec!["a".repeat(64), "b".repeat(64)]),
+                resident_model_digests_truncated: Some(false),
+            })
+        });
 
-    assert!(matches!(
+    assert_eq!(
         request,
-        agl_protocol::DaemonRequestKind::InferenceStatus(_)
-    ));
+        agl_protocol::DaemonRequestKind::InferenceStatus(agl_protocol::InferenceStatusRequest {
+            detail: true
+        })
+    );
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=running");
@@ -1670,9 +1684,107 @@ fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads()
     assert_contains(&stdout, "accelerator_physical_device_id=pci:0000:03:00.0");
     assert_contains(&stdout, "accelerator_reserved_bytes=67108864");
     assert_contains(&stdout, "accelerator_cooldown_not_before_unix_ms=12345");
+    assert_contains(&stdout, "resident_models=2");
+    assert_contains(&stdout, "resident_contexts=1");
+    assert_contains(&stdout, "next_residency_deadline_after_ms=30000");
+    assert_contains(&stdout, "last_release_reason=idle_context");
+    assert_contains(&stdout, "last_release_outcome=released");
+    assert_contains(&stdout, "automatic_context_unloads=3");
+    assert_contains(&stdout, "automatic_model_unloads=4");
+    assert_contains(&stdout, "manual_unloads=5");
+    assert_contains(&stdout, "unload_failures=1");
+    assert_contains(
+        &stdout,
+        &format!("resident_model_digest.0={}", "a".repeat(64)),
+    );
+    assert_contains(
+        &stdout,
+        &format!("resident_model_digest.1={}", "b".repeat(64)),
+    );
+    assert_contains(&stdout, "resident_model_digests_truncated=false");
     assert!(!stdout.contains("model_path="));
     assert!(!stdout.contains("prompt="));
     assert!(!stdout.contains("backend_log="));
+}
+
+#[cfg(unix)]
+#[test]
+fn model_unload_reports_typed_success_and_sends_the_exact_digest() {
+    let home = TempHome::new("model-unload-success");
+    let digest = "a".repeat(64);
+    let digest_arg = digest.clone();
+    let (output, request) =
+        run_agl_with_fake_daemon(&home, &["model", "unload", "--digest", &digest_arg], |_| {
+            agl_protocol::DaemonEventKind::ModelUnload(agl_protocol::ModelUnloadEvent {
+                matched_models: 1,
+                released_models: 1,
+                released_contexts: 2,
+                outcome: agl_protocol::ModelUnloadOutcome::Released,
+            })
+        });
+
+    assert_eq!(
+        request,
+        agl_protocol::DaemonRequestKind::ModelUnload(agl_protocol::ModelUnloadRequest {
+            target: agl_protocol::ModelUnloadTarget::Digest { digest },
+        })
+    );
+    assert_success_no_stderr(&output);
+    let stdout = stdout(&output);
+    assert_contains(&stdout, "outcome=released");
+    assert_contains(&stdout, "matched_models=1");
+    assert_contains(&stdout, "released_models=1");
+    assert_contains(&stdout, "released_contexts=2");
+    assert!(!stdout.contains("model_path"));
+    assert!(!stdout.contains("prompt"));
+    assert!(!stdout.contains("backend_log"));
+}
+
+#[cfg(unix)]
+#[test]
+fn model_unload_maps_idempotent_busy_and_missing_daemon_outcomes() {
+    let home = TempHome::new("model-unload-not-resident");
+    let (output, request) = run_agl_with_fake_daemon(&home, &["model", "unload", "--all"], |_| {
+        agl_protocol::DaemonEventKind::ModelUnload(agl_protocol::ModelUnloadEvent {
+            matched_models: 0,
+            released_models: 0,
+            released_contexts: 0,
+            outcome: agl_protocol::ModelUnloadOutcome::NotResident,
+        })
+    });
+    assert!(matches!(
+        request,
+        agl_protocol::DaemonRequestKind::ModelUnload(agl_protocol::ModelUnloadRequest {
+            target: agl_protocol::ModelUnloadTarget::All,
+        })
+    ));
+    assert_success_no_stderr(&output);
+    assert_contains(&stdout(&output), "outcome=not_resident");
+
+    let busy_home = TempHome::new("model-unload-busy");
+    let (busy, _) = run_agl_with_fake_daemon(&busy_home, &["model", "unload", "--all"], |_| {
+        agl_protocol::DaemonEventKind::Error(agl_protocol::ProtocolError::new(
+            agl_protocol::ProtocolErrorCode::Busy,
+            "active model cannot be unloaded",
+            true,
+        ))
+    });
+    assert_failure(&busy);
+    assert_contains(&stderr(&busy), "daemon request failed with Busy");
+
+    let missing_home = TempHome::new("model-unload-missing-daemon");
+    let missing = run_agl(&[
+        "--home",
+        &missing_home.path_string(),
+        "model",
+        "unload",
+        "--all",
+    ]);
+    assert_failure(&missing);
+    assert_contains(
+        &stderr(&missing),
+        "start the user daemon before unloading resident models",
+    );
 }
 
 #[cfg(unix)]

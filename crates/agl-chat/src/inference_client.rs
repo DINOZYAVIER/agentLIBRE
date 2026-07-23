@@ -8,6 +8,7 @@ use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
     ContextKey, InferenceCancellation, InferenceDeviceInfo, InferenceJob, InferenceOutputSink,
     InferenceRequest, InferenceResponse, ModelManagerHandle, ModelManagerStatus,
+    ModelManagerStatusDetail, ModelUnloadResult, ModelUnloadTarget,
 };
 use anyhow::{Result, ensure};
 
@@ -62,6 +63,17 @@ pub trait InferenceClient: Send + Sync + 'static {
     ) -> Result<()>;
 
     fn status(&self) -> Result<ModelManagerStatus>;
+
+    fn status_with_detail(&self, detail: ModelManagerStatusDetail) -> Result<ModelManagerStatus> {
+        if detail != ModelManagerStatusDetail::Aggregate {
+            anyhow::bail!("detailed inference status is unavailable");
+        }
+        self.status()
+    }
+
+    fn unload(&self, _target: ModelUnloadTarget) -> Result<ModelUnloadResult> {
+        anyhow::bail!("model unload is unavailable")
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +114,17 @@ impl InferenceClientHandle {
 
     pub fn status(&self) -> Result<ModelManagerStatus> {
         self.inner.status()
+    }
+
+    pub fn status_with_detail(
+        &self,
+        detail: ModelManagerStatusDetail,
+    ) -> Result<ModelManagerStatus> {
+        self.inner.status_with_detail(detail)
+    }
+
+    pub fn unload(&self, target: ModelUnloadTarget) -> Result<ModelUnloadResult> {
+        self.inner.unload(target)
     }
 }
 
@@ -149,6 +172,14 @@ impl InferenceClient for ModelManagerHandle {
 
     fn status(&self) -> Result<ModelManagerStatus> {
         Ok(ModelManagerHandle::status(self)?)
+    }
+
+    fn status_with_detail(&self, detail: ModelManagerStatusDetail) -> Result<ModelManagerStatus> {
+        Ok(ModelManagerHandle::status_with_detail(self, detail)?)
+    }
+
+    fn unload(&self, target: ModelUnloadTarget) -> Result<ModelUnloadResult> {
+        Ok(ModelManagerHandle::unload(self, target)?)
     }
 }
 

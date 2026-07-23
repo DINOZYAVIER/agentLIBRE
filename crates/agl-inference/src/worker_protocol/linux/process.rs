@@ -576,26 +576,51 @@ impl WorkerProcess {
         Ok(status)
     }
 
-    pub fn shutdown(mut self, reason: ShutdownReason, timeout: Duration) -> Result<()> {
-        self.channel
-            .send(HostCommand::Shutdown(Shutdown::new(reason)))?;
-        match self.channel.receive_timeout(timeout)? {
-            WorkerEvent::ShutdownComplete(ShutdownComplete {}) => {}
-            _ => {
+    pub fn shutdown(self, reason: ShutdownReason, timeout: Duration) -> Result<()> {
+        self.shutdown_with_reap_status(reason, timeout).0
+    }
+
+    pub(crate) fn shutdown_with_reap_status(
+        mut self,
+        reason: ShutdownReason,
+        timeout: Duration,
+    ) -> (Result<()>, bool) {
+        let orderly = (|| {
+            self.channel
+                .send(HostCommand::Shutdown(Shutdown::new(reason)))?;
+            match self.channel.receive_timeout(timeout)? {
+                WorkerEvent::ShutdownComplete(ShutdownComplete {}) => {}
+                _ => {
+                    return Err(WorkerProtocolError::new(
+                        WorkerProtocolErrorCode::UnexpectedMessage,
+                        "inference worker sent an invalid response to shutdown",
+                    ));
+                }
+            }
+            let status = self.wait_for_exit(timeout)?;
+            if !status.success() {
                 return Err(WorkerProtocolError::new(
-                    WorkerProtocolErrorCode::UnexpectedMessage,
-                    "inference worker sent an invalid response to shutdown",
+                    WorkerProtocolErrorCode::SpawnFailed,
+                    format!("inference worker failed during orderly shutdown: {status}"),
                 ));
             }
+            Ok(())
+        })();
+        match orderly {
+            Ok(()) => (Ok(()), true),
+            Err(orderly_error) => match self.terminate_and_reap_with_timeout(timeout) {
+                Ok(()) => (Err(orderly_error), true),
+                Err(reap_error) => (
+                    Err(WorkerProtocolError::new(
+                        WorkerProtocolErrorCode::TimedOut,
+                        format!(
+                            "inference worker shutdown failed ({orderly_error}); forced reap also failed ({reap_error})"
+                        ),
+                    )),
+                    false,
+                ),
+            },
         }
-        let status = self.wait_for_exit(timeout)?;
-        if !status.success() {
-            return Err(WorkerProtocolError::new(
-                WorkerProtocolErrorCode::SpawnFailed,
-                format!("inference worker failed during orderly shutdown: {status}"),
-            ));
-        }
-        Ok(())
     }
 
     pub fn terminate_and_reap(&mut self) {

@@ -59,6 +59,20 @@ invocation. Changing the selected function, local inference profile, or model
 requires starting a new `agl run`, interactive session, `agl serve`, or
 `agl inference ...` process.
 
+## Inference residency
+
+`[inference.residency]` sets one global bounded policy for idle native
+resources. A reusable context is eligible for release after
+`context_idle_seconds`; once the final context release is acknowledged, its
+model is eligible after `model_idle_seconds`. Both values are integer seconds
+in `1..=86400`.
+
+```toml
+[inference.residency]
+context_idle_seconds = 900
+model_idle_seconds = 300
+```
+
 ## Process execution
 
 `[execution]` controls bounded process supervision. Defaults include eight

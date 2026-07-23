@@ -297,6 +297,7 @@ pub struct WorkerModelRuntime {
     device_selectors: BTreeMap<String, String>,
     supervisors: BTreeMap<String, WorkerSupervisorState>,
     session: Option<WorkerSession>,
+    reap_pending: bool,
     next_operation_id: u64,
     next_resource_id: u64,
     next_launch_generation: u64,
@@ -461,6 +462,7 @@ impl WorkerModelRuntime {
             device_selectors: BTreeMap::new(),
             supervisors: BTreeMap::new(),
             session: None,
+            reap_pending: false,
             next_operation_id: 1,
             next_resource_id: 1,
             next_launch_generation: 1,
@@ -559,9 +561,9 @@ impl WorkerModelRuntime {
         }
     }
 
-    fn release_all_device_authority_if_idle(&mut self) {
+    fn release_all_device_authority_if_idle(&mut self) -> Result<(), RuntimeFailure> {
         if self.live_models != 0 || self.live_contexts != 0 {
-            return;
+            return Ok(());
         }
         let has_reservations = self.admissions.values().any(|admission| {
             admission.ledger.status().map_or(true, |status| {
@@ -571,11 +573,12 @@ impl WorkerModelRuntime {
             })
         });
         if has_reservations {
-            return;
+            return Ok(());
         }
-        self.shutdown_session();
+        self.shutdown_session()?;
         self.device_leases.clear();
         self.refresh_status(None);
+        Ok(())
     }
 
     fn ensure_job_admission(&mut self, job: &InferenceJob) -> Result<(), RuntimeFailure> {
@@ -995,7 +998,9 @@ impl WorkerModelRuntime {
     fn missing_receipt_failure(&mut self, error: &RuntimeFailure) -> RuntimeFailure {
         let message = error.message().to_string();
         let log = error.log().to_string();
-        self.retire_session_without_cooldown();
+        if let Err(retirement) = self.retire_session_without_cooldown() {
+            return retirement;
+        }
         RuntimeFailure::reaped_resource_generation(
             "allocation_receipt_missing",
             format!("inference worker failed before its allocation receipt: {message}"),
@@ -1023,7 +1028,7 @@ impl WorkerModelRuntime {
         }
         self.acquire_inventory_device_authority()?;
         let result = self.worker_device_snapshot_with_authority();
-        self.retire_session_without_cooldown();
+        self.retire_session_without_cooldown()?;
         result
     }
 
@@ -1330,17 +1335,22 @@ impl WorkerModelRuntime {
         let mut detail = detail.into();
         let session = self.session.take();
         let Some(mut session) = session else {
-            self.release_admission_generation();
+            if !self.reap_pending {
+                self.release_admission_generation();
+            }
             self.refresh_status(None);
             return typed_worker_loss(kind, detail, "worker session was already absent");
         };
-        if let Err(error) = session
+        let proven_reaped = if let Err(error) = session
             .process
             .terminate_and_reap_with_timeout(self.options.shutdown_timeout)
         {
             kind = WorkerFailureKind::ReapTimedOut;
             detail.push_str(&format!("; bounded worker reap failed: {error}"));
-        }
+            false
+        } else {
+            true
+        };
         let private_log = session
             .process
             .private_stderr_evidence()
@@ -1355,11 +1365,15 @@ impl WorkerModelRuntime {
         };
         self.live_models = 0;
         self.live_contexts = 0;
-        match failed_physical_device_id.as_deref() {
-            Some(physical_device_id) => {
-                self.release_device_admission_generation(physical_device_id)
+        if proven_reaped {
+            match failed_physical_device_id.as_deref() {
+                Some(physical_device_id) => {
+                    self.release_device_admission_generation(physical_device_id)
+                }
+                None => self.release_admission_generation(),
             }
-            None => self.release_admission_generation(),
+        } else {
+            self.reap_pending = true;
         }
         let preferred = persistence.as_ref().map(|(physical, _)| physical.as_str());
         self.refresh_status(preferred);
@@ -1374,7 +1388,11 @@ impl WorkerModelRuntime {
             kind,
             detail,
             worker_loss_log(
-                "exact worker generation was killed and reaped",
+                if proven_reaped {
+                    "exact worker generation was killed and reaped"
+                } else {
+                    "exact worker generation was not proven reaped; device authority remains held"
+                },
                 &private_log,
             ),
         )
@@ -1447,6 +1465,13 @@ impl WorkerModelRuntime {
         configuration: SandboxConfiguration,
         physical_device_id: Option<String>,
     ) -> Result<(), RuntimeFailure> {
+        if self.reap_pending {
+            return Err(RuntimeFailure::reaped_resource_generation(
+                "inference_worker_reap_pending",
+                "a prior inference worker could not be proven reaped; refusing another worker start",
+                "",
+            ));
+        }
         let configuration = self.with_native_bundle_authority(configuration)?;
         match physical_device_id.as_deref() {
             Some(physical_device_id) if !self.device_leases.contains_key(physical_device_id) => {
@@ -1482,7 +1507,7 @@ impl WorkerModelRuntime {
                 "inference worker sandbox roots cannot change while remote resources are live",
             ));
         }
-        self.shutdown_session();
+        self.shutdown_session()?;
 
         if let Some(physical_device_id) = &physical_device_id {
             let now = unix_time_millis()?;
@@ -2220,8 +2245,9 @@ impl WorkerModelRuntime {
         self.record_session_failure(kind, message)
     }
 
-    fn retire_session_without_cooldown(&mut self) {
+    fn retire_session_without_cooldown(&mut self) -> Result<(), RuntimeFailure> {
         let mut retired_physical_device_id = None;
+        let mut reap_failure = None;
         if let Some(mut session) = self.session.take() {
             retired_physical_device_id = session.physical_device_id.clone();
             if let Some(physical) = &session.physical_device_id
@@ -2233,33 +2259,50 @@ impl WorkerModelRuntime {
                 }
                 let _ = supervisor.retire_worker(&session.identity);
             }
-            let _ = session
+            reap_failure = session
                 .process
-                .terminate_and_reap_with_timeout(self.options.shutdown_timeout);
+                .terminate_and_reap_with_timeout(self.options.shutdown_timeout)
+                .err();
         }
         self.live_models = 0;
         self.live_contexts = 0;
-        match retired_physical_device_id.as_deref() {
-            Some(physical_device_id) => {
-                self.release_device_admission_generation(physical_device_id)
+        if reap_failure.is_none() {
+            match retired_physical_device_id.as_deref() {
+                Some(physical_device_id) => {
+                    self.release_device_admission_generation(physical_device_id)
+                }
+                None => self.release_admission_generation(),
             }
-            None => self.release_admission_generation(),
+        } else {
+            self.reap_pending = true;
         }
         self.refresh_status(None);
+        match reap_failure {
+            Some(error) => Err(RuntimeFailure::reaped_resource_generation(
+                "inference_worker_reap_pending",
+                error.to_string(),
+                "worker generation was not proven reaped; device authority remains held",
+            )),
+            None => Ok(()),
+        }
     }
 
-    fn shutdown_session(&mut self) {
+    fn shutdown_session(&mut self) -> Result<(), RuntimeFailure> {
         let mut retired_physical_device_id = None;
+        let mut shutdown_failure = None;
+        let mut proven_reaped = true;
         if let Some(mut session) = self.session.take() {
             let physical = session.physical_device_id.clone();
             retired_physical_device_id = physical.clone();
             let identity = session.identity.clone();
             let active_attempt = session.active_attempt.take();
-            let shutdown = session
-                .process
-                .shutdown(ShutdownReason::HostShutdown, self.options.shutdown_timeout);
+            let (shutdown, reaped) = session.process.shutdown_with_reap_status(
+                ShutdownReason::HostShutdown,
+                self.options.shutdown_timeout,
+            );
+            proven_reaped = reaped;
             if let Some(physical) = &physical {
-                match shutdown {
+                match &shutdown {
                     Ok(()) => {
                         if let Some(supervisor) = self.supervisors.get_mut(physical) {
                             if let Some((_, attempt)) = active_attempt {
@@ -2281,20 +2324,42 @@ impl WorkerModelRuntime {
                     }
                 }
             }
+            shutdown_failure = shutdown.err();
         }
         self.live_models = 0;
         self.live_contexts = 0;
-        if let Some(physical_device_id) = retired_physical_device_id.as_deref() {
+        if proven_reaped && let Some(physical_device_id) = retired_physical_device_id.as_deref() {
             self.release_device_admission_generation(physical_device_id);
         }
+        if !proven_reaped {
+            self.reap_pending = true;
+        }
         self.refresh_status(None);
+        match shutdown_failure {
+            Some(error) => Err(RuntimeFailure::reaped_resource_generation(
+                if proven_reaped {
+                    "inference_worker_shutdown_failed"
+                } else {
+                    "inference_worker_reap_pending"
+                },
+                error.to_string(),
+                if proven_reaped {
+                    "worker generation was force-reaped after shutdown failure"
+                } else {
+                    "worker generation was not proven reaped; device authority remains held"
+                },
+            )),
+            None => Ok(()),
+        }
     }
 }
 
 impl Drop for WorkerModelRuntime {
     fn drop(&mut self) {
-        self.shutdown_session();
-        self.release_admission_generation();
+        let _ = self.shutdown_session();
+        if !self.reap_pending {
+            self.release_admission_generation();
+        }
     }
 }
 
@@ -2372,7 +2437,7 @@ impl ModelRuntime for WorkerModelRuntime {
                 let code = error.code().to_string();
                 let message = error.message().to_string();
                 let log = error.log().to_string();
-                self.retire_session_without_cooldown();
+                self.retire_session_without_cooldown()?;
                 return Err(RuntimeFailure::reaped_resource_generation(
                     code,
                     format!("model allocation failed before a worker receipt: {message}"),
@@ -2449,7 +2514,7 @@ impl ModelRuntime for WorkerModelRuntime {
                 let code = error.code().to_string();
                 let message = error.message().to_string();
                 let log = error.log().to_string();
-                self.retire_session_without_cooldown();
+                self.retire_session_without_cooldown()?;
                 return Err(RuntimeFailure::reaped_resource_generation(
                     code,
                     format!("context allocation failed before a worker receipt: {message}"),
@@ -2590,8 +2655,15 @@ impl ModelRuntime for WorkerModelRuntime {
             _ => Ok(None),
         })?;
         self.live_contexts = self.live_contexts.saturating_sub(1);
-        self.release_context_admission(&context.key_digest)?;
-        self.release_all_device_authority_if_idle();
+        if let Err(error) = self.release_context_admission(&context.key_digest) {
+            return Err(self.record_session_failure(
+                WorkerFailureKind::ProtocolViolation,
+                format!(
+                    "context release was acknowledged but host admission reconciliation failed: {error}"
+                ),
+            ));
+        }
+        self.release_all_device_authority_if_idle()?;
         Ok(result)
     }
 
@@ -2621,8 +2693,15 @@ impl ModelRuntime for WorkerModelRuntime {
             _ => Ok(None),
         })?;
         self.live_models = self.live_models.saturating_sub(1);
-        self.release_model_admission(&model.key_digest)?;
-        self.release_all_device_authority_if_idle();
+        if let Err(error) = self.release_model_admission(&model.key_digest) {
+            return Err(self.record_session_failure(
+                WorkerFailureKind::ProtocolViolation,
+                format!(
+                    "model release was acknowledged but host admission reconciliation failed: {error}"
+                ),
+            ));
+        }
+        self.release_all_device_authority_if_idle()?;
         Ok(result)
     }
 }

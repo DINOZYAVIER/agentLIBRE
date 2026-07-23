@@ -35,12 +35,14 @@ pub use device_lease::{
     PhysicalDeviceLeaseIdentity,
 };
 pub use model_manager::{
-    ContextKey, DEFAULT_IDLE_CONTEXT_RETENTION, DEFAULT_MAX_CONTEXTS_PER_MODEL,
-    DEFAULT_MAX_LOADED_MODELS, DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY, InferenceCancellation,
-    InferenceJob, InferenceJobScope, ModelGeneration, ModelKey, ModelManager, ModelManagerError,
-    ModelManagerHandle, ModelManagerOptions, ModelManagerStatus, ModelRuntime, ResolvedContentPart,
-    ResolvedMessageContent, ResolvedModelContent, RuntimeFailure, RuntimeFailureKind,
-    RuntimeOperation,
+    ContextKey, DEFAULT_CONTEXT_IDLE_DURATION, DEFAULT_MAX_CONTEXTS_PER_MODEL,
+    DEFAULT_MAX_LOADED_MODELS, DEFAULT_MODEL_IDLE_DURATION, DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY,
+    InferenceCancellation, InferenceJob, InferenceJobScope, MAX_STATUS_MODEL_DIGESTS,
+    ModelGeneration, ModelKey, ModelManager, ModelManagerError, ModelManagerHandle,
+    ModelManagerOptions, ModelManagerStatus, ModelManagerStatusDetail, ModelReleaseOutcome,
+    ModelReleaseReason, ModelRuntime, ModelUnloadOutcome, ModelUnloadResult, ModelUnloadTarget,
+    ResolvedContentPart, ResolvedMessageContent, ResolvedModelContent, RuntimeFailure,
+    RuntimeFailureKind, RuntimeOperation,
 };
 pub use output::{
     InferenceOutputEvent, InferenceOutputSink, InferenceProductStage, InferenceProgressUnit,
