@@ -5,9 +5,11 @@ mod tracing_setup;
 
 pub use config::{
     AgentLibreExecutionConfig, AgentLibreExecutionEnvironmentConfig, AgentLibreHistoryConfig,
-    AgentLibreLogFormat, AgentLibreLoggingConfig, AgentLibreRuntimeConfig,
-    AgentLibreShellExecutionConfig, AgentLibreStderrLogMode, AgentLibreWorkspaceConfig,
-    DEFAULT_RUNTIME_CONFIG_TOML, resolve_workspace_root_from, write_default_runtime_config,
+    AgentLibreInferenceConfig, AgentLibreInferenceResidencyConfig, AgentLibreLogFormat,
+    AgentLibreLoggingConfig, AgentLibreRuntimeConfig, AgentLibreShellExecutionConfig,
+    AgentLibreStderrLogMode, AgentLibreWorkspaceConfig, DEFAULT_CONTEXT_IDLE_SECONDS,
+    DEFAULT_MODEL_IDLE_SECONDS, DEFAULT_RUNTIME_CONFIG_TOML, MAX_INFERENCE_IDLE_SECONDS,
+    MIN_INFERENCE_IDLE_SECONDS, resolve_workspace_root_from, write_default_runtime_config,
 };
 pub use features::{
     DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP, RenderedRuntimeFeatureContext, RuntimeFeature,

@@ -515,6 +515,7 @@ tool_call_format = "hermes_json"
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
             history: agl_runtime::AgentLibreHistoryConfig::default(),
             workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let state = ScriptState {

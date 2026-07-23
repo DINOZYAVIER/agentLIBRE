@@ -6973,6 +6973,7 @@ mod tests {
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
             history: agl_runtime::AgentLibreHistoryConfig::default(),
             workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
         let options = InteractiveOptions {

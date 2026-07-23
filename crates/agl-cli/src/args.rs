@@ -69,6 +69,7 @@ mod help {
     pub(super) const MODEL_REMOVE: &str = cli_help!("model/remove");
     pub(super) const MODEL_STATUS: &str = cli_help!("model/status");
     pub(super) const MODEL_UNBIND: &str = cli_help!("model/unbind");
+    pub(super) const MODEL_UNLOAD: &str = cli_help!("model/unload");
     pub(super) const MODEL_VERIFY: &str = cli_help!("model/verify");
     pub(super) const NOTES: &str = cli_help!("notes");
     pub(super) const NOTES_ADD: &str = cli_help!("notes/add");
@@ -349,6 +350,9 @@ enum ModelCommands {
     /// Delete only removed, agentLIBRE-provenanced cache entries.
     #[command(long_about = help::MODEL_PRUNE)]
     Prune(ModelPruneArgs),
+    /// Release resident model and context resources from the running daemon.
+    #[command(long_about = help::MODEL_UNLOAD)]
+    Unload(ModelUnloadArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -740,6 +744,18 @@ struct ModelPruneArgs {
     /// Print one machine-readable report.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct ModelUnloadArgs {
+    /// Release all currently resident models and contexts.
+    #[arg(long)]
+    all: bool,
+
+    /// Release one resident model by its 64-character lowercase SHA-256 digest.
+    #[arg(long, value_name = "DIGEST", value_parser = parse_model_digest)]
+    digest: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1771,6 +1787,10 @@ struct StatusArgs {
     /// Unix socket path for the daemon.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
+
+    /// Include at most 16 lexically ordered resident model digests.
+    #[arg(long)]
+    detail: bool,
 }
 
 pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInvocation> {
@@ -1861,6 +1881,7 @@ impl Cli {
             Some(Commands::Daemon { command }) => match command {
                 DaemonCommands::Status(args) => CliCommand::DaemonStatus(DaemonStatusOptions {
                     socket_path: args.socket,
+                    detail: args.detail,
                 }),
             },
             None if self.prompt.is_empty()
@@ -1949,6 +1970,29 @@ fn model_command(command: ModelCommands) -> ModelCommand {
             dry_run: args.dry_run,
             json: args.json,
         }),
+        ModelCommands::Unload(args) => ModelCommand::Unload(ModelUnloadOptions {
+            target: if args.all {
+                agl_protocol::ModelUnloadTarget::All
+            } else {
+                agl_protocol::ModelUnloadTarget::Digest {
+                    digest: args
+                        .digest
+                        .expect("clap requires exactly one model unload target"),
+                }
+            },
+        }),
+    }
+}
+
+fn parse_model_digest(value: &str) -> std::result::Result<String, String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_string())
+    } else {
+        Err("digest must contain exactly 64 lowercase hexadecimal characters".to_string())
     }
 }
 

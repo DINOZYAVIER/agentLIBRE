@@ -2,10 +2,12 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
+use agl_client::AgentLibreClient;
 use agl_config::{
     InferencePresetRuntimeConfig, ModelId, load_inference_preset_from_str,
     load_model_bindings_or_empty, model_bindings_path,
 };
+use agl_daemon::default_socket_path;
 use agl_models::{
     ArtifactDownloadSpec, ArtifactFileDownloadSpec, HfSource, HfSourceKind, HubFileCandidate,
     InstallSource, ModelArtifactRole, ModelBindingPatch, ModelDownloadRequest, ModelDownloadWorker,
@@ -13,13 +15,14 @@ use agl_models::{
     ModelLifecycleService, ModelProgressEvent, SetupCheckpointStore, derive_hf_model_id,
     import_local_model,
 };
+use agl_protocol::{ModelUnloadOutcome, ModelUnloadRequest};
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::args::{
     ModelCommand, ModelImportOptions, ModelListOptions, ModelMutationOptions, ModelPruneOptions,
-    ModelPullOptions, ModelStatusOptions,
+    ModelPullOptions, ModelStatusOptions, ModelUnloadOptions,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -100,7 +103,40 @@ pub(crate) fn run_model(command: ModelCommand, runtime: &AgentLibreRuntimeConfig
         ModelCommand::Unbind(options) => run_unbind(options, runtime),
         ModelCommand::Remove(options) => run_remove(options, runtime),
         ModelCommand::Prune(options) => run_prune(options, runtime),
+        ModelCommand::Unload(options) => run_unload(options, runtime),
     }
+}
+
+fn run_unload(options: ModelUnloadOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    let socket_path = default_socket_path(&runtime.paths);
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build model unload runtime")?;
+    let client = async_runtime
+        .block_on(AgentLibreClient::connect(&socket_path))
+        .with_context(|| {
+            format!(
+                "agentLIBRE daemon is unavailable at {}; start the user daemon before unloading resident models",
+                socket_path.display()
+            )
+        })?;
+    let event = async_runtime
+        .block_on(client.model_unload(ModelUnloadRequest {
+            target: options.target,
+        }))
+        .context("model unload request failed")?;
+    println!(
+        "outcome={}",
+        match event.outcome {
+            ModelUnloadOutcome::Released => "released",
+            ModelUnloadOutcome::NotResident => "not_resident",
+        }
+    );
+    println!("matched_models={}", event.matched_models);
+    println!("released_models={}", event.released_models);
+    println!("released_contexts={}", event.released_contexts);
+    Ok(())
 }
 
 fn run_pull(mut options: ModelPullOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {

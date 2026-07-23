@@ -16,17 +16,20 @@ use agl_cron::{CronJob, CronJobDraft, CronRepository, CronRunStatus, CronTargetK
 use agl_ids::{ExecutionId, MessageId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::{
     InferenceFinishReason, InferenceOutputEvent, InferenceProductStage, InferenceProgressUnit,
-    InferenceResponse, InferenceResponseMetadata, InferenceStageEvent, ModelManagerStatus,
-    OutputDelivery, WorkerRuntimeStatusHandle,
+    InferenceResponse, InferenceResponseMetadata, InferenceStageEvent, ModelManagerError,
+    ModelManagerStatus, ModelManagerStatusDetail, ModelUnloadOutcome as ManagerUnloadOutcome,
+    ModelUnloadResult, ModelUnloadTarget as ManagerUnloadTarget, OutputDelivery,
+    WorkerRuntimeStatusHandle,
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionListRequest, ExecutionReadRequest, ExecutionStatusRequest, HelloRequest,
-    InferenceInventoryRequest, InferenceStatusRequest, PROTOCOL_VERSION, ProtocolErrorCode,
-    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
-    RunBudgetRequest, RunCancelRequest, RunEventsRequest, RunStatusRequest, RunSubmitRequest,
-    RunTreeRequest, SessionFinishReason, SessionFinishRequest, SessionListRequest,
-    SessionOpenRequest, SessionStatus, SessionStatusRequest, SetupSmokeSessionOpenRequest,
+    InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest, ModelUnloadTarget,
+    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolInferenceWorkerState, ProtocolRunKind,
+    ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest, RunEventsRequest,
+    RunStatusRequest, RunSubmitRequest, RunTreeRequest, SessionFinishReason, SessionFinishRequest,
+    SessionListRequest, SessionOpenRequest, SessionStatus, SessionStatusRequest,
+    SetupSmokeSessionOpenRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -85,6 +88,7 @@ tool_call_format = "hermes_json"
                 logging: AgentLibreLoggingConfig::from_env(),
                 history: AgentLibreHistoryConfig::default(),
                 workspace: AgentLibreWorkspaceConfig::default(),
+                inference: agl_runtime::AgentLibreInferenceConfig::default(),
                 execution: agl_runtime::AgentLibreExecutionConfig::default(),
             },
             inference: InferenceOptions {
@@ -111,6 +115,9 @@ struct InferenceControl {
     emit_scripted_progress: AtomicBool,
     requests: Mutex<Vec<agl_inference::InferenceRequest>>,
     configs: Mutex<Vec<ResolvedInferenceConfig>>,
+    manager_status: Mutex<Option<ModelManagerStatus>>,
+    unload_result: Mutex<Option<Result<ModelUnloadResult, ModelManagerError>>>,
+    unload_targets: Mutex<Vec<ManagerUnloadTarget>>,
 }
 
 struct InferenceUnblockGuard(Arc<InferenceControl>);
@@ -297,7 +304,38 @@ impl InferenceClient for ControlledInferenceClient {
     }
 
     fn status(&self) -> anyhow::Result<ModelManagerStatus> {
-        Ok(ModelManagerStatus::default())
+        Ok(self
+            .control
+            .manager_status
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default())
+    }
+
+    fn status_with_detail(
+        &self,
+        _detail: ModelManagerStatusDetail,
+    ) -> anyhow::Result<ModelManagerStatus> {
+        self.status()
+    }
+
+    fn unload(&self, target: ManagerUnloadTarget) -> anyhow::Result<ModelUnloadResult> {
+        self.control.unload_targets.lock().unwrap().push(target);
+        self.control
+            .unload_result
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or({
+                Ok(ModelUnloadResult {
+                    matched_models: 0,
+                    released_models: 0,
+                    released_contexts: 0,
+                    outcome: ManagerUnloadOutcome::NotResident,
+                })
+            })
+            .map_err(Into::into)
     }
 
     fn device_inventory(&self) -> anyhow::Result<Vec<agl_inference::InferenceDeviceInfo>> {
@@ -1014,6 +1052,7 @@ fn hello_declares_strict_run_capabilities() {
                     .capabilities
                     .contains(&DaemonCapability::InferenceStatus)
             );
+            assert!(hello.capabilities.contains(&DaemonCapability::ModelUnload));
         }
         other => panic!("unexpected hello event: {other:?}"),
     }
@@ -1051,6 +1090,104 @@ fn inference_status_uses_the_captured_worker_status_handle() {
             assert_eq!(status.cooldown_not_before_unix_ms, None);
         }
         other => panic!("unexpected inference status event: {other:?}"),
+    }
+}
+
+#[test]
+fn inference_status_joins_explicit_manager_detail_without_private_payloads() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    *control.manager_status.lock().unwrap() = Some(ModelManagerStatus {
+        resident_models: 2,
+        resident_contexts: 3,
+        next_residency_deadline_after_ms: Some(1_234),
+        resident_model_digests: vec!["0".repeat(64), "1".repeat(64)],
+        resident_model_digests_truncated: true,
+        automatic_context_unloads: 4,
+        automatic_model_unloads: 5,
+        manual_unloads: 6,
+        unload_failures: 7,
+        ..ModelManagerStatus::default()
+    });
+    let mut state = daemon(&test, control);
+
+    let event = state.handle_request(request(DaemonRequestKind::InferenceStatus(
+        InferenceStatusRequest { detail: true },
+    )));
+    match event.kind {
+        DaemonEventKind::InferenceStatus(status) => {
+            assert_eq!(status.resident_models, 2);
+            assert_eq!(status.resident_contexts, 3);
+            assert_eq!(status.next_residency_deadline_after_ms, Some(1_234));
+            assert_eq!(
+                status.resident_model_digests,
+                Some(vec!["0".repeat(64), "1".repeat(64)])
+            );
+            assert_eq!(status.resident_model_digests_truncated, Some(true));
+            assert_eq!(status.automatic_context_unloads, 4);
+            assert_eq!(status.automatic_model_unloads, 5);
+            assert_eq!(status.manual_unloads, 6);
+            assert_eq!(status.unload_failures, 7);
+            let wire = serde_json::to_string(&status).unwrap();
+            assert!(!wire.contains("model_path"));
+            assert!(!wire.contains("prompt"));
+            assert!(!wire.contains("backend_log"));
+        }
+        other => panic!("unexpected inference status event: {other:?}"),
+    }
+}
+
+#[test]
+fn model_unload_dispatches_typed_targets_results_and_busy() {
+    let test = TestRuntime::new();
+    let control = Arc::new(InferenceControl::default());
+    *control.unload_result.lock().unwrap() = Some(Ok(ModelUnloadResult {
+        matched_models: 1,
+        released_models: 1,
+        released_contexts: 2,
+        outcome: ManagerUnloadOutcome::Released,
+    }));
+    let mut state = daemon(&test, Arc::clone(&control));
+    let digest = "a".repeat(64);
+
+    let event = state.handle_request(request(DaemonRequestKind::ModelUnload(
+        ModelUnloadRequest {
+            target: ModelUnloadTarget::Digest {
+                digest: digest.clone(),
+            },
+        },
+    )));
+    match event.kind {
+        DaemonEventKind::ModelUnload(result) => {
+            assert_eq!(result.matched_models, 1);
+            assert_eq!(result.released_models, 1);
+            assert_eq!(result.released_contexts, 2);
+            assert_eq!(result.outcome, agl_protocol::ModelUnloadOutcome::Released);
+        }
+        other => panic!("unexpected model unload event: {other:?}"),
+    }
+    assert_eq!(
+        control.unload_targets.lock().unwrap().as_slice(),
+        [ManagerUnloadTarget::Digest(digest)]
+    );
+
+    *control.unload_result.lock().unwrap() = Some(Ok(ModelUnloadResult {
+        matched_models: 0,
+        released_models: 0,
+        released_contexts: 0,
+        outcome: ManagerUnloadOutcome::Busy,
+    }));
+    let event = state.handle_request(request(DaemonRequestKind::ModelUnload(
+        ModelUnloadRequest {
+            target: ModelUnloadTarget::All,
+        },
+    )));
+    match event.kind {
+        DaemonEventKind::Error(error) => {
+            assert_eq!(error.code, ProtocolErrorCode::Busy);
+            assert!(error.retryable);
+        }
+        other => panic!("unexpected busy event: {other:?}"),
     }
 }
 

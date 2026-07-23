@@ -107,6 +107,7 @@ pub enum DaemonRequestKind {
     RunSubscribe(RunSubscribeRequest),
     InferenceInventory(InferenceInventoryRequest),
     InferenceStatus(InferenceStatusRequest),
+    ModelUnload(ModelUnloadRequest),
     CommandCatalog(CommandCatalogRequest),
     CommandSuggestions(CommandSuggestionsRequest),
     ApplicationAction(ApplicationActionRequest),
@@ -245,6 +246,7 @@ pub enum DaemonEventKind {
     RunSubscriptionFinished(RunSubscriptionFinishedEvent),
     InferenceInventory(InferenceInventoryEvent),
     InferenceStatus(InferenceStatusEvent),
+    ModelUnload(ModelUnloadEvent),
     CommandCatalog(CommandCatalogEvent),
     CommandSuggestions(CommandSuggestionsEvent),
     ApplicationActionResult(ApplicationActionResultEvent),
@@ -327,7 +329,9 @@ pub struct InferenceInventoryEvent {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InferenceStatusRequest {}
+pub struct InferenceStatusRequest {
+    pub detail: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -337,6 +341,24 @@ pub enum ProtocolInferenceWorkerState {
     Ready,
     Busy,
     CoolingDown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReleaseReason {
+    IdleContext,
+    IdleModel,
+    Manual,
+    Shutdown,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReleaseOutcome {
+    Released,
+    Failed,
+    BackendLost,
 }
 
 /// Safe aggregate status for the daemon-owned native inference boundary.
@@ -358,6 +380,51 @@ pub struct InferenceStatusEvent {
     pub reserved_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_not_before_unix_ms: Option<u64>,
+    pub resident_models: u32,
+    pub resident_contexts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_residency_deadline_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_release_reason: Option<ModelReleaseReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_release_outcome: Option<ModelReleaseOutcome>,
+    pub automatic_context_unloads: u64,
+    pub automatic_model_unloads: u64,
+    pub manual_unloads: u64,
+    pub unload_failures: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resident_model_digests: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resident_model_digests_truncated: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelUnloadTarget {
+    All,
+    Digest { digest: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelUnloadRequest {
+    pub target: ModelUnloadTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUnloadOutcome {
+    Released,
+    NotResident,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelUnloadEvent {
+    pub matched_models: u32,
+    pub released_models: u32,
+    pub released_contexts: u32,
+    pub outcome: ModelUnloadOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -380,6 +447,7 @@ pub enum DaemonCapability {
     RunSubscribe,
     InferenceInventory,
     InferenceStatus,
+    ModelUnload,
     ExecutionList,
     ExecutionControl,
     ExecutionAttach,
@@ -1362,6 +1430,78 @@ mod tests {
         assert_eq!(value["kind"], "error");
         assert_eq!(value["payload"]["code"], "unsupported_protocol_version");
         assert_eq!(value["payload"]["retryable"], false);
+    }
+
+    #[test]
+    fn inference_status_detail_request_and_private_default_shape_round_trip() {
+        let request = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::InferenceStatus(InferenceStatusRequest { detail: true }),
+        );
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DaemonRequest>(&encoded).unwrap(),
+            request
+        );
+        assert!(encoded.contains("\"detail\":true"));
+
+        let event = DaemonEvent::new(
+            Some(request_id()),
+            DaemonEventKind::InferenceStatus(InferenceStatusEvent {
+                worker_build_id: "sha256:worker".to_owned(),
+                worker_state: ProtocolInferenceWorkerState::Cold,
+                worker_pid: None,
+                launch_generation: None,
+                physical_device_id: None,
+                reserved_bytes: 0,
+                cooldown_not_before_unix_ms: None,
+                resident_models: 0,
+                resident_contexts: 0,
+                next_residency_deadline_after_ms: None,
+                last_release_reason: None,
+                last_release_outcome: None,
+                automatic_context_unloads: 0,
+                automatic_model_unloads: 0,
+                manual_unloads: 0,
+                unload_failures: 0,
+                resident_model_digests: None,
+                resident_model_digests_truncated: None,
+            }),
+        );
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DaemonEvent>(&encoded).unwrap(),
+            event
+        );
+        assert!(!encoded.contains("resident_model_digests"));
+        assert!(!encoded.contains("model_path"));
+        assert!(!encoded.contains("prompt"));
+        assert!(!encoded.contains("backend_log"));
+
+        let missing_detail = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "request_id": REQUEST_ID,
+            "kind": "inference_status",
+            "payload": {}
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(missing_detail).is_err());
+    }
+
+    #[test]
+    fn model_unload_rejects_unknown_target_fields() {
+        let value = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "request_id": REQUEST_ID,
+            "kind": "model_unload",
+            "payload": {
+                "target": {
+                    "kind": "digest",
+                    "digest": "a".repeat(64),
+                    "path": "/private/model.gguf"
+                }
+            }
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(value).is_err());
     }
 
     #[test]

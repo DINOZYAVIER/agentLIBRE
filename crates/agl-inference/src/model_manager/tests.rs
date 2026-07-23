@@ -28,6 +28,42 @@ const RUN_ID: &str = "run_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31";
 const TURN_ID: &str = "turn_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b32";
 static ROOT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Clone)]
+struct ManualManagerClock(Arc<Mutex<Instant>>);
+
+impl ManualManagerClock {
+    fn new(now: Instant) -> Self {
+        Self(Arc::new(Mutex::new(now)))
+    }
+
+    fn advance(&self, duration: Duration) {
+        let mut now = self.0.lock().unwrap();
+        *now = now.checked_add(duration).unwrap();
+    }
+}
+
+fn latest_whole_second_instant() -> Instant {
+    let now = Instant::now();
+    let mut low = 0_u64;
+    let mut high = u64::MAX;
+    while low < high {
+        let middle = low + (high - low) / 2 + 1;
+        if now.checked_add(Duration::from_secs(middle)).is_some() {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    now.checked_add(Duration::from_secs(low))
+        .expect("the zero duration is always representable")
+}
+
+impl super::queue::ManagerClock for ManualManagerClock {
+    fn now(&self) -> Instant {
+        *self.0.lock().unwrap()
+    }
+}
+
 #[derive(Default)]
 struct FakeState {
     operations: Vec<String>,
@@ -303,6 +339,14 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
     assert_eq!(ModelManagerOptions::default().max_loaded_models, 1);
     assert_eq!(ModelManagerOptions::default().max_contexts_per_model, 2);
     assert_eq!(ModelManagerOptions::default().queue_capacity, 32);
+    assert_eq!(
+        ModelManagerOptions::default().context_idle_duration,
+        Duration::from_secs(900)
+    );
+    assert_eq!(
+        ModelManagerOptions::default().model_idle_duration,
+        Duration::from_secs(300)
+    );
     assert!(ModelManagerOptions::default().model_lease_root.is_none());
     assert!(
         ModelManagerOptions {
@@ -312,6 +356,33 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
         .validate()
         .is_err()
     );
+    for duration in [Duration::ZERO, Duration::from_secs(86_401)] {
+        assert!(
+            ModelManagerOptions {
+                context_idle_duration: duration,
+                ..ModelManagerOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ModelManagerOptions {
+                model_idle_duration: duration,
+                ..ModelManagerOptions::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    for duration in [Duration::from_secs(1), Duration::from_secs(86_400)] {
+        ModelManagerOptions {
+            context_idle_duration: duration,
+            model_idle_duration: duration,
+            ..ModelManagerOptions::default()
+        }
+        .validate()
+        .unwrap();
+    }
 
     let first = config("one.gguf");
     let mut context_variant = first.clone();
@@ -339,6 +410,49 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
         ModelKey::from_config(&second).unwrap()
     );
     assert!(ContextKey::for_conversation(&first, " ").is_err());
+}
+
+#[test]
+fn checked_residency_deadline_overflow_is_typed_before_native_context_allocation() {
+    let root = temp_root("residency-deadline-overflow");
+    let control = Arc::new(FakeControl::default());
+    let clock = Arc::new(ManualManagerClock::new(latest_whole_second_instant()));
+    let mut manager = ModelManager::spawn_for_test(
+        ModelManagerOptions {
+            context_idle_duration: Duration::from_secs(1),
+            model_idle_duration: Duration::from_secs(1),
+            ..ModelManagerOptions::default()
+        },
+        FakeRuntime {
+            control: Arc::clone(&control),
+        },
+        clock,
+    )
+    .unwrap();
+    let handle = manager.handle();
+    let config = config("residency-deadline-overflow.gguf");
+    let model_key = ModelKey::from_config(&config).unwrap();
+
+    let error = handle
+        .generate(job(&root, &config, "overflow", 1))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ModelManagerError::InvalidOptions { ref message }
+            if message == "manager residency deadline overflowed the monotonic clock"
+    ));
+    wait_for_residency(&handle, 0, 0);
+    let operations = control.operations();
+    assert!(operations.contains(&format!("load_model:{}", model_key.digest())));
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation.starts_with("create_context:"))
+    );
+    assert!(operations.contains(&format!("release_model:{}", model_key.digest())));
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -538,7 +652,7 @@ fn manager_reuses_weights_and_keeps_conversation_evidence_isolated() {
     let status = handle.status().unwrap();
     assert_eq!(status.model_loads, 1);
     assert_eq!(status.context_loads, 2);
-    assert_eq!(status.cached_contexts, 2);
+    assert_eq!(status.resident_contexts, 2);
     assert_eq!(status.completed_jobs, 3);
 
     let first_log = runtime_log(&root, 1);
@@ -967,11 +1081,20 @@ fn shutdown_closes_full_queue_out_of_band_and_releases_all_waiters() {
 fn clear_release_idle_retention_and_shutdown_are_observable() {
     let root = temp_root("lifecycle");
     let control = Arc::new(FakeControl::default());
+    let clock = Arc::new(ManualManagerClock::new(Instant::now()));
     let options = ModelManagerOptions {
-        idle_context_retention: Duration::from_millis(15),
+        context_idle_duration: Duration::from_secs(1),
+        model_idle_duration: Duration::from_secs(1),
         ..ModelManagerOptions::default()
     };
-    let mut manager = manager(options, Arc::clone(&control));
+    let mut manager = ModelManager::spawn_for_test(
+        options,
+        FakeRuntime {
+            control: Arc::clone(&control),
+        },
+        clock.clone(),
+    )
+    .unwrap();
     let handle = manager.handle();
     let config = config("lifecycle.gguf");
     let key_a = ContextKey::for_conversation(&config, "a").unwrap();
@@ -985,17 +1108,215 @@ fn clear_release_idle_retention_and_shutdown_are_observable() {
             .any(|operation| operation == &format!("clear_context:{}", key_a.digest()))
     );
     handle.release_context(&key_a).unwrap();
-    assert_eq!(handle.status().unwrap().cached_contexts, 0);
+    assert_eq!(handle.status().unwrap().resident_contexts, 0);
 
     handle.generate(job(&root, &config, "a", 2)).unwrap();
-    thread::sleep(Duration::from_millis(25));
-    handle.generate(job(&root, &config, "b", 3)).unwrap();
+    clock.advance(Duration::from_secs(1));
+    handle.wake_for_test();
+    wait_for_residency(&handle, 1, 0);
     let status = handle.status().unwrap();
-    assert_eq!(status.cached_contexts, 1);
-    assert!(status.context_evictions >= 1);
+    assert_eq!(status.automatic_context_unloads, 1);
+    assert_eq!(status.automatic_model_unloads, 0);
+
+    clock.advance(Duration::from_secs(1));
+    handle.wake_for_test();
+    wait_for_residency(&handle, 0, 0);
+    let status = handle.status().unwrap();
+    assert_eq!(status.automatic_model_unloads, 1);
 
     manager.shutdown().unwrap();
     wait_for_unavailable(&handle);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn manual_unload_is_idempotent_ordered_and_bounded_in_status() {
+    let root = temp_root("manual-unload");
+    let control = Arc::new(FakeControl::default());
+    let options = ModelManagerOptions {
+        max_contexts_per_model: 3,
+        ..ModelManagerOptions::default()
+    };
+    let mut manager = manager(options, Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("manual-unload.gguf");
+    let model_key = ModelKey::from_config(&config).unwrap();
+    let context_a = ContextKey::for_conversation(&config, "a").unwrap();
+    let context_b = ContextKey::for_conversation(&config, "b").unwrap();
+
+    handle.generate(job(&root, &config, "b", 1)).unwrap();
+    handle.generate(job(&root, &config, "a", 2)).unwrap();
+
+    let aggregate = handle.status().unwrap();
+    assert_eq!(aggregate.resident_models, 1);
+    assert_eq!(aggregate.resident_contexts, 2);
+    assert!(aggregate.resident_model_digests.is_empty());
+    let detail = handle
+        .status_with_detail(ModelManagerStatusDetail::ModelDigests)
+        .unwrap();
+    assert_eq!(detail.resident_model_digests, [model_key.digest()]);
+    assert!(!detail.resident_model_digests_truncated);
+
+    let result = handle
+        .unload(ModelUnloadTarget::digest(model_key.digest()).unwrap())
+        .unwrap();
+    assert_eq!(
+        result,
+        ModelUnloadResult {
+            matched_models: 1,
+            released_models: 1,
+            released_contexts: 2,
+            outcome: ModelUnloadOutcome::Released,
+        }
+    );
+    let operations = control.operations();
+    let release_a = operations
+        .iter()
+        .position(|operation| operation == &format!("release_context:{}", context_a.digest()))
+        .unwrap();
+    let release_b = operations
+        .iter()
+        .position(|operation| operation == &format!("release_context:{}", context_b.digest()))
+        .unwrap();
+    let release_model = operations
+        .iter()
+        .position(|operation| operation == &format!("release_model:{}", model_key.digest()))
+        .unwrap();
+    let expected_context_order = if context_a.digest() < context_b.digest() {
+        (release_a, release_b)
+    } else {
+        (release_b, release_a)
+    };
+    assert!(expected_context_order.0 < expected_context_order.1);
+    assert!(expected_context_order.1 < release_model);
+
+    let status = handle.status().unwrap();
+    assert_eq!(status.resident_models, 0);
+    assert_eq!(status.resident_contexts, 0);
+    assert_eq!(status.manual_unloads, 1);
+    assert_eq!(status.last_release_reason, Some(ModelReleaseReason::Manual));
+    assert_eq!(
+        status.last_release_outcome,
+        Some(ModelReleaseOutcome::Released)
+    );
+    assert_eq!(
+        handle.unload(ModelUnloadTarget::All).unwrap(),
+        ModelUnloadResult::not_resident()
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn matching_manual_unload_is_busy_while_generation_owns_the_model() {
+    let root = temp_root("manual-unload-busy");
+    let control = Arc::new(FakeControl::default());
+    control.set_blocked(true);
+    let mut manager = manager(ModelManagerOptions::default(), Arc::clone(&control));
+    let handle = manager.handle();
+    let config = config("manual-unload-busy.gguf");
+    let model_key = ModelKey::from_config(&config).unwrap();
+    let generation_handle = handle.clone();
+    let generation_root = root.clone();
+    let generation_config = config.clone();
+    let generation = thread::spawn(move || {
+        generation_handle.generate(job(&generation_root, &generation_config, "active", 1))
+    });
+    control.wait_for_started(1);
+
+    assert_eq!(
+        handle
+            .unload(ModelUnloadTarget::digest(model_key.digest()).unwrap())
+            .unwrap(),
+        ModelUnloadResult::busy()
+    );
+    assert_eq!(
+        handle.unload(ModelUnloadTarget::All).unwrap(),
+        ModelUnloadResult::busy()
+    );
+    assert_eq!(handle.status().unwrap().queue_depth, 0);
+
+    control.set_blocked(false);
+    generation.join().unwrap().unwrap();
+    assert_eq!(
+        handle
+            .unload(ModelUnloadTarget::digest(model_key.digest()).unwrap())
+            .unwrap()
+            .outcome,
+        ModelUnloadOutcome::Released
+    );
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn equal_context_deadlines_release_by_digest_before_model_deadline_starts() {
+    let root = temp_root("equal-idle-deadlines");
+    let control = Arc::new(FakeControl::default());
+    let clock = Arc::new(ManualManagerClock::new(Instant::now()));
+    let options = ModelManagerOptions {
+        max_contexts_per_model: 3,
+        context_idle_duration: Duration::from_secs(1),
+        model_idle_duration: Duration::from_secs(2),
+        ..ModelManagerOptions::default()
+    };
+    let mut manager = ModelManager::spawn_for_test(
+        options,
+        FakeRuntime {
+            control: Arc::clone(&control),
+        },
+        clock.clone(),
+    )
+    .unwrap();
+    let handle = manager.handle();
+    let config = config("equal-idle-deadlines.gguf");
+    let model_key = ModelKey::from_config(&config).unwrap();
+    let context_a = ContextKey::for_conversation(&config, "a").unwrap();
+    let context_b = ContextKey::for_conversation(&config, "b").unwrap();
+    handle.generate(job(&root, &config, "b", 1)).unwrap();
+    handle.generate(job(&root, &config, "a", 2)).unwrap();
+
+    clock.advance(Duration::from_secs(1));
+    handle.wake_for_test();
+    wait_for_residency(&handle, 1, 0);
+    let operations = control.operations();
+    let release_a = operations
+        .iter()
+        .position(|operation| operation == &format!("release_context:{}", context_a.digest()))
+        .unwrap();
+    let release_b = operations
+        .iter()
+        .position(|operation| operation == &format!("release_context:{}", context_b.digest()))
+        .unwrap();
+    if context_a.digest() < context_b.digest() {
+        assert!(release_a < release_b);
+    } else {
+        assert!(release_b < release_a);
+    }
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation == &format!("release_model:{}", model_key.digest()))
+    );
+    assert_eq!(
+        handle.status().unwrap().next_residency_deadline_after_ms,
+        Some(2_000)
+    );
+
+    clock.advance(Duration::from_secs(2));
+    handle.wake_for_test();
+    wait_for_residency(&handle, 0, 0);
+    let operations = control.operations();
+    let model_release = operations
+        .iter()
+        .position(|operation| operation == &format!("release_model:{}", model_key.digest()))
+        .unwrap();
+    assert!(release_a < model_release);
+    assert!(release_b < model_release);
+
+    manager.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -1013,12 +1334,14 @@ fn failed_explicit_context_release_keeps_host_resource_and_accounting() {
     let error = handle.release_context(&context_key).unwrap_err();
 
     assert!(matches!(error, ModelManagerError::ContextFailed { .. }));
-    let status = handle.status().unwrap();
-    assert_eq!(status.cached_contexts, 1);
+    let status = handle
+        .status_with_detail(ModelManagerStatusDetail::ModelDigests)
+        .unwrap();
+    assert_eq!(status.resident_contexts, 1);
     assert_eq!(status.context_evictions, 0);
     assert!(
         status
-            .loaded_model_digests
+            .resident_model_digests
             .contains(&context_key.model_key().digest().to_string())
     );
     assert!(
@@ -1030,7 +1353,7 @@ fn failed_explicit_context_release_keeps_host_resource_and_accounting() {
 
     control.state.lock().unwrap().fail_context_release = false;
     handle.release_context(&context_key).unwrap();
-    assert_eq!(handle.status().unwrap().cached_contexts, 0);
+    assert_eq!(handle.status().unwrap().resident_contexts, 0);
     let operations = control.operations();
     let releases = operations
         .iter()
@@ -1069,7 +1392,7 @@ fn failed_lru_releases_do_not_claim_context_or_model_eviction() {
         ModelManagerError::ContextFailed { .. }
     ));
     let status = handle.status().unwrap();
-    assert_eq!(status.cached_contexts, 1);
+    assert_eq!(status.resident_contexts, 1);
     assert_eq!(status.context_loads, 1);
     assert_eq!(status.context_evictions, 0);
 
@@ -1086,11 +1409,13 @@ fn failed_lru_releases_do_not_claim_context_or_model_eviction() {
         ModelManagerError::LoadFailed { .. }
     ));
     let first_model = ModelKey::from_config(&first_config).unwrap();
-    let status = handle.status().unwrap();
-    assert_eq!(status.cached_contexts, 0);
+    let status = handle
+        .status_with_detail(ModelManagerStatusDetail::ModelDigests)
+        .unwrap();
+    assert_eq!(status.resident_contexts, 0);
     assert_eq!(status.model_evictions, 0);
     assert_eq!(status.context_evictions, 2);
-    assert_eq!(status.loaded_model_digests, [first_model.digest()]);
+    assert_eq!(status.resident_model_digests, [first_model.digest()]);
     assert!(
         !control
             .operations()
@@ -1126,9 +1451,11 @@ fn backend_loss_during_release_discards_the_whole_generation_without_ack() {
     assert!(matches!(error, ModelManagerError::BackendLost { .. }));
     assert_eq!(error.code(), "manager.backend_lost");
     assert!(!error.retryable());
-    let status = handle.status().unwrap();
-    assert_eq!(status.cached_contexts, 0);
-    assert!(status.loaded_model_digests.is_empty());
+    let status = handle
+        .status_with_detail(ModelManagerStatusDetail::ModelDigests)
+        .unwrap();
+    assert_eq!(status.resident_contexts, 0);
+    assert!(status.resident_model_digests.is_empty());
     assert_eq!(status.context_evictions, 0);
     assert_eq!(status.model_evictions, 0);
     let operations = control.operations();
@@ -1181,9 +1508,11 @@ fn resource_admission_codes_survive_manager_mapping_and_reaped_generations() {
         .unwrap_err();
     assert!(matches!(error, ModelManagerError::ResourceAdmission { .. }));
     assert_eq!(error.code(), "resource_estimate_exceeded");
-    let status = handle.status().unwrap();
-    assert!(status.loaded_model_digests.is_empty());
-    assert_eq!(status.cached_contexts, 0);
+    let status = handle
+        .status_with_detail(ModelManagerStatusDetail::ModelDigests)
+        .unwrap();
+    assert!(status.resident_model_digests.is_empty());
+    assert_eq!(status.resident_contexts, 0);
 
     manager.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(root);
@@ -1347,6 +1676,21 @@ fn wait_until_idle(handle: &ModelManagerHandle) {
         }
         assert!(Instant::now() < deadline, "manager did not become idle");
         thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn wait_for_residency(handle: &ModelManagerHandle, models: usize, contexts: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let status = handle.status().unwrap();
+        if status.resident_models == models && status.resident_contexts == contexts {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "manager residency did not converge"
+        );
+        thread::yield_now();
     }
 }
 
