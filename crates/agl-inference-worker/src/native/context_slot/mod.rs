@@ -91,6 +91,9 @@ impl LlamaCppContextSlot {
     ) -> Result<Self> {
         let mut context_params = unsafe { ffi::llama_context_default_params() };
         context_params.n_ctx = runtime.context_tokens;
+        // Match llama.cpp's CLI default: retain only the architecture's
+        // sliding window instead of expanding every SWA layer to n_ctx.
+        context_params.swa_full = false;
         let prefill_batch_size = runtime.batch_size.unwrap_or(runtime.context_tokens);
         context_params.n_batch = prefill_batch_size;
         if let Some(ubatch_size) = runtime.ubatch_size {
