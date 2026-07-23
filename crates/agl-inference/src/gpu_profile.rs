@@ -28,6 +28,11 @@ const GEMMA4_12B_MAIN: ArtifactSpec = ArtifactSpec {
     sha256: "cc9ff072e0a8203429ed854e6662c17a6c2bc1e5dca5b475dd4736caaacbc165",
 };
 
+const GEMMA4_31B_MAIN: ArtifactSpec = ArtifactSpec {
+    byte_size: 17_651_001_568,
+    sha256: "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b",
+};
+
 // The builtin catalog artifact and the exact BF16 projector used by the
 // designated 2026-07-21 64K live test are byte-distinct, reviewed variants of
 // the same Gemma 4 12B projector allocation shape.
@@ -48,6 +53,12 @@ struct ArtifactSpec {
     sha256: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileArtifacts {
+    Gemma4_12B,
+    Gemma4_31B,
+}
+
 /// One reviewed allocation profile selected only after exact shape matching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KnownGpuProfile {
@@ -58,6 +69,7 @@ pub struct KnownGpuProfile {
     estimate: AllocationEstimate,
     receipt: AllocationReceipt,
     reserve_bytes: u64,
+    artifacts: ProfileArtifacts,
 }
 
 impl KnownGpuProfile {
@@ -112,13 +124,23 @@ impl GpuProfileVerifier {
         let Some(profile) = known_gpu_profile_shape(config)? else {
             return Ok(None);
         };
-        self.verify_exact(&config.backend.model, &[GEMMA4_12B_MAIN])?;
-        let projector = config
-            .backend
-            .multimodal_projector
-            .as_deref()
-            .ok_or(GpuProfileError::UnknownFixedConfiguration)?;
-        self.verify_exact(projector, &GEMMA4_12B_PROJECTORS)?;
+        match profile.artifacts {
+            ProfileArtifacts::Gemma4_12B => {
+                self.verify_exact(&config.backend.model, &[GEMMA4_12B_MAIN])?;
+                let projector = config
+                    .backend
+                    .multimodal_projector
+                    .as_deref()
+                    .ok_or(GpuProfileError::UnknownFixedConfiguration)?;
+                self.verify_exact(projector, &GEMMA4_12B_PROJECTORS)?;
+            }
+            ProfileArtifacts::Gemma4_31B => {
+                self.verify_exact(&config.backend.model, &[GEMMA4_31B_MAIN])?;
+                if config.backend.multimodal_projector.is_some() {
+                    return Err(GpuProfileError::UnknownFixedConfiguration);
+                }
+            }
+        }
         Ok(Some(profile))
     }
 
@@ -269,13 +291,10 @@ pub fn known_gpu_profile_shape(
         return Ok(None);
     }
 
-    let exact_shape = config.backend.kind == BackendKind::LlamaCpp
-        && config.backend.multimodal_projector.is_some()
+    let common_shape = config.backend.kind == BackendKind::LlamaCpp
         && runtime.gpu_layers == 999
         && runtime.device.as_deref() == Some("Vulkan0")
         && runtime.threads == 8
-        && runtime.batch_size == Some(1024)
-        && runtime.ubatch_size == Some(1024)
         && runtime.flash_attention == Some(RuntimeSwitch::On)
         && runtime.cache_type_k == Some(KvCacheType::Q8_0)
         && runtime.cache_type_v == Some(KvCacheType::Q8_0)
@@ -284,41 +303,75 @@ pub fn known_gpu_profile_shape(
         && !runtime.mtp.enabled
         && config.model.dialect == ModelDialect::Gemma4
         && config.model.tool_call_format == ToolCallFormat::GemmaFunctionCall;
-    if !exact_shape {
+    if !common_shape {
         return Err(GpuProfileError::UnknownFixedConfiguration);
     }
 
-    let (context_mib, measured_context_mib) = match runtime.context_tokens {
-        // The isolated 64K worker measured 11,424 MiB of device context
-        // buffers. Keep a 352-MiB component margin in addition to the global
-        // uncertainty and reserve below. The 98K incident remains recorded at
-        // its measured size and is rejected by capacity admission.
-        65_536 => (11_776, 11_424),
-        98_304 => (18_788, 18_788),
-        _ => return Err(GpuProfileError::UnknownFixedConfiguration),
-    };
-    Ok(Some(KnownGpuProfile {
-        id: "gemma4-12b-rx7900xtx-vulkan-q8-64k-20260721",
-        pci_device_id: "1002:744c",
-        pci_subsystem_id: "1da2:471e",
-        total_device_bytes: 24_560 * MIB,
-        estimate: AllocationEstimate {
-            // 6,390 MiB measured weights plus a bounded projector/backend
-            // allowance retained for the complete worker generation.
-            model_bytes: 6_650 * MIB,
-            context_bytes: context_mib * MIB,
-            // The isolated 64K worker measured 1,524.32 MiB of Vulkan compute
-            // buffers. Round up and retain a further component margin.
-            transient_bytes: 1_792 * MIB,
-            uncertainty_bytes: 1_024 * MIB,
-        },
-        receipt: AllocationReceipt {
-            model_bytes: 6_390 * MIB,
-            context_bytes: measured_context_mib * MIB,
-            transient_bytes: 1_525 * MIB,
-        },
-        reserve_bytes: 1_024 * MIB,
-    }))
+    if config.backend.multimodal_projector.is_some()
+        && runtime.batch_size == Some(1024)
+        && runtime.ubatch_size == Some(1024)
+    {
+        let (context_mib, measured_context_mib) = match runtime.context_tokens {
+            // The isolated 64K worker measured 11,424 MiB of device context
+            // buffers. Keep a 352-MiB component margin in addition to the global
+            // uncertainty and reserve below. The 98K incident remains recorded at
+            // its measured size and is rejected by capacity admission.
+            65_536 => (11_776, 11_424),
+            98_304 => (18_788, 18_788),
+            _ => return Err(GpuProfileError::UnknownFixedConfiguration),
+        };
+        return Ok(Some(KnownGpuProfile {
+            id: "gemma4-12b-rx7900xtx-vulkan-q8-64k-20260721",
+            pci_device_id: "1002:744c",
+            pci_subsystem_id: "1da2:471e",
+            total_device_bytes: 24_560 * MIB,
+            estimate: AllocationEstimate {
+                // 6,390 MiB measured weights plus a bounded projector/backend
+                // allowance retained for the complete worker generation.
+                model_bytes: 6_650 * MIB,
+                context_bytes: context_mib * MIB,
+                // The isolated 64K worker measured 1,524.32 MiB of Vulkan compute
+                // buffers. Round up and retain a further component margin.
+                transient_bytes: 1_792 * MIB,
+                uncertainty_bytes: 1_024 * MIB,
+            },
+            receipt: AllocationReceipt {
+                model_bytes: 6_390 * MIB,
+                context_bytes: measured_context_mib * MIB,
+                transient_bytes: 1_525 * MIB,
+            },
+            reserve_bytes: 1_024 * MIB,
+            artifacts: ProfileArtifacts::Gemma4_12B,
+        }));
+    }
+
+    if config.backend.multimodal_projector.is_none()
+        && runtime.context_tokens == 32_768
+        && runtime.batch_size == Some(2048)
+        && runtime.ubatch_size == Some(512)
+    {
+        return Ok(Some(KnownGpuProfile {
+            id: "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-20260722",
+            pci_device_id: "1002:744c",
+            pci_subsystem_id: "1da2:471e",
+            total_device_bytes: 24_560 * MIB,
+            estimate: AllocationEstimate {
+                model_bytes: 17_050 * MIB,
+                context_bytes: 2_100 * MIB,
+                transient_bytes: 768 * MIB,
+                uncertainty_bytes: 512 * MIB,
+            },
+            receipt: AllocationReceipt {
+                model_bytes: 16_819 * MIB,
+                context_bytes: 1_998 * MIB,
+                transient_bytes: 591 * MIB,
+            },
+            reserve_bytes: 512 * MIB,
+            artifacts: ProfileArtifacts::Gemma4_31B,
+        }));
+    }
+
+    Err(GpuProfileError::UnknownFixedConfiguration)
 }
 
 #[derive(Debug)]
@@ -407,6 +460,15 @@ mod tests {
             },
             prompt: PromptConfig::default(),
         }
+    }
+
+    fn config_31b() -> ResolvedInferenceConfig {
+        let mut config = config(32_768);
+        config.backend.model = PathBuf::from("/models/gemma4-31b-q4_0-qat.gguf");
+        config.backend.multimodal_projector = None;
+        config.runtime.batch_size = Some(2048);
+        config.runtime.ubatch_size = Some(512);
+        config
     }
 
     fn snapshot(available_mib: u64) -> crate::admission::ValidatedDeviceSnapshot {
@@ -538,5 +600,39 @@ mod tests {
         let mut cpu = config(65_536);
         cpu.runtime.gpu_layers = 0;
         assert_eq!(known_gpu_profile_shape(&cpu).unwrap(), None);
+    }
+
+    #[test]
+    fn exact_31b_qat_profile_is_recognized_and_variants_fail_closed() {
+        let profile = known_gpu_profile_shape(&config_31b()).unwrap().unwrap();
+        assert_eq!(
+            profile.id(),
+            "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-20260722"
+        );
+        assert_eq!(profile.artifacts, ProfileArtifacts::Gemma4_31B);
+        assert_eq!(profile.receipt().model_bytes, mib(16_819).unwrap());
+        assert_eq!(profile.receipt().context_bytes, mib(1_998).unwrap());
+
+        let mut projector = config_31b();
+        projector.backend.multimodal_projector = Some(PathBuf::from("/models/mmproj.gguf"));
+        assert!(matches!(
+            known_gpu_profile_shape(&projector),
+            Err(GpuProfileError::UnknownFixedConfiguration)
+        ));
+
+        let mut batch = config_31b();
+        batch.runtime.batch_size = Some(1024);
+        let mut ubatch = config_31b();
+        ubatch.runtime.ubatch_size = Some(256);
+        let mut context = config_31b();
+        context.runtime.context_tokens = 24_576;
+        let mut cache = config_31b();
+        cache.runtime.cache_type_v = Some(KvCacheType::Q4_0);
+        for config in [batch, ubatch, context, cache] {
+            assert!(matches!(
+                known_gpu_profile_shape(&config),
+                Err(GpuProfileError::UnknownFixedConfiguration)
+            ));
+        }
     }
 }
