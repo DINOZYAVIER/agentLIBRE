@@ -21,7 +21,7 @@ Required:
   AGL_INIT_SMOKE_ALLOW_DOWNLOAD=1
 
 Useful overrides:
-  AGL_INIT_SMOKE_MODEL=gemma4-e4b|gemma4-12b|gemma4-26b|gemma4-31b
+  AGL_INIT_SMOKE_MODEL=gemma4-e2b|gemma4-e4b|gemma4-12b|gemma4-26b|gemma4-31b
   AGL_INIT_SMOKE_AGL_BIN=/path/to/agl
   AGL_INIT_SMOKE_ROOT=/path/to/new/evidence-directory
   AGL_INIT_SMOKE_ALLOW_LOW_MEMORY=1
@@ -123,7 +123,7 @@ plan = report["plan"]
 if plan["selected_package"] != selected:
     raise SystemExit(f"selected package mismatch: {plan['selected_package']!r}")
 package_ids = {item["package_id"] for item in plan["packages"]}
-required = {"gemma4-e4b", "gemma4-12b", "gemma4-26b", "gemma4-31b"}
+required = {"gemma4-e2b", "gemma4-e4b", "gemma4-12b", "gemma4-26b", "gemma4-31b"}
 if package_ids != required:
     raise SystemExit(f"catalog mismatch: {sorted(package_ids)!r}")
 gpu_layers = plan["runtime"]["selected"]["runtime"]["gpu_layers"]
@@ -149,8 +149,12 @@ time_bin="$(type -P time || true)"
 
 model="${AGL_INIT_SMOKE_MODEL:-gemma4-e4b}"
 case "$model" in
-  gemma4-e4b | gemma4-12b | gemma4-26b | gemma4-31b) ;;
+  gemma4-e2b | gemma4-e4b | gemma4-12b | gemma4-26b | gemma4-31b) ;;
   *) fail "unsupported AGL_INIT_SMOKE_MODEL: $model" ;;
+esac
+case "$model" in
+  gemma4-e4b | gemma4-12b) projector_model="${model}-mmproj" ;;
+  gemma4-e2b | gemma4-26b | gemma4-31b) projector_model="" ;;
 esac
 
 require_cpu="${AGL_INIT_SMOKE_REQUIRE_CPU:-0}"
@@ -265,13 +269,11 @@ record_command model-list "$agl_bin" --home "$agl_home" model list --json ||
   fail "model list failed"
 record_command verify-main "$agl_bin" --home "$agl_home" model verify "$model" --json ||
   fail "main model verification failed"
-case "$model" in
-  gemma4-e4b | gemma4-12b)
-    record_command verify-projector \
-      "$agl_bin" --home "$agl_home" model verify "$model-mmproj" --json ||
-      fail "projector verification failed"
-    ;;
-esac
+if [[ -n "$projector_model" ]]; then
+  record_command verify-projector \
+    "$agl_bin" --home "$agl_home" model verify "$projector_model" --json ||
+    fail "projector verification failed"
+fi
 
 record_command text-generation \
   "$agl_bin" --home "$agl_home" run \

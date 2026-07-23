@@ -224,6 +224,8 @@ mod tests {
             fn device_inventory(&self) -> Result<Vec<InferenceDeviceInfo>> {
                 Ok(vec![InferenceDeviceInfo {
                     physical_device_id: "physical-test-0".to_string(),
+                    pci_device_id: None,
+                    pci_subsystem_id: None,
                     driver_build_id: "sha256:test-driver".to_string(),
                     backend_name: "fake0".to_string(),
                     description: "Fake accelerator".to_string(),

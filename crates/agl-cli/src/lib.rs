@@ -1580,6 +1580,8 @@ pub(crate) fn daemon_first_inference_inventory(
                 .into_iter()
                 .map(|device| InferenceDeviceInfo {
                     physical_device_id: device.physical_device_id,
+                    pci_device_id: device.pci_device_id,
+                    pci_subsystem_id: device.pci_subsystem_id,
                     driver_build_id: device.driver_build_id,
                     backend_name: device.backend_name,
                     description: device.description,

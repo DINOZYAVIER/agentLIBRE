@@ -23,29 +23,40 @@ use crate::admission::{AllocationEstimate, AllocationReceipt};
 
 const MIB: u64 = 1024 * 1024;
 
+const GEMMA4_E2B_MAIN: ArtifactSpec = ArtifactSpec {
+    byte_size: 3_349_514_112,
+    sha256: "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+};
+
+const GEMMA4_E4B_MAIN: ArtifactSpec = ArtifactSpec {
+    byte_size: 4_215_693_760,
+    sha256: "b3052f962d6449b4eb2075733c068bdec1c51eadb7b237e6c3157bfbb7b1dae0",
+};
+
+const GEMMA4_E4B_PROJECTOR: ArtifactSpec = ArtifactSpec {
+    byte_size: 990_372_672,
+    sha256: "6a255159ee4b01b304f633a57f017dd7d5a69d30fff52abb2614bf0813cef034",
+};
+
 const GEMMA4_12B_MAIN: ArtifactSpec = ArtifactSpec {
     byte_size: 6_716_355_328,
     sha256: "cc9ff072e0a8203429ed854e6662c17a6c2bc1e5dca5b475dd4736caaacbc165",
+};
+
+const GEMMA4_12B_PROJECTOR: ArtifactSpec = ArtifactSpec {
+    byte_size: 175_115_840,
+    sha256: "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3",
+};
+
+const GEMMA4_26B_MAIN: ArtifactSpec = ArtifactSpec {
+    byte_size: 14_249_045_120,
+    sha256: "dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e",
 };
 
 const GEMMA4_31B_MAIN: ArtifactSpec = ArtifactSpec {
     byte_size: 17_651_001_568,
     sha256: "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b",
 };
-
-// The builtin catalog artifact and the exact BF16 projector used by the
-// designated 2026-07-21 64K live test are byte-distinct, reviewed variants of
-// the same Gemma 4 12B projector allocation shape.
-const GEMMA4_12B_PROJECTORS: [ArtifactSpec; 2] = [
-    ArtifactSpec {
-        byte_size: 175_115_840,
-        sha256: "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3",
-    },
-    ArtifactSpec {
-        byte_size: 175_115_328,
-        sha256: "922168af5824a5df33cfeb0afa7ccac7e47355b4d268693a2b2bab517ac1d066",
-    },
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArtifactSpec {
@@ -55,8 +66,31 @@ struct ArtifactSpec {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProfileArtifacts {
-    Gemma4_12B,
-    Gemma4_31B,
+    Gemma4E2b,
+    Gemma4E4b,
+    Gemma4TwelveB,
+    Gemma4TwentySixB,
+    Gemma4ThirtyOneB,
+}
+
+impl ProfileArtifacts {
+    const fn main(self) -> ArtifactSpec {
+        match self {
+            Self::Gemma4E2b => GEMMA4_E2B_MAIN,
+            Self::Gemma4E4b => GEMMA4_E4B_MAIN,
+            Self::Gemma4TwelveB => GEMMA4_12B_MAIN,
+            Self::Gemma4TwentySixB => GEMMA4_26B_MAIN,
+            Self::Gemma4ThirtyOneB => GEMMA4_31B_MAIN,
+        }
+    }
+
+    const fn projector(self) -> Option<ArtifactSpec> {
+        match self {
+            Self::Gemma4E4b => Some(GEMMA4_E4B_PROJECTOR),
+            Self::Gemma4TwelveB => Some(GEMMA4_12B_PROJECTOR),
+            Self::Gemma4E2b | Self::Gemma4TwentySixB | Self::Gemma4ThirtyOneB => None,
+        }
+    }
 }
 
 /// One reviewed allocation profile selected only after exact shape matching.
@@ -121,34 +155,52 @@ impl GpuProfileVerifier {
         &mut self,
         config: &ResolvedInferenceConfig,
     ) -> Result<Option<KnownGpuProfile>, GpuProfileError> {
-        let Some(profile) = known_gpu_profile_shape(config)? else {
+        let profiles = matching_gpu_profiles(config)?;
+        if profiles.is_empty() {
             return Ok(None);
+        }
+
+        let accepted_main = profiles
+            .iter()
+            .map(|profile| profile.artifacts.main())
+            .collect::<Vec<_>>();
+        let main = self.identify_exact(&config.backend.model, &accepted_main)?;
+        let main_profiles = profiles
+            .iter()
+            .copied()
+            .filter(|profile| main.matches(profile.artifacts.main()))
+            .collect::<Vec<_>>();
+        if main_profiles.is_empty() {
+            return Err(GpuProfileError::ArtifactIdentityMismatch {
+                path: config.backend.model.clone(),
+            });
+        }
+
+        let accepted_projectors = main_profiles
+            .iter()
+            .filter_map(|profile| profile.artifacts.projector())
+            .collect::<Vec<_>>();
+        let projector = match config.backend.multimodal_projector.as_deref() {
+            Some(path) => Some(self.identify_exact(path, &accepted_projectors)?),
+            None => None,
         };
-        match profile.artifacts {
-            ProfileArtifacts::Gemma4_12B => {
-                self.verify_exact(&config.backend.model, &[GEMMA4_12B_MAIN])?;
-                let projector = config
+
+        select_verified_profile(&main_profiles, &main, projector.as_ref())
+            .map(Some)
+            .ok_or_else(|| GpuProfileError::ArtifactIdentityMismatch {
+                path: config
                     .backend
                     .multimodal_projector
-                    .as_deref()
-                    .ok_or(GpuProfileError::UnknownFixedConfiguration)?;
-                self.verify_exact(projector, &GEMMA4_12B_PROJECTORS)?;
-            }
-            ProfileArtifacts::Gemma4_31B => {
-                self.verify_exact(&config.backend.model, &[GEMMA4_31B_MAIN])?;
-                if config.backend.multimodal_projector.is_some() {
-                    return Err(GpuProfileError::UnknownFixedConfiguration);
-                }
-            }
-        }
-        Ok(Some(profile))
+                    .clone()
+                    .unwrap_or_else(|| config.backend.model.clone()),
+            })
     }
 
-    fn verify_exact(
+    fn identify_exact(
         &mut self,
         path: &Path,
         accepted: &[ArtifactSpec],
-    ) -> Result<(), GpuProfileError> {
+    ) -> Result<ArtifactIdentity, GpuProfileError> {
         let mut options = OpenOptions::new();
         options
             .read(true)
@@ -204,8 +256,43 @@ impl GpuProfileVerifier {
                 path: path.to_path_buf(),
             });
         }
-        Ok(())
+        Ok(ArtifactIdentity {
+            byte_size: before.byte_size,
+            sha256: digest,
+        })
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArtifactIdentity {
+    byte_size: u64,
+    sha256: String,
+}
+
+impl ArtifactIdentity {
+    fn matches(&self, expected: ArtifactSpec) -> bool {
+        self.byte_size == expected.byte_size && self.sha256 == expected.sha256
+    }
+}
+
+fn select_verified_profile(
+    profiles: &[KnownGpuProfile],
+    main: &ArtifactIdentity,
+    projector: Option<&ArtifactIdentity>,
+) -> Option<KnownGpuProfile> {
+    let mut matching = profiles.iter().copied().filter(|profile| {
+        main.matches(profile.artifacts.main())
+            && match (profile.artifacts.projector(), projector) {
+                (Some(expected), Some(actual)) => actual.matches(expected),
+                (None, None) => true,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    });
+    let profile = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(profile)
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -278,17 +365,25 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// Shape-only lookup for the worker side of an already host-verified job.
-/// The host must call [`GpuProfileVerifier::resolve`] before dispatch. The
-/// worker repeats the exact config match so it cannot manufacture a receipt
-/// for an arbitrary fixed profile.
+///
+/// The host must call [`GpuProfileVerifier::resolve`] before dispatch. Multiple
+/// artifact families may intentionally share one runtime shape; in that case
+/// the returned value is only a shape witness. Host admission must use the
+/// artifact-selected profile returned by [`GpuProfileVerifier::resolve`].
 pub fn known_gpu_profile_shape(
     config: &ResolvedInferenceConfig,
 ) -> Result<Option<KnownGpuProfile>, GpuProfileError> {
+    Ok(matching_gpu_profiles(config)?.into_iter().next())
+}
+
+fn matching_gpu_profiles(
+    config: &ResolvedInferenceConfig,
+) -> Result<Vec<KnownGpuProfile>, GpuProfileError> {
     let runtime = &config.runtime;
     let draft_gpu_layers = runtime.mtp.gpu_layers.unwrap_or(runtime.gpu_layers);
     let requests_gpu = runtime.gpu_layers > 0 || (runtime.mtp.enabled && draft_gpu_layers > 0);
     if !requests_gpu {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let common_shape = config.backend.kind == BackendKind::LlamaCpp
@@ -296,10 +391,6 @@ pub fn known_gpu_profile_shape(
         && runtime.device.as_deref() == Some("Vulkan0")
         && runtime.threads == 8
         && runtime.flash_attention == Some(RuntimeSwitch::On)
-        && runtime.cache_type_k == Some(KvCacheType::Q8_0)
-        && runtime.cache_type_v == Some(KvCacheType::Q8_0)
-        && runtime.mmap.is_none()
-        && runtime.kv_unified.is_none()
         && !runtime.mtp.enabled
         && config.model.dialect == ModelDialect::Gemma4
         && config.model.tool_call_format == ToolCallFormat::GemmaFunctionCall;
@@ -307,50 +398,103 @@ pub fn known_gpu_profile_shape(
         return Err(GpuProfileError::UnknownFixedConfiguration);
     }
 
-    if config.backend.multimodal_projector.is_some()
-        && runtime.batch_size == Some(1024)
-        && runtime.ubatch_size == Some(1024)
-    {
-        let (context_mib, measured_context_mib) = match runtime.context_tokens {
-            // The isolated 64K worker measured 11,424 MiB of device context
-            // buffers. Keep a 352-MiB component margin in addition to the global
-            // uncertainty and reserve below. The 98K incident remains recorded at
-            // its measured size and is rejected by capacity admission.
-            65_536 => (11_776, 11_424),
-            98_304 => (18_788, 18_788),
-            _ => return Err(GpuProfileError::UnknownFixedConfiguration),
-        };
-        return Ok(Some(KnownGpuProfile {
-            id: "gemma4-12b-rx7900xtx-vulkan-q8-64k-20260721",
-            pci_device_id: "1002:744c",
-            pci_subsystem_id: "1da2:471e",
-            total_device_bytes: 24_560 * MIB,
-            estimate: AllocationEstimate {
-                // 6,390 MiB measured weights plus a bounded projector/backend
-                // allowance retained for the complete worker generation.
-                model_bytes: 6_650 * MIB,
-                context_bytes: context_mib * MIB,
-                // The isolated 64K worker measured 1,524.32 MiB of Vulkan compute
-                // buffers. Round up and retain a further component margin.
-                transient_bytes: 1_792 * MIB,
-                uncertainty_bytes: 1_024 * MIB,
-            },
-            receipt: AllocationReceipt {
-                model_bytes: 6_390 * MIB,
-                context_bytes: measured_context_mib * MIB,
-                transient_bytes: 1_525 * MIB,
-            },
-            reserve_bytes: 1_024 * MIB,
-            artifacts: ProfileArtifacts::Gemma4_12B,
-        }));
+    let has_projector = config.backend.multimodal_projector.is_some();
+    let mut profiles = Vec::new();
+
+    if has_projector && exact_runtime_shape(runtime, 65_536, 1024, 1024, None, None) {
+        profiles.push(manual_12b_profile(65_536));
+    }
+    if has_projector && exact_runtime_shape(runtime, 98_304, 1024, 1024, None, None) {
+        profiles.push(manual_12b_profile(98_304));
     }
 
-    if config.backend.multimodal_projector.is_none()
-        && runtime.context_tokens == 32_768
-        && runtime.batch_size == Some(2048)
-        && runtime.ubatch_size == Some(512)
-    {
-        return Ok(Some(KnownGpuProfile {
+    if has_projector && exact_runtime_shape(runtime, 32_768, 512, 256, Some(true), Some(true)) {
+        profiles.push(planner_profile(
+            "gemma4-e4b-qat-ud-q4-rx7900xtx-vulkan-q8-32k-auto-20260723",
+            AllocationEstimate {
+                model_bytes: 3_600 * MIB,
+                context_bytes: 384 * MIB,
+                transient_bytes: 640 * MIB,
+                uncertainty_bytes: 512 * MIB,
+            },
+            AllocationReceipt {
+                model_bytes: 3_438 * MIB,
+                context_bytes: 288 * MIB,
+                transient_bytes: 517 * MIB,
+            },
+            ProfileArtifacts::Gemma4E4b,
+        ));
+    }
+    if has_projector && exact_runtime_shape(runtime, 65_536, 512, 256, Some(true), Some(true)) {
+        profiles.push(planner_profile(
+            "gemma4-12b-qat-ud-q4-rx7900xtx-vulkan-q8-64k-auto-20260723",
+            AllocationEstimate {
+                model_bytes: 6_700 * MIB,
+                context_bytes: 900 * MIB,
+                transient_bytes: 384 * MIB,
+                uncertainty_bytes: 512 * MIB,
+            },
+            AllocationReceipt {
+                model_bytes: 6_558 * MIB,
+                context_bytes: 757 * MIB,
+                transient_bytes: 342 * MIB,
+            },
+            ProfileArtifacts::Gemma4TwelveB,
+        ));
+    }
+
+    if !has_projector && exact_runtime_shape(runtime, 32_768, 512, 256, Some(true), Some(true)) {
+        profiles.extend([
+            planner_profile(
+                "gemma4-e2b-qat-q4_0-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                AllocationEstimate {
+                    model_bytes: 1_500 * MIB,
+                    context_bytes: 160 * MIB,
+                    transient_bytes: 384 * MIB,
+                    uncertainty_bytes: 512 * MIB,
+                },
+                AllocationReceipt {
+                    model_bytes: 1_342 * MIB,
+                    context_bytes: 107 * MIB,
+                    transient_bytes: 284 * MIB,
+                },
+                ProfileArtifacts::Gemma4E2b,
+            ),
+            planner_profile(
+                "gemma4-26b-a4b-qat-ud-q4-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                AllocationEstimate {
+                    model_bytes: 13_850 * MIB,
+                    context_bytes: 600 * MIB,
+                    transient_bytes: 384 * MIB,
+                    uncertainty_bytes: 512 * MIB,
+                },
+                AllocationReceipt {
+                    model_bytes: 13_574 * MIB,
+                    context_bytes: 473 * MIB,
+                    transient_bytes: 263 * MIB,
+                },
+                ProfileArtifacts::Gemma4TwentySixB,
+            ),
+            planner_profile(
+                "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                AllocationEstimate {
+                    model_bytes: 17_050 * MIB,
+                    context_bytes: 2_050 * MIB,
+                    transient_bytes: 384 * MIB,
+                    uncertainty_bytes: 512 * MIB,
+                },
+                AllocationReceipt {
+                    model_bytes: 16_819 * MIB,
+                    context_bytes: 1_892 * MIB,
+                    transient_bytes: 290 * MIB,
+                },
+                ProfileArtifacts::Gemma4ThirtyOneB,
+            ),
+        ]);
+    }
+
+    if !has_projector && exact_runtime_shape(runtime, 32_768, 2048, 512, None, None) {
+        profiles.push(KnownGpuProfile {
             id: "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-20260722",
             pci_device_id: "1002:744c",
             pci_subsystem_id: "1da2:471e",
@@ -366,12 +510,77 @@ pub fn known_gpu_profile_shape(
                 context_bytes: 1_998 * MIB,
                 transient_bytes: 591 * MIB,
             },
-            reserve_bytes: 512 * MIB,
-            artifacts: ProfileArtifacts::Gemma4_31B,
-        }));
+            reserve_bytes: 1_024 * MIB,
+            artifacts: ProfileArtifacts::Gemma4ThirtyOneB,
+        });
     }
 
-    Err(GpuProfileError::UnknownFixedConfiguration)
+    if profiles.is_empty() {
+        return Err(GpuProfileError::UnknownFixedConfiguration);
+    }
+    Ok(profiles)
+}
+
+fn exact_runtime_shape(
+    runtime: &agl_config::InferenceRuntimeConfig,
+    context_tokens: u32,
+    batch_size: u32,
+    ubatch_size: u32,
+    mmap: Option<bool>,
+    kv_unified: Option<bool>,
+) -> bool {
+    runtime.context_tokens == context_tokens
+        && runtime.batch_size == Some(batch_size)
+        && runtime.ubatch_size == Some(ubatch_size)
+        && runtime.cache_type_k == Some(KvCacheType::Q8_0)
+        && runtime.cache_type_v == Some(KvCacheType::Q8_0)
+        && runtime.mmap == mmap
+        && runtime.kv_unified == kv_unified
+}
+
+fn manual_12b_profile(context_tokens: u32) -> KnownGpuProfile {
+    let (context_mib, measured_context_mib) = match context_tokens {
+        65_536 => (11_776, 11_424),
+        98_304 => (18_788, 18_788),
+        _ => unreachable!("manual 12B profile has a fixed context"),
+    };
+    KnownGpuProfile {
+        id: "gemma4-12b-rx7900xtx-vulkan-q8-64k-20260721",
+        pci_device_id: "1002:744c",
+        pci_subsystem_id: "1da2:471e",
+        total_device_bytes: 24_560 * MIB,
+        estimate: AllocationEstimate {
+            model_bytes: 6_650 * MIB,
+            context_bytes: context_mib * MIB,
+            transient_bytes: 1_792 * MIB,
+            uncertainty_bytes: 1_024 * MIB,
+        },
+        receipt: AllocationReceipt {
+            model_bytes: 6_390 * MIB,
+            context_bytes: measured_context_mib * MIB,
+            transient_bytes: 1_525 * MIB,
+        },
+        reserve_bytes: 1_024 * MIB,
+        artifacts: ProfileArtifacts::Gemma4TwelveB,
+    }
+}
+
+fn planner_profile(
+    id: &'static str,
+    estimate: AllocationEstimate,
+    receipt: AllocationReceipt,
+    artifacts: ProfileArtifacts,
+) -> KnownGpuProfile {
+    KnownGpuProfile {
+        id,
+        pci_device_id: "1002:744c",
+        pci_subsystem_id: "1da2:471e",
+        total_device_bytes: 24_560 * MIB,
+        estimate,
+        receipt,
+        reserve_bytes: 1_024 * MIB,
+        artifacts,
+    }
 }
 
 #[derive(Debug)]
@@ -469,6 +678,30 @@ mod tests {
         config.runtime.batch_size = Some(2048);
         config.runtime.ubatch_size = Some(512);
         config
+    }
+
+    fn planner_config(context_tokens: u32, projector: bool) -> ResolvedInferenceConfig {
+        let mut config = config(context_tokens);
+        config.backend.multimodal_projector =
+            projector.then(|| PathBuf::from("/models/mmproj.gguf"));
+        config.runtime.batch_size = Some(512);
+        config.runtime.ubatch_size = Some(256);
+        config.runtime.mmap = Some(true);
+        config.runtime.kv_unified = Some(true);
+        config
+    }
+
+    fn identity(spec: ArtifactSpec) -> ArtifactIdentity {
+        ArtifactIdentity {
+            byte_size: spec.byte_size,
+            sha256: spec.sha256.to_string(),
+        }
+    }
+
+    fn select(config: &ResolvedInferenceConfig, family: ProfileArtifacts) -> KnownGpuProfile {
+        let candidates = matching_gpu_profiles(config).unwrap();
+        let projector = family.projector().map(identity);
+        select_verified_profile(&candidates, &identity(family.main()), projector.as_ref()).unwrap()
     }
 
     fn snapshot(available_mib: u64) -> crate::admission::ValidatedDeviceSnapshot {
@@ -609,7 +842,7 @@ mod tests {
             profile.id(),
             "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-20260722"
         );
-        assert_eq!(profile.artifacts, ProfileArtifacts::Gemma4_31B);
+        assert_eq!(profile.artifacts, ProfileArtifacts::Gemma4ThirtyOneB);
         assert_eq!(profile.receipt().model_bytes, mib(16_819).unwrap());
         assert_eq!(profile.receipt().context_bytes, mib(1_998).unwrap());
 
@@ -634,5 +867,211 @@ mod tests {
                 Err(GpuProfileError::UnknownFixedConfiguration)
             ));
         }
+    }
+
+    #[test]
+    fn planner_shapes_are_disambiguated_by_exact_artifact_identity() {
+        let text = planner_config(32_768, false);
+        let candidates = matching_gpu_profiles(&text).unwrap();
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|profile| profile.artifacts)
+                .collect::<Vec<_>>(),
+            [
+                ProfileArtifacts::Gemma4E2b,
+                ProfileArtifacts::Gemma4TwentySixB,
+                ProfileArtifacts::Gemma4ThirtyOneB,
+            ]
+        );
+
+        let expected = [
+            (
+                ProfileArtifacts::Gemma4E2b,
+                "gemma4-e2b-qat-q4_0-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                (1_342, 107, 284),
+                (1_500, 160, 384, 512),
+            ),
+            (
+                ProfileArtifacts::Gemma4TwentySixB,
+                "gemma4-26b-a4b-qat-ud-q4-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                (13_574, 473, 263),
+                (13_850, 600, 384, 512),
+            ),
+            (
+                ProfileArtifacts::Gemma4ThirtyOneB,
+                "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-auto-20260723",
+                (16_819, 1_892, 290),
+                (17_050, 2_050, 384, 512),
+            ),
+        ];
+        for (family, id, receipt, estimate) in expected {
+            let selected = select(&text, family);
+            assert_eq!(selected.id(), id);
+            assert_eq!(selected.artifacts, family);
+            assert_profile_bytes(selected, receipt, estimate);
+        }
+
+        let unknown = ArtifactIdentity {
+            byte_size: GEMMA4_E2B_MAIN.byte_size,
+            sha256: "0".repeat(64),
+        };
+        assert!(select_verified_profile(&candidates, &unknown, None).is_none());
+    }
+
+    #[test]
+    fn projector_profiles_require_the_exact_family_pair() {
+        let e4b = planner_config(32_768, true);
+        let e4b_candidates = matching_gpu_profiles(&e4b).unwrap();
+        assert_eq!(e4b_candidates.len(), 1);
+        let e4b_profile = select(&e4b, ProfileArtifacts::Gemma4E4b);
+        assert_profile_bytes(e4b_profile, (3_438, 288, 517), (3_600, 384, 640, 512));
+
+        let twelve = planner_config(65_536, true);
+        let twelve_candidates = matching_gpu_profiles(&twelve).unwrap();
+        assert_eq!(twelve_candidates.len(), 1);
+        let twelve_profile = select(&twelve, ProfileArtifacts::Gemma4TwelveB);
+        assert_profile_bytes(twelve_profile, (6_558, 757, 342), (6_700, 900, 384, 512));
+
+        assert!(
+            select_verified_profile(
+                &e4b_candidates,
+                &identity(GEMMA4_E4B_MAIN),
+                Some(&identity(GEMMA4_12B_PROJECTOR)),
+            )
+            .is_none()
+        );
+        assert!(
+            select_verified_profile(
+                &twelve_candidates,
+                &identity(GEMMA4_12B_MAIN),
+                Some(&identity(GEMMA4_E4B_PROJECTOR)),
+            )
+            .is_none()
+        );
+        assert!(
+            select_verified_profile(&e4b_candidates, &identity(GEMMA4_E4B_MAIN), None,).is_none()
+        );
+    }
+
+    #[test]
+    fn planner_profiles_fail_closed_on_every_runtime_dimension() {
+        let base = planner_config(32_768, false);
+        let mut variants = Vec::new();
+
+        let mut context = base.clone();
+        context.runtime.context_tokens = 32_767;
+        variants.push(context);
+        let mut batch = base.clone();
+        batch.runtime.batch_size = Some(256);
+        variants.push(batch);
+        let mut ubatch = base.clone();
+        ubatch.runtime.ubatch_size = Some(128);
+        variants.push(ubatch);
+        let mut cache_k = base.clone();
+        cache_k.runtime.cache_type_k = Some(KvCacheType::Q4_0);
+        variants.push(cache_k);
+        let mut cache_v = base.clone();
+        cache_v.runtime.cache_type_v = Some(KvCacheType::Q4_0);
+        variants.push(cache_v);
+        let mut mmap = base.clone();
+        mmap.runtime.mmap = None;
+        variants.push(mmap);
+        let mut kv_unified = base.clone();
+        kv_unified.runtime.kv_unified = Some(false);
+        variants.push(kv_unified);
+        let mut layers = base.clone();
+        layers.runtime.gpu_layers = 61;
+        variants.push(layers);
+        let mut device = base.clone();
+        device.runtime.device = Some("Vulkan1".to_string());
+        variants.push(device);
+        let mut threads = base.clone();
+        threads.runtime.threads = 7;
+        variants.push(threads);
+        let mut flash = base.clone();
+        flash.runtime.flash_attention = Some(RuntimeSwitch::Off);
+        variants.push(flash);
+        let mut mtp = base;
+        mtp.runtime.mtp.enabled = true;
+        variants.push(mtp);
+
+        for variant in variants {
+            assert!(matches!(
+                matching_gpu_profiles(&variant),
+                Err(GpuProfileError::UnknownFixedConfiguration)
+            ));
+        }
+    }
+
+    #[test]
+    fn every_profile_uses_the_uniform_reserve_and_exact_admission_boundary() {
+        let incident = known_gpu_profile_shape(&config(98_304)).unwrap().unwrap();
+        assert_eq!(incident.reserve_bytes(), mib(1_024).unwrap());
+
+        let profiles = [
+            known_gpu_profile_shape(&config(65_536)).unwrap().unwrap(),
+            known_gpu_profile_shape(&config_31b()).unwrap().unwrap(),
+            select(&planner_config(32_768, false), ProfileArtifacts::Gemma4E2b),
+            select(&planner_config(32_768, true), ProfileArtifacts::Gemma4E4b),
+            select(
+                &planner_config(65_536, true),
+                ProfileArtifacts::Gemma4TwelveB,
+            ),
+            select(
+                &planner_config(32_768, false),
+                ProfileArtifacts::Gemma4TwentySixB,
+            ),
+            select(
+                &planner_config(32_768, false),
+                ProfileArtifacts::Gemma4ThirtyOneB,
+            ),
+        ];
+
+        for profile in profiles {
+            assert_eq!(profile.reserve_bytes(), mib(1_024).unwrap());
+            profile
+                .receipt()
+                .validate_against(profile.estimate())
+                .unwrap();
+
+            let required_mib =
+                (profile.estimate().envelope_bytes().unwrap() + profile.reserve_bytes()) / MIB;
+            let reserve = AdmissionPolicy {
+                reserve_bytes: profile.reserve_bytes(),
+            };
+            let request = || ReservationRequest {
+                model_key: "model".to_string(),
+                context_key: profile.id().to_string(),
+                estimate: profile.estimate(),
+            };
+            let mut admitted = ReservationLedger::new("pci:0000:03:00.0", reserve).unwrap();
+            assert!(admitted.reserve(&snapshot(required_mib), request()).is_ok());
+
+            let mut denied = ReservationLedger::new("pci:0000:03:00.0", reserve).unwrap();
+            assert!(
+                denied
+                    .reserve(&snapshot(required_mib - 1), request())
+                    .is_err()
+            );
+        }
+    }
+
+    fn assert_profile_bytes(
+        profile: KnownGpuProfile,
+        receipt: (u64, u64, u64),
+        estimate: (u64, u64, u64, u64),
+    ) {
+        assert_eq!(profile.receipt().model_bytes, mib(receipt.0).unwrap());
+        assert_eq!(profile.receipt().context_bytes, mib(receipt.1).unwrap());
+        assert_eq!(profile.receipt().transient_bytes, mib(receipt.2).unwrap());
+        assert_eq!(profile.estimate().model_bytes, mib(estimate.0).unwrap());
+        assert_eq!(profile.estimate().context_bytes, mib(estimate.1).unwrap());
+        assert_eq!(profile.estimate().transient_bytes, mib(estimate.2).unwrap());
+        assert_eq!(
+            profile.estimate().uncertainty_bytes,
+            mib(estimate.3).unwrap()
+        );
     }
 }

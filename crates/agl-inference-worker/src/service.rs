@@ -1888,6 +1888,29 @@ mod tests {
                 if snapshot.loaded_models() == 1 && snapshot.live_contexts() == 1
         ));
 
+        host.send(HostCommand::Inventory {
+            operation_id: operation(8),
+        })
+        .unwrap();
+        assert!(matches!(
+            host.receive().unwrap(),
+            WorkerEvent::Inventory { operation_id, snapshot }
+                if operation_id == operation(8)
+                    && snapshot.loaded_models().len() == 1
+                    && snapshot.live_contexts().len() == 1
+        ));
+        assert_eq!(inventory_calls.load(Ordering::Acquire), 2);
+
+        host.send(HostCommand::Status {
+            operation_id: operation(9),
+        })
+        .unwrap();
+        assert!(matches!(
+            host.receive().unwrap(),
+            WorkerEvent::Status { snapshot, .. }
+                if snapshot.loaded_models() == 1 && snapshot.live_contexts() == 1
+        ));
+
         assert_eq!(fatal_exit_calls.load(Ordering::Acquire), 0);
 
         shutdown(host, server);
