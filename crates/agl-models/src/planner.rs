@@ -45,6 +45,8 @@ pub struct LlamaDeviceInfo {
     pub name: String,
     pub description: String,
     pub kind: LlamaDeviceKind,
+    pub pci_device_id: Option<String>,
+    pub pci_subsystem_id: Option<String>,
     pub free_memory_bytes: u64,
     pub total_memory_bytes: u64,
     pub usable: bool,
@@ -117,6 +119,18 @@ fn validate_device_snapshots(devices: &[LlamaDeviceInfo]) -> Result<()> {
             device.name,
             device.free_memory_bytes,
             device.total_memory_bytes
+        );
+        ensure!(
+            device
+                .pci_device_id
+                .as_deref()
+                .is_some_and(is_canonical_pci_id)
+                && device
+                    .pci_subsystem_id
+                    .as_deref()
+                    .is_some_and(is_canonical_pci_id),
+            "GPU device `{}` lacks canonical PCI device and subsystem identity",
+            device.name
         );
     }
     Ok(())
@@ -486,6 +500,8 @@ fn select_gpu_profile<'a>(
         for device in host.devices.iter().filter(|device| {
             device.usable
                 && device.supports_gpu_offload
+                && device.pci_device_id == profile.pci_device_id
+                && device.pci_subsystem_id == profile.pci_subsystem_id
                 && matches!(
                     device.kind,
                     LlamaDeviceKind::DiscreteGpu | LlamaDeviceKind::IntegratedGpu
@@ -505,6 +521,14 @@ fn select_gpu_profile<'a>(
         }
     }
     None
+}
+
+fn is_canonical_pci_id(value: &str) -> bool {
+    value.len() == 9
+        && value.as_bytes()[4] == b':'
+        && value.bytes().enumerate().all(|(index, byte)| {
+            index == 4 || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+        })
 }
 
 fn select_cpu_profile<'a>(
@@ -590,6 +614,8 @@ mod tests {
             profiles: vec![CatalogRuntimeProfile {
                 id: "cpu-8gb".to_string(),
                 device: ProfileDevice::Cpu,
+                pci_device_id: None,
+                pci_subsystem_id: None,
                 benchmark_evidence: "fixture".to_string(),
                 required_total_ram_bytes: 7_000_000_000,
                 required_available_ram_bytes: 4_000_000_000,
@@ -612,6 +638,8 @@ mod tests {
             CatalogRuntimeProfile {
                 id: "vulkan-5gb".to_string(),
                 device: ProfileDevice::Gpu,
+                pci_device_id: Some("1002:744c".to_string()),
+                pci_subsystem_id: Some("1da2:471e".to_string()),
                 benchmark_evidence: "fixture".to_string(),
                 required_total_ram_bytes: 8_000_000_000,
                 required_available_ram_bytes: 5_000_000_000,
@@ -745,6 +773,8 @@ mod tests {
             name: "Vulkan0".to_string(),
             description: "discrete fixture".to_string(),
             kind: LlamaDeviceKind::DiscreteGpu,
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
             free_memory_bytes: 6_000_000_000,
             total_memory_bytes: 8_000_000_000,
             usable: true,
@@ -769,6 +799,8 @@ mod tests {
             name: "Vulkan0".to_string(),
             description: "invalid driver fixture".to_string(),
             kind: LlamaDeviceKind::DiscreteGpu,
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
             free_memory_bytes,
             total_memory_bytes,
             usable: true,
@@ -793,6 +825,8 @@ mod tests {
             name: "Vulkan0".to_string(),
             description: "integrated fixture".to_string(),
             kind: LlamaDeviceKind::IntegratedGpu,
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
             free_memory_bytes: 6_000_000_000,
             total_memory_bytes: 8_000_000_000,
             usable: true,
@@ -821,9 +855,35 @@ mod tests {
             name: "Vulkan0".to_string(),
             description: "unavailable fixture".to_string(),
             kind: LlamaDeviceKind::DiscreteGpu,
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
             free_memory_bytes: 8_000_000_000,
             total_memory_bytes: 8_000_000_000,
             usable: false,
+            supports_gpu_offload: true,
+        });
+
+        let plan = RuntimePlanner
+            .plan(&package_with_gpu_profile(), &host, &policy(), false)
+            .unwrap();
+
+        assert_eq!(plan.profile_id, "cpu-8gb");
+        assert_eq!(plan.runtime.gpu_layers, 0);
+        assert_eq!(plan.selected_device, None);
+    }
+
+    #[test]
+    fn exact_gpu_profile_is_not_selected_for_a_different_pci_device() {
+        let mut host = host(16_000_000_000, 12_000_000_000, 20_000_000_000);
+        host.devices.push(LlamaDeviceInfo {
+            name: "Vulkan0".to_string(),
+            description: "different discrete GPU fixture".to_string(),
+            kind: LlamaDeviceKind::DiscreteGpu,
+            pci_device_id: Some("10de:2684".to_string()),
+            pci_subsystem_id: Some("10de:16a1".to_string()),
+            free_memory_bytes: 8_000_000_000,
+            total_memory_bytes: 8_000_000_000,
+            usable: true,
             supports_gpu_offload: true,
         });
 

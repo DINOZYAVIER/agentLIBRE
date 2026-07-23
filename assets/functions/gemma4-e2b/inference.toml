@@ -1,11 +1,10 @@
 [backend]
 kind = "llama_cpp"
-model_id = "gemma4-12b"
-multimodal_projector_id = "gemma4-12b-mmproj"
+model_id = "gemma4-e2b"
 
 [runtime]
 mode = "auto"
-max_context_tokens = 65536
+max_context_tokens = 32768
 max_batch_size = 512
 max_ubatch_size = 256
 flash_attention = "on"

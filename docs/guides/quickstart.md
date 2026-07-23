@@ -16,6 +16,11 @@ devices before downloading into the standard Hugging Face cache. If setup is
 interrupted, run the same command again; it resumes the recorded package and
 revalidates completed work.
 
+The builtin choices are `gemma4-e2b`, `gemma4-e4b`, `gemma4-12b`,
+`gemma4-26b`, and `gemma4-31b`. E2B, E4B, 26B, and the official 31B QAT Q4_0
+package use a 32K maximum context; 12B uses 64K. Select one explicitly with
+`agl init --model MODEL_ID`.
+
 Use `agl init --dry-run` to inspect the complete plan first. Machines with less
 than 8 GB of physical RAM are rejected by default; `--allow-low-memory` permits
 a best-effort attempt without claiming that the machine is supported.

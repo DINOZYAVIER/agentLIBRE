@@ -18,10 +18,13 @@ daemon identity plus the worker build, PID/FSM state, selected device,
 reservation, and cooldown without exposing prompts or native payloads.
 
 The conservative default is `gemma4-e4b`, a Gemma 4 E4B QAT Q4 main model plus
-its required projector. `--model gemma4-12b`, `gemma4-26b`, and
-`gemma4-31b` select larger pinned packages. The plan reports cache hits, bytes
-to download, the measured runtime profile, numeric context/batch/thread/offload
-values, binding/default changes, and the required smoke before it writes.
+its required projector. `--model gemma4-e2b` selects the text-and-tools
+official QAT E2B package without a projector; `gemma4-12b`, `gemma4-26b`, and
+`gemma4-31b` select larger pinned packages, with 31B using the official QAT
+Q4_0 artifact. E2B, E4B, 26B, and 31B have a 32K maximum context; 12B has 64K.
+The plan reports cache hits, bytes to download, the measured runtime profile,
+numeric context/batch/thread/offload values, binding/default changes, and the
+required smoke before it writes.
 
 Setup state is resumable per workspace. A repeated `agl init` keeps the
 confirmed package, rechecks files and digests, continues from the last durable

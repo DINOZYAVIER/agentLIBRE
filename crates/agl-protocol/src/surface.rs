@@ -2588,6 +2588,29 @@ fn validate_inference_inventory(
             "inference driver build ID",
             false,
         )?;
+        for (value, label) in [
+            (&device.pci_device_id, "inference PCI device ID"),
+            (&device.pci_subsystem_id, "inference PCI subsystem ID"),
+        ] {
+            if let Some(value) = value {
+                bound_string(value, 9, label, false)?;
+                if !is_canonical_pci_id(value) {
+                    return Err(SurfaceValidationError::new(format!(
+                        "{label} is not canonical lowercase vendor:device identity"
+                    )));
+                }
+            }
+        }
+        if matches!(
+            device.kind,
+            crate::ProtocolInferenceDeviceKind::DiscreteGpu
+                | crate::ProtocolInferenceDeviceKind::IntegratedGpu
+        ) && (device.pci_device_id.is_none() || device.pci_subsystem_id.is_none())
+        {
+            return Err(SurfaceValidationError::new(
+                "inference GPU device lacks exact PCI device and subsystem identity",
+            ));
+        }
         bound_string(
             &device.backend_name,
             MAX_IDENTIFIER_BYTES,
@@ -2617,6 +2640,14 @@ fn validate_inference_inventory(
         }
     }
     Ok(())
+}
+
+fn is_canonical_pci_id(value: &str) -> bool {
+    value.len() == 9
+        && value.as_bytes()[4] == b':'
+        && value.bytes().enumerate().all(|(index, byte)| {
+            index == 4 || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+        })
 }
 
 fn validate_inference_status(
@@ -3714,6 +3745,8 @@ mod tests {
     fn inference_inventory_is_bounded_and_rejects_impossible_memory() {
         let device = crate::InferenceDeviceEvent {
             physical_device_id: "pci:0000:03:00.0".to_owned(),
+            pci_device_id: Some("1002:744c".to_owned()),
+            pci_subsystem_id: Some("1da2:471e".to_owned()),
             driver_build_id: "sha256:driver".to_owned(),
             backend_name: "Vulkan0".to_owned(),
             description: "RX 7900 XTX".to_owned(),

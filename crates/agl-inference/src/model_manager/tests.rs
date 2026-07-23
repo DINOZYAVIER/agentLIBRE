@@ -1247,6 +1247,8 @@ fn config(model: &str) -> ResolvedInferenceConfig {
 fn test_device_info() -> InferenceDeviceInfo {
     InferenceDeviceInfo {
         physical_device_id: "0000:03:00.0".to_string(),
+        pci_device_id: Some("1002:744c".to_string()),
+        pci_subsystem_id: Some("1da2:471e".to_string()),
         driver_build_id: "sha256:test-driver".to_string(),
         backend_name: "Vulkan0".to_string(),
         description: "Fake GPU".to_string(),

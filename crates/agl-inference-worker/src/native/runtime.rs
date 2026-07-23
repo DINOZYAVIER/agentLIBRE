@@ -253,6 +253,8 @@ fn map_inference_device_inventory(
         }
         mapped.push(InferenceDeviceInfo {
             physical_device_id,
+            pci_device_id: None,
+            pci_subsystem_id: None,
             driver_build_id,
             backend_name: device.name,
             description: device.description,
