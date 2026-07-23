@@ -20,19 +20,22 @@ const MAX_RESOLVED_MEDIA_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_LOADED_MODELS: usize = 1;
 pub const DEFAULT_MAX_CONTEXTS_PER_MODEL: usize = 2;
 pub const DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY: usize = 32;
-pub const DEFAULT_IDLE_CONTEXT_RETENTION: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_CONTEXT_IDLE_DURATION: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_MODEL_IDLE_DURATION: Duration = Duration::from_secs(5 * 60);
+pub const MAX_STATUS_MODEL_DIGESTS: usize = 16;
 
 const MAX_LOADED_MODELS: usize = 64;
 const MAX_CONTEXTS_PER_MODEL: usize = 64;
 const MAX_QUEUE_CAPACITY: usize = 4096;
-const MAX_IDLE_CONTEXT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_IDLE_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelManagerOptions {
     pub max_loaded_models: usize,
     pub max_contexts_per_model: usize,
     pub queue_capacity: usize,
-    pub idle_context_retention: Duration,
+    pub context_idle_duration: Duration,
+    pub model_idle_duration: Duration,
     pub model_lease_root: Option<PathBuf>,
 }
 
@@ -42,7 +45,8 @@ impl Default for ModelManagerOptions {
             max_loaded_models: DEFAULT_MAX_LOADED_MODELS,
             max_contexts_per_model: DEFAULT_MAX_CONTEXTS_PER_MODEL,
             queue_capacity: DEFAULT_MODEL_MANAGER_QUEUE_CAPACITY,
-            idle_context_retention: DEFAULT_IDLE_CONTEXT_RETENTION,
+            context_idle_duration: DEFAULT_CONTEXT_IDLE_DURATION,
+            model_idle_duration: DEFAULT_MODEL_IDLE_DURATION,
             model_lease_root: None,
         }
     }
@@ -51,6 +55,16 @@ impl Default for ModelManagerOptions {
 impl ModelManagerOptions {
     pub fn with_model_lease_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.model_lease_root = Some(path.into());
+        self
+    }
+
+    pub fn with_residency_durations(
+        mut self,
+        context_idle_duration: Duration,
+        model_idle_duration: Duration,
+    ) -> Self {
+        self.context_idle_duration = context_idle_duration;
+        self.model_idle_duration = model_idle_duration;
         self
     }
 
@@ -66,16 +80,8 @@ impl ModelManagerOptions {
             MAX_CONTEXTS_PER_MODEL,
         )?;
         validate_bounded("queue_capacity", self.queue_capacity, MAX_QUEUE_CAPACITY)?;
-        if self.idle_context_retention.is_zero()
-            || self.idle_context_retention > MAX_IDLE_CONTEXT_RETENTION
-        {
-            return Err(ModelManagerError::InvalidOptions {
-                message: format!(
-                    "idle_context_retention must be between 1ns and {}s",
-                    MAX_IDLE_CONTEXT_RETENTION.as_secs()
-                ),
-            });
-        }
+        validate_idle_duration("context_idle_duration", self.context_idle_duration)?;
+        validate_idle_duration("model_idle_duration", self.model_idle_duration)?;
         if self
             .model_lease_root
             .as_ref()
@@ -87,6 +93,18 @@ impl ModelManagerOptions {
         }
         Ok(())
     }
+}
+
+fn validate_idle_duration(name: &str, value: Duration) -> Result<(), ModelManagerError> {
+    if value < Duration::from_secs(1) || value > MAX_IDLE_DURATION || value.subsec_nanos() != 0 {
+        return Err(ModelManagerError::InvalidOptions {
+            message: format!(
+                "{name} must be a whole number of seconds between 1 and {}",
+                MAX_IDLE_DURATION.as_secs()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_bounded(name: &str, value: usize, maximum: usize) -> Result<(), ModelManagerError> {
@@ -141,6 +159,13 @@ impl fmt::Display for ModelKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.digest())
     }
+}
+
+fn validate_model_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -659,12 +684,116 @@ fn map_artifact_error(artifact: &ArtifactRef, error: agl_store::StoreError) -> M
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModelManagerStatusDetail {
+    #[default]
+    Aggregate,
+    ModelDigests,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelUnloadTarget {
+    All,
+    Digest(String),
+}
+
+impl ModelUnloadTarget {
+    pub fn digest(digest: impl Into<String>) -> Result<Self, ModelManagerError> {
+        let digest = digest.into();
+        if !validate_model_digest(&digest) {
+            return Err(ModelManagerError::InvalidUnloadTarget {
+                message: "model digest must contain exactly 64 lowercase hexadecimal characters"
+                    .to_string(),
+            });
+        }
+        Ok(Self::Digest(digest))
+    }
+
+    pub fn validate(&self) -> Result<(), ModelManagerError> {
+        match self {
+            Self::All => Ok(()),
+            Self::Digest(digest) if validate_model_digest(digest) => Ok(()),
+            Self::Digest(_) => Err(ModelManagerError::InvalidUnloadTarget {
+                message: "model digest must contain exactly 64 lowercase hexadecimal characters"
+                    .to_string(),
+            }),
+        }
+    }
+
+    pub(crate) fn matches_digest(&self, digest: &str) -> bool {
+        matches!(self, Self::All) || matches!(self, Self::Digest(candidate) if candidate == digest)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelUnloadOutcome {
+    Released,
+    NotResident,
+    Busy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelUnloadResult {
+    pub matched_models: u32,
+    pub released_models: u32,
+    pub released_contexts: u32,
+    pub outcome: ModelUnloadOutcome,
+}
+
+impl ModelUnloadResult {
+    pub(crate) const fn busy() -> Self {
+        Self {
+            matched_models: 0,
+            released_models: 0,
+            released_contexts: 0,
+            outcome: ModelUnloadOutcome::Busy,
+        }
+    }
+
+    pub(crate) const fn not_resident() -> Self {
+        Self {
+            matched_models: 0,
+            released_models: 0,
+            released_contexts: 0,
+            outcome: ModelUnloadOutcome::NotResident,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReleaseReason {
+    IdleContext,
+    IdleModel,
+    Manual,
+    Shutdown,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReleaseOutcome {
+    Released,
+    Failed,
+    BackendLost,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ModelManagerStatus {
     pub queue_depth: usize,
-    pub loaded_model_digests: Vec<String>,
     pub active_scope: Option<InferenceJobScope>,
-    pub cached_contexts: usize,
+    pub resident_models: usize,
+    pub resident_contexts: usize,
+    pub next_residency_deadline_after_ms: Option<u64>,
+    pub resident_model_digests: Vec<String>,
+    pub resident_model_digests_truncated: bool,
+    pub last_release_reason: Option<ModelReleaseReason>,
+    pub last_release_outcome: Option<ModelReleaseOutcome>,
+    pub automatic_context_unloads: u64,
+    pub automatic_model_unloads: u64,
+    pub manual_unloads: u64,
+    pub unload_failures: u64,
     pub model_loads: u64,
     pub context_loads: u64,
     pub model_evictions: u64,
@@ -676,6 +805,13 @@ pub struct ModelManagerStatus {
     pub failures: u64,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct SharedManagerStatus {
+    pub(super) status: ModelManagerStatus,
+    pub(super) next_residency_deadline: Option<Instant>,
+    pub(super) resident_model_digests: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelManagerError {
     InvalidOptions {
@@ -683,6 +819,9 @@ pub enum ModelManagerError {
     },
     QueueFull {
         capacity: usize,
+    },
+    InvalidUnloadTarget {
+        message: String,
     },
     DeadlineExceeded,
     Cancelled,
@@ -736,6 +875,7 @@ impl ModelManagerError {
         match self {
             Self::InvalidOptions { .. } => "manager.invalid_options",
             Self::QueueFull { .. } => "manager.queue_full",
+            Self::InvalidUnloadTarget { .. } => "manager.invalid_unload_target",
             Self::DeadlineExceeded => "manager.deadline_exceeded",
             Self::Cancelled => "manager.cancelled",
             Self::ProfileInvalid { .. } => "manager.profile_invalid",
@@ -764,6 +904,9 @@ impl fmt::Display for ModelManagerError {
                 formatter,
                 "model manager queue is full (capacity {capacity})"
             ),
+            Self::InvalidUnloadTarget { message } => {
+                write!(formatter, "invalid model unload target: {message}")
+            }
             Self::DeadlineExceeded => formatter.write_str("inference deadline exceeded"),
             Self::Cancelled => formatter.write_str("inference job cancelled"),
             Self::ProfileInvalid { message } => {

@@ -181,7 +181,12 @@ pub(crate) fn run_function_smoke(
         WorkerModelRuntime::discover(runtime.paths.inference_worker_temp_root())
             .context("failed to prepare isolated inference worker for function smoke")?;
     let model_manager = ModelManager::spawn(
-        ModelManagerOptions::default().with_model_lease_root(runtime.paths.model_lease_root()),
+        ModelManagerOptions::default()
+            .with_residency_durations(
+                Duration::from_secs(runtime.inference.residency.context_idle_seconds),
+                Duration::from_secs(runtime.inference.residency.model_idle_seconds),
+            )
+            .with_model_lease_root(runtime.paths.model_lease_root()),
         inference_runtime,
     )
     .context("failed to start model manager for function smoke")?;
@@ -447,6 +452,7 @@ mod tests {
             logging: AgentLibreLoggingConfig::default(),
             history: AgentLibreHistoryConfig::default(),
             workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: AgentLibreExecutionConfig::default(),
         }
     }

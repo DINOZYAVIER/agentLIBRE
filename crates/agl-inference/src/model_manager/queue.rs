@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use super::{InferenceCancellation, InferenceJobScope, ModelManagerError, ModelManagerStatus};
+use super::types::SharedManagerStatus;
+use super::{InferenceCancellation, InferenceJobScope, ModelManagerError};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct QueueEntryId(u64);
@@ -52,6 +53,9 @@ pub(super) trait QueueCommand: Send + 'static {
     fn cancellation(&self) -> Option<&InferenceCancellation>;
     fn deadline(&self) -> Option<Instant>;
     fn active_scope(&self) -> Option<InferenceJobScope>;
+    fn active_model_target(&self) -> Option<ActiveModelTarget<'_>> {
+        None
+    }
     fn complete(self, error: ModelManagerError);
 
     fn on_queued(&self) {}
@@ -72,13 +76,19 @@ pub(super) trait QueueCommand: Send + 'static {
     }
 }
 
-trait QueueClock: Send + Sync + 'static {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActiveModelTarget<'a> {
+    All,
+    Digest(&'a str),
+}
+
+pub(super) trait ManagerClock: Send + Sync + 'static {
     fn now(&self) -> Instant;
 }
 
-struct SystemQueueClock;
+pub(super) struct SystemManagerClock;
 
-impl QueueClock for SystemQueueClock {
+impl ManagerClock for SystemManagerClock {
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -96,6 +106,31 @@ struct ActiveEntry {
     generation: bool,
     cancellation: Option<InferenceCancellation>,
     scope: Option<InferenceJobScope>,
+    model_target: Option<OwnedActiveModelTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OwnedActiveModelTarget {
+    All,
+    Digest(String),
+}
+
+impl OwnedActiveModelTarget {
+    fn as_borrowed(&self) -> ActiveModelTarget<'_> {
+        match self {
+            Self::All => ActiveModelTarget::All,
+            Self::Digest(digest) => ActiveModelTarget::Digest(digest),
+        }
+    }
+}
+
+impl ActiveModelTarget<'_> {
+    fn into_owned(self) -> OwnedActiveModelTarget {
+        match self {
+            Self::All => OwnedActiveModelTarget::All,
+            Self::Digest(digest) => OwnedActiveModelTarget::Digest(digest.to_string()),
+        }
+    }
 }
 
 struct PendingQueueState<C> {
@@ -111,13 +146,24 @@ struct PendingQueueState<C> {
 pub(super) struct PendingQueue<C: QueueCommand> {
     state: Mutex<PendingQueueState<C>>,
     changed: Condvar,
-    status: Arc<Mutex<ModelManagerStatus>>,
-    clock: Arc<dyn QueueClock>,
+    status: Arc<Mutex<SharedManagerStatus>>,
+    clock: Arc<dyn ManagerClock>,
 }
 
 pub(super) struct ActiveCommand<C> {
     pub(super) id: QueueEntryId,
     pub(super) command: C,
+}
+
+pub(super) enum QueueWake<C> {
+    Command(ActiveCommand<C>),
+    Deadline,
+    Shutdown,
+}
+
+pub(super) enum EnqueueResult<C> {
+    Queued(QueueEntryId),
+    ActiveConflict(C),
 }
 
 pub(super) struct QueueSnapshot {
@@ -126,14 +172,15 @@ pub(super) struct QueueSnapshot {
 }
 
 impl<C: QueueCommand> PendingQueue<C> {
-    pub(super) fn new(capacity: usize, status: Arc<Mutex<ModelManagerStatus>>) -> Self {
-        Self::with_clock(capacity, status, Arc::new(SystemQueueClock))
+    #[cfg(test)]
+    pub(super) fn new(capacity: usize, status: Arc<Mutex<SharedManagerStatus>>) -> Self {
+        Self::with_clock(capacity, status, Arc::new(SystemManagerClock))
     }
 
-    fn with_clock(
+    pub(super) fn with_clock(
         capacity: usize,
-        status: Arc<Mutex<ModelManagerStatus>>,
-        clock: Arc<dyn QueueClock>,
+        status: Arc<Mutex<SharedManagerStatus>>,
+        clock: Arc<dyn ManagerClock>,
     ) -> Self {
         Self {
             state: Mutex::new(PendingQueueState {
@@ -152,15 +199,38 @@ impl<C: QueueCommand> PendingQueue<C> {
     }
 
     pub(super) fn enqueue(&self, command: C) -> Result<QueueEntryId, ModelManagerError> {
+        match self.enqueue_with_active_check(command, |_| false)? {
+            EnqueueResult::Queued(id) => Ok(id),
+            EnqueueResult::ActiveConflict(_) => unreachable!("unconditional admission conflicted"),
+        }
+    }
+
+    pub(super) fn enqueue_with_active_check(
+        &self,
+        command: C,
+        conflicts: impl FnOnce(Option<ActiveModelTarget<'_>>) -> bool,
+    ) -> Result<EnqueueResult<C>, ModelManagerError> {
         let now = self.clock.now();
         let mut terminal = Vec::new();
+        let mut conflicts = Some(conflicts);
         let result = {
             let mut state = self.lock_state();
             if state.closed || !state.worker_running {
                 Err(ModelManagerError::ManagerUnavailable)
             } else {
                 terminal = prune_terminal_entries(&mut state.entries, now);
-                if state.entries.len() >= state.capacity {
+                let active_target = state
+                    .active
+                    .as_ref()
+                    .and_then(|active| active.model_target.as_ref())
+                    .map(OwnedActiveModelTarget::as_borrowed);
+                if conflicts
+                    .take()
+                    .expect("active conflict predicate is evaluated once")(
+                    active_target
+                ) {
+                    Ok(EnqueueResult::ActiveConflict(command))
+                } else if state.entries.len() >= state.capacity {
                     Err(ModelManagerError::QueueFull {
                         capacity: state.capacity,
                     })
@@ -179,7 +249,7 @@ impl<C: QueueCommand> PendingQueue<C> {
                                 command,
                                 state: QueueEntryState::Queued,
                             });
-                            Ok(id)
+                            Ok(EnqueueResult::Queued(id))
                         }
                         None => Err(ModelManagerError::ManagerUnavailable),
                     }
@@ -187,13 +257,13 @@ impl<C: QueueCommand> PendingQueue<C> {
             }
         };
         self.complete_terminal(terminal);
-        if result.is_ok() {
+        if matches!(&result, Ok(EnqueueResult::Queued(_))) {
             self.changed.notify_one();
         }
         result
     }
 
-    pub(super) fn pop(&self) -> Option<ActiveCommand<C>> {
+    pub(super) fn pop_until(&self, deadline: Option<Instant>) -> QueueWake<C> {
         loop {
             let mut state = self.lock_state();
             let terminal = prune_terminal_entries(&mut state.entries, self.clock.now());
@@ -210,22 +280,38 @@ impl<C: QueueCommand> PendingQueue<C> {
                     generation: entry.command.is_generation(),
                     cancellation: entry.command.cancellation().cloned(),
                     scope: entry.command.active_scope(),
+                    model_target: entry
+                        .command
+                        .active_model_target()
+                        .map(ActiveModelTarget::into_owned),
                 };
                 debug_assert!(state.active.is_none());
                 state.active = Some(active);
-                return Some(ActiveCommand {
+                return QueueWake::Command(ActiveCommand {
                     id: entry.id,
                     command: entry.command,
                 });
             }
             if state.closed {
-                return None;
+                return QueueWake::Shutdown;
             }
-            drop(
-                self.changed
+            let now = self.clock.now();
+            if deadline.is_some_and(|deadline| now >= deadline) {
+                return QueueWake::Deadline;
+            }
+            state = match deadline {
+                Some(deadline) => {
+                    self.changed
+                        .wait_timeout(state, deadline.saturating_duration_since(now))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .0
+                }
+                None => self
+                    .changed
                     .wait(state)
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            };
+            drop(state);
         }
     }
 
@@ -246,6 +332,7 @@ impl<C: QueueCommand> PendingQueue<C> {
 
     pub(super) fn abandon(&self, id: QueueEntryId, reason: WaitAbandonReason) {
         let mut terminal = None;
+        let mut changed = false;
         {
             let mut state = self.lock_state();
             if let Some(index) = state.entries.iter().position(|entry| entry.id == id) {
@@ -256,6 +343,7 @@ impl<C: QueueCommand> PendingQueue<C> {
                 let reason = terminal_reason(&entry.command, reason);
                 entry.state = reason.state();
                 terminal = Some((entry.command, reason));
+                changed = true;
             } else if let Some(active) = state.active.as_ref().filter(|active| active.id == id)
                 && active.generation
                 && matches!(
@@ -265,11 +353,15 @@ impl<C: QueueCommand> PendingQueue<C> {
                 && let Some(cancellation) = &active.cancellation
             {
                 cancellation.cancel();
+                changed = true;
             }
         }
         if let Some((command, reason)) = terminal {
             self.record_terminal(reason);
             command.complete(reason.error());
+        }
+        if changed {
+            self.changed.notify_all();
         }
     }
 
@@ -368,6 +460,10 @@ impl<C: QueueCommand> PendingQueue<C> {
                 generation: entry.command.is_generation(),
                 cancellation: entry.command.cancellation().cloned(),
                 scope: entry.command.active_scope(),
+                model_target: entry
+                    .command
+                    .active_model_target()
+                    .map(ActiveModelTarget::into_owned),
             });
             Some(ActiveCommand {
                 id: entry.id,
@@ -384,6 +480,11 @@ impl<C: QueueCommand> PendingQueue<C> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(test)]
+    pub(super) fn wake(&self) {
+        self.changed.notify_all();
+    }
+
     fn complete_terminal(&self, terminal: Vec<(C, TerminalReason)>) {
         for (command, reason) in terminal {
             self.record_terminal(reason);
@@ -398,10 +499,10 @@ impl<C: QueueCommand> PendingQueue<C> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match reason {
             TerminalReason::Cancelled => {
-                status.cancellations = status.cancellations.saturating_add(1);
+                status.status.cancellations = status.status.cancellations.saturating_add(1);
             }
             TerminalReason::DeadlineExceeded => {
-                status.deadline_exceeded = status.deadline_exceeded.saturating_add(1);
+                status.status.deadline_exceeded = status.status.deadline_exceeded.saturating_add(1);
             }
             TerminalReason::ManagerUnavailable => {}
         }
@@ -498,7 +599,7 @@ mod tests {
         }
     }
 
-    impl QueueClock for ManualClock {
+    impl ManagerClock for ManualClock {
         fn now(&self) -> Instant {
             *self.0.lock().unwrap()
         }
@@ -556,7 +657,7 @@ mod tests {
     fn queue(capacity: usize) -> Arc<PendingQueue<FakeCommand>> {
         Arc::new(PendingQueue::new(
             capacity,
-            Arc::new(Mutex::new(ModelManagerStatus::default())),
+            Arc::new(Mutex::new(SharedManagerStatus::default())),
         ))
     }
 
@@ -586,7 +687,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(start));
         let queue = PendingQueue::with_clock(
             1,
-            Arc::new(Mutex::new(ModelManagerStatus::default())),
+            Arc::new(Mutex::new(SharedManagerStatus::default())),
             clock.clone(),
         );
         let (expired, expired_reply) =
@@ -610,7 +711,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(start));
         let queue = PendingQueue::with_clock(
             1,
-            Arc::new(Mutex::new(ModelManagerStatus::default())),
+            Arc::new(Mutex::new(SharedManagerStatus::default())),
             clock.clone(),
         );
         let (expired, expired_reply) =
@@ -721,7 +822,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new(start));
         let queue = PendingQueue::with_clock(
             2,
-            Arc::new(Mutex::new(ModelManagerStatus::default())),
+            Arc::new(Mutex::new(SharedManagerStatus::default())),
             clock.clone(),
         );
         let (expired, expired_reply) =
@@ -731,7 +832,9 @@ mod tests {
         queue.enqueue(survivor).unwrap();
         clock.advance(Duration::from_secs(1));
 
-        let active = queue.pop().unwrap();
+        let QueueWake::Command(active) = queue.pop_until(None) else {
+            panic!("queued command was not returned");
+        };
 
         assert_eq!(active.command.label, "survivor");
         assert_eq!(
@@ -739,6 +842,32 @@ mod tests {
             ModelManagerError::DeadlineExceeded
         );
         queue.complete_active(active.id);
+    }
+
+    #[test]
+    fn deadline_wake_needs_no_command_and_visible_fifo_work_wins_at_exact_deadline() {
+        let start = Instant::now();
+        let clock = Arc::new(ManualClock::new(start));
+        let queue = PendingQueue::with_clock(
+            1,
+            Arc::new(Mutex::new(SharedManagerStatus::default())),
+            clock.clone(),
+        );
+        let resource_deadline = start + Duration::from_secs(1);
+        clock.advance(Duration::from_secs(1));
+
+        assert!(matches!(
+            queue.pop_until(Some(resource_deadline)),
+            QueueWake::Deadline
+        ));
+
+        let (candidate, _) = command("fifo-first", false, None, None);
+        let id = queue.enqueue(candidate).unwrap();
+        let QueueWake::Command(active) = queue.pop_until(Some(resource_deadline)) else {
+            panic!("visible FIFO command must win at an exact resource deadline");
+        };
+        assert_eq!(active.command.label, "fifo-first");
+        queue.complete_active(id);
     }
 
     #[test]

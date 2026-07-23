@@ -475,6 +475,37 @@ fn parse_model_pull_and_lifecycle_commands() {
             json: false,
         })),
     );
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    assert_eq!(
+        parse_cli([
+            "agl".to_string(),
+            "model".to_string(),
+            "unload".to_string(),
+            "--digest".to_string(),
+            digest.to_string(),
+        ])
+        .unwrap()
+        .command,
+        CliCommand::Model(ModelCommand::Unload(ModelUnloadOptions {
+            target: agl_protocol::ModelUnloadTarget::Digest {
+                digest: digest.to_string(),
+            },
+        })),
+    );
+    assert_command(
+        ["agl", "model", "unload", "--all"],
+        CliCommand::Model(ModelCommand::Unload(ModelUnloadOptions {
+            target: agl_protocol::ModelUnloadTarget::All,
+        })),
+    );
+    assert_parse_error_contains(
+        ["agl", "model", "unload", "--all", "--digest", digest],
+        "cannot be used with",
+    );
+    assert_parse_error_contains(
+        ["agl", "model", "unload", "--digest", "ABC"],
+        "64 lowercase hexadecimal",
+    );
 }
 
 #[test]
@@ -1030,9 +1061,17 @@ fn parse_memory_rejects_zero_limit() {
 #[test]
 fn parse_daemon_status_command_with_socket_override() {
     assert_command(
-        ["agl", "daemon", "status", "--socket", "/tmp/agl.sock"],
+        [
+            "agl",
+            "daemon",
+            "status",
+            "--socket",
+            "/tmp/agl.sock",
+            "--detail",
+        ],
         CliCommand::DaemonStatus(DaemonStatusOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
+            detail: true,
         }),
     );
 }

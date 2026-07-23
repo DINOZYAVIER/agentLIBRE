@@ -400,6 +400,23 @@ pub struct WorkerProcess {
 }
 
 impl WorkerProcess {
+    /// Constructs an in-memory host-side process fixture for runtime protocol
+    /// tests. It deliberately has no child: containment tests exercise the
+    /// same control transport and teardown path without granting a fixture an
+    /// ambient executable or process authority.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(channel: HostControlChannel) -> Self {
+        Self {
+            child: None,
+            channel,
+            stderr: WorkerStderrCapture::start_reader(std::io::empty())
+                .expect("empty test stderr capture must start"),
+            identity: WorkerIdentity::current(),
+            executable_path: PathBuf::from("/test/agl-inference-worker"),
+            native_bundle_id: "test-native-bundle".to_string(),
+        }
+    }
+
     pub fn spawn(executable: &WorkerExecutable, handshake_timeout: Duration) -> Result<Self> {
         Self::spawn_with_environment(executable, handshake_timeout, &BTreeMap::new())
     }
@@ -576,26 +593,51 @@ impl WorkerProcess {
         Ok(status)
     }
 
-    pub fn shutdown(mut self, reason: ShutdownReason, timeout: Duration) -> Result<()> {
-        self.channel
-            .send(HostCommand::Shutdown(Shutdown::new(reason)))?;
-        match self.channel.receive_timeout(timeout)? {
-            WorkerEvent::ShutdownComplete(ShutdownComplete {}) => {}
-            _ => {
+    pub fn shutdown(self, reason: ShutdownReason, timeout: Duration) -> Result<()> {
+        self.shutdown_with_reap_status(reason, timeout).0
+    }
+
+    pub(crate) fn shutdown_with_reap_status(
+        mut self,
+        reason: ShutdownReason,
+        timeout: Duration,
+    ) -> (Result<()>, bool) {
+        let orderly = (|| {
+            self.channel
+                .send(HostCommand::Shutdown(Shutdown::new(reason)))?;
+            match self.channel.receive_timeout(timeout)? {
+                WorkerEvent::ShutdownComplete(ShutdownComplete {}) => {}
+                _ => {
+                    return Err(WorkerProtocolError::new(
+                        WorkerProtocolErrorCode::UnexpectedMessage,
+                        "inference worker sent an invalid response to shutdown",
+                    ));
+                }
+            }
+            let status = self.wait_for_exit(timeout)?;
+            if !status.success() {
                 return Err(WorkerProtocolError::new(
-                    WorkerProtocolErrorCode::UnexpectedMessage,
-                    "inference worker sent an invalid response to shutdown",
+                    WorkerProtocolErrorCode::SpawnFailed,
+                    format!("inference worker failed during orderly shutdown: {status}"),
                 ));
             }
+            Ok(())
+        })();
+        match orderly {
+            Ok(()) => (Ok(()), true),
+            Err(orderly_error) => match self.terminate_and_reap_with_timeout(timeout) {
+                Ok(()) => (Err(orderly_error), true),
+                Err(reap_error) => (
+                    Err(WorkerProtocolError::new(
+                        WorkerProtocolErrorCode::TimedOut,
+                        format!(
+                            "inference worker shutdown failed ({orderly_error}); forced reap also failed ({reap_error})"
+                        ),
+                    )),
+                    false,
+                ),
+            },
         }
-        let status = self.wait_for_exit(timeout)?;
-        if !status.success() {
-            return Err(WorkerProtocolError::new(
-                WorkerProtocolErrorCode::SpawnFailed,
-                format!("inference worker failed during orderly shutdown: {status}"),
-            ));
-        }
-        Ok(())
     }
 
     pub fn terminate_and_reap(&mut self) {

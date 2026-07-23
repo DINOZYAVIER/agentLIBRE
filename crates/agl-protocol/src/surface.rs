@@ -49,6 +49,10 @@ pub const MAX_ACTIVITY_GRAPH_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_ACTIVE_ACTIVITY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ACTIVITY_DELTA_BYTES: usize = 700 * 1024;
 pub const MAX_INFERENCE_DEVICES: usize = 64;
+pub const MAX_INFERENCE_RESIDENT_MODELS: u32 = 64;
+pub const MAX_INFERENCE_RESIDENT_CONTEXTS: u32 = 64 * 64;
+pub const MAX_INFERENCE_STATUS_MODEL_DIGESTS: usize = 16;
+pub const MAX_INFERENCE_RESIDENCY_DEADLINE_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const MAX_SETUP_SMOKE_MODEL_BINDINGS: usize = 16;
 pub const MAX_SETUP_SMOKE_OUTPUT_TOKENS: u32 = 4_096;
 
@@ -2377,6 +2381,7 @@ impl DaemonRequestKind {
     pub fn validate_surface(&self) -> Result<(), SurfaceValidationError> {
         match self {
             Self::SetupSmokeSessionOpen(request) => validate_setup_smoke_session_open(request),
+            Self::ModelUnload(request) => validate_model_unload_target(&request.target),
             Self::CommandCatalog(request) => {
                 bound_count(
                     request.client_effects.len(),
@@ -2551,6 +2556,7 @@ impl DaemonEventKind {
             Self::HumanTerminalCommandAccepted(_) => Ok(()),
             Self::InferenceInventory(event) => validate_inference_inventory(event),
             Self::InferenceStatus(event) => validate_inference_status(event),
+            Self::ModelUnload(event) => validate_model_unload_event(event),
             Self::Error(error) => {
                 bound_string(
                     &error.message,
@@ -2678,7 +2684,127 @@ fn validate_inference_status(
         status.physical_device_id.as_deref(),
         MAX_IDENTIFIER_BYTES,
         "inference physical device ID",
-    )
+    )?;
+    if status.resident_models > MAX_INFERENCE_RESIDENT_MODELS {
+        return Err(SurfaceValidationError::new(
+            "inference resident model count exceeds its bounded maximum",
+        ));
+    }
+    if status.resident_contexts > MAX_INFERENCE_RESIDENT_CONTEXTS {
+        return Err(SurfaceValidationError::new(
+            "inference resident context count exceeds its bounded maximum",
+        ));
+    }
+    if status.resident_models == 0 && status.resident_contexts != 0 {
+        return Err(SurfaceValidationError::new(
+            "inference contexts cannot be resident without a resident model",
+        ));
+    }
+    if status
+        .next_residency_deadline_after_ms
+        .is_some_and(|milliseconds| milliseconds > MAX_INFERENCE_RESIDENCY_DEADLINE_AFTER_MS)
+    {
+        return Err(SurfaceValidationError::new(
+            "inference residency deadline exceeds the bounded idle policy",
+        ));
+    }
+    if status.last_release_reason.is_some() != status.last_release_outcome.is_some() {
+        return Err(SurfaceValidationError::new(
+            "inference last release reason and outcome must be present together",
+        ));
+    }
+    match (
+        status.resident_model_digests.as_deref(),
+        status.resident_model_digests_truncated,
+    ) {
+        (None, None) => Ok(()),
+        (Some(digests), Some(truncated)) => {
+            bound_count(
+                digests.len(),
+                MAX_INFERENCE_STATUS_MODEL_DIGESTS,
+                "inference resident model digests",
+            )?;
+            for digest in digests {
+                validate_model_digest(digest)?;
+            }
+            if !digests.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(SurfaceValidationError::new(
+                    "inference resident model digests must be unique and lexically ordered",
+                ));
+            }
+            if truncated {
+                if digests.len() != MAX_INFERENCE_STATUS_MODEL_DIGESTS
+                    || status.resident_models
+                        <= u32::try_from(MAX_INFERENCE_STATUS_MODEL_DIGESTS)
+                            .expect("status digest bound fits u32")
+                {
+                    return Err(SurfaceValidationError::new(
+                        "truncated inference model detail must contain the full bounded prefix",
+                    ));
+                }
+            } else if usize::try_from(status.resident_models).ok() != Some(digests.len()) {
+                return Err(SurfaceValidationError::new(
+                    "complete inference model detail must match the resident model count",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(SurfaceValidationError::new(
+            "inference model digest detail and truncation must be present together",
+        )),
+    }
+}
+
+fn validate_model_digest(digest: &str) -> Result<(), SurfaceValidationError> {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SurfaceValidationError::new(
+            "model digest must contain exactly 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_unload_target(
+    target: &crate::ModelUnloadTarget,
+) -> Result<(), SurfaceValidationError> {
+    match target {
+        crate::ModelUnloadTarget::All => Ok(()),
+        crate::ModelUnloadTarget::Digest { digest } => validate_model_digest(digest),
+    }
+}
+
+fn validate_model_unload_event(
+    event: &crate::ModelUnloadEvent,
+) -> Result<(), SurfaceValidationError> {
+    if event.matched_models > MAX_INFERENCE_RESIDENT_MODELS
+        || event.released_models > event.matched_models
+        || event.released_contexts > MAX_INFERENCE_RESIDENT_CONTEXTS
+    {
+        return Err(SurfaceValidationError::new(
+            "model unload result counts are outside their bounded relationship",
+        ));
+    }
+    match event.outcome {
+        crate::ModelUnloadOutcome::Released
+            if event.matched_models > 0 && event.released_models == event.matched_models =>
+        {
+            Ok(())
+        }
+        crate::ModelUnloadOutcome::NotResident
+            if event.matched_models == 0
+                && event.released_models == 0
+                && event.released_contexts == 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(SurfaceValidationError::new(
+            "model unload outcome does not agree with its result counts",
+        )),
+    }
 }
 
 fn validate_catalog(catalog: &CommandCatalogEvent) -> Result<(), SurfaceValidationError> {
@@ -3791,6 +3917,17 @@ mod tests {
             physical_device_id: Some("pci:0000:03:00.0".to_owned()),
             reserved_bytes: 16 * 1024 * 1024,
             cooldown_not_before_unix_ms: None,
+            resident_models: 0,
+            resident_contexts: 0,
+            next_residency_deadline_after_ms: None,
+            last_release_reason: None,
+            last_release_outcome: None,
+            automatic_context_unloads: 0,
+            automatic_model_unloads: 0,
+            manual_unloads: 0,
+            unload_failures: 0,
+            resident_model_digests: None,
+            resident_model_digests_truncated: None,
         };
         let event = DaemonEvent::new(
             Some(request_id()),
@@ -3811,6 +3948,183 @@ mod tests {
             }),
         );
         assert!(incomplete_identity.validate().is_err());
+    }
+
+    #[test]
+    fn model_unload_targets_and_results_are_strict_and_bounded() {
+        let digest = "a".repeat(64);
+        for target in [
+            crate::ModelUnloadTarget::All,
+            crate::ModelUnloadTarget::Digest {
+                digest: digest.clone(),
+            },
+        ] {
+            let request = crate::DaemonRequest::new(
+                request_id(),
+                crate::DaemonRequestKind::ModelUnload(crate::ModelUnloadRequest { target }),
+            );
+            request.validate().unwrap();
+            let encoded = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<crate::DaemonRequest>(&encoded).unwrap(),
+                request
+            );
+        }
+
+        for invalid in [
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let request = crate::DaemonRequest::new(
+                request_id(),
+                crate::DaemonRequestKind::ModelUnload(crate::ModelUnloadRequest {
+                    target: crate::ModelUnloadTarget::Digest { digest: invalid },
+                }),
+            );
+            assert!(request.validate().is_err());
+        }
+
+        let released = crate::DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::ModelUnload(crate::ModelUnloadEvent {
+                matched_models: 1,
+                released_models: 1,
+                released_contexts: 2,
+                outcome: crate::ModelUnloadOutcome::Released,
+            }),
+        );
+        released.validate().unwrap();
+        let encoded = serde_json::to_string(&released).unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::DaemonEvent>(&encoded).unwrap(),
+            released
+        );
+
+        let not_resident = crate::DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::ModelUnload(crate::ModelUnloadEvent {
+                matched_models: 0,
+                released_models: 0,
+                released_contexts: 0,
+                outcome: crate::ModelUnloadOutcome::NotResident,
+            }),
+        );
+        not_resident.validate().unwrap();
+
+        let impossible = crate::DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::ModelUnload(crate::ModelUnloadEvent {
+                matched_models: 1,
+                released_models: 0,
+                released_contexts: 0,
+                outcome: crate::ModelUnloadOutcome::Released,
+            }),
+        );
+        assert!(impossible.validate().is_err());
+    }
+
+    #[test]
+    fn inference_status_detail_is_explicit_sorted_and_capped() {
+        let digests = (0..MAX_INFERENCE_STATUS_MODEL_DIGESTS)
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let detailed = crate::DaemonEvent::new(
+            Some(request_id()),
+            crate::DaemonEventKind::InferenceStatus(crate::InferenceStatusEvent {
+                worker_build_id: "sha256:worker".to_owned(),
+                worker_state: crate::ProtocolInferenceWorkerState::Ready,
+                worker_pid: Some(42),
+                launch_generation: Some(7),
+                physical_device_id: Some("pci:0000:03:00.0".to_owned()),
+                reserved_bytes: 16,
+                cooldown_not_before_unix_ms: None,
+                resident_models: 17,
+                resident_contexts: 2,
+                next_residency_deadline_after_ms: Some(250),
+                last_release_reason: Some(crate::ModelReleaseReason::Manual),
+                last_release_outcome: Some(crate::ModelReleaseOutcome::Released),
+                automatic_context_unloads: 3,
+                automatic_model_unloads: 2,
+                manual_unloads: 1,
+                unload_failures: 0,
+                resident_model_digests: Some(digests.clone()),
+                resident_model_digests_truncated: Some(true),
+            }),
+        );
+        detailed.validate().unwrap();
+
+        let mut unsorted = detailed.clone();
+        let crate::DaemonEventKind::InferenceStatus(status) = &mut unsorted.kind else {
+            unreachable!()
+        };
+        status.resident_model_digests.as_mut().unwrap().swap(0, 1);
+        assert!(unsorted.validate().is_err());
+
+        let mut oversized = detailed.clone();
+        let crate::DaemonEventKind::InferenceStatus(status) = &mut oversized.kind else {
+            unreachable!()
+        };
+        status
+            .resident_model_digests
+            .as_mut()
+            .unwrap()
+            .push("f".repeat(64));
+        assert!(oversized.validate().is_err());
+
+        let mut incomplete_pair = detailed.clone();
+        let crate::DaemonEventKind::InferenceStatus(status) = &mut incomplete_pair.kind else {
+            unreachable!()
+        };
+        status.resident_model_digests_truncated = None;
+        assert!(incomplete_pair.validate().is_err());
+
+        let mutations: [fn(&mut crate::InferenceStatusEvent); 5] = [
+            |status: &mut crate::InferenceStatusEvent| {
+                status.resident_models = MAX_INFERENCE_RESIDENT_MODELS + 1;
+            },
+            |status: &mut crate::InferenceStatusEvent| {
+                status.resident_contexts = MAX_INFERENCE_RESIDENT_CONTEXTS + 1;
+            },
+            |status: &mut crate::InferenceStatusEvent| {
+                status.resident_models = 0;
+                status.resident_contexts = 1;
+            },
+            |status: &mut crate::InferenceStatusEvent| {
+                status.next_residency_deadline_after_ms =
+                    Some(MAX_INFERENCE_RESIDENCY_DEADLINE_AFTER_MS + 1);
+            },
+            |status: &mut crate::InferenceStatusEvent| {
+                status.last_release_outcome = None;
+            },
+        ];
+        for mutate in mutations {
+            let mut invalid = detailed.clone();
+            let crate::DaemonEventKind::InferenceStatus(status) = &mut invalid.kind else {
+                unreachable!()
+            };
+            mutate(status);
+            assert!(invalid.validate().is_err());
+        }
+
+        let mut invalid_digest = detailed.clone();
+        let crate::DaemonEventKind::InferenceStatus(status) = &mut invalid_digest.kind else {
+            unreachable!()
+        };
+        status.resident_model_digests = Some(vec!["A".repeat(64)]);
+        status.resident_model_digests_truncated = Some(false);
+        status.resident_models = 1;
+        assert!(invalid_digest.validate().is_err());
+
+        let mut count_mismatch = detailed;
+        let crate::DaemonEventKind::InferenceStatus(status) = &mut count_mismatch.kind else {
+            unreachable!()
+        };
+        status.resident_model_digests = Some(vec!["0".repeat(64)]);
+        status.resident_model_digests_truncated = Some(false);
+        status.resident_models = 2;
+        assert!(count_mismatch.validate().is_err());
     }
 
     #[test]

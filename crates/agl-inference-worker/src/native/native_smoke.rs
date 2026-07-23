@@ -17,8 +17,8 @@ use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
     ContextKey, InferenceCancellation, InferenceJob, InferenceRequest, InferenceResponse,
     ModelGeneration, ModelKey, ModelManager, ModelManagerError, ModelManagerHandle,
-    ModelManagerOptions, ModelManagerStatus, ModelRuntime, NoopInferenceOutputSink, RuntimeFailure,
-    RuntimeOperation,
+    ModelManagerOptions, ModelManagerStatus, ModelManagerStatusDetail, ModelRuntime,
+    NoopInferenceOutputSink, RuntimeFailure, RuntimeOperation,
 };
 
 use super::{LlamaCppModelRuntime, NativeAbortTestProbe};
@@ -417,7 +417,7 @@ fn manual_llama_cpp_smoke_from_env() -> Result<()> {
     let warm_status = handle.status()?;
     ensure!(warm_status.model_loads == 1, "native model was not reused");
     ensure!(
-        warm_status.context_loads == 2 && warm_status.cached_contexts == 2,
+        warm_status.context_loads == 2 && warm_status.resident_contexts == 2,
         "native smoke did not retain two independent contexts"
     );
 
@@ -496,7 +496,7 @@ fn manual_llama_cpp_smoke_from_env() -> Result<()> {
     active_cancellation.cancel();
     let active_result = join_generation(active_thread)?;
     let replacement_result = join_generation(replacement_thread)?;
-    let final_status = handle.status()?;
+    let final_status = handle.status_with_detail(ModelManagerStatusDetail::ModelDigests)?;
     manager.shutdown()?;
     let observed = lock_observations(&observations).clone();
 
@@ -748,7 +748,7 @@ fn validate_smoke_outcomes(
         "manager did not create exactly two contexts"
     );
     ensure!(
-        status.cached_contexts == 1,
+        status.resident_contexts == 1,
         "active cancellation did not invalidate only its context"
     );
     ensure!(
@@ -765,7 +765,7 @@ fn validate_smoke_outcomes(
         "unexpected failure accounting"
     );
     ensure!(
-        status.loaded_model_digests == [model_key.digest().to_string()],
+        status.resident_model_digests == [model_key.digest().to_string()],
         "loaded-model status does not match the configured model"
     );
     ensure!(
@@ -869,7 +869,7 @@ fn build_summary(
         counters: SmokeCounterSummary {
             model_loads: status.model_loads,
             context_loads: status.context_loads,
-            cached_contexts_before_shutdown: status.cached_contexts,
+            cached_contexts_before_shutdown: status.resident_contexts,
             completed_jobs: status.completed_jobs,
             incomplete_jobs: status.incomplete_jobs,
             cancellations: status.cancellations,

@@ -35,7 +35,12 @@ use agl_ids::{
     TerminalSessionId, TurnId,
 };
 use agl_inference::worker_supervisor::WorkerLifecyclePhase;
-use agl_inference::{InferenceDeviceKind, ModelManagerStatus, WorkerRuntimeStatusHandle};
+use agl_inference::{
+    InferenceDeviceKind, ModelManagerStatus, ModelManagerStatusDetail,
+    ModelReleaseOutcome as ManagerReleaseOutcome, ModelReleaseReason as ManagerReleaseReason,
+    ModelUnloadOutcome as ManagerUnloadOutcome, ModelUnloadTarget as ManagerUnloadTarget,
+    WorkerRuntimeStatusHandle,
+};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionAuthorization, ExecutionCursor,
     ExecutionGrantLease, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
@@ -50,11 +55,12 @@ use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionReadEvent, ExecutionStatusEvent,
     HelloEvent, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
-    PROTOCOL_VERSION, ProtocolError, ProtocolErrorCode, ProtocolInferenceDeviceKind,
-    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
-    RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent, RunTreeNodeEvent,
-    RunUsageEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent, SessionStatus,
-    SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
+    InferenceStatusRequest, ModelReleaseOutcome, ModelReleaseReason, ModelUnloadEvent,
+    ModelUnloadOutcome, ModelUnloadRequest, ModelUnloadTarget, PROTOCOL_VERSION, ProtocolError,
+    ProtocolErrorCode, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState, ProtocolRunKind,
+    ProtocolRunState, ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent,
+    RunTreeEvent, RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent,
+    SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_session::{
@@ -445,7 +451,8 @@ impl DaemonState {
                 self.run_events(request.run_id, request.after_sequence, request.limit)
             }
             DaemonRequestKind::InferenceInventory(_) => self.inference_inventory(),
-            DaemonRequestKind::InferenceStatus(_) => Ok(self.inference_status()),
+            DaemonRequestKind::InferenceStatus(request) => self.inference_status(request),
+            DaemonRequestKind::ModelUnload(request) => self.model_unload(request),
             DaemonRequestKind::RunSubscribe(_) => Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "run_subscribe must be handled by the streaming transport",
@@ -667,6 +674,7 @@ impl DaemonState {
                 DaemonCapability::RunSubscribe,
                 DaemonCapability::InferenceInventory,
                 DaemonCapability::InferenceStatus,
+                DaemonCapability::ModelUnload,
                 DaemonCapability::ExecutionList,
                 DaemonCapability::ExecutionControl,
                 DaemonCapability::ExecutionAttach,
@@ -714,23 +722,77 @@ impl DaemonState {
         ))
     }
 
-    fn inference_status(&self) -> DaemonEventKind {
-        let status = self.inference_status.snapshot();
-        DaemonEventKind::InferenceStatus(InferenceStatusEvent {
-            worker_build_id: status.worker_build_id().to_owned(),
-            worker_state: match status.phase() {
+    fn inference_status(
+        &self,
+        request: InferenceStatusRequest,
+    ) -> Result<DaemonEventKind, ProtocolError> {
+        let manager = self
+            .inference_client
+            .status_with_detail(if request.detail {
+                ModelManagerStatusDetail::ModelDigests
+            } else {
+                ModelManagerStatusDetail::Aggregate
+            })
+            .map_err(runtime_error)?;
+        let worker = self.inference_status.snapshot();
+        Ok(DaemonEventKind::InferenceStatus(InferenceStatusEvent {
+            worker_build_id: worker.worker_build_id().to_owned(),
+            worker_state: match worker.phase() {
                 WorkerLifecyclePhase::Cold => ProtocolInferenceWorkerState::Cold,
                 WorkerLifecyclePhase::Starting => ProtocolInferenceWorkerState::Starting,
                 WorkerLifecyclePhase::Ready => ProtocolInferenceWorkerState::Ready,
                 WorkerLifecyclePhase::Busy => ProtocolInferenceWorkerState::Busy,
                 WorkerLifecyclePhase::CoolingDown => ProtocolInferenceWorkerState::CoolingDown,
             },
-            worker_pid: status.worker_pid(),
-            launch_generation: status.launch_generation(),
-            physical_device_id: status.physical_device_id().map(str::to_owned),
-            reserved_bytes: status.reserved_bytes(),
-            cooldown_not_before_unix_ms: status.cooldown_not_before_unix_ms(),
-        })
+            worker_pid: worker.worker_pid(),
+            launch_generation: worker.launch_generation(),
+            physical_device_id: worker.physical_device_id().map(str::to_owned),
+            reserved_bytes: worker.reserved_bytes(),
+            cooldown_not_before_unix_ms: worker.cooldown_not_before_unix_ms(),
+            resident_models: u32::try_from(manager.resident_models).unwrap_or(u32::MAX),
+            resident_contexts: u32::try_from(manager.resident_contexts).unwrap_or(u32::MAX),
+            next_residency_deadline_after_ms: manager.next_residency_deadline_after_ms,
+            last_release_reason: manager.last_release_reason.map(protocol_release_reason),
+            last_release_outcome: manager.last_release_outcome.map(protocol_release_outcome),
+            automatic_context_unloads: manager.automatic_context_unloads,
+            automatic_model_unloads: manager.automatic_model_unloads,
+            manual_unloads: manager.manual_unloads,
+            unload_failures: manager.unload_failures,
+            resident_model_digests: request.detail.then_some(manager.resident_model_digests),
+            resident_model_digests_truncated: request
+                .detail
+                .then_some(manager.resident_model_digests_truncated),
+        }))
+    }
+
+    fn model_unload(&self, request: ModelUnloadRequest) -> Result<DaemonEventKind, ProtocolError> {
+        let target = match request.target {
+            ModelUnloadTarget::All => ManagerUnloadTarget::All,
+            ModelUnloadTarget::Digest { digest } => {
+                ManagerUnloadTarget::digest(digest).map_err(runtime_error)?
+            }
+        };
+        let result = self
+            .inference_client
+            .unload(target)
+            .map_err(runtime_error)?;
+        let outcome = match result.outcome {
+            ManagerUnloadOutcome::Released => ModelUnloadOutcome::Released,
+            ManagerUnloadOutcome::NotResident => ModelUnloadOutcome::NotResident,
+            ManagerUnloadOutcome::Busy => {
+                return Err(ProtocolError::new(
+                    ProtocolErrorCode::Busy,
+                    "active model cannot be unloaded",
+                    true,
+                ));
+            }
+        };
+        Ok(DaemonEventKind::ModelUnload(ModelUnloadEvent {
+            matched_models: result.matched_models,
+            released_models: result.released_models,
+            released_contexts: result.released_contexts,
+            outcome,
+        }))
     }
 
     fn execution_list(
@@ -5996,6 +6058,24 @@ fn not_found(resource: &str) -> ProtocolError {
 
 fn runtime_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(ProtocolErrorCode::RuntimeFailure, error.to_string(), false)
+}
+
+fn protocol_release_reason(reason: ManagerReleaseReason) -> ModelReleaseReason {
+    match reason {
+        ManagerReleaseReason::IdleContext => ModelReleaseReason::IdleContext,
+        ManagerReleaseReason::IdleModel => ModelReleaseReason::IdleModel,
+        ManagerReleaseReason::Manual => ModelReleaseReason::Manual,
+        ManagerReleaseReason::Shutdown => ModelReleaseReason::Shutdown,
+        ManagerReleaseReason::Capacity => ModelReleaseReason::Capacity,
+    }
+}
+
+fn protocol_release_outcome(outcome: ManagerReleaseOutcome) -> ModelReleaseOutcome {
+    match outcome {
+        ManagerReleaseOutcome::Released => ModelReleaseOutcome::Released,
+        ManagerReleaseOutcome::Failed => ModelReleaseOutcome::Failed,
+        ManagerReleaseOutcome::BackendLost => ModelReleaseOutcome::BackendLost,
+    }
 }
 
 pub(crate) fn process_error(error: ProcessError) -> ProtocolError {

@@ -66,6 +66,7 @@ pub(crate) enum ModelCommand {
     Unbind(ModelMutationOptions),
     Remove(ModelMutationOptions),
     Prune(ModelPruneOptions),
+    Unload(ModelUnloadOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +115,11 @@ pub(crate) struct ModelPruneOptions {
     pub(crate) yes: bool,
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelUnloadOptions {
+    pub(crate) target: agl_protocol::ModelUnloadTarget,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -746,6 +752,7 @@ pub(crate) struct ServeOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DaemonStatusOptions {
     pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) detail: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

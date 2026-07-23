@@ -88,8 +88,13 @@ impl DaemonServer {
             WorkerModelRuntime::discover(self.runtime.paths.inference_worker_temp_root())
                 .context("failed to prepare isolated daemon inference worker")?;
         let inference_status = inference_runtime.status_handle();
+        let residency = &self.runtime.inference.residency;
         let model_manager = ModelManager::spawn(
             ModelManagerOptions::default()
+                .with_residency_durations(
+                    Duration::from_secs(residency.context_idle_seconds),
+                    Duration::from_secs(residency.model_idle_seconds),
+                )
                 .with_model_lease_root(self.runtime.paths.model_lease_root()),
             inference_runtime,
         )
@@ -160,9 +165,14 @@ fn trace_model_manager_status(state: &SharedDaemonState) {
         Ok(status) => tracing::debug!(
             target: "agentlibre::daemon",
             queue_depth = status.queue_depth,
-            loaded_model_digests = ?status.loaded_model_digests,
             active = status.active_scope.is_some(),
-            cached_contexts = status.cached_contexts,
+            resident_models = status.resident_models,
+            resident_contexts = status.resident_contexts,
+            next_residency_deadline_after_ms = status.next_residency_deadline_after_ms,
+            automatic_context_unloads = status.automatic_context_unloads,
+            automatic_model_unloads = status.automatic_model_unloads,
+            manual_unloads = status.manual_unloads,
+            unload_failures = status.unload_failures,
             model_loads = status.model_loads,
             context_loads = status.context_loads,
             model_evictions = status.model_evictions,

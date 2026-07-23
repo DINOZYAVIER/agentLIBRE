@@ -24,6 +24,10 @@ enabled = true
 [workspace]
 # root = "/path/to/workspace"
 
+[inference.residency]
+context_idle_seconds = 900
+model_idle_seconds = 300
+
 [execution]
 max_active = 8
 default_foreground_timeout_ms = 120000
@@ -43,6 +47,11 @@ login_command_args = ["-l", "-c"]
 [execution.environment]
 inherit = ["PATH", "LANG", "LC_*", "TERM", "COLORTERM", "TZ"]
 "#;
+
+pub const DEFAULT_CONTEXT_IDLE_SECONDS: u64 = 900;
+pub const DEFAULT_MODEL_IDLE_SECONDS: u64 = 300;
+pub const MIN_INFERENCE_IDLE_SECONDS: u64 = 1;
+pub const MAX_INFERENCE_IDLE_SECONDS: u64 = 86_400;
 
 pub fn write_default_runtime_config(path: impl AsRef<Path>, force: bool) -> Result<()> {
     let path = path.as_ref();
@@ -85,6 +94,7 @@ pub struct AgentLibreRuntimeConfig {
     pub logging: AgentLibreLoggingConfig,
     pub history: AgentLibreHistoryConfig,
     pub workspace: AgentLibreWorkspaceConfig,
+    pub inference: AgentLibreInferenceConfig,
     pub execution: AgentLibreExecutionConfig,
 }
 
@@ -96,11 +106,14 @@ impl AgentLibreRuntimeConfig {
     pub fn from_paths(paths: AgentLibrePaths) -> Result<Self> {
         let file_config = AgentLibreRuntimeConfigFile::read(&paths.runtime_config_path())?;
         let workspace = AgentLibreWorkspaceConfig::from_file_and_env(file_config.workspace)?;
+        let inference = file_config.inference.unwrap_or_default();
+        inference.validate()?;
         Ok(Self {
             paths,
             logging: AgentLibreLoggingConfig::from_file_and_env(file_config.logging),
             history: file_config.history.unwrap_or_default(),
             workspace,
+            inference,
             execution: file_config.execution.unwrap_or_default().validate()?,
         })
     }
@@ -116,7 +129,52 @@ struct AgentLibreRuntimeConfigFile {
     logging: Option<AgentLibreLoggingConfigFile>,
     history: Option<AgentLibreHistoryConfig>,
     workspace: Option<AgentLibreWorkspaceConfig>,
+    inference: Option<AgentLibreInferenceConfig>,
     execution: Option<AgentLibreExecutionConfig>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLibreInferenceConfig {
+    pub residency: AgentLibreInferenceResidencyConfig,
+}
+
+impl AgentLibreInferenceConfig {
+    fn validate(&self) -> Result<()> {
+        self.residency.validate()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLibreInferenceResidencyConfig {
+    pub context_idle_seconds: u64,
+    pub model_idle_seconds: u64,
+}
+
+impl Default for AgentLibreInferenceResidencyConfig {
+    fn default() -> Self {
+        Self {
+            context_idle_seconds: DEFAULT_CONTEXT_IDLE_SECONDS,
+            model_idle_seconds: DEFAULT_MODEL_IDLE_SECONDS,
+        }
+    }
+}
+
+impl AgentLibreInferenceResidencyConfig {
+    fn validate(&self) -> Result<()> {
+        validate_inference_idle_seconds("context_idle_seconds", self.context_idle_seconds)?;
+        validate_inference_idle_seconds("model_idle_seconds", self.model_idle_seconds)
+    }
+}
+
+fn validate_inference_idle_seconds(name: &str, value: u64) -> Result<()> {
+    if !(MIN_INFERENCE_IDLE_SECONDS..=MAX_INFERENCE_IDLE_SECONDS).contains(&value) {
+        bail!(
+            "inference.residency.{name} must be between {MIN_INFERENCE_IDLE_SECONDS} and {MAX_INFERENCE_IDLE_SECONDS} seconds"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -683,6 +741,10 @@ enabled = false
 
 [workspace]
 root = "/tmp/workspace-root"
+
+[inference.residency]
+context_idle_seconds = 17
+model_idle_seconds = 29
 "#,
         )
         .unwrap();
@@ -698,8 +760,119 @@ root = "/tmp/workspace-root"
             config.workspace.root,
             Some(PathBuf::from("/tmp/workspace-root"))
         );
+        assert_eq!(config.inference.residency.context_idle_seconds, 17);
+        assert_eq!(config.inference.residency.model_idle_seconds, 29);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inference_residency_defaults_without_runtime_config() {
+        let root = temp_root("inference-residency-defaults");
+        let paths = AgentLibrePaths::from_agl_home(&root);
+
+        let config = AgentLibreRuntimeConfig::from_paths(paths).unwrap();
+
+        assert_eq!(
+            config.inference.residency.context_idle_seconds,
+            DEFAULT_CONTEXT_IDLE_SECONDS
+        );
+        assert_eq!(
+            config.inference.residency.model_idle_seconds,
+            DEFAULT_MODEL_IDLE_SECONDS
+        );
+    }
+
+    #[test]
+    fn inference_residency_accepts_inclusive_bounds() {
+        let root = temp_root("inference-residency-bounds");
+        let paths = AgentLibrePaths::from_agl_home(&root);
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.runtime_config_path(),
+            format!(
+                "[inference.residency]\ncontext_idle_seconds = {MIN_INFERENCE_IDLE_SECONDS}\nmodel_idle_seconds = {MAX_INFERENCE_IDLE_SECONDS}\n"
+            ),
+        )
+        .unwrap();
+
+        let config = AgentLibreRuntimeConfig::from_paths(paths).unwrap();
+
+        assert_eq!(
+            config.inference.residency.context_idle_seconds,
+            MIN_INFERENCE_IDLE_SECONDS
+        );
+        assert_eq!(
+            config.inference.residency.model_idle_seconds,
+            MAX_INFERENCE_IDLE_SECONDS
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inference_residency_rejects_values_outside_bounds() {
+        for (name, context_idle_seconds, model_idle_seconds) in [
+            ("context-zero", 0, DEFAULT_MODEL_IDLE_SECONDS),
+            (
+                "context-over",
+                MAX_INFERENCE_IDLE_SECONDS + 1,
+                DEFAULT_MODEL_IDLE_SECONDS,
+            ),
+            ("model-zero", DEFAULT_CONTEXT_IDLE_SECONDS, 0),
+            (
+                "model-over",
+                DEFAULT_CONTEXT_IDLE_SECONDS,
+                MAX_INFERENCE_IDLE_SECONDS + 1,
+            ),
+        ] {
+            let root = temp_root(name);
+            let paths = AgentLibrePaths::from_agl_home(&root);
+            std::fs::create_dir_all(&paths.config_dir).unwrap();
+            std::fs::write(
+                paths.runtime_config_path(),
+                format!(
+                    "[inference.residency]\ncontext_idle_seconds = {context_idle_seconds}\nmodel_idle_seconds = {model_idle_seconds}\n"
+                ),
+            )
+            .unwrap();
+
+            let error = AgentLibreRuntimeConfig::from_paths(paths).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be between 1 and 86400 seconds"),
+                "unexpected validation error: {error:#}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn inference_residency_rejects_unknown_and_non_integer_fields() {
+        for (name, content) in [
+            (
+                "unknown",
+                "[inference.residency]\ncontext_idle_seconds = 900\nmodel_idle_seconds = 300\nlegacy_idle_seconds = 1\n",
+            ),
+            (
+                "non-integer",
+                "[inference.residency]\ncontext_idle_seconds = 1.5\nmodel_idle_seconds = 300\n",
+            ),
+        ] {
+            let root = temp_root(name);
+            let paths = AgentLibrePaths::from_agl_home(&root);
+            std::fs::create_dir_all(&paths.config_dir).unwrap();
+            std::fs::write(paths.runtime_config_path(), content).unwrap();
+
+            let error = AgentLibreRuntimeConfig::from_paths(paths).unwrap_err();
+
+            assert!(
+                error.to_string().contains("failed to parse runtime config"),
+                "unexpected parse error: {error:#}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
