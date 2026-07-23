@@ -400,6 +400,23 @@ pub struct WorkerProcess {
 }
 
 impl WorkerProcess {
+    /// Constructs an in-memory host-side process fixture for runtime protocol
+    /// tests. It deliberately has no child: containment tests exercise the
+    /// same control transport and teardown path without granting a fixture an
+    /// ambient executable or process authority.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(channel: HostControlChannel) -> Self {
+        Self {
+            child: None,
+            channel,
+            stderr: WorkerStderrCapture::start_reader(std::io::empty())
+                .expect("empty test stderr capture must start"),
+            identity: WorkerIdentity::current(),
+            executable_path: PathBuf::from("/test/agl-inference-worker"),
+            native_bundle_id: "test-native-bundle".to_string(),
+        }
+    }
+
     pub fn spawn(executable: &WorkerExecutable, handshake_timeout: Duration) -> Result<Self> {
         Self::spawn_with_environment(executable, handshake_timeout, &BTreeMap::new())
     }

@@ -733,7 +733,19 @@ impl<R: ModelRuntime> Worker<R> {
             }
             return Err(error);
         }
-        let context_loaded = self.ensure_context(job, log)?;
+        let context_loaded = match self.ensure_context(job, log) {
+            Ok(context_loaded) => context_loaded,
+            Err(error) => {
+                if model_loaded && matches!(&error, ModelManagerError::InvalidOptions { .. }) {
+                    self.release_model_resource(
+                        job.model_key(),
+                        Some(log),
+                        ReleaseAccounting::None,
+                    )?;
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) = check_job_gate(job) {
             if context_loaded {
                 self.release_context_resource(
@@ -921,6 +933,9 @@ impl<R: ModelRuntime> Worker<R> {
         {
             self.evict_lru_context(&model_key, log)?;
         }
+        // Reject an unrepresentable deadline before creating a native context. The actual
+        // idle state is still sampled after the acknowledgement below, when its timer begins.
+        let _ = self.new_idle_state(self.options.context_idle_duration)?;
         if let Some(entry) = self.models.get_mut(&model_key) {
             entry.idle = None;
         }

@@ -3271,6 +3271,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
 
     use super::*;
 
@@ -3286,6 +3288,221 @@ mod tests {
 
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    fn hostile_release_fixture(
+        label: &str,
+    ) -> (
+        WorkerModelRuntime,
+        crate::worker_protocol::WorkerControlChannel,
+    ) {
+        let root = test_root(label);
+        let options = WorkerRuntimeOptions::new(root.join("worker-tmp")).with_timeouts(
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        );
+        let mut runtime = WorkerModelRuntime::new(options).unwrap();
+        seed_device_generation(&mut runtime, "fixture-device", label, 9);
+        let (host, worker) = crate::worker_protocol::control_channel_pair().unwrap();
+        runtime.session = Some(WorkerSession {
+            process: WorkerProcess::test_fixture(host),
+            configuration: SandboxConfiguration::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                "/tmp/agl-worker-fixture",
+            )
+            .unwrap(),
+            identity: WorkerGenerationIdentity::new(1234, 1, "fixture-worker").unwrap(),
+            physical_device_id: None,
+            active_attempt: None,
+            attempts: BTreeMap::new(),
+        });
+        runtime.live_models = 1;
+        runtime.live_contexts = 1;
+        (runtime, worker)
+    }
+
+    fn fixture_remote_resources() -> (RemoteModel, RemoteContext) {
+        let model_id = ModelResourceId::new(41).unwrap();
+        (
+            RemoteModel {
+                resource_id: model_id,
+                key_digest: digest(7),
+            },
+            RemoteContext {
+                resource_id: ContextResourceId::new(42).unwrap(),
+                model_resource_id: model_id,
+                key_digest: digest(8),
+            },
+        )
+    }
+
+    fn assert_hostile_release_reaped(runtime: &mut WorkerModelRuntime) {
+        assert!(
+            runtime.session.is_none(),
+            "host must discard the hostile session"
+        );
+        assert_eq!(runtime.live_models, 0);
+        assert_eq!(runtime.live_contexts, 0);
+        assert!(runtime.pending_admissions.is_empty());
+        assert!(runtime.active_admissions.is_empty());
+        for admission in runtime.admissions.values_mut() {
+            let status = admission.ledger.status().unwrap();
+            assert_eq!(status.pending_reservations, 0);
+            assert_eq!(status.active_reservations, 0);
+            assert_eq!(
+                status.resident,
+                crate::admission::ResidentReservations::default()
+            );
+        }
+        assert_eq!(runtime.status_handle().snapshot().reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn hostile_release_events_fail_closed_and_reconcile_host_generation() {
+        enum HostileEvent {
+            WrongOperation,
+            WrongResource,
+            Unsolicited,
+        }
+
+        for hostile in [
+            HostileEvent::WrongOperation,
+            HostileEvent::WrongResource,
+            HostileEvent::Unsolicited,
+        ] {
+            let label = match hostile {
+                HostileEvent::WrongOperation => "release-wrong-operation",
+                HostileEvent::WrongResource => "release-wrong-resource",
+                HostileEvent::Unsolicited => "release-unsolicited",
+            };
+            let (mut runtime, mut worker) = hostile_release_fixture(label);
+            let (mut model, mut context) = fixture_remote_resources();
+            let sender = thread::spawn(move || {
+                let command = worker.receive().unwrap();
+                let HostCommand::ReleaseContext { operation_id, .. } = command else {
+                    panic!("host must send release-context");
+                };
+                let event = match hostile {
+                    HostileEvent::WrongOperation => WorkerEvent::ModelReleased {
+                        operation_id,
+                        model_resource_id: ModelResourceId::new(41).unwrap(),
+                    },
+                    HostileEvent::WrongResource => WorkerEvent::ContextReleased {
+                        operation_id,
+                        context_resource_id: ContextResourceId::new(99).unwrap(),
+                    },
+                    HostileEvent::Unsolicited => WorkerEvent::ContextReleased {
+                        operation_id: OperationId::new(operation_id.get() + 1).unwrap(),
+                        context_resource_id: ContextResourceId::new(42).unwrap(),
+                    },
+                };
+                worker.send(event).unwrap();
+            });
+
+            let failure = runtime
+                .release_context(&mut model, &mut context)
+                .unwrap_err();
+            sender.join().unwrap();
+            assert_eq!(failure.code(), "inference_worker_protocol_violation");
+            assert!(failure.is_backend_lost());
+            assert_hostile_release_reaped(&mut runtime);
+        }
+    }
+
+    #[test]
+    fn missing_release_acknowledgement_times_out_and_reaps_host_generation() {
+        let (mut runtime, mut worker) = hostile_release_fixture("release-missing-ack");
+        let (mut model, mut context) = fixture_remote_resources();
+        let holder = thread::spawn(move || {
+            assert!(matches!(
+                worker.receive().unwrap(),
+                HostCommand::ReleaseContext { .. }
+            ));
+            thread::sleep(Duration::from_millis(80));
+        });
+
+        let failure = runtime
+            .release_context(&mut model, &mut context)
+            .unwrap_err();
+        holder.join().unwrap();
+        assert_eq!(failure.code(), "inference_worker_forced_after_deadline");
+        assert!(failure.is_backend_lost());
+        assert_hostile_release_reaped(&mut runtime);
+    }
+
+    #[test]
+    fn duplicate_release_acknowledgement_is_contained_by_the_next_release() {
+        let (mut runtime, mut worker) = hostile_release_fixture("release-duplicate-post-ack");
+        let (mut model, mut context) = fixture_remote_resources();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let sender = thread::spawn(move || {
+            let command = worker.receive().unwrap();
+            let HostCommand::ReleaseContext { operation_id, .. } = command else {
+                panic!("host must send release-context");
+            };
+            let acknowledgement = WorkerEvent::ContextReleased {
+                operation_id,
+                context_resource_id: ContextResourceId::new(42).unwrap(),
+            };
+            worker.send(acknowledgement.clone()).unwrap();
+            worker.send(acknowledgement).unwrap();
+            release_receiver.recv().unwrap();
+        });
+
+        runtime.release_context(&mut model, &mut context).unwrap();
+        let failure = runtime.release_model(&mut model).unwrap_err();
+        release_sender.send(()).unwrap();
+        sender.join().unwrap();
+        assert_eq!(failure.code(), "inference_worker_protocol_violation");
+        assert!(failure.is_backend_lost());
+        assert_hostile_release_reaped(&mut runtime);
+    }
+
+    #[test]
+    fn worker_exit_before_or_after_release_acknowledgement_is_contained() {
+        for acknowledged in [false, true] {
+            let label = if acknowledged {
+                "release-exit-after-ack"
+            } else {
+                "release-exit-before-ack"
+            };
+            let (mut runtime, mut worker) = hostile_release_fixture(label);
+            let (mut model, mut context) = fixture_remote_resources();
+            let sender = thread::spawn(move || {
+                let command = worker.receive().unwrap();
+                let HostCommand::ReleaseContext { operation_id, .. } = command else {
+                    panic!("host must send release-context");
+                };
+                if acknowledged {
+                    worker
+                        .send(WorkerEvent::ContextReleased {
+                            operation_id,
+                            context_resource_id: ContextResourceId::new(42).unwrap(),
+                        })
+                        .unwrap();
+                }
+            });
+
+            if acknowledged {
+                runtime.release_context(&mut model, &mut context).unwrap();
+                let failure = runtime.release_model(&mut model).unwrap_err();
+                assert_eq!(failure.code(), "inference_worker_exited");
+                assert!(failure.is_backend_lost());
+            } else {
+                let failure = runtime
+                    .release_context(&mut model, &mut context)
+                    .unwrap_err();
+                assert_eq!(failure.code(), "inference_worker_exited");
+                assert!(failure.is_backend_lost());
+            }
+            sender.join().unwrap();
+            assert_hostile_release_reaped(&mut runtime);
+        }
     }
 
     #[test]

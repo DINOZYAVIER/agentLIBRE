@@ -42,6 +42,22 @@ impl ManualManagerClock {
     }
 }
 
+fn latest_whole_second_instant() -> Instant {
+    let now = Instant::now();
+    let mut low = 0_u64;
+    let mut high = u64::MAX;
+    while low < high {
+        let middle = low + (high - low) / 2 + 1;
+        if now.checked_add(Duration::from_secs(middle)).is_some() {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    now.checked_add(Duration::from_secs(low))
+        .expect("the zero duration is always representable")
+}
+
 impl super::queue::ManagerClock for ManualManagerClock {
     fn now(&self) -> Instant {
         *self.0.lock().unwrap()
@@ -394,6 +410,49 @@ fn options_and_resource_keys_are_strict_and_load_aware() {
         ModelKey::from_config(&second).unwrap()
     );
     assert!(ContextKey::for_conversation(&first, " ").is_err());
+}
+
+#[test]
+fn checked_residency_deadline_overflow_is_typed_before_native_context_allocation() {
+    let root = temp_root("residency-deadline-overflow");
+    let control = Arc::new(FakeControl::default());
+    let clock = Arc::new(ManualManagerClock::new(latest_whole_second_instant()));
+    let mut manager = ModelManager::spawn_for_test(
+        ModelManagerOptions {
+            context_idle_duration: Duration::from_secs(1),
+            model_idle_duration: Duration::from_secs(1),
+            ..ModelManagerOptions::default()
+        },
+        FakeRuntime {
+            control: Arc::clone(&control),
+        },
+        clock,
+    )
+    .unwrap();
+    let handle = manager.handle();
+    let config = config("residency-deadline-overflow.gguf");
+    let model_key = ModelKey::from_config(&config).unwrap();
+
+    let error = handle
+        .generate(job(&root, &config, "overflow", 1))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ModelManagerError::InvalidOptions { ref message }
+            if message == "manager residency deadline overflowed the monotonic clock"
+    ));
+    wait_for_residency(&handle, 0, 0);
+    let operations = control.operations();
+    assert!(operations.contains(&format!("load_model:{}", model_key.digest())));
+    assert!(
+        !operations
+            .iter()
+            .any(|operation| operation.starts_with("create_context:"))
+    );
+    assert!(operations.contains(&format!("release_model:{}", model_key.digest())));
+
+    manager.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
