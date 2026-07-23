@@ -264,6 +264,8 @@ impl MtpState {
 
         let mut context_params = unsafe { ffi::llama_context_default_params() };
         context_params.n_ctx = runtime.context_tokens;
+        // Keep the draft context on the same bounded-SWA policy as the target.
+        context_params.swa_full = false;
         context_params.n_batch =
             u32::try_from(prefill_batch_size).context("llama.cpp MTP n_batch exceeds u32")?;
         if let Some(ubatch_size) = runtime.ubatch_size {
