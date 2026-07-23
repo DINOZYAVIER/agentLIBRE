@@ -768,8 +768,7 @@ impl WorkerModelRuntime {
             return Ok(physical_device_id.clone());
         }
         let snapshot = self.worker_device_snapshot()?;
-        let devices = map_worker_device_snapshot(&snapshot, &self.options.admitted_devices)
-            .map_err(|message| self.protocol_loss(message))?;
+        let devices = self.map_device_snapshot(&snapshot)?;
         for device in devices {
             if matches!(
                 device.kind,
@@ -1004,17 +1003,23 @@ impl WorkerModelRuntime {
         )
     }
 
-    /// Performs native inventory in an ephemeral, already-sandboxed worker.
-    /// A later model request receives a fresh exact sandbox if its roots differ.
+    /// Performs native inventory without replacing a resident worker generation.
+    ///
+    /// A cold runtime uses an ephemeral inventory sandbox and retires it after
+    /// the response. A resident runtime sends the already-supported Inventory
+    /// operation to its current worker. The mapped GPU availability remains a
+    /// fresh kernel observation and includes resident AGL allocations; this
+    /// method never predicts eviction by adding conservative ledger estimates.
     fn worker_device_snapshot(&mut self) -> Result<DeviceSnapshot, RuntimeFailure> {
-        if self.live_models != 0
-            || self.live_contexts != 0
-            || !self.pending_admissions.is_empty()
-            || !self.active_admissions.is_empty()
-        {
-            return Err(runtime_failure(
-                "inference device inventory cannot replace a resident worker generation",
-            ));
+        match inventory_session_mode(
+            self.session.is_some(),
+            self.live_models,
+            self.live_contexts,
+            self.pending_admissions.len(),
+            self.active_admissions.len(),
+        )? {
+            InventorySessionMode::Resident => return self.request_worker_device_snapshot(),
+            InventorySessionMode::Ephemeral => {}
         }
         self.acquire_inventory_device_authority()?;
         let result = self.worker_device_snapshot_with_authority();
@@ -1025,6 +1030,10 @@ impl WorkerModelRuntime {
     fn worker_device_snapshot_with_authority(&mut self) -> Result<DeviceSnapshot, RuntimeFailure> {
         let configuration = self.inventory_sandbox_configuration()?;
         self.ensure_session(configuration, None)?;
+        self.request_worker_device_snapshot()
+    }
+
+    fn request_worker_device_snapshot(&mut self) -> Result<DeviceSnapshot, RuntimeFailure> {
         let operation_id = self.allocate_operation_id()?;
         self.send(HostCommand::Inventory { operation_id })?;
         let deadline = deadline_after(self.options.operation_timeout);
@@ -1040,6 +1049,14 @@ impl WorkerModelRuntime {
                         return Err(self.protocol_loss(format!(
                             "worker inventory carried unexpected descriptors: {error}"
                         )));
+                    }
+                    if let Err(message) = validate_inventory_resource_counts(
+                        self.live_models,
+                        self.live_contexts,
+                        snapshot.loaded_models().len(),
+                        snapshot.live_contexts().len(),
+                    ) {
+                        return Err(self.protocol_loss(message));
                     }
                     return Ok(snapshot.devices().clone());
                 }
@@ -1058,6 +1075,22 @@ impl WorkerModelRuntime {
                     );
                 }
             }
+        }
+    }
+
+    fn map_device_snapshot(
+        &mut self,
+        snapshot: &DeviceSnapshot,
+    ) -> Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
+        let mapped = map_worker_device_snapshot(snapshot, &self.options.admitted_devices);
+        match mapped {
+            Ok(devices) => Ok(devices),
+            Err(DeviceSnapshotMappingError::WorkerProtocol(message)) => {
+                Err(self.protocol_loss(message))
+            }
+            Err(DeviceSnapshotMappingError::HostObservation(message)) => Err(
+                RuntimeFailure::resource_admission("device_snapshot_invalid", message, ""),
+            ),
         }
     }
 
@@ -2284,8 +2317,7 @@ impl ModelRuntime for WorkerModelRuntime {
 
     fn device_inventory(&mut self) -> Result<Vec<InferenceDeviceInfo>, RuntimeFailure> {
         let snapshot = self.worker_device_snapshot()?;
-        map_worker_device_snapshot(&snapshot, &self.options.admitted_devices)
-            .map_err(|message| self.protocol_loss(message))
+        self.map_device_snapshot(&snapshot)
     }
 
     fn load_model(
@@ -2647,6 +2679,46 @@ impl WorkerModelRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InventorySessionMode {
+    Ephemeral,
+    Resident,
+}
+
+fn validate_inventory_resource_counts(
+    host_models: usize,
+    host_contexts: usize,
+    worker_models: usize,
+    worker_contexts: usize,
+) -> Result<(), String> {
+    if host_models != worker_models || host_contexts != worker_contexts {
+        return Err(format!(
+            "worker inventory resource counts drifted from host state: \
+             host models={host_models} contexts={host_contexts}, \
+             worker models={worker_models} contexts={worker_contexts}"
+        ));
+    }
+    Ok(())
+}
+
+fn inventory_session_mode(
+    has_session: bool,
+    live_models: usize,
+    live_contexts: usize,
+    pending_admissions: usize,
+    active_admissions: usize,
+) -> Result<InventorySessionMode, RuntimeFailure> {
+    let has_resident_generation =
+        live_models != 0 || live_contexts != 0 || pending_admissions != 0 || active_admissions != 0;
+    match (has_session, has_resident_generation) {
+        (true, true) => Ok(InventorySessionMode::Resident),
+        (false, false) | (true, false) => Ok(InventorySessionMode::Ephemeral),
+        (false, true) => Err(runtime_failure(
+            "resident inference resources have no worker session for device inventory",
+        )),
+    }
+}
+
 struct WorkerSession {
     process: WorkerProcess,
     configuration: SandboxConfiguration,
@@ -2794,15 +2866,23 @@ fn validate_bounded_identity(label: &str, value: &str) -> Result<(), RuntimeFail
     Ok(())
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum DeviceSnapshotMappingError {
+    WorkerProtocol(String),
+    HostObservation(String),
+}
+
 fn map_worker_device_snapshot(
     snapshot: &DeviceSnapshot,
     admitted_devices: &BTreeMap<String, crate::worker_resources::RenderDeviceResource>,
-) -> Result<Vec<InferenceDeviceInfo>, String> {
+) -> Result<Vec<InferenceDeviceInfo>, DeviceSnapshotMappingError> {
     let mut backend_names = BTreeSet::new();
     let mut result = Vec::with_capacity(snapshot.devices().len());
     for device in snapshot.devices() {
         if !backend_names.insert(device.backend_name()) {
-            return Err("worker inventory contains duplicate backend selectors".to_string());
+            return Err(DeviceSnapshotMappingError::WorkerProtocol(
+                "worker inventory contains duplicate backend selectors".to_string(),
+            ));
         }
         let kind = match device.kind() {
             DeviceKind::Cpu => InferenceDeviceKind::Cpu,
@@ -2816,46 +2896,63 @@ fn map_worker_device_snapshot(
             device.kind(),
             DeviceKind::DiscreteGpu | DeviceKind::IntegratedGpu
         );
-        let (driver_build_id, free_memory_bytes, total_memory_bytes, usable, supports_gpu_offload) =
-            if gpu {
-                let resource = admitted_devices.get(device.device_id()).ok_or_else(|| {
-                    format!(
-                        "worker reported unadmitted physical GPU identity {}",
+        let (
+            pci_device_id,
+            pci_subsystem_id,
+            driver_build_id,
+            free_memory_bytes,
+            total_memory_bytes,
+            usable,
+            supports_gpu_offload,
+        ) = if gpu {
+            let resource = admitted_devices.get(device.device_id()).ok_or_else(|| {
+                DeviceSnapshotMappingError::WorkerProtocol(format!(
+                    "worker reported unadmitted physical GPU identity {}",
+                    device.device_id()
+                ))
+            })?;
+            let observation = resource
+                .memory_observation()
+                .map_err(|error| {
+                    DeviceSnapshotMappingError::HostObservation(format!(
+                        "failed to read admitted GPU memory: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    DeviceSnapshotMappingError::HostObservation(format!(
+                        "physical GPU {} has no kernel-owned VRAM counters",
                         device.device_id()
-                    )
+                    ))
                 })?;
-                let observation = resource
-                    .memory_observation()
-                    .map_err(|error| format!("failed to read admitted GPU memory: {error}"))?
-                    .ok_or_else(|| {
-                        format!(
-                            "physical GPU {} has no kernel-owned VRAM counters",
-                            device.device_id()
-                        )
-                    })?;
-                (
-                    resource.driver_build_id().to_string(),
-                    observation.available_bytes,
-                    observation.total_bytes,
-                    device.usable(),
-                    device.supports_gpu_offload(),
-                )
-            } else {
-                if device.supports_gpu_offload() {
-                    return Err(
-                        "non-GPU worker inventory entry claims GPU offload authority".to_string(),
-                    );
-                }
-                (
-                    device.driver_build_id().to_string(),
-                    device.free_memory_bytes(),
-                    device.total_memory_bytes(),
-                    device.usable(),
-                    false,
-                )
-            };
+            (
+                resource.pci_device_id().map(str::to_owned),
+                resource.pci_subsystem_id().map(str::to_owned),
+                resource.driver_build_id().to_string(),
+                observation.available_bytes,
+                observation.total_bytes,
+                device.usable(),
+                device.supports_gpu_offload(),
+            )
+        } else {
+            if device.supports_gpu_offload() {
+                return Err(DeviceSnapshotMappingError::WorkerProtocol(
+                    "non-GPU worker inventory entry claims GPU offload authority".to_string(),
+                ));
+            }
+            (
+                None,
+                None,
+                device.driver_build_id().to_string(),
+                device.free_memory_bytes(),
+                device.total_memory_bytes(),
+                device.usable(),
+                false,
+            )
+        };
         result.push(InferenceDeviceInfo {
             physical_device_id: device.device_id().to_string(),
+            pci_device_id,
+            pci_subsystem_id,
             driver_build_id,
             backend_name: device.backend_name().to_string(),
             description: device.description().to_string(),
@@ -3110,6 +3207,110 @@ mod tests {
 
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn inventory_reuses_a_resident_session_and_never_fabricates_one() {
+        assert_eq!(
+            inventory_session_mode(true, 1, 1, 0, 0).unwrap(),
+            InventorySessionMode::Resident
+        );
+        assert_eq!(
+            inventory_session_mode(true, 0, 0, 1, 0).unwrap(),
+            InventorySessionMode::Resident
+        );
+        assert_eq!(
+            inventory_session_mode(true, 0, 0, 0, 1).unwrap(),
+            InventorySessionMode::Resident
+        );
+        assert_eq!(
+            inventory_session_mode(false, 0, 0, 0, 0).unwrap(),
+            InventorySessionMode::Ephemeral
+        );
+        assert_eq!(
+            inventory_session_mode(true, 0, 0, 0, 0).unwrap(),
+            InventorySessionMode::Ephemeral
+        );
+
+        let missing = inventory_session_mode(false, 1, 0, 0, 0).unwrap_err();
+        assert_eq!(missing.code(), "runtime_failure");
+        assert!(
+            missing
+                .message()
+                .contains("resident inference resources have no worker session")
+        );
+    }
+
+    #[test]
+    fn inventory_resource_counts_must_match_host_owned_state() {
+        validate_inventory_resource_counts(0, 0, 0, 0).unwrap();
+        validate_inventory_resource_counts(2, 3, 2, 3).unwrap();
+
+        let model_drift = validate_inventory_resource_counts(1, 1, 0, 1).unwrap_err();
+        assert!(model_drift.contains("host models=1 contexts=1"));
+        assert!(model_drift.contains("worker models=0 contexts=1"));
+
+        let context_drift = validate_inventory_resource_counts(1, 1, 1, 0).unwrap_err();
+        assert!(context_drift.contains("worker models=1 contexts=0"));
+    }
+
+    #[test]
+    fn host_vram_observation_failure_is_not_a_worker_protocol_violation() {
+        let root = test_root("inventory-host-observation");
+        let render_node = PathBuf::from("/dev/dri/renderD128");
+        let physical_device_id = "pci:0000:03:00.0";
+        let resource = crate::worker_resources::RenderDeviceResource::fixture(
+            &render_node,
+            physical_device_id,
+            "radv:test-driver",
+        );
+        let admitted_devices = BTreeMap::from([(physical_device_id.to_string(), resource.clone())]);
+        let snapshot = DeviceSnapshot::new(vec![
+            crate::worker_protocol::DeviceSnapshotEntry::new(
+                physical_device_id,
+                "worker-driver",
+                "Vulkan0",
+                "fixture GPU",
+                DeviceKind::DiscreteGpu,
+                1,
+                2,
+                true,
+                true,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        let mapping = map_worker_device_snapshot(&snapshot, &admitted_devices).unwrap_err();
+        assert!(matches!(
+            mapping,
+            DeviceSnapshotMappingError::HostObservation(ref message)
+                if message.contains("has no kernel-owned VRAM counters")
+        ));
+
+        let mut runtime = WorkerModelRuntime::new(
+            WorkerRuntimeOptions::new(root.join("worker-tmp"))
+                .with_gpu_device_paths(vec![render_node])
+                .with_admitted_devices(admitted_devices)
+                .with_device_lease_root(root.join("device-leases"))
+                .with_health_root(root.join("health")),
+        )
+        .unwrap();
+        let error = runtime.map_device_snapshot(&snapshot).unwrap_err();
+        assert_eq!(error.code(), "device_snapshot_invalid");
+        assert!(!error.is_backend_lost());
+        assert!(runtime.session.is_none());
+        assert!(runtime.device_leases.is_empty());
+
+        let unadmitted = map_worker_device_snapshot(&snapshot, &BTreeMap::new()).unwrap_err();
+        assert!(matches!(
+            unadmitted,
+            DeviceSnapshotMappingError::WorkerProtocol(ref message)
+                if message.contains("unadmitted physical GPU identity")
+        ));
+
+        drop(runtime);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn quarantine_key(device: u8, config: u8) -> ResourceQuarantineKey {

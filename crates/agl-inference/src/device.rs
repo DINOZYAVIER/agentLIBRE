@@ -17,6 +17,8 @@ pub enum InferenceDeviceKind {
 #[serde(deny_unknown_fields)]
 pub struct InferenceDeviceInfo {
     pub physical_device_id: String,
+    pub pci_device_id: Option<String>,
+    pub pci_subsystem_id: Option<String>,
     pub driver_build_id: String,
     pub backend_name: String,
     pub description: String,
@@ -35,6 +37,8 @@ mod tests {
     fn device_inventory_round_trips_and_rejects_unknown_fields() {
         let info = InferenceDeviceInfo {
             physical_device_id: "0000:03:00.0".to_string(),
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
             driver_build_id: "sha256:driver".to_string(),
             backend_name: "Vulkan0".to_string(),
             description: "GPU".to_string(),

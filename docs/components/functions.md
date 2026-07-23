@@ -370,10 +370,15 @@ It does not disable the function's skills, subagents, or system prompt context.
 
 Current builtin model functions:
 
-- `gemma4-e4b`: conservative default Gemma4 E4B QAT Q4 config with projector.
-- `gemma4-12b`: packaged Gemma4 12B QAT config.
-- `gemma4-26b`: packaged Gemma4 26B-A4B QAT config.
-- `gemma4-31b`: packaged Gemma4 31B QAT config.
+- `gemma4-e4b`: conservative default Gemma4 E4B QAT Q4 config with projector
+  and a 32K maximum context.
+- `gemma4-e2b`: official Gemma 4 E2B QAT text-and-tools config without a
+  projector and with a 32K maximum context.
+- `gemma4-12b`: packaged Gemma4 12B QAT config with a 64K maximum context.
+- `gemma4-26b`: packaged Gemma4 26B-A4B QAT config with a 32K maximum
+  context.
+- `gemma4-31b`: official Gemma4 31B QAT Q4_0 config with a 32K maximum
+  context.
 
 ## Runtime Semantics
 

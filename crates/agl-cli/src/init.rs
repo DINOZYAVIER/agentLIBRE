@@ -751,6 +751,8 @@ fn model_device_info(device: InferenceDeviceInfo) -> LlamaDeviceInfo {
             InferenceDeviceKind::Metadata => LlamaDeviceKind::Metadata,
             InferenceDeviceKind::Unknown => LlamaDeviceKind::Unknown,
         },
+        pci_device_id: device.pci_device_id,
+        pci_subsystem_id: device.pci_subsystem_id,
         free_memory_bytes: device.free_memory_bytes,
         total_memory_bytes: device.total_memory_bytes,
         usable: device.usable,

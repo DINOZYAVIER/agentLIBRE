@@ -92,6 +92,8 @@ pub struct ModelArtifact {
 pub struct CatalogRuntimeProfile {
     pub id: String,
     pub device: ProfileDevice,
+    pub pci_device_id: Option<String>,
+    pub pci_subsystem_id: Option<String>,
     pub benchmark_evidence: String,
     pub required_total_ram_bytes: u64,
     pub required_available_ram_bytes: u64,
@@ -409,19 +411,53 @@ fn validate_profiles(package: &ModelPackage) -> Result<()> {
             profile.id
         );
         match profile.device {
-            ProfileDevice::Cpu => ensure!(
-                profile.gpu_layers == 0 && profile.required_vram_bytes == 0,
-                "CPU profile `{}` must not request GPU resources",
-                profile.id
-            ),
-            ProfileDevice::Gpu => ensure!(
-                profile.gpu_layers > 0 && profile.required_vram_bytes > 0,
-                "GPU profile `{}` must request GPU resources",
-                profile.id
-            ),
+            ProfileDevice::Cpu => {
+                ensure!(
+                    profile.gpu_layers == 0 && profile.required_vram_bytes == 0,
+                    "CPU profile `{}` must not request GPU resources",
+                    profile.id
+                );
+                ensure!(
+                    profile.pci_device_id.is_none() && profile.pci_subsystem_id.is_none(),
+                    "CPU profile `{}` must not declare PCI GPU identity",
+                    profile.id
+                );
+            }
+            ProfileDevice::Gpu => {
+                ensure!(
+                    profile.gpu_layers > 0 && profile.required_vram_bytes > 0,
+                    "GPU profile `{}` must request GPU resources",
+                    profile.id
+                );
+                let pci_device_id = profile.pci_device_id.as_deref().with_context(|| {
+                    format!(
+                        "GPU profile `{}` has no exact PCI device identity",
+                        profile.id
+                    )
+                })?;
+                let pci_subsystem_id = profile.pci_subsystem_id.as_deref().with_context(|| {
+                    format!(
+                        "GPU profile `{}` has no exact PCI subsystem identity",
+                        profile.id
+                    )
+                })?;
+                ensure!(
+                    is_canonical_pci_id(pci_device_id) && is_canonical_pci_id(pci_subsystem_id),
+                    "GPU profile `{}` has malformed PCI identity",
+                    profile.id
+                );
+            }
         }
     }
     Ok(())
+}
+
+fn is_canonical_pci_id(value: &str) -> bool {
+    value.len() == 9
+        && value.as_bytes()[4] == b':'
+        && value.bytes().enumerate().all(|(index, byte)| {
+            index == 4 || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+        })
 }
 
 fn validate_function_contract(package: &ModelPackage) -> Result<()> {
@@ -447,6 +483,20 @@ fn validate_function_contract(package: &ModelPackage) -> Result<()> {
         "package `{}` function must use automatic runtime planning",
         package.id
     );
+    let policy = preset
+        .runtime
+        .auto_policy()
+        .expect("automatic runtime was checked above");
+    for profile in &package.profiles {
+        ensure!(
+            profile.context_tokens <= policy.max_context_tokens,
+            "package `{}` profile `{}` context {} exceeds function ceiling {}",
+            package.id,
+            profile.id,
+            profile.context_tokens,
+            policy.max_context_tokens
+        );
+    }
     let main = package
         .artifacts
         .iter()
@@ -514,50 +564,210 @@ mod tests {
     }
 
     #[test]
-    fn builtin_large_model_profiles_match_live_32k_cpu_admission() {
+    fn catalog_rejects_profiles_above_the_function_ceiling() {
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let e2b = catalog
+            .packages
+            .iter_mut()
+            .find(|package| package.id.as_str() == "gemma4-e2b")
+            .unwrap();
+        e2b.profiles[0].context_tokens = 65_536;
+        let error = catalog.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds function ceiling 32768"));
+    }
+
+    #[test]
+    fn catalog_rejects_gpu_profiles_without_exact_pci_identity() {
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let gpu = catalog.packages[0]
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.device == ProfileDevice::Gpu)
+            .unwrap();
+        gpu.pci_subsystem_id = None;
+
+        let error = catalog.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("has no exact PCI subsystem identity"));
+    }
+
+    #[test]
+    fn builtin_catalog_contains_five_canonical_function_owners() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let package_ids = catalog
+            .packages
+            .iter()
+            .map(|package| package.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            package_ids,
+            BTreeSet::from([
+                "gemma4-12b",
+                "gemma4-26b",
+                "gemma4-31b",
+                "gemma4-e2b",
+                "gemma4-e4b",
+            ])
+        );
+        assert_eq!(catalog.packages.len(), 5);
+        assert_eq!(
+            catalog
+                .packages
+                .iter()
+                .filter(|package| package.default)
+                .map(|package| package.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gemma4-e4b"]
+        );
+        assert!(catalog.packages.iter().all(|package| {
+            package.id.as_str() == package.function_id
+                && package
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.model_id.as_str() == package.id.as_str())
+        }));
+    }
+
+    #[test]
+    fn official_e2b_and_31b_artifact_pins_are_exact() {
         let catalog = ModelCatalog::builtin().unwrap();
         let expected = [
             (
+                "gemma4-e2b",
+                "google/gemma-4-E2B-it-qat-q4_0-gguf",
+                "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+                "gemma-4-E2B_q4_0-it.gguf",
+                3_349_514_112,
+                "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+            ),
+            (
+                "gemma4-31b",
+                "google/gemma-4-31B-it-qat-q4_0-gguf",
+                "59dde24573e7e61570dba08b18a2e1fe246955ed",
+                "gemma-4-31B_q4_0-it.gguf",
+                17_651_001_568,
+                "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b",
+            ),
+        ];
+
+        for (package_id, repository, revision, filename, byte_size, sha256) in expected {
+            let package = catalog
+                .package(&ModelPackageId::new(package_id).unwrap())
+                .unwrap();
+            assert_eq!(package.repository, repository);
+            assert_eq!(package.revision, revision);
+            assert_eq!(package.artifacts.len(), 1);
+            let main = &package.artifacts[0];
+            assert_eq!(main.role, ModelArtifactRole::Main);
+            assert_eq!(main.model_id.as_str(), package_id);
+            assert_eq!(main.filename, filename);
+            assert_eq!(main.byte_size, byte_size);
+            assert_eq!(main.sha256, sha256);
+            assert!(main.required);
+            assert_eq!(
+                package.capabilities,
+                vec![CatalogCapability::Text, CatalogCapability::Tools]
+            );
+        }
+    }
+
+    #[test]
+    fn official_e2b_and_31b_cannot_be_cross_bound() {
+        let mut catalog = ModelCatalog::builtin().unwrap();
+        let e2b_index = catalog
+            .packages
+            .iter()
+            .position(|package| package.id.as_str() == "gemma4-e2b")
+            .unwrap();
+        let thirty_one_index = catalog
+            .packages
+            .iter()
+            .position(|package| package.id.as_str() == "gemma4-31b")
+            .unwrap();
+        let e2b_model = catalog.packages[e2b_index].artifacts[0].model_id.clone();
+        let thirty_one_model = catalog.packages[thirty_one_index].artifacts[0]
+            .model_id
+            .clone();
+        catalog.packages[e2b_index].artifacts[0].model_id = thirty_one_model;
+        catalog.packages[thirty_one_index].artifacts[0].model_id = e2b_model;
+
+        let error = catalog.validate().unwrap_err();
+        assert!(format!("{error:#}").contains("main model id does not match"));
+    }
+
+    #[test]
+    fn builtin_profiles_match_five_function_cpu_and_gpu_matrix() {
+        let catalog = ModelCatalog::builtin().unwrap();
+        let expected = [
+            (
+                "gemma4-e2b",
+                "cpu-8gb-32768",
+                32_768,
+                "gpu-rx7900xtx-32768",
+                3_753_902_080,
+            ),
+            (
+                "gemma4-e4b",
+                "cpu-8gb-32768",
+                32_768,
+                "gpu-rx7900xtx-32768",
+                6_459_228_160,
+            ),
+            (
                 "gemma4-12b",
-                "cpu-16gb-32768",
-                17_179_869_184,
-                14_000_000_000,
-                "model-benchmark:20260716-gemma4-12b-32k-cpu",
+                "cpu-16gb-65536",
+                65_536,
+                "gpu-rx7900xtx-65536",
+                9_982_443_520,
             ),
             (
                 "gemma4-26b",
                 "cpu-20gb-32768",
-                21_474_836_480,
-                20_000_000_000,
-                "model-benchmark:20260716-gemma4-26b-32k-cpu",
+                32_768,
+                "gpu-rx7900xtx-32768",
+                17_165_189_120,
             ),
             (
                 "gemma4-31b",
                 "cpu-40gb-32768",
-                42_949_672_960,
-                40_000_000_000,
-                "model-benchmark:20260716-gemma4-31b-32k-cpu",
+                32_768,
+                "gpu-rx7900xtx-32768",
+                22_041_067_520,
             ),
         ];
 
-        for (package_id, profile_id, total_ram, available_ram, evidence) in expected {
+        for (package_id, cpu_profile_id, context, gpu_profile_id, required_vram) in expected {
             let package = catalog
                 .package(&ModelPackageId::new(package_id).unwrap())
                 .unwrap();
-            assert_eq!(package.profiles.len(), 1);
-            let profile = &package.profiles[0];
-            assert_eq!(profile.id, profile_id);
-            assert_eq!(profile.device, ProfileDevice::Cpu);
-            assert_eq!(profile.required_total_ram_bytes, total_ram);
-            assert_eq!(profile.required_available_ram_bytes, available_ram);
-            assert_eq!(profile.context_tokens, 32_768);
-            assert_eq!(profile.benchmark_evidence, evidence);
-        }
-        assert!(catalog.packages.iter().all(|package| {
-            package
+            assert_eq!(package.profiles.len(), 2);
+            let cpu = package
                 .profiles
                 .iter()
-                .all(|profile| profile.device == ProfileDevice::Cpu)
-        }));
+                .find(|profile| profile.device == ProfileDevice::Cpu)
+                .unwrap();
+            assert_eq!(cpu.id, cpu_profile_id);
+            assert_eq!(cpu.context_tokens, context);
+            assert_eq!(cpu.required_vram_bytes, 0);
+            assert_eq!(cpu.gpu_layers, 0);
+
+            let gpu = package
+                .profiles
+                .iter()
+                .find(|profile| profile.device == ProfileDevice::Gpu)
+                .unwrap();
+            assert_eq!(gpu.id, gpu_profile_id);
+            assert_eq!(gpu.context_tokens, context);
+            assert_eq!(gpu.required_vram_bytes, required_vram);
+            assert_eq!(gpu.gpu_layers, 999);
+            assert_eq!(gpu.pci_device_id.as_deref(), Some("1002:744c"));
+            assert_eq!(gpu.pci_subsystem_id.as_deref(), Some("1da2:471e"));
+            assert_eq!(gpu.batch_size, 512);
+            assert_eq!(gpu.ubatch_size, 256);
+            assert_eq!(gpu.threads, 8);
+            assert_eq!(
+                gpu.benchmark_evidence,
+                "model-benchmark:20260723-five-gemma4-rx7900xtx"
+            );
+        }
     }
 }

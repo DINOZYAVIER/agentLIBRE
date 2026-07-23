@@ -39,6 +39,49 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
 }
 
 #[test]
+fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-functions-builtin-gemma4-e2b-{}",
+        std::process::id()
+    ));
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let locator = resolve_function_reference("gemma4-e2b", &workspace, &config).unwrap();
+    assert_eq!(locator.source, FunctionSource::Builtin);
+
+    let loaded = load_function(locator).unwrap();
+    assert_eq!(loaded.front_matter.id, "gemma4-e2b");
+    assert_eq!(
+        loaded.front_matter.runtime_tool_mode(),
+        Some(FunctionToolMode::ReadOnly)
+    );
+    assert!(loaded.front_matter.skills.as_ref().unwrap().use_.is_empty());
+    assert!(
+        loaded
+            .front_matter
+            .subagents
+            .as_ref()
+            .unwrap()
+            .use_
+            .is_empty()
+    );
+    let inference = loaded.inference_config_toml.as_deref().unwrap();
+    assert!(inference.contains("model_id = \"gemma4-e2b\""));
+    assert!(!inference.contains("multimodal_projector_id"));
+    assert!(!inference.contains("[runtime.mtp]"));
+
+    let runtime = resolve_runtime_function("gemma4-e2b", &workspace, &config).unwrap();
+    assert_eq!(runtime.source, FunctionSource::Builtin);
+    assert_eq!(runtime.model_profile, None);
+    assert_eq!(runtime.profile_path, None);
+    assert!(runtime.inference_config_toml.is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn lists_builtin_functions() {
     let root =
         std::env::temp_dir().join(format!("agl-functions-list-builtin-{}", std::process::id()));
@@ -49,15 +92,22 @@ fn lists_builtin_functions() {
 
     let functions = list_functions(&workspace, &config).unwrap();
 
-    assert!(functions.iter().any(|function| {
-        function.id == "gemma4-12b" && function.source == FunctionSource::Builtin && function.valid
-    }));
-    assert!(functions.iter().any(|function| {
-        function.id == "gemma4-26b" && function.source == FunctionSource::Builtin && function.valid
-    }));
-    assert!(functions.iter().any(|function| {
-        function.id == "gemma4-31b" && function.source == FunctionSource::Builtin && function.valid
-    }));
+    let builtin_functions = functions
+        .iter()
+        .filter(|function| function.source == FunctionSource::Builtin)
+        .map(|function| (function.id.as_str(), function.valid))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        builtin_functions,
+        vec![
+            ("gemma4-12b", true),
+            ("gemma4-26b", true),
+            ("gemma4-31b", true),
+            ("gemma4-e2b", true),
+            ("gemma4-e4b", true),
+        ]
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

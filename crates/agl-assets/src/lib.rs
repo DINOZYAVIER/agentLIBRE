@@ -158,7 +158,13 @@ mod tests {
 
         assert_eq!(
             functions,
-            vec!["gemma4-12b", "gemma4-26b", "gemma4-31b", "gemma4-e4b"]
+            vec![
+                "gemma4-12b",
+                "gemma4-26b",
+                "gemma4-31b",
+                "gemma4-e2b",
+                "gemma4-e4b"
+            ]
         );
         for function in BUILTIN_FUNCTIONS {
             assert_eq!(function.tree_sha256.len(), 64);
@@ -212,6 +218,38 @@ dialect = "gemma4"
 tool_call_format = "gemma_function_call"
 "#;
         assert!(agl_config::load_inference_preset_from_str("direct path", direct_path).is_err());
+    }
+
+    #[test]
+    fn gemma4_e2b_and_12b_presets_match_builtin_policy() {
+        let e2b = builtin_function("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
+        let e2b_text = e2b.inference_config.text().unwrap();
+        let e2b_preset =
+            agl_config::load_inference_preset_from_str("gemma4-e2b", e2b_text).unwrap();
+        let e2b_runtime = e2b_preset.runtime.auto_policy().unwrap();
+
+        assert_eq!(e2b_preset.backend.model_id.as_str(), "gemma4-e2b");
+        assert_eq!(e2b_preset.backend.multimodal_projector_id, None);
+        assert_eq!(e2b_runtime.max_context_tokens, 32_768);
+        assert_eq!(e2b_runtime.max_batch_size, 512);
+        assert_eq!(e2b_runtime.max_ubatch_size, 256);
+        assert_eq!(e2b_runtime.flash_attention, agl_config::RuntimeSwitch::On);
+        assert_eq!(e2b_runtime.cache_type_k, agl_config::KvCacheType::Q8_0);
+        assert_eq!(e2b_runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
+        assert!(!e2b_preset.runtime.mtp_enabled());
+
+        let twelve_b = builtin_function("gemma4-12b").expect("Gemma 4 12B must be embedded");
+        let twelve_b_preset = agl_config::load_inference_preset_from_str(
+            "gemma4-12b",
+            twelve_b.inference_config.text().unwrap(),
+        )
+        .unwrap();
+        let twelve_b_runtime = twelve_b_preset.runtime.auto_policy().unwrap();
+
+        assert_eq!(twelve_b_runtime.max_context_tokens, 65_536);
+        assert_eq!(twelve_b_runtime.max_batch_size, 512);
+        assert_eq!(twelve_b_runtime.max_ubatch_size, 256);
+        assert!(!twelve_b_preset.runtime.mtp_enabled());
     }
 
     #[test]

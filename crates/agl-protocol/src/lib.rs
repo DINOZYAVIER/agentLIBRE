@@ -307,6 +307,8 @@ pub enum ProtocolInferenceDeviceKind {
 #[serde(deny_unknown_fields)]
 pub struct InferenceDeviceEvent {
     pub physical_device_id: String,
+    pub pci_device_id: Option<String>,
+    pub pci_subsystem_id: Option<String>,
     pub driver_build_id: String,
     pub backend_name: String,
     pub description: String,

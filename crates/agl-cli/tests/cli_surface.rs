@@ -1059,7 +1059,14 @@ fn init_dry_run_reports_conservative_catalog_without_writes() {
     let packages = report["plan"]["packages"]
         .as_array()
         .expect("setup plan packages");
-    for expected in ["gemma4-e4b", "gemma4-12b", "gemma4-26b", "gemma4-31b"] {
+    assert_eq!(packages.len(), 5, "unexpected setup packages:\n{stdout}");
+    for expected in [
+        "gemma4-e2b",
+        "gemma4-e4b",
+        "gemma4-12b",
+        "gemma4-26b",
+        "gemma4-31b",
+    ] {
         assert!(
             packages
                 .iter()
@@ -1832,6 +1839,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&list_stdout, "function id=gemma4-e4b source=builtin");
     assert_contains(
         &list_stdout,
+        "function id=gemma4-e2b source=builtin path=assets/functions/gemma4-e2b/FUNCTION.md valid=true",
+    );
+    assert_contains(
+        &list_stdout,
         "function id=gemma4-12b source=builtin path=assets/functions/gemma4-12b/FUNCTION.md valid=true",
     );
     assert_contains(&list_stdout, "function id=gemma4-26b source=builtin");
@@ -1864,6 +1875,27 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     );
     assert_contains(&show_stdout, "--- inference.toml ---");
     assert_contains(&show_stdout, "tool_call_format = \"gemma_function_call\"");
+
+    let e2b_status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-e2b"]);
+    assert_success_no_stderr(&e2b_status);
+    let e2b_status_stdout = stdout(&e2b_status);
+    assert_contains(&e2b_status_stdout, "function.source=builtin");
+    assert_contains(&e2b_status_stdout, "function.model.id=gemma4-e2b");
+    assert!(
+        !e2b_status_stdout.contains("function.model.multimodal_projector_id="),
+        "Gemma 4 E2B must not require a projector"
+    );
+
+    let e2b_show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-e2b"]);
+    assert_success_no_stderr(&e2b_show);
+    let e2b_show_stdout = stdout(&e2b_show);
+    assert_contains(
+        &e2b_show_stdout,
+        "You are an agentLIBRE function running on local Gemma 4 E2B.",
+    );
+    assert_contains(&e2b_show_stdout, "max_context_tokens = 32768");
+    assert!(!e2b_show_stdout.contains("multimodal_projector_id"));
+    assert!(!e2b_show_stdout.contains("[runtime.mtp]"));
 }
 
 #[test]

@@ -110,6 +110,8 @@ mod tests {
     fn production_snapshot_keeps_backend_name_out_of_authority_identity() {
         let snapshot = device_snapshot_from_inventory(vec![InferenceDeviceInfo {
             physical_device_id: "pci:0000:03:00.0".to_string(),
+            pci_device_id: None,
+            pci_subsystem_id: None,
             driver_build_id: WORKER_BUILD_ID.to_string(),
             backend_name: "Vulkan0".to_string(),
             description: "display-only GPU description".to_string(),
