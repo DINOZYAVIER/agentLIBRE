@@ -4,18 +4,18 @@ use serde_json::json;
 #[test]
 fn parses_plain_answer() {
     assert_eq!(
-        parse_model_action("done"),
-        ModelAction::Answer("done".to_string())
+        parse_model_output("done"),
+        ParsedModelOutput::Answer("done".to_string())
     );
 }
 
 #[test]
 fn parses_valid_qwen_hermes_tool_call() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<tool_call>{"name":"read_file","arguments":{"path":"README.MD"}}</tool_call>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "read_file".to_string(),
             arguments: json!({"path": "README.MD"}),
         })
@@ -25,8 +25,8 @@ fn parses_valid_qwen_hermes_tool_call() {
 #[test]
 fn parses_valid_gemma_tool_call() {
     assert_eq!(
-        parse_model_action(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#),
-        ModelAction::ToolCall(ToolCall {
+        parse_model_output(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#),
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "fs.read".to_string(),
             arguments: json!({"path": "README.MD"}),
         })
@@ -36,10 +36,10 @@ fn parses_valid_gemma_tool_call() {
 #[test]
 fn parses_gemma_scalar_arguments() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<|tool_call>call:memory.search{query:<|"|>rust<|"|>,limit:5,exact:false,after:null}<tool_call|>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "memory.search".to_string(),
             arguments: json!({
                 "query": "rust",
@@ -54,8 +54,8 @@ fn parses_gemma_scalar_arguments() {
 #[test]
 fn parses_gemma_json_quoted_string_argument() {
     assert_eq!(
-        parse_model_action(r#"<|tool_call>call:fs.read{path:"README.MD"}<tool_call|>"#),
-        ModelAction::ToolCall(ToolCall {
+        parse_model_output(r#"<|tool_call>call:fs.read{path:"README.MD"}<tool_call|>"#),
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "fs.read".to_string(),
             arguments: json!({"path": "README.MD"}),
         })
@@ -65,10 +65,10 @@ fn parses_gemma_json_quoted_string_argument() {
 #[test]
 fn parses_gemma_mixed_json_quoted_and_scalar_arguments() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<|tool_call>call:memory.search{query:"rust",limit:5,exact:false,after:null}<tool_call|>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "memory.search".to_string(),
             arguments: json!({
                 "query": "rust",
@@ -83,8 +83,8 @@ fn parses_gemma_mixed_json_quoted_and_scalar_arguments() {
 #[test]
 fn parses_gemma_json_quoted_string_with_escaped_quote_and_comma() {
     assert_eq!(
-        parse_model_action(r#"<|tool_call>call:fs.read{path:"notes/a,\"b,c.md"}<tool_call|>"#),
-        ModelAction::ToolCall(ToolCall {
+        parse_model_output(r#"<|tool_call>call:fs.read{path:"notes/a,\"b,c.md"}<tool_call|>"#),
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "fs.read".to_string(),
             arguments: json!({"path": "notes/a,\"b,c.md"}),
         })
@@ -94,10 +94,10 @@ fn parses_gemma_json_quoted_string_with_escaped_quote_and_comma() {
 #[test]
 fn parses_nested_gemma_object_argument() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<|tool_call>call:process.exec{options:{env:{MODE:<|"|>live<|"|>},stdin:null}}<tool_call|>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "process.exec".to_string(),
             arguments: json!({
                 "options": {
@@ -112,10 +112,10 @@ fn parses_nested_gemma_object_argument() {
 #[test]
 fn parses_live_gemma_process_array_argument() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<|tool_call>call:process.exec{args:[<|"|>PTY_LIVE_OK<|"|>],program:<|"|>/usr/bin/printf<|"|>}<tool_call|>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "process.exec".to_string(),
             arguments: json!({
                 "args": ["PTY_LIVE_OK"],
@@ -127,11 +127,11 @@ fn parses_live_gemma_process_array_argument() {
 
 #[test]
 fn rejects_duplicate_gemma_object_keys() {
-    let action = parse_model_action(
+    let action = parse_model_output(
         r#"<|tool_call>call:process.exec{program:<|"|>first<|"|>,program:<|"|>second<|"|>}<tool_call|>"#,
     );
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
     assert_eq!(
@@ -144,11 +144,11 @@ fn rejects_duplicate_gemma_object_keys() {
 #[test]
 fn rejects_gemma_values_beyond_the_nesting_limit() {
     let nested = format!("{}0{}", "[".repeat(33), "]".repeat(33));
-    let action = parse_model_action(&format!(
+    let action = parse_model_output(&format!(
         "<|tool_call>call:test.deep{{value:{nested}}}<tool_call|>"
     ));
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
     assert_eq!(
@@ -160,9 +160,9 @@ fn rejects_gemma_values_beyond_the_nesting_limit() {
 
 #[test]
 fn classifies_missing_gemma_terminator_without_json_repair() {
-    let action = parse_model_action(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}"#);
+    let action = parse_model_output(r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}"#);
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
 
@@ -179,9 +179,9 @@ fn classifies_missing_gemma_terminator_without_json_repair() {
 
 #[test]
 fn classifies_invalid_gemma_shape() {
-    let action = parse_model_action(r#"<|tool_call>fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#);
+    let action = parse_model_output(r#"<|tool_call>fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#);
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
 
@@ -195,10 +195,10 @@ fn classifies_invalid_gemma_shape() {
 #[test]
 fn parses_earliest_tool_call_format() {
     assert_eq!(
-        parse_model_action(
+        parse_model_output(
             r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|> then <tool_call>{"name":"other","arguments":{}}</tool_call>"#
         ),
-        ModelAction::ToolCall(ToolCall {
+        ParsedModelOutput::ToolCall(ToolCall {
             name: "fs.read".to_string(),
             arguments: json!({"path": "README.MD"}),
         })
@@ -207,11 +207,11 @@ fn parses_earliest_tool_call_format() {
 
 #[test]
 fn repairs_quoted_tool_json() {
-    let action = parse_model_action(
+    let action = parse_model_output(
         r#"<tool_call>"{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.MD\"}}"</tool_call>"#,
     );
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call with repair");
     };
     let Some(ToolJsonRepair::Succeeded {
@@ -230,11 +230,11 @@ fn repairs_quoted_tool_json() {
 
 #[test]
 fn repairs_one_missing_closing_brace() {
-    let action = parse_model_action(
+    let action = parse_model_output(
         r#"<tool_call>{"name":"read_file","arguments":{"path":"README.MD"}</tool_call>"#,
     );
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call with repair");
     };
     let Some(ToolJsonRepair::Succeeded {
@@ -254,9 +254,9 @@ fn repairs_one_missing_closing_brace() {
 #[test]
 fn repairs_missing_tool_call_terminator_when_json_is_complete() {
     let action =
-        parse_model_action(r#"<tool_call>{"name":"read_file","arguments":{"path":"README.MD"}}"#);
+        parse_model_output(r#"<tool_call>{"name":"read_file","arguments":{"path":"README.MD"}}"#);
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call with repair");
     };
     let Some(ToolJsonRepair::Succeeded {
@@ -279,9 +279,9 @@ fn repairs_missing_tool_call_terminator_when_json_is_complete() {
 
 #[test]
 fn classifies_missing_terminator_before_json_syntax() {
-    let action = parse_model_action(r#"<tool_call>{"name":,"arguments":42"#);
+    let action = parse_model_output(r#"<tool_call>{"name":,"arguments":42"#);
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
 
@@ -297,9 +297,9 @@ fn classifies_missing_terminator_before_json_syntax() {
 
 #[test]
 fn leaves_unrepairable_json_malformed() {
-    let action = parse_model_action(r#"<tool_call>{"name":,"arguments":42</tool_call>"#);
+    let action = parse_model_output(r#"<tool_call>{"name":,"arguments":42</tool_call>"#);
 
-    let ModelAction::MalformedToolCall(malformed) = action else {
+    let ParsedModelOutput::MalformedToolCall(malformed) = action else {
         panic!("expected malformed tool call");
     };
 

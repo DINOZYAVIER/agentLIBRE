@@ -14,7 +14,7 @@ pub use inference::{
     AutoRuntimePolicy, BackendKind, FixedRuntimePreset, InferenceBackendConfig, InferencePreset,
     InferencePresetBackendConfig, InferencePresetRuntimeConfig, InferenceRuntimeConfig,
     KvCacheType, MIN_AUTO_CONTEXT_TOKENS, MtpPresetConfig, MtpProbability, MtpRuntimeConfig,
-    ResolvedInferenceConfig, RuntimeSwitch,
+    ResolvedInferenceConfig, RuntimeSwitch, StructuredDecodingMode,
 };
 pub use load::{
     load_inference_preset, load_inference_preset_from_str, load_local_inference_config,

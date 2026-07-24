@@ -431,6 +431,33 @@ fn malformed_tool_json_repair_and_stop_paths_are_pure() {
 }
 
 #[test]
+fn disabled_malformed_tool_repair_stops_without_a_repair_event() {
+    let stopped = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1)
+            .with_repair_malformed_tool_calls(false),
+        Script::default()
+            .model(r#"<tool_call>{"name":"read_file","arguments":{"path":"README.md"}}"#),
+        true,
+    );
+    let kinds = event_kinds(&stopped.events);
+
+    assert!(!kinds.contains(&"tool.json_repair_attempted"));
+    assert!(!kinds.contains(&"tool.json_repair_succeeded"));
+    assert!(!kinds.contains(&"tool.json_repair_failed"));
+    assert!(matches!(
+        stopped.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::ToolJsonUnrepairable,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
 fn hook_repair_reissues_model_and_hook_failure_is_typed() {
     let artifact_hook = TurnHookBatch::new(agl_capabilities::HookEvent::ArtifactWrite)
         .with_required_hook(hook_id("guard:test"));

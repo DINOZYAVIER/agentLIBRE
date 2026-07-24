@@ -18,6 +18,7 @@ pub struct TurnInput {
     pub request_index_start: usize,
     pub max_tool_calls: usize,
     pub max_hook_repair_attempts: usize,
+    pub repair_malformed_tool_calls: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_policy_hash: Option<String>,
 }
@@ -35,6 +36,7 @@ impl TurnInput {
             request_index_start: 0,
             max_tool_calls: 0,
             max_hook_repair_attempts: 0,
+            repair_malformed_tool_calls: true,
             capability_policy_hash: None,
         }
     }
@@ -71,6 +73,11 @@ impl TurnInput {
 
     pub fn with_max_hook_repair_attempts(mut self, max_hook_repair_attempts: usize) -> Self {
         self.max_hook_repair_attempts = max_hook_repair_attempts;
+        self
+    }
+
+    pub fn with_repair_malformed_tool_calls(mut self, enabled: bool) -> Self {
+        self.repair_malformed_tool_calls = enabled;
         self
     }
 

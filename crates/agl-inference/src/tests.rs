@@ -94,6 +94,8 @@ fn local_config() -> ResolvedInferenceConfig {
             cache_type_v: None,
             mmap: Some(true),
             kv_unified: None,
+            structured_decoding: agl_config::StructuredDecodingMode::Auto,
+            repair_malformed_tool_calls: true,
             mtp: MtpRuntimeConfig::default(),
         },
         model: ModelConfig {

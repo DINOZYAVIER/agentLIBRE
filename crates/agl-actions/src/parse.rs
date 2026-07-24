@@ -1,5 +1,5 @@
 use crate::{
-    MalformedToolCall, MalformedToolJsonKind, ModelAction, ToolCall, repair::repair_tool_json,
+    MalformedToolCall, MalformedToolJsonKind, ParsedModelOutput, ToolCall, repair::repair_tool_json,
 };
 use serde_json::{Map, Value};
 
@@ -11,11 +11,11 @@ const GEMMA_CALL_PREFIX: &str = "call:";
 const GEMMA_STRING_DELIMITER: &str = "<|\"|>";
 const MAX_GEMMA_VALUE_DEPTH: usize = 32;
 
-pub fn parse_model_action(content: &str) -> ModelAction {
+pub fn parse_model_output(content: &str) -> ParsedModelOutput {
     match first_tool_call_format(content) {
-        Some((ToolCallParser::Hermes, open_at)) => parse_hermes_model_action(content, open_at),
-        Some((ToolCallParser::Gemma, open_at)) => parse_gemma_model_action(content, open_at),
-        None => ModelAction::Answer(content.to_string()),
+        Some((ToolCallParser::Hermes, open_at)) => parse_hermes_model_output(content, open_at),
+        Some((ToolCallParser::Gemma, open_at)) => parse_gemma_model_output(content, open_at),
+        None => ParsedModelOutput::Answer(content.to_string()),
     }
 }
 
@@ -38,12 +38,12 @@ fn first_tool_call_format(content: &str) -> Option<(ToolCallParser, usize)> {
     }
 }
 
-fn parse_hermes_model_action(content: &str, open_at: usize) -> ModelAction {
+fn parse_hermes_model_output(content: &str, open_at: usize) -> ParsedModelOutput {
     let json_start = open_at + TOOL_CALL_OPEN.len();
     let Some(close_rel) = content[json_start..].find(TOOL_CALL_CLOSE) else {
         let raw_json = content[json_start..].trim().to_string();
         let repair = repair_tool_json(&raw_json, MalformedToolJsonKind::MissingTerminator);
-        return ModelAction::MalformedToolCall(MalformedToolCall {
+        return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
             raw_json,
             classification: MalformedToolJsonKind::MissingTerminator,
             repair: Some(repair),
@@ -56,20 +56,20 @@ fn parse_hermes_model_action(content: &str, open_at: usize) -> ModelAction {
     parse_tool_json(&raw_json).map_or_else(
         |classification| {
             let repair = repair_tool_json(&raw_json, classification.clone());
-            ModelAction::MalformedToolCall(MalformedToolCall {
+            ParsedModelOutput::MalformedToolCall(MalformedToolCall {
                 raw_json,
                 classification,
                 repair: Some(repair),
             })
         },
-        ModelAction::ToolCall,
+        ParsedModelOutput::ToolCall,
     )
 }
 
-fn parse_gemma_model_action(content: &str, open_at: usize) -> ModelAction {
+fn parse_gemma_model_output(content: &str, open_at: usize) -> ParsedModelOutput {
     let call_start = open_at + GEMMA_TOOL_CALL_OPEN.len();
     let Some(close_rel) = content[call_start..].find(GEMMA_TOOL_CALL_CLOSE) else {
-        return ModelAction::MalformedToolCall(MalformedToolCall {
+        return ParsedModelOutput::MalformedToolCall(MalformedToolCall {
             raw_json: content[call_start..].trim().to_string(),
             classification: MalformedToolJsonKind::MissingTerminator,
             repair: None,
@@ -81,13 +81,13 @@ fn parse_gemma_model_action(content: &str, open_at: usize) -> ModelAction {
         .to_string();
     parse_gemma_tool_call(&raw_call).map_or_else(
         |classification| {
-            ModelAction::MalformedToolCall(MalformedToolCall {
+            ParsedModelOutput::MalformedToolCall(MalformedToolCall {
                 raw_json: raw_call,
                 classification,
                 repair: None,
             })
         },
-        ModelAction::ToolCall,
+        ParsedModelOutput::ToolCall,
     )
 }
 

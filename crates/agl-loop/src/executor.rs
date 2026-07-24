@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use agl_actions::{ModelAction, RepairStrategy, ToolCall, ToolJsonRepair};
+use agl_actions::{ParsedModelOutput, RepairStrategy, ToolCall, ToolJsonRepair};
 use agl_capabilities::{DispatchDenialCode, HookBatchRequest, HookBatchResult, HookEvent};
 use agl_content::Content;
 use agl_events::{EventDraft, EventScope, RuntimeEvent};
@@ -868,8 +868,8 @@ impl TurnExecutor {
                 "unsupported_content: model responses must be text-only".to_string(),
             )
         })?;
-        match agl_actions::parse_model_action(&text) {
-            ModelAction::Answer(answer) => {
+        match agl_actions::parse_model_output(&text) {
+            ParsedModelOutput::Answer(answer) => {
                 self.apply(TurnTransition::ParseAnswer, events)?;
                 self.apply(
                     TurnTransition::FinalAnswer {
@@ -882,8 +882,8 @@ impl TurnExecutor {
                     provisional_message_id,
                 };
             }
-            ModelAction::ToolCall(tool_call) => self.handle_tool_call(tool_call, events)?,
-            ModelAction::MalformedToolCall(malformed) => {
+            ParsedModelOutput::ToolCall(tool_call) => self.handle_tool_call(tool_call, events)?,
+            ParsedModelOutput::MalformedToolCall(malformed) => {
                 self.apply(
                     TurnTransition::DetectMalformedToolJson {
                         classification: malformed_kind(malformed.classification),
@@ -891,6 +891,10 @@ impl TurnExecutor {
                     },
                     events,
                 )?;
+                if !self.checkpoint.state.input.repair_malformed_tool_calls {
+                    self.stop(StopReason::ToolJsonUnrepairable, None, events)?;
+                    return Ok(());
+                }
                 match malformed.repair {
                     Some(ToolJsonRepair::Succeeded {
                         strategy,

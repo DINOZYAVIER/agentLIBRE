@@ -892,6 +892,8 @@ fn automatic_profiles_require_a_32k_context_floor() {
         flash_attention: RuntimeSwitch::On,
         cache_type_k: KvCacheType::Q8_0,
         cache_type_v: KvCacheType::Q8_0,
+        structured_decoding: StructuredDecodingMode::Auto,
+        repair_malformed_tool_calls: true,
     };
     policy.validate().unwrap();
 
@@ -899,6 +901,34 @@ fn automatic_profiles_require_a_32k_context_floor() {
     let error = policy.validate().unwrap_err();
     assert_error_contains(&error, "automatic agent profiles");
     assert_error_contains(&error, "32768");
+}
+
+#[test]
+fn structured_decoding_and_repair_modes_decode_from_runtime() {
+    let preset = load_inference_preset_from_str(
+        "structured fixture",
+        &preset_text(
+            "",
+            "structured_decoding = \"required\"\nrepair_malformed_tool_calls = false",
+        ),
+    )
+    .unwrap();
+    let InferencePresetRuntimeConfig::Fixed(runtime) = preset.runtime else {
+        panic!("expected fixed runtime");
+    };
+
+    assert_eq!(
+        runtime.structured_decoding,
+        StructuredDecodingMode::Required
+    );
+    assert!(!runtime.repair_malformed_tool_calls);
+
+    let defaults = load_inference_preset_from_str("defaults", &preset_text("", "")).unwrap();
+    let InferencePresetRuntimeConfig::Fixed(defaults) = defaults.runtime else {
+        panic!("expected fixed runtime");
+    };
+    assert_eq!(defaults.structured_decoding, StructuredDecodingMode::Auto);
+    assert!(defaults.repair_malformed_tool_calls);
 }
 
 fn preset_text(backend_extra: &str, runtime_extra: &str) -> String {

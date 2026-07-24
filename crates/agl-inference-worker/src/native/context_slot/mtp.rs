@@ -20,13 +20,15 @@ impl LlamaCppContextSlot {
         model: &LlamaCppModel,
         request: LlamaCppGenerationRequest<'_>,
         prepared: PreparedPrompt,
+        sampler: &Sampler,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
         let Some(mut mtp) = self.mtp.take() else {
             bail!("llama.cpp MTP state is missing");
         };
-        let result = self.generate_with_mtp_state(model, request, prepared, control, log, &mut mtp);
+        let result =
+            self.generate_with_mtp_state(model, request, prepared, sampler, control, log, &mut mtp);
         self.mtp = Some(mtp);
         result
     }
@@ -37,17 +39,21 @@ impl LlamaCppContextSlot {
         model: &LlamaCppModel,
         request: LlamaCppGenerationRequest<'_>,
         prepared: PreparedPrompt,
+        sampler: &Sampler,
         control: &LlamaCppGenerationControl<'_>,
         log: &mut String,
         mtp: &mut MtpState,
     ) -> Result<LlamaCppGenerationOutput> {
         let PreparedPrompt {
             tokens: prompt_tokens,
+            generation_plan,
             messages: prompt_messages,
             history: prompt_history,
         } = prepared;
         let input_tokens = u64::try_from(prompt_tokens.len()).unwrap_or(u64::MAX);
-        let mut output = request.classifier();
+        let additional_stops = generation_plan.map_or_else(Vec::new, |plan| plan.additional_stops);
+        let mut output =
+            request.classifier(additional_stops, self.runtime.repair_malformed_tool_calls);
         log.push_str("mtp_generation_mode = draft-mtp\n");
         log.push_str("mtp_sequence_mode = seq0-temporary\n");
 
@@ -140,8 +146,7 @@ impl LlamaCppContextSlot {
             mtp.process(&mut batch)
                 .context("failed to process MTP target verification batch")?;
 
-            let accepted =
-                sample_verified_tokens(self.sampler.as_ptr(), self.context.as_ptr(), &draft);
+            let accepted = sample_verified_tokens(sampler, self.context.as_ptr(), &draft)?;
             ensure!(
                 !accepted.is_empty(),
                 "llama.cpp MTP target verification produced no accepted tokens"
@@ -472,23 +477,38 @@ fn mtp_status_to_result(status: i32, operation: &str) -> Result<()> {
 }
 
 fn sample_verified_tokens(
-    sampler: *mut c_void,
+    sampler: &Sampler,
     ctx: *mut c_void,
     draft: &[ffi::llama_token],
-) -> Vec<ffi::llama_token> {
-    let mut accepted = Vec::with_capacity(draft.len() + 1);
+) -> Result<Vec<ffi::llama_token>> {
+    let scratch = sampler.try_clone()?;
+    let mut sampled = Vec::with_capacity(draft.len() + 1);
     for row in 0..=draft.len() {
-        let token = unsafe { ffi::llama_sampler_sample(sampler, ctx, row as i32) };
-        if row == 0 {
-            accepted.push(token);
-            continue;
-        }
-        if token != draft[row - 1] {
+        let token = unsafe { ffi::llama_sampler_sample(scratch.as_ptr(), ctx, row as i32) };
+        sampled.push(token);
+        if committed_verified_prefix(draft, &sampled).len() != sampled.len() {
             break;
         }
-        accepted.push(token);
     }
-    accepted
+    let accepted = committed_verified_prefix(draft, &sampled);
+    for token in &accepted {
+        sampler.accept(*token);
+    }
+    Ok(accepted)
+}
+
+pub(super) fn committed_verified_prefix(
+    draft: &[ffi::llama_token],
+    sampled: &[ffi::llama_token],
+) -> Vec<ffi::llama_token> {
+    let mut committed = Vec::with_capacity(sampled.len().min(draft.len() + 1));
+    for (row, token) in sampled.iter().copied().take(draft.len() + 1).enumerate() {
+        if row > 0 && token != draft[row - 1] {
+            break;
+        }
+        committed.push(token);
+    }
+    committed
 }
 
 fn rollback_rejected_mtp_tokens(

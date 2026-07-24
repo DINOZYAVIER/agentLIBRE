@@ -318,7 +318,7 @@ fn build_request_injects_runtime_features_before_tools() {
     )
     .unwrap();
 
-    assert_eq!(request.rendered.messages.len(), 6);
+    assert_eq!(request.rendered.messages.len(), 5);
     assert_eq!(request.rendered.messages[0].content, Some(text("system")));
     assert!(
         request.rendered.messages[1]
@@ -345,19 +345,14 @@ fn build_request_injects_runtime_features_before_tools() {
         request.rendered.messages[3].content,
         Some(text("skill context"))
     );
-    assert!(
-        request.rendered.messages[4]
-            .content
-            .contains("<agentlibre_tool_context>")
-    );
     assert_eq!(
-        request.rendered.messages[5].content,
+        request.rendered.messages[4].content,
         Some(text("can you run cron jobs?"))
     );
 }
 
 #[test]
-fn build_request_injects_visible_tool_context_for_hermes() {
+fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
@@ -385,23 +380,21 @@ fn build_request_injects_visible_tool_context_for_hermes() {
     )
     .unwrap();
 
-    assert_eq!(request.rendered.messages.len(), 4);
+    assert_eq!(request.rendered.messages.len(), 3);
     assert_eq!(request.rendered.messages[0].content, Some(text("system")));
     assert_eq!(
         request.rendered.messages[1].content,
         Some(text("skill context"))
     );
-    assert!(request.rendered.messages[2].content.contains("fs.read"));
-    assert!(request.rendered.messages[2].content.contains("<tool_call>"));
     assert_eq!(
-        request.rendered.messages[3].content,
+        request.rendered.messages[2].content,
         Some(text("read README"))
     );
     assert_eq!(request.rendered.tools[0].name, "fs.read");
 }
 
 #[test]
-fn build_request_injects_visible_tool_context_for_gemma() {
+fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
     let config = ModelConfig {
         dialect: ModelDialect::Gemma4,
         tool_call_format: ToolCallFormat::GemmaFunctionCall,
@@ -429,38 +422,38 @@ fn build_request_injects_visible_tool_context_for_gemma() {
     )
     .unwrap();
 
-    assert_eq!(request.rendered.messages.len(), 4);
-    let tool_context = &request.rendered.messages[2].content;
-    assert!(tool_context.contains("# GEMMA NATIVE TOOL CALLING"));
-    assert!(tool_context.contains("<|tool_call>call:TOOL_NAME"));
-    assert!(tool_context.contains("fs.read"));
-    assert!(!tool_context.contains(r#"{"name":"TOOL_NAME""#));
+    assert_eq!(request.rendered.messages.len(), 3);
     assert_eq!(
-        request.rendered.messages[3].content,
+        request.rendered.messages[2].content,
         Some(text("read README"))
     );
     assert_eq!(request.rendered.tools[0].name, "fs.read");
 }
 
 #[test]
-fn hermes_and_gemma_render_the_same_compact_input_schema() {
+fn rendered_tool_keeps_the_exact_input_schema() {
     let effective = effective_capabilities(&["fs.read"]);
     let declaration = effective
         .capability(&CapabilityId::new("fs.read").unwrap())
         .unwrap()
         .declaration();
-    let schema_record = render_action_schema(declaration);
+    let config = ModelConfig {
+        dialect: ModelDialect::Qwen3,
+        tool_call_format: ToolCallFormat::HermesJson,
+    };
+    let rendered = render_model_request(
+        &ModelRequest {
+            run_id: run_id(),
+            turn_id: turn_id(),
+            request_index: 0,
+            messages: vec![],
+            visible_tools: visible_tools_from_effective(&effective),
+        },
+        &config,
+    )
+    .unwrap();
 
-    let hermes = render_hermes_tool_context(&effective);
-    let gemma = render_gemma_tool_context(&effective);
-
-    assert!(hermes.contains(&schema_record));
-    assert!(gemma.contains(&schema_record));
-    assert!(schema_record.contains(r#""additionalProperties":false"#));
-    assert!(schema_record.contains(r#""path":{"type":"string"}"#));
-    assert!(!schema_record.contains(r#""$schema""#));
-    assert!(!schema_record.contains(r#""title""#));
-    assert!(!schema_record.contains(r#""format""#));
+    assert_eq!(rendered.tools[0].input_schema, declaration.input_schema);
 }
 
 #[test]
@@ -1009,19 +1002,16 @@ tool_call_format = "hermes_json"
             .iter()
             .find(|message| message.content.contains("<agentlibre_tool_context>"))
             .map(|message| message.content.as_str());
-        assert_eq!(
-            tool_context.is_some(),
-            !case.expected_ids.is_empty(),
-            "{} textual tool context",
-            case.id
-        );
-        let expected = case.expected_ids.iter().copied().collect::<BTreeSet<_>>();
+        assert!(tool_context.is_none(), "{} textual tool context", case.id);
         for capability_id in &catalog_ids {
             let marker = format!(r#""name":"{capability_id}""#);
-            assert_eq!(
-                tool_context.is_some_and(|context| context.contains(&marker)),
-                expected.contains(capability_id),
-                "{} textual prompt capability {}",
+            assert!(
+                request
+                    .rendered
+                    .messages
+                    .iter()
+                    .all(|message| !message.content.contains(&marker)),
+                "{} duplicated textual prompt capability {}",
                 case.id,
                 capability_id
             );
