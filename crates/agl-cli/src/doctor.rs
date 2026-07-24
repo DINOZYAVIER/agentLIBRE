@@ -473,6 +473,8 @@ mod tests {
                 cache_type_v: None,
                 mmap: Some(true),
                 kv_unified: Some(true),
+                structured_decoding: agl_config::StructuredDecodingMode::Auto,
+                repair_malformed_tool_calls: true,
                 mtp: agl_config::MtpRuntimeConfig::default(),
             },
             smoke_timeout_seconds: 30,

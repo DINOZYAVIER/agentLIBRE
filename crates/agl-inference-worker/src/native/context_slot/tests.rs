@@ -1,11 +1,14 @@
 use std::ffi::CStr;
 
+use agl_actions::ParsedModelOutput;
 use agl_config::{ModelDialect, ToolCallFormat};
 use agl_content::Content;
 use agl_oven::{RenderedMessageRole, RenderedTool, RenderedToolCall};
 use serde_json::json;
 
 use super::decode::*;
+use super::mtp::committed_verified_prefix;
+use super::native::grammar_trigger_inputs;
 use super::prompt::*;
 use super::*;
 
@@ -422,4 +425,169 @@ fn prefill_chunk_count_rejects_zero_batch_size() {
         format!("{err:#}").contains("llama.cpp prefill batch size cannot be zero"),
         "unexpected error: {err:#}"
     );
+}
+
+#[test]
+fn tool_schema_bridge_keeps_nested_schema_bytes_exact() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "request": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["request"],
+        "additionalProperties": false
+    });
+    let prepared = PreparedTools::new(&[RenderedTool {
+        name: "fs.read".to_string(),
+        description: "Read a file".to_string(),
+        input_schema: schema.clone(),
+    }])
+    .unwrap();
+    let parameters = unsafe { CStr::from_ptr(prepared.tools[0].parameters) }
+        .to_str()
+        .unwrap();
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parameters).unwrap(),
+        schema
+    );
+}
+
+#[test]
+fn tool_schema_bridge_rejects_non_object_schema_roots() {
+    let error = match PreparedTools::new(&[RenderedTool {
+        name: "bad".to_string(),
+        description: "bad schema".to_string(),
+        input_schema: json!(true),
+    }]) {
+        Ok(_) => panic!("non-object Tool schema was admitted"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("root must be an object"));
+}
+
+#[test]
+fn generation_plan_boundary_rejects_length_mismatch() {
+    let value = std::ffi::CString::new("prompt").unwrap();
+
+    assert!(
+        raw_string(value.as_ptr(), 99, "prompt")
+            .unwrap_err()
+            .to_string()
+            .contains("length mismatch")
+    );
+}
+
+#[test]
+fn lazy_grammar_triggers_translate_common_metadata() {
+    let plan = GenerationPlan {
+        prompt: "prompt".to_string(),
+        grammar: "root ::= \"ok\"".to_string(),
+        grammar_lazy: true,
+        grammar_needs_prefill: false,
+        grammar_triggers: vec![
+            GrammarTrigger {
+                kind: 0,
+                value: String::new(),
+                token: 17,
+            },
+            GrammarTrigger {
+                kind: 1,
+                value: "<tool.call>".to_string(),
+                token: -1,
+            },
+            GrammarTrigger {
+                kind: 2,
+                value: "call:[a-z]+".to_string(),
+                token: -1,
+            },
+            GrammarTrigger {
+                kind: 3,
+                value: "full".to_string(),
+                token: -1,
+            },
+        ],
+        grammar_prefill_tokens: Vec::new(),
+        additional_stops: vec!["<stop>".to_string()],
+        preserved_tokens: Vec::new(),
+        generation_prompt: String::new(),
+        format: 0,
+        parser: String::new(),
+    };
+    let (patterns, tokens) = grammar_trigger_inputs(&plan).unwrap();
+    let patterns = patterns
+        .iter()
+        .map(|pattern| pattern.to_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(tokens, vec![17]);
+    assert_eq!(patterns, vec![r"<tool\.call>", "call:[a-z]+", "^full$"]);
+}
+
+#[test]
+fn malformed_lazy_grammar_trigger_is_typed() {
+    let plan = GenerationPlan {
+        prompt: "prompt".to_string(),
+        grammar: "root ::= \"ok\"".to_string(),
+        grammar_lazy: true,
+        grammar_needs_prefill: false,
+        grammar_triggers: vec![GrammarTrigger {
+            kind: 99,
+            value: "bad".to_string(),
+            token: -1,
+        }],
+        grammar_prefill_tokens: Vec::new(),
+        additional_stops: Vec::new(),
+        preserved_tokens: Vec::new(),
+        generation_prompt: String::new(),
+        format: 0,
+        parser: String::new(),
+    };
+
+    assert!(
+        grammar_trigger_inputs(&plan)
+            .unwrap_err()
+            .to_string()
+            .contains("trigger type 99")
+    );
+}
+
+#[test]
+fn rejected_mtp_tail_is_not_part_of_the_committed_sequence() {
+    let draft = [11, 12, 13];
+
+    assert_eq!(
+        committed_verified_prefix(&draft, &[10, 11, 99, 13]),
+        vec![10, 11]
+    );
+    assert_eq!(
+        committed_verified_prefix(&draft, &[10, 11, 12, 13]),
+        vec![10, 11, 12, 13]
+    );
+}
+
+#[test]
+fn constrained_output_corpus_never_enters_repair() {
+    let corpus = [
+        "plain answer",
+        r#"<tool_call>{"name":"fs.read","arguments":{"path":"README.md"}}</tool_call>"#,
+        r#"<tool_call>{"name":"nested","arguments":{"request":{"path":"README.md","flags":["a","b"]}}}</tool_call>"#,
+        r#"<|tool_call>call:screen.capture{}<tool_call|>"#,
+    ];
+
+    for output in corpus {
+        assert!(
+            !matches!(
+                agl_actions::parse_model_output(output),
+                ParsedModelOutput::MalformedToolCall(_)
+            ),
+            "constrained corpus output entered repair: {output}"
+        );
+    }
 }

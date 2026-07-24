@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use agl_actions::ModelAction;
+use agl_actions::ParsedModelOutput;
 use agl_content::MAX_TEXT_PART_BYTES;
 use agl_ids::AttemptId;
 
@@ -8,7 +8,8 @@ use agl_inference::{InferenceOutputEvent, InferenceOutputSink, OutputDelivery};
 
 use super::decode::trim_generated_continuation;
 use super::prompt::{
-    generated_assistant_prefix_is_pending, isolated_tool_call, strip_generated_assistant_prefix,
+    generated_assistant_prefix_is_pending, isolated_tool_call_with_repair,
+    strip_generated_assistant_prefix,
 };
 
 const MAX_DELTA_BYTES: usize = 4 * 1024;
@@ -31,6 +32,8 @@ pub(super) struct IncrementalResponseClassifier<'a> {
     continuation: bool,
     delivery_suspended: bool,
     content_byte_limit_reached: bool,
+    additional_stops: Vec<String>,
+    repair_malformed_tool_calls: bool,
 }
 
 pub(super) struct ClassifiedResponse {
@@ -40,7 +43,26 @@ pub(super) struct ClassifiedResponse {
 }
 
 impl<'a> IncrementalResponseClassifier<'a> {
+    #[cfg(test)]
     pub(super) fn new(attempt_id: AttemptId, sink: &'a dyn InferenceOutputSink) -> Self {
+        Self::new_with_stops(attempt_id, sink, Vec::new())
+    }
+
+    #[cfg(test)]
+    pub(super) fn new_with_stops(
+        attempt_id: AttemptId,
+        sink: &'a dyn InferenceOutputSink,
+        additional_stops: Vec<String>,
+    ) -> Self {
+        Self::new_with_policy(attempt_id, sink, additional_stops, true)
+    }
+
+    pub(super) fn new_with_policy(
+        attempt_id: AttemptId,
+        sink: &'a dyn InferenceOutputSink,
+        additional_stops: Vec<String>,
+        repair_malformed_tool_calls: bool,
+    ) -> Self {
         Self {
             attempt_id,
             sink,
@@ -56,6 +78,8 @@ impl<'a> IncrementalResponseClassifier<'a> {
             continuation: false,
             delivery_suspended: false,
             content_byte_limit_reached: false,
+            additional_stops,
+            repair_malformed_tool_calls,
         }
     }
 
@@ -113,13 +137,16 @@ impl<'a> IncrementalResponseClassifier<'a> {
     fn refresh(&mut self, terminal: bool) {
         self.content.clone_from(&self.decoded_content);
         strip_generated_assistant_prefix(&mut self.content);
+        self.continuation |= trim_additional_stops(&mut self.content, &self.additional_stops);
         self.continuation |= trim_generated_continuation(&mut self.content);
 
         if !self.answer_committed {
             if !terminal && generated_assistant_prefix_is_pending(&self.decoded_content) {
                 return;
             }
-            if isolated_tool_call(&self.content).is_some() {
+            if isolated_tool_call_with_repair(&self.content, self.repair_malformed_tool_calls)
+                .is_some()
+            {
                 self.action = true;
                 self.pending_delta.clear();
                 return;
@@ -127,8 +154,8 @@ impl<'a> IncrementalResponseClassifier<'a> {
             if tool_call_candidate(&self.content) {
                 if terminal {
                     if !matches!(
-                        agl_actions::parse_model_action(&self.content),
-                        ModelAction::Answer(_)
+                        agl_actions::parse_model_output(&self.content),
+                        ParsedModelOutput::Answer(_)
                     ) {
                         self.action = true;
                         return;
@@ -145,7 +172,7 @@ impl<'a> IncrementalResponseClassifier<'a> {
         let stable_end = if terminal {
             self.content.len()
         } else {
-            stable_text_end(&self.content)
+            stable_text_end_with_stops(&self.content, &self.additional_stops)
         };
         if stable_end > self.classified_len {
             self.pending_delta
@@ -211,9 +238,13 @@ fn tool_call_candidate(content: &str) -> bool {
         .any(|opening| opening.starts_with(content) || content.starts_with(opening))
 }
 
-fn stable_text_end(content: &str) -> usize {
+fn stable_text_end_with_stops(content: &str, additional_stops: &[String]) -> usize {
     let mut end = content.len();
-    for marker in STOP_MARKERS {
+    for marker in STOP_MARKERS
+        .iter()
+        .copied()
+        .chain(additional_stops.iter().map(String::as_str))
+    {
         for prefix_len in 1..marker.len() {
             if content.ends_with(&marker[..prefix_len]) {
                 end = end.min(content.len() - prefix_len);
@@ -221,6 +252,20 @@ fn stable_text_end(content: &str) -> usize {
         }
     }
     end
+}
+
+fn trim_additional_stops(content: &mut String, additional_stops: &[String]) -> bool {
+    let marker_offset = additional_stops
+        .iter()
+        .filter(|marker| !marker.is_empty())
+        .filter_map(|marker| content.find(marker))
+        .min();
+    if let Some(offset) = marker_offset {
+        content.truncate(offset);
+        true
+    } else {
+        false
+    }
 }
 
 fn char_boundary_at_or_before(value: &str, requested: usize) -> usize {
@@ -359,6 +404,30 @@ mod tests {
 
         assert!(response.content.starts_with("<tool_call>"));
         assert!(sink.deltas().is_empty());
+    }
+
+    #[test]
+    fn common_plan_stop_is_removed_exactly() {
+        let sink = RecordingSink::delivered();
+        let mut classifier = IncrementalResponseClassifier::new_with_stops(
+            attempt_id(),
+            &sink,
+            vec!["<exact_stop>".to_string()],
+        );
+
+        assert!(!classifier.push(b"answer<exact_"));
+        assert!(!classifier.push(b"stop>ignored"));
+        let response = classifier.finish();
+
+        assert_eq!(response.content, "answer");
+        assert!(classifier_stop_was_not_published(
+            &sink.deltas(),
+            "<exact_stop>"
+        ));
+    }
+
+    fn classifier_stop_was_not_published(deltas: &[(u64, String)], marker: &str) -> bool {
+        !deltas.iter().any(|(_, delta)| delta.contains(marker))
     }
 
     #[test]

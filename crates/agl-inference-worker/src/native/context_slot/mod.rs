@@ -23,7 +23,7 @@ use super::generation::{
 };
 use super::model::LlamaCppModel;
 use mtp::MtpState;
-use native::{ContextHandle, Sampler, map_cache_type, map_flash_attention};
+use native::{ContextHandle, map_cache_type, map_flash_attention};
 use output::IncrementalResponseClassifier;
 
 #[derive(Clone, Copy)]
@@ -49,15 +49,23 @@ impl<'a> LlamaCppGenerationRequest<'a> {
         }
     }
 
-    fn classifier(self) -> IncrementalResponseClassifier<'a> {
-        IncrementalResponseClassifier::new(self.attempt_id.clone(), self.output_sink)
+    fn classifier(
+        self,
+        additional_stops: Vec<String>,
+        repair_malformed_tool_calls: bool,
+    ) -> IncrementalResponseClassifier<'a> {
+        IncrementalResponseClassifier::new_with_policy(
+            self.attempt_id.clone(),
+            self.output_sink,
+            additional_stops,
+            repair_malformed_tool_calls,
+        )
     }
 }
 pub struct LlamaCppContextSlot {
     runtime: InferenceRuntimeConfig,
-    // Declaration order keeps sampler/speculative/draft context ahead of the
-    // target context in Rust's field drop order.
-    sampler: Sampler,
+    // Declaration order keeps speculative/draft context ahead of the target
+    // context in Rust's field drop order.
     mtp: Option<MtpState>,
     context: ContextHandle,
     cache: ContextCache,
@@ -123,7 +131,6 @@ impl LlamaCppContextSlot {
         log.push_str(&unsafe { ffi::llama_n_ctx(context.as_ptr()) }.to_string());
         log.push('\n');
 
-        let sampler = Sampler::greedy().context("failed to create llama.cpp sampler")?;
         let prefill_batch_size =
             usize::try_from(prefill_batch_size).context("llama.cpp n_batch exceeds usize")?;
         ensure!(
@@ -141,7 +148,6 @@ impl LlamaCppContextSlot {
 
         Ok(Self {
             runtime: runtime.clone(),
-            sampler,
             mtp,
             context,
             cache: ContextCache {

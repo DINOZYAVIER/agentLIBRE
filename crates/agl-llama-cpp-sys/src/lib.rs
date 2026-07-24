@@ -121,12 +121,42 @@ pub struct agl_llama_chat_tool_call {
 }
 
 #[repr(C)]
+pub struct agl_llama_chat_tool {
+    pub name: *const c_char,
+    pub description: *const c_char,
+    pub parameters: *const c_char,
+}
+
+#[repr(C)]
 pub struct agl_llama_chat_message {
     pub role: *const c_char,
     pub content: *const c_char,
     pub name: *const c_char,
     pub tool_calls: *const agl_llama_chat_tool_call,
     pub n_tool_calls: usize,
+}
+
+#[repr(C)]
+pub struct agl_llama_generation_plan {
+    pub prompt: *mut c_char,
+    pub prompt_len: usize,
+    pub grammar: *mut c_char,
+    pub grammar_len: usize,
+    pub grammar_lazy: c_int,
+    pub grammar_needs_prefill: c_int,
+    pub grammar_triggers_json: *mut c_char,
+    pub grammar_triggers_json_len: usize,
+    pub grammar_prefill_tokens_json: *mut c_char,
+    pub grammar_prefill_tokens_json_len: usize,
+    pub additional_stops_json: *mut c_char,
+    pub additional_stops_json_len: usize,
+    pub preserved_tokens_json: *mut c_char,
+    pub preserved_tokens_json_len: usize,
+    pub generation_prompt: *mut c_char,
+    pub generation_prompt_len: usize,
+    pub format: c_int,
+    pub parser: *mut c_char,
+    pub parser_len: usize,
 }
 
 #[repr(C)]
@@ -211,6 +241,18 @@ unsafe extern "C" {
         err: *mut c_char,
         err_len: usize,
     ) -> i32;
+    pub fn agl_llama_common_chat_build_generation_plan(
+        model: *const c_void,
+        chat: *const agl_llama_chat_message,
+        n_msg: usize,
+        tools: *const agl_llama_chat_tool,
+        n_tools: usize,
+        add_assistant: bool,
+        plan: *mut agl_llama_generation_plan,
+        err: *mut c_char,
+        err_len: usize,
+    ) -> c_int;
+    pub fn agl_llama_generation_plan_free(plan: *mut agl_llama_generation_plan);
     pub fn agl_llama_mtp_init(
         ctx_tgt: *mut c_void,
         ctx_dft: *mut c_void,
@@ -286,6 +328,22 @@ unsafe extern "C" {
     pub fn llama_sampler_chain_init(params: llama_sampler_chain_params) -> *mut c_void;
     pub fn llama_sampler_chain_add(chain: *mut c_void, sampler: *mut c_void);
     pub fn llama_sampler_init_greedy() -> *mut c_void;
+    pub fn llama_sampler_init_grammar(
+        vocab: *const c_void,
+        grammar_str: *const c_char,
+        grammar_root: *const c_char,
+    ) -> *mut c_void;
+    pub fn llama_sampler_init_grammar_lazy_patterns(
+        vocab: *const c_void,
+        grammar_str: *const c_char,
+        grammar_root: *const c_char,
+        trigger_patterns: *const *const c_char,
+        n_trigger_patterns: usize,
+        trigger_tokens: *const llama_token,
+        n_trigger_tokens: usize,
+    ) -> *mut c_void;
+    pub fn llama_sampler_accept(sampler: *mut c_void, token: llama_token);
+    pub fn llama_sampler_clone(sampler: *const c_void) -> *mut c_void;
     pub fn llama_sampler_sample(sampler: *mut c_void, ctx: *mut c_void, idx: i32) -> llama_token;
     pub fn llama_sampler_free(sampler: *mut c_void);
 }

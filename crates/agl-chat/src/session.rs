@@ -10,7 +10,7 @@ use agl_capabilities::{
     SkillCapabilityPolicy, SkillId, StateEffect, render_canonical_json,
 };
 use agl_config::{
-    ModelConfig, ResolvedInferenceConfig, ToolCallFormat, bind_inference_preset,
+    ModelConfig, ResolvedInferenceConfig, bind_inference_preset,
     bind_inference_preset_with_bindings, load_inference_preset_from_str,
     load_local_inference_config, model_bindings_path, resolve_inference_preset,
     resolve_inference_preset_with_bindings,
@@ -1229,14 +1229,6 @@ fn build_inference_request(
             .context("skill tool routing is missing from inference request context")?;
         ensure_skill_tool_routing_parity(skill_tool_routing, effective_capabilities)?;
     }
-    if effective_capabilities.capabilities().len() != 0 {
-        request_messages.push(TurnMessage::System {
-            content: Content::text(render_tool_context(
-                effective_capabilities,
-                model_config.tool_call_format,
-            )?)?,
-        });
-    }
     request_messages.extend(request.messages);
 
     let model_request = ModelRequest {
@@ -1305,96 +1297,6 @@ impl InferenceRequestContexts<'_> {
 
 fn non_empty_context(context: Option<&str>) -> Option<&str> {
     context.filter(|content| !content.trim().is_empty())
-}
-
-fn render_tool_context(
-    capabilities: &EffectiveCapabilitySet,
-    format: ToolCallFormat,
-) -> Result<String> {
-    match format {
-        ToolCallFormat::HermesJson => Ok(render_hermes_tool_context(capabilities)),
-        ToolCallFormat::GemmaFunctionCall => Ok(render_gemma_tool_context(capabilities)),
-        ToolCallFormat::StructuredToolCalls => {
-            bail!("visible CLI tools are not supported for structured tool-call rendering")
-        }
-    }
-}
-
-fn render_hermes_tool_context(capabilities: &EffectiveCapabilitySet) -> String {
-    let mut content = String::new();
-    content.push_str("<agentlibre_tool_context>\n");
-    content.push_str(
-        "You may call exactly one available tool by responding with only this Hermes JSON form:\n",
-    );
-    content.push_str(
-        "<tool_call>{\"name\":\"TOOL_NAME\",\"arguments\":{\"arg\":\"value\"}}</tool_call>\n",
-    );
-    content.push_str("Use only the listed tools. Do not use markdown around tool calls.\n");
-    content.push_str("\nAvailable tools:\n");
-    for capability in capabilities.capabilities() {
-        content.push_str(&render_action_schema(capability.declaration()));
-        content.push('\n');
-    }
-    content.push_str("</agentlibre_tool_context>\n");
-    content
-}
-
-fn render_gemma_tool_context(capabilities: &EffectiveCapabilitySet) -> String {
-    let mut content = String::new();
-    content.push_str("<agentlibre_tool_context>\n");
-    content.push_str("# GEMMA NATIVE TOOL CALLING\n\n");
-    content.push_str("For Gemma 4 models, use the native Gemma tool-call syntax only.\n\n");
-    content.push_str("Rules:\n");
-    content.push_str("- Do not use `<tool>`, `</tool>`, `<answer>`, `</answer>`, or Hermes `<tool_call>...</tool_call>`.\n");
-    content.push_str("- Do not call an `answer` tool.\n");
-    content.push_str("- To call a tool, output exactly one native block:\n");
-    content.push_str("  `<|tool_call>call:TOOL_NAME{key:<|\"|>value<|\"|>,...}<tool_call|>`\n");
-    content.push_str("- Use the exact tool name listed below.\n");
-    content.push_str("- Wrap string argument values with `<|\"|>` delimiters. Numbers, booleans, and null are unquoted.\n");
-    content.push_str("- Do not put prose before or after the native tool-call block.\n");
-    content.push_str(
-        "- After a tool result, either emit another native tool call or answer in plain text.\n",
-    );
-    content.push_str("- Final answers must be plain text only.\n");
-    content.push_str(
-        "- Do not emit tool-response wrappers yourself; the runtime provides tool responses.\n",
-    );
-    content.push_str("\nAvailable tools:\n");
-    for capability in capabilities.capabilities() {
-        content.push_str(&render_action_schema(capability.declaration()));
-        content.push('\n');
-    }
-    content.push_str("</agentlibre_tool_context>\n");
-    content
-}
-
-fn render_action_schema(declaration: &agl_capabilities::ActionDeclaration) -> String {
-    render_canonical_json(&serde_json::json!({
-        "name": declaration.id,
-        "description": declaration.description,
-        "input_schema": compact_prompt_schema(&declaration.input_schema),
-    }))
-}
-
-fn compact_prompt_schema(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(compact_prompt_schema).collect())
-        }
-        serde_json::Value::Object(object) => serde_json::Value::Object(
-            object
-                .iter()
-                .filter(|(key, _)| {
-                    !matches!(
-                        key.as_str(),
-                        "$schema" | "title" | "description" | "default" | "examples" | "format"
-                    )
-                })
-                .map(|(key, value)| (key.clone(), compact_prompt_schema(value)))
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
 }
 
 fn ensure_visible_tool_parity(

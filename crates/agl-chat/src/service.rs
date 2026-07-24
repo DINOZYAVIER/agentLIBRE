@@ -138,6 +138,7 @@ pub(crate) struct TurnInputSpec<'a> {
     hook_batches: &'a [TurnHookBatch],
     hook_payload: serde_json::Value,
     max_hook_repair_attempts: usize,
+    repair_malformed_tool_calls: bool,
     max_tool_calls: usize,
     visible_tools: &'a [VisibleTool],
     capability_policy_hash: Option<String>,
@@ -835,6 +836,12 @@ impl ChatService {
             hook_batches: self.turn_runtime.session().turn_hook_batches(),
             hook_payload: self.turn_runtime.session().turn_hook_payload(),
             max_hook_repair_attempts: self.turn_runtime.session().max_hook_repair_attempts(),
+            repair_malformed_tool_calls: self
+                .turn_runtime
+                .session()
+                .inference_config()
+                .runtime
+                .repair_malformed_tool_calls,
             max_tool_calls: self.max_tool_calls,
             visible_tools: self.turn_runtime.session().turn_visible_tools(),
             capability_policy_hash,
@@ -1368,7 +1375,8 @@ pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
     .with_context_messages(spec.context_messages.to_vec())
     .with_request_index_start(spec.request_index)
     .with_hook_payload(spec.hook_payload)
-    .with_max_hook_repair_attempts(spec.max_hook_repair_attempts);
+    .with_max_hook_repair_attempts(spec.max_hook_repair_attempts)
+    .with_repair_malformed_tool_calls(spec.repair_malformed_tool_calls);
     if let Some(policy_hash) = spec.capability_policy_hash {
         input = input.with_capability_policy_hash(policy_hash);
     }
@@ -3010,6 +3018,7 @@ tool_call_format = "hermes_json"
             hook_batches: &hook_batches,
             hook_payload: serde_json::json!({"runtime_identity": {"skills": []}}),
             max_hook_repair_attempts: 1,
+            repair_malformed_tool_calls: false,
             max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &visible_tools,
             capability_policy_hash: Some("sha256:test".to_string()),
@@ -3029,6 +3038,7 @@ tool_call_format = "hermes_json"
         assert_eq!(input.visible_tools, visible_tools);
         assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
         assert_eq!(input.max_hook_repair_attempts, 1);
+        assert!(!input.repair_malformed_tool_calls);
         assert_eq!(input.capability_policy_hash.as_deref(), Some("sha256:test"));
     }
 
@@ -3045,6 +3055,7 @@ tool_call_format = "hermes_json"
             hook_batches: &[],
             hook_payload: serde_json::json!({}),
             max_hook_repair_attempts: 0,
+            repair_malformed_tool_calls: true,
             max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &[],
             capability_policy_hash: None,

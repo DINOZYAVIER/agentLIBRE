@@ -3,9 +3,10 @@ mod parse;
 mod repair;
 
 pub use action::{
-    MalformedToolCall, MalformedToolJsonKind, ModelAction, RepairStrategy, ToolCall, ToolJsonRepair,
+    MalformedToolCall, MalformedToolJsonKind, ParsedModelOutput, RepairStrategy, ToolCall,
+    ToolJsonRepair,
 };
-pub use parse::parse_model_action;
+pub use parse::parse_model_output;
 
 #[cfg(test)]
 mod tests;
