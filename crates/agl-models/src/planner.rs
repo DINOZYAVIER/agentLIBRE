@@ -475,6 +475,8 @@ fn runtime_plan_from_profile(
         cache_type_v: Some(policy.cache_type_v),
         mmap: Some(true),
         kv_unified: Some(true),
+        structured_decoding: policy.structured_decoding,
+        repair_malformed_tool_calls: policy.repair_malformed_tool_calls,
         mtp: MtpRuntimeConfig::default(),
     };
     runtime.validate()?;
@@ -683,6 +685,8 @@ mod tests {
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
+            structured_decoding: agl_config::StructuredDecodingMode::Auto,
+            repair_malformed_tool_calls: true,
         }
     }
 
@@ -731,6 +735,8 @@ mod tests {
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
+            structured_decoding: agl_config::StructuredDecodingMode::Auto,
+            repair_malformed_tool_calls: true,
         };
         let plan = RuntimePlanner
             .plan(&package(), &constrained, &policy, true)
@@ -756,6 +762,8 @@ mod tests {
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
+            structured_decoding: agl_config::StructuredDecodingMode::Auto,
+            repair_malformed_tool_calls: true,
         };
         let plan = RuntimePlanner
             .plan(&package(), &host, &policy, false)

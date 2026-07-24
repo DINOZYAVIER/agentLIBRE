@@ -661,6 +661,8 @@ mod tests {
                 cache_type_v: Some(KvCacheType::Q8_0),
                 mmap: None,
                 kv_unified: None,
+                structured_decoding: agl_config::StructuredDecodingMode::Auto,
+                repair_malformed_tool_calls: true,
                 mtp: MtpRuntimeConfig::default(),
             },
             model: ModelConfig {

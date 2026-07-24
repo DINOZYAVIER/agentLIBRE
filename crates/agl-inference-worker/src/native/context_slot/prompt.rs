@@ -1,11 +1,13 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 
-use agl_actions::{ModelAction, ToolCall, ToolJsonRepair, parse_model_action};
-use agl_config::ToolCallFormat;
+use agl_actions::{ParsedModelOutput, ToolCall, ToolJsonRepair, parse_model_output};
+use agl_config::{StructuredDecodingMode, ToolCallFormat};
 use agl_content::Content;
-use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest};
+use agl_oven::{RenderedMessage, RenderedMessageRole, RenderedModelRequest, RenderedTool};
 use anyhow::{Context, Result, bail, ensure};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use super::super::{ffi, model::LlamaCppModel};
 use super::LlamaCppContextSlot;
@@ -50,13 +52,33 @@ impl LlamaCppContextSlot {
                 .iter()
                 .cloned(),
         );
-        let mut formatted = apply_chat_template_messages(
-            model.main_ptr().cast_const(),
-            &messages,
-            rendered.tool_call_format,
-            true,
-        )
-        .context("failed to render llama.cpp chat template")?;
+        let generation_plan = if rendered.tools.is_empty() {
+            None
+        } else {
+            let plan = build_common_generation_plan(
+                model.main_ptr().cast_const(),
+                &messages,
+                &rendered.tools,
+            )
+            .map_err(anyhow::Error::new)
+            .context("failed to build llama.cpp structured generation plan")?;
+            if self.runtime.structured_decoding == StructuredDecodingMode::Required
+                && plan.grammar.is_empty()
+            {
+                return Err(GenerationPlanError::MissingGrammar.into());
+            }
+            Some(plan)
+        };
+        let mut formatted = match &generation_plan {
+            Some(plan) => plan.prompt.clone(),
+            None => apply_chat_template_messages(
+                model.main_ptr().cast_const(),
+                &messages,
+                rendered.tool_call_format,
+                true,
+            )
+            .context("failed to render llama.cpp chat template")?,
+        };
         let injected_assistant_prefix = disable_qwen_thinking(&mut formatted);
         let assistant_context_prefix = if formatted.ends_with(DISABLED_THINKING_PREFILL) {
             DISABLED_THINKING_PREFILL.to_string()
@@ -103,6 +125,7 @@ impl LlamaCppContextSlot {
         Ok(PromptTemplateAppend {
             prompt,
             tokens,
+            generation_plan,
             history: PreparedPromptHistory {
                 assistant_context_prefix,
                 formatted_prompt,
@@ -127,6 +150,7 @@ impl LlamaCppContextSlot {
         let PromptTemplateAppend {
             prompt,
             tokens: prompt_tokens,
+            generation_plan,
             history,
             messages,
         } = self.render_prompt_append(model, rendered)?;
@@ -143,6 +167,40 @@ impl LlamaCppContextSlot {
         log.push_str("prompt_append_tokens = ");
         log.push_str(&prompt_tokens.len().to_string());
         log.push('\n');
+        log.push_str("structured_decoding_mode = ");
+        log.push_str(match self.runtime.structured_decoding {
+            StructuredDecodingMode::Off => "off",
+            StructuredDecodingMode::Auto => "auto",
+            StructuredDecodingMode::Required => "required",
+        });
+        log.push('\n');
+        log.push_str("repair_malformed_tool_calls = ");
+        log.push_str(if self.runtime.repair_malformed_tool_calls {
+            "true"
+        } else {
+            "false"
+        });
+        log.push('\n');
+        log.push_str("tool_set_digest = ");
+        log.push_str(&tool_set_digest(&rendered.tools)?);
+        log.push('\n');
+        if let Some(plan) = &generation_plan {
+            log.push_str("grammar_digest = ");
+            log.push_str(&hex_digest(plan.grammar.as_bytes()));
+            log.push('\n');
+            log.push_str("grammar_lazy = ");
+            log.push_str(if plan.grammar_lazy { "true" } else { "false" });
+            log.push('\n');
+            log.push_str("common_chat_format = ");
+            log.push_str(&plan.format.to_string());
+            log.push('\n');
+            log.push_str("common_chat_parser_digest = ");
+            log.push_str(&hex_digest(plan.parser.as_bytes()));
+            log.push('\n');
+        } else {
+            log.push_str("grammar_digest = none\n");
+            log.push_str("grammar_lazy = false\n");
+        }
         log.push_str("llama_cpp_prompt_append:\n");
         log.push_str(&prompt);
         if !prompt.ends_with('\n') {
@@ -151,6 +209,7 @@ impl LlamaCppContextSlot {
 
         Ok(PreparedPrompt {
             tokens: prompt_tokens,
+            generation_plan,
             messages,
             history,
         })
@@ -254,19 +313,29 @@ pub(super) fn rendered_history_message_matches(
 }
 
 pub(super) fn isolated_tool_call(content: &str) -> Option<ToolCall> {
+    isolated_tool_call_with_repair(content, true)
+}
+
+pub(super) fn isolated_tool_call_with_repair(
+    content: &str,
+    repair_malformed: bool,
+) -> Option<ToolCall> {
     let content = content.trim();
     let isolated = isolated_block(content, "<tool_call>", "</tool_call>")
         || isolated_block(content, "<|tool_call>", "<tool_call|>");
     if !isolated {
         return None;
     }
-    match parse_model_action(content) {
-        ModelAction::ToolCall(tool_call) => Some(tool_call),
-        ModelAction::MalformedToolCall(malformed) => match malformed.repair {
-            Some(ToolJsonRepair::Succeeded { tool_call, .. }) => Some(tool_call),
-            Some(ToolJsonRepair::Failed { .. }) | None => None,
-        },
-        ModelAction::Answer(_) => None,
+    match parse_model_output(content) {
+        ParsedModelOutput::ToolCall(tool_call) => Some(tool_call),
+        ParsedModelOutput::MalformedToolCall(malformed) if repair_malformed => {
+            match malformed.repair {
+                Some(ToolJsonRepair::Succeeded { tool_call, .. }) => Some(tool_call),
+                Some(ToolJsonRepair::Failed { .. }) | None => None,
+            }
+        }
+        ParsedModelOutput::MalformedToolCall(_) => None,
+        ParsedModelOutput::Answer(_) => None,
     }
 }
 
@@ -370,6 +439,7 @@ pub(super) fn mismatch_excerpt(value: &str, offset: usize) -> String {
 
 pub(super) struct PreparedPrompt {
     pub(super) tokens: Vec<ffi::llama_token>,
+    pub(super) generation_plan: Option<GenerationPlan>,
     pub(super) messages: Vec<RenderedMessage>,
     pub(super) history: PreparedPromptHistory,
 }
@@ -382,8 +452,285 @@ pub(super) struct PreparedPromptHistory {
 pub(super) struct PromptTemplateAppend {
     prompt: String,
     tokens: Vec<ffi::llama_token>,
+    generation_plan: Option<GenerationPlan>,
     history: PreparedPromptHistory,
     messages: Vec<RenderedMessage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct GenerationPlan {
+    pub(super) prompt: String,
+    pub(super) grammar: String,
+    pub(super) grammar_lazy: bool,
+    pub(super) grammar_needs_prefill: bool,
+    pub(super) grammar_triggers: Vec<GrammarTrigger>,
+    pub(super) grammar_prefill_tokens: Vec<ffi::llama_token>,
+    pub(super) additional_stops: Vec<String>,
+    pub(super) preserved_tokens: Vec<String>,
+    pub(super) generation_prompt: String,
+    pub(super) format: i32,
+    pub(super) parser: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(super) struct GrammarTrigger {
+    #[serde(rename = "type")]
+    pub(super) kind: i32,
+    pub(super) value: String,
+    pub(super) token: ffi::llama_token,
+}
+
+#[derive(Debug)]
+pub(super) enum GenerationPlanError {
+    InvalidToolSchema { tool: String, reason: String },
+    Boundary(String),
+    InvalidUtf8(&'static str),
+    InvalidMetadata { field: &'static str, reason: String },
+    MissingGrammar,
+}
+
+impl std::fmt::Display for GenerationPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidToolSchema { tool, reason } => {
+                write!(formatter, "invalid Tool schema for `{tool}`: {reason}")
+            }
+            Self::Boundary(reason) => {
+                write!(formatter, "llama.cpp generation plan failed: {reason}")
+            }
+            Self::InvalidUtf8(field) => {
+                write!(
+                    formatter,
+                    "llama.cpp generation plan `{field}` is not UTF-8"
+                )
+            }
+            Self::InvalidMetadata { field, reason } => {
+                write!(formatter, "invalid generation plan `{field}`: {reason}")
+            }
+            Self::MissingGrammar => {
+                formatter.write_str("structured decoding is required but the Tool grammar is empty")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GenerationPlanError {}
+
+pub(super) struct PreparedTools {
+    _names: Vec<CString>,
+    _descriptions: Vec<CString>,
+    _parameters: Vec<CString>,
+    pub(super) tools: Vec<ffi::agl_llama_chat_tool>,
+}
+
+impl PreparedTools {
+    pub(super) fn new(tools: &[RenderedTool]) -> std::result::Result<Self, GenerationPlanError> {
+        let mut names = Vec::with_capacity(tools.len());
+        let mut descriptions = Vec::with_capacity(tools.len());
+        let mut parameters = Vec::with_capacity(tools.len());
+        let mut ffi_tools = Vec::with_capacity(tools.len());
+        for tool in tools {
+            if !tool.input_schema.is_object() {
+                return Err(GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: "Tool input schema root must be an object".to_string(),
+                });
+            }
+            names.push(CString::new(tool.name.as_str()).map_err(|error| {
+                GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?);
+            descriptions.push(CString::new(tool.description.as_str()).map_err(|error| {
+                GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?);
+            let schema = serde_json::to_string(&tool.input_schema).map_err(|error| {
+                GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            parameters.push(CString::new(schema).map_err(|error| {
+                GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?);
+            ffi_tools.push(ffi::agl_llama_chat_tool {
+                name: names.last().expect("name was pushed").as_ptr(),
+                description: descriptions
+                    .last()
+                    .expect("description was pushed")
+                    .as_ptr(),
+                parameters: parameters.last().expect("parameters were pushed").as_ptr(),
+            });
+        }
+        Ok(Self {
+            _names: names,
+            _descriptions: descriptions,
+            _parameters: parameters,
+            tools: ffi_tools,
+        })
+    }
+}
+
+struct RawGenerationPlan(ffi::agl_llama_generation_plan);
+
+impl RawGenerationPlan {
+    fn empty() -> Self {
+        Self(ffi::agl_llama_generation_plan {
+            prompt: ptr::null_mut(),
+            prompt_len: 0,
+            grammar: ptr::null_mut(),
+            grammar_len: 0,
+            grammar_lazy: 0,
+            grammar_needs_prefill: 0,
+            grammar_triggers_json: ptr::null_mut(),
+            grammar_triggers_json_len: 0,
+            grammar_prefill_tokens_json: ptr::null_mut(),
+            grammar_prefill_tokens_json_len: 0,
+            additional_stops_json: ptr::null_mut(),
+            additional_stops_json_len: 0,
+            preserved_tokens_json: ptr::null_mut(),
+            preserved_tokens_json_len: 0,
+            generation_prompt: ptr::null_mut(),
+            generation_prompt_len: 0,
+            format: 0,
+            parser: ptr::null_mut(),
+            parser_len: 0,
+        })
+    }
+}
+
+impl Drop for RawGenerationPlan {
+    fn drop(&mut self) {
+        unsafe { ffi::agl_llama_generation_plan_free(ptr::from_mut(&mut self.0)) };
+    }
+}
+
+fn build_common_generation_plan(
+    model: *const c_void,
+    messages: &[RenderedMessage],
+    tools: &[RenderedTool],
+) -> std::result::Result<GenerationPlan, GenerationPlanError> {
+    if messages.len() > isize::MAX as usize || tools.len() > isize::MAX as usize {
+        return Err(GenerationPlanError::Boundary(
+            "input count exceeds the FFI addressable range".to_string(),
+        ));
+    }
+    let prepared_messages = PreparedChatMessages::new_structured(messages)
+        .map_err(|error| GenerationPlanError::Boundary(error.to_string()))?;
+    let prepared_tools = PreparedTools::new(tools)?;
+    let mut raw = RawGenerationPlan::empty();
+    let mut error = vec![0_i8; 4096];
+    let status = unsafe {
+        ffi::agl_llama_common_chat_build_generation_plan(
+            model,
+            prepared_messages.messages.as_ptr(),
+            prepared_messages.messages.len(),
+            prepared_tools.tools.as_ptr(),
+            prepared_tools.tools.len(),
+            true,
+            ptr::from_mut(&mut raw.0),
+            error.as_mut_ptr(),
+            error.len(),
+        )
+    };
+    if status != 0 {
+        return Err(GenerationPlanError::Boundary(c_error_message(&error)));
+    }
+    let prompt = raw_string(raw.0.prompt, raw.0.prompt_len, "prompt")?;
+    if prompt.is_empty() {
+        return Err(GenerationPlanError::Boundary(
+            "common chat template returned an empty prompt".to_string(),
+        ));
+    }
+    let triggers_json = raw_string(
+        raw.0.grammar_triggers_json,
+        raw.0.grammar_triggers_json_len,
+        "grammar_triggers",
+    )?;
+    let prefill_json = raw_string(
+        raw.0.grammar_prefill_tokens_json,
+        raw.0.grammar_prefill_tokens_json_len,
+        "grammar_prefill_tokens",
+    )?;
+    let stops_json = raw_string(
+        raw.0.additional_stops_json,
+        raw.0.additional_stops_json_len,
+        "additional_stops",
+    )?;
+    let preserved_json = raw_string(
+        raw.0.preserved_tokens_json,
+        raw.0.preserved_tokens_json_len,
+        "preserved_tokens",
+    )?;
+    Ok(GenerationPlan {
+        prompt,
+        grammar: raw_string(raw.0.grammar, raw.0.grammar_len, "grammar")?,
+        grammar_lazy: raw.0.grammar_lazy != 0,
+        grammar_needs_prefill: raw.0.grammar_needs_prefill != 0,
+        grammar_triggers: parse_plan_json(&triggers_json, "grammar_triggers")?,
+        grammar_prefill_tokens: parse_plan_json(&prefill_json, "grammar_prefill_tokens")?,
+        additional_stops: parse_plan_json(&stops_json, "additional_stops")?,
+        preserved_tokens: parse_plan_json(&preserved_json, "preserved_tokens")?,
+        generation_prompt: raw_string(
+            raw.0.generation_prompt,
+            raw.0.generation_prompt_len,
+            "generation_prompt",
+        )?,
+        format: raw.0.format,
+        parser: raw_string(raw.0.parser, raw.0.parser_len, "parser")?,
+    })
+}
+
+pub(super) fn raw_string(
+    value: *const c_char,
+    length: usize,
+    field: &'static str,
+) -> std::result::Result<String, GenerationPlanError> {
+    if value.is_null() {
+        return Err(GenerationPlanError::Boundary(format!(
+            "generation plan `{field}` pointer is null"
+        )));
+    }
+    if length > isize::MAX as usize {
+        return Err(GenerationPlanError::Boundary(format!(
+            "generation plan `{field}` length exceeds isize"
+        )));
+    }
+    let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+    if bytes.len() != length {
+        return Err(GenerationPlanError::Boundary(format!(
+            "generation plan `{field}` length mismatch"
+        )));
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| GenerationPlanError::InvalidUtf8(field))
+}
+
+fn parse_plan_json<T: serde::de::DeserializeOwned>(
+    value: &str,
+    field: &'static str,
+) -> std::result::Result<T, GenerationPlanError> {
+    serde_json::from_str(value).map_err(|error| GenerationPlanError::InvalidMetadata {
+        field,
+        reason: error.to_string(),
+    })
+}
+
+fn tool_set_digest(tools: &[RenderedTool]) -> Result<String> {
+    Ok(hex_digest(&serde_json::to_vec(tools)?))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(super) fn apply_chat_template_messages(
@@ -471,7 +818,20 @@ impl PreparedChatMessages {
         messages: &[RenderedMessage],
         tool_call_format: ToolCallFormat,
     ) -> Result<Self> {
-        let render_structured_tool_fields = tool_call_format == ToolCallFormat::GemmaFunctionCall;
+        Self::with_structured_fields(
+            messages,
+            tool_call_format == ToolCallFormat::GemmaFunctionCall,
+        )
+    }
+
+    fn new_structured(messages: &[RenderedMessage]) -> Result<Self> {
+        Self::with_structured_fields(messages, true)
+    }
+
+    fn with_structured_fields(
+        messages: &[RenderedMessage],
+        render_structured_tool_fields: bool,
+    ) -> Result<Self> {
         let mut roles = Vec::with_capacity(messages.len());
         let mut contents = Vec::with_capacity(messages.len());
         let mut names = Vec::new();

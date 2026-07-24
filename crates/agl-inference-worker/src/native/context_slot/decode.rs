@@ -22,6 +22,16 @@ impl LlamaCppContextSlot {
         log: &mut String,
     ) -> Result<LlamaCppGenerationOutput> {
         let prepared = self.prepare_prompt_append(model, request.rendered, log)?;
+        let additional_stops = prepared
+            .generation_plan
+            .as_ref()
+            .map_or_else(Vec::new, |plan| plan.additional_stops.clone());
+        let sampler = Sampler::for_generation(
+            model.vocab(),
+            prepared.generation_plan.as_ref(),
+            self.runtime.structured_decoding,
+        )
+        .context("failed to create per-generation llama.cpp sampler")?;
 
         ensure!(
             !prepared.tokens.is_empty(),
@@ -34,10 +44,11 @@ impl LlamaCppContextSlot {
             "llama.cpp prompt exceeds remaining context"
         );
         if self.mtp.is_some() {
-            return self.generate_with_mtp(model, request, prepared, control, log);
+            return self.generate_with_mtp(model, request, prepared, &sampler, control, log);
         }
         let PreparedPrompt {
             tokens: mut prompt_tokens,
+            generation_plan: _,
             messages: prompt_messages,
             history: prompt_history,
         } = prepared;
@@ -59,7 +70,8 @@ impl LlamaCppContextSlot {
             prompt_history,
             input_tokens,
             request.max_output_tokens,
-            request.classifier(),
+            request.classifier(additional_stops, self.runtime.repair_malformed_tool_calls),
+            &sampler,
             control,
         )
     }
@@ -77,7 +89,18 @@ impl LlamaCppContextSlot {
             "llama.cpp vision requires a fresh context"
         );
         let prepared = self.prepare_prompt_append(model, request.rendered, log)?;
+        let additional_stops = prepared
+            .generation_plan
+            .as_ref()
+            .map_or_else(Vec::new, |plan| plan.additional_stops.clone());
+        let sampler = Sampler::for_generation(
+            model.vocab(),
+            prepared.generation_plan.as_ref(),
+            self.runtime.structured_decoding,
+        )
+        .context("failed to create per-generation llama.cpp sampler")?;
         let PreparedPrompt {
+            generation_plan: _,
             messages: prompt_messages,
             history: prompt_history,
             ..
@@ -107,7 +130,8 @@ impl LlamaCppContextSlot {
             prompt_history,
             u64::try_from(input_tokens).unwrap_or(u64::MAX),
             request.max_output_tokens,
-            request.classifier(),
+            request.classifier(additional_stops, self.runtime.repair_malformed_tool_calls),
+            &sampler,
             control,
         )
     }
@@ -122,6 +146,7 @@ impl LlamaCppContextSlot {
         input_tokens: u64,
         max_output_tokens: u32,
         mut output: IncrementalResponseClassifier<'_>,
+        sampler: &Sampler,
         control: &LlamaCppGenerationControl<'_>,
     ) -> Result<LlamaCppGenerationOutput> {
         let mut finish_reason = InferenceFinishReason::Length;
@@ -132,9 +157,8 @@ impl LlamaCppContextSlot {
                 finish_reason = InferenceFinishReason::Length;
                 break;
             }
-            let token = unsafe {
-                ffi::llama_sampler_sample(self.sampler.as_ptr(), self.context.as_ptr(), -1)
-            };
+            let token =
+                unsafe { ffi::llama_sampler_sample(sampler.as_ptr(), self.context.as_ptr(), -1) };
             if unsafe { ffi::llama_vocab_is_eog(model.vocab(), token) } {
                 finish_reason = InferenceFinishReason::Stop;
                 break;

@@ -14,6 +14,19 @@ pub const MAX_BATCH_TOKENS: u32 = 1_048_576;
 pub const MAX_MTP_DRAFT_TOKENS: u32 = 64;
 const MTP_PROBABILITY_SCALE: u32 = 1_000_000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredDecodingMode {
+    Off,
+    #[default]
+    Auto,
+    Required,
+}
+
+const fn default_repair_malformed_tool_calls() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedInferenceConfig {
@@ -121,6 +134,10 @@ pub struct AutoRuntimePolicy {
     pub flash_attention: RuntimeSwitch,
     pub cache_type_k: KvCacheType,
     pub cache_type_v: KvCacheType,
+    #[serde(default)]
+    pub structured_decoding: StructuredDecodingMode,
+    #[serde(default = "default_repair_malformed_tool_calls")]
+    pub repair_malformed_tool_calls: bool,
 }
 
 impl AutoRuntimePolicy {
@@ -170,6 +187,10 @@ pub struct FixedRuntimePreset {
     #[serde(default)]
     pub kv_unified: Option<bool>,
     #[serde(default)]
+    pub structured_decoding: StructuredDecodingMode,
+    #[serde(default = "default_repair_malformed_tool_calls")]
+    pub repair_malformed_tool_calls: bool,
+    #[serde(default)]
     pub mtp: MtpPresetConfig,
 }
 
@@ -201,6 +222,8 @@ impl FixedRuntimePreset {
             cache_type_v: self.cache_type_v,
             mmap: self.mmap,
             kv_unified: self.kv_unified,
+            structured_decoding: self.structured_decoding,
+            repair_malformed_tool_calls: self.repair_malformed_tool_calls,
             mtp: MtpRuntimeConfig {
                 enabled: self.mtp.enabled,
                 draft_model,
@@ -287,6 +310,10 @@ pub struct InferenceRuntimeConfig {
     pub mmap: Option<bool>,
     #[serde(default)]
     pub kv_unified: Option<bool>,
+    #[serde(default)]
+    pub structured_decoding: StructuredDecodingMode,
+    #[serde(default = "default_repair_malformed_tool_calls")]
+    pub repair_malformed_tool_calls: bool,
     #[serde(default)]
     pub mtp: MtpRuntimeConfig,
 }
