@@ -2,7 +2,7 @@ use crate::*;
 #[test]
 fn runtime_function_can_allow_missing_profile_when_config_overrides() {
     let root = std::env::temp_dir().join(format!(
-        "agl-functions-missing-profile-{}",
+        "agl-function-missing-profile-{}",
         std::process::id()
     ));
     let workspace = root.join("workspace");
@@ -13,8 +13,16 @@ fn runtime_function_can_allow_missing_profile_when_config_overrides() {
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 model:
   profile: missing-profile

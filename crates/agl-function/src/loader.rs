@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::locator::{FunctionLocator, FunctionSource};
+use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_SYSTEM_PROMPT_FILE_NAME};
 use crate::subagent::{SubagentFrontMatter, load_declared_subagents};
 use crate::validation::validate_relative_function_file_path;
@@ -15,7 +15,7 @@ pub struct MarkdownSection {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LoadedFunction {
-    pub locator: FunctionLocator,
+    pub locator: FunctionPackageLocation,
     pub front_matter: AgentFunctionFrontMatter,
     pub system_prompt_path: PathBuf,
     pub system_prompt: String,
@@ -34,16 +34,15 @@ pub struct LoadedSubagent {
     pub source_digest: String,
 }
 
-pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
-    let builtin = if locator.source == FunctionSource::Builtin {
-        Some(resolve_builtin_function(&locator.reference)?)
+pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction> {
+    let builtin = if locator.source == FunctionPackageSource::Builtin {
+        Some(resolve_builtin_package(&locator.reference)?)
     } else {
         None
     };
     let content = if let Some(function) = builtin {
-        function
-            .function_md
-            .text()
+        let file = function_file(function, FUNCTION_FILE_NAME)?;
+        std::str::from_utf8(file.bytes)
             .with_context(|| format!("builtin function `{}` is not UTF-8", function.id))?
             .to_string()
     } else {
@@ -59,7 +58,7 @@ pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
     );
     if !matches!(
         locator.source,
-        FunctionSource::Explicit | FunctionSource::Builtin
+        FunctionPackageSource::Explicit | FunctionPackageSource::Builtin
     ) {
         let directory_id = locator
             .root_dir
@@ -67,9 +66,9 @@ pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
             .and_then(|name| name.to_str())
             .unwrap_or_default();
         ensure!(
-            directory_id == front_matter.id,
+            directory_id == front_matter.id(),
             "function id `{}` does not match directory `{directory_id}`",
-            front_matter.id
+            front_matter.id()
         );
     }
     let subagents = load_declared_subagents(&locator.root_dir, &front_matter)?;
@@ -92,10 +91,11 @@ pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
 
 pub(crate) fn load_function_system_prompt(
     function_root: &Path,
-    builtin: Option<&'static agl_assets::BuiltinFunction>,
+    builtin: Option<&'static agl_assets::BuiltinArtifactPackage>,
 ) -> Result<(PathBuf, String)> {
     if let Some(function) = builtin {
-        let content = function.system_prompt.text().with_context(|| {
+        let file = function_file(function, FUNCTION_SYSTEM_PROMPT_FILE_NAME)?;
+        let content = std::str::from_utf8(file.bytes).with_context(|| {
             format!(
                 "builtin function `{}` system prompt is not UTF-8",
                 function.id
@@ -104,10 +104,10 @@ pub(crate) fn load_function_system_prompt(
         ensure!(
             !content.trim().is_empty(),
             "function system prompt cannot be empty: {}",
-            function.system_prompt.source_path
+            file.path
         );
         return Ok((
-            PathBuf::from(function.system_prompt.source_path),
+            PathBuf::from(format!("builtin:function/{}/{}", function.id, file.path)),
             content.to_string(),
         ));
     }
@@ -131,7 +131,7 @@ pub(crate) fn load_function_system_prompt(
 pub(crate) fn load_function_inference_config(
     function_root: &Path,
     front_matter: &AgentFunctionFrontMatter,
-    builtin: Option<&'static agl_assets::BuiltinFunction>,
+    builtin: Option<&'static agl_assets::BuiltinArtifactPackage>,
 ) -> Result<(Option<PathBuf>, Option<String>)> {
     let Some(relative) = front_matter.model_config_path() else {
         return Ok((None, None));
@@ -142,7 +142,8 @@ pub(crate) fn load_function_inference_config(
             "builtin function `{}` can only load model.config: inference.toml",
             function.id
         );
-        let content = function.inference_config.text().with_context(|| {
+        let file = function_file(function, relative)?;
+        let content = std::str::from_utf8(file.bytes).with_context(|| {
             format!(
                 "builtin function `{}` inference config is not UTF-8",
                 function.id
@@ -151,10 +152,13 @@ pub(crate) fn load_function_inference_config(
         ensure!(
             !content.trim().is_empty(),
             "function inference config cannot be empty: {}",
-            function.inference_config.source_path
+            file.path
         );
         return Ok((
-            Some(PathBuf::from(function.inference_config.source_path)),
+            Some(PathBuf::from(format!(
+                "builtin:function/{}/{}",
+                function.id, file.path
+            ))),
             Some(content.to_string()),
         ));
     }
@@ -179,11 +183,22 @@ pub(crate) fn load_function_inference_config(
     Ok((Some(path), Some(content)))
 }
 
-pub(crate) fn resolve_builtin_function(
+pub(crate) fn resolve_builtin_package(
     reference: &str,
-) -> Result<&'static agl_assets::BuiltinFunction> {
-    agl_assets::builtin_function(reference)
+) -> Result<&'static agl_assets::BuiltinArtifactPackage> {
+    agl_assets::builtin_artifact_package(reference)
         .with_context(|| format!("builtin function `{reference}` is not embedded"))
+}
+
+fn function_file(
+    function: &agl_assets::BuiltinArtifactPackage,
+    path: &str,
+) -> Result<&agl_assets::BuiltinArtifactFile> {
+    function
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .with_context(|| format!("builtin function `{}` is missing {path}", function.id))
 }
 
 pub(crate) fn resolve_function_relative_path(

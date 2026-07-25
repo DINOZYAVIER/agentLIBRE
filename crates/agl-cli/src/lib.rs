@@ -1380,7 +1380,7 @@ fn one_shot_chat_options_from_run_options(
 fn resolve_run_function_defaults(
     options: &RunOptions,
     runtime: &AgentLibreRuntimeConfig,
-) -> Result<Option<agl_functions::RuntimeFunction>> {
+) -> Result<Option<agl_function::RuntimeFunction>> {
     options
         .function_ref
         .as_deref()
@@ -1390,13 +1390,13 @@ fn resolve_run_function_defaults(
             let require_profile = options.config.is_none()
                 && std::env::var_os("AGL_LOCAL_INFERENCE_CONFIG").is_none();
             if require_profile {
-                agl_functions::resolve_runtime_function(
+                agl_function::resolve_runtime_function(
                     reference,
                     &workspace_root,
                     &runtime.paths.config_dir,
                 )
             } else {
-                agl_functions::resolve_runtime_function_allow_missing_profile(
+                agl_function::resolve_runtime_function_allow_missing_profile(
                     reference,
                     &workspace_root,
                     &runtime.paths.config_dir,
@@ -1407,13 +1407,13 @@ fn resolve_run_function_defaults(
         .transpose()
 }
 
-fn args_tool_mode_from_function(mode: agl_functions::FunctionToolMode) -> args::ToolAccessMode {
+fn args_tool_mode_from_function(mode: agl_function::FunctionToolMode) -> args::ToolAccessMode {
     match mode {
-        agl_functions::FunctionToolMode::ReadOnly => args::ToolAccessMode::ReadOnly,
-        agl_functions::FunctionToolMode::Write => args::ToolAccessMode::Write,
-        agl_functions::FunctionToolMode::Execute => args::ToolAccessMode::Execute,
-        agl_functions::FunctionToolMode::Approve => args::ToolAccessMode::Approve,
-        agl_functions::FunctionToolMode::Admin => args::ToolAccessMode::Admin,
+        agl_function::FunctionToolMode::ReadOnly => args::ToolAccessMode::ReadOnly,
+        agl_function::FunctionToolMode::Write => args::ToolAccessMode::Write,
+        agl_function::FunctionToolMode::Execute => args::ToolAccessMode::Execute,
+        agl_function::FunctionToolMode::Approve => args::ToolAccessMode::Approve,
+        agl_function::FunctionToolMode::Admin => args::ToolAccessMode::Admin,
     }
 }
 

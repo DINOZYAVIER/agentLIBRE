@@ -461,15 +461,19 @@ fn is_canonical_pci_id(value: &str) -> bool {
 }
 
 fn validate_function_contract(package: &ModelPackage) -> Result<()> {
-    let function = agl_assets::builtin_function(&package.function_id).with_context(|| {
-        format!(
-            "package `{}` references missing builtin function `{}`",
-            package.id, package.function_id
-        )
-    })?;
+    let function =
+        agl_assets::builtin_artifact_package(&package.function_id).with_context(|| {
+            format!(
+                "package `{}` references missing builtin function `{}`",
+                package.id, package.function_id
+            )
+        })?;
     let inference = function
-        .inference_config
-        .text()
+        .files
+        .iter()
+        .find(|file| file.path == "inference.toml")
+        .context("builtin function inference config is missing")?;
+    let inference = std::str::from_utf8(inference.bytes)
         .context("builtin function inference config is not UTF-8")?;
     let preset = agl_config::load_inference_preset_from_str(&package.function_id, inference)
         .with_context(|| {

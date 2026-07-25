@@ -913,7 +913,7 @@ tool_call_format = "hermes_json"
         let function_root = workspace.join(".agl/functions").join(case.id);
         std::fs::create_dir_all(&function_root).unwrap();
         std::fs::write(
-            function_root.join(agl_functions::FUNCTION_FILE_NAME),
+            function_root.join(agl_function::FUNCTION_FILE_NAME),
             format!(
                 "---\nschema: agentfunction/v1\nid: {}\ntitle: Function policy test\n{}---\n",
                 case.id, case.tools_yaml
@@ -921,7 +921,7 @@ tool_call_format = "hermes_json"
         )
         .unwrap();
         std::fs::write(
-            function_root.join(agl_functions::FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+            function_root.join(agl_function::FUNCTION_SYSTEM_PROMPT_FILE_NAME),
             "Apply the function policy.\n",
         )
         .unwrap();

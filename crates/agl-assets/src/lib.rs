@@ -37,12 +37,19 @@ pub struct BuiltinSkill {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BuiltinFunction {
+pub struct BuiltinArtifactFile {
+    pub path: &'static str,
+    pub bytes: &'static [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinArtifactPackage {
+    pub type_id: &'static str,
     pub id: &'static str,
-    pub function_md: &'static BuiltinAsset,
-    pub system_prompt: &'static BuiltinAsset,
-    pub inference_config: &'static BuiltinAsset,
-    pub tree_sha256: &'static str,
+    pub version: &'static str,
+    pub entrypoint: &'static str,
+    pub files: &'static [BuiltinArtifactFile],
+    pub digest: &'static str,
 }
 
 include!(concat!(env!("OUT_DIR"), "/builtin_assets.rs"));
@@ -55,8 +62,10 @@ pub fn builtin_skill(id: &str) -> Option<&'static BuiltinSkill> {
     BUILTIN_SKILLS.iter().find(|skill| skill.id == id)
 }
 
-pub fn builtin_function(id: &str) -> Option<&'static BuiltinFunction> {
-    BUILTIN_FUNCTIONS.iter().find(|function| function.id == id)
+pub fn builtin_artifact_package(id: &str) -> Option<&'static BuiltinArtifactPackage> {
+    BUILTIN_ARTIFACT_PACKAGES
+        .iter()
+        .find(|package| package.id == id)
 }
 
 pub fn builtin_skills_by_pack(pack: &str) -> impl Iterator<Item = &'static BuiltinSkill> + '_ {
@@ -151,7 +160,7 @@ mod tests {
 
     #[test]
     fn builtin_functions_are_embedded_from_assets() {
-        let functions = BUILTIN_FUNCTIONS
+        let functions = BUILTIN_ARTIFACT_PACKAGES
             .iter()
             .map(|function| function.id)
             .collect::<Vec<_>>();
@@ -166,36 +175,31 @@ mod tests {
                 "gemma4-e4b"
             ]
         );
-        for function in BUILTIN_FUNCTIONS {
-            assert_eq!(function.tree_sha256.len(), 64);
-            assert_eq!(
-                function.function_md.kind,
-                BuiltinAssetKind::FunctionManifest
-            );
-            assert_eq!(
-                function.system_prompt.kind,
-                BuiltinAssetKind::FunctionSystemPrompt
-            );
-            assert_eq!(
-                function.inference_config.kind,
-                BuiltinAssetKind::FunctionInferenceConfig
-            );
+        for function in BUILTIN_ARTIFACT_PACKAGES {
+            assert_eq!(function.type_id, "function");
+            assert_eq!(function.version, "1.0.0");
+            assert_eq!(function.entrypoint, "FUNCTION.md");
+            assert_eq!(function.digest.len(), 64);
+            assert!(function.files.iter().any(|file| file.path == "SYSTEM.md"));
             assert!(
                 function
-                    .function_md
-                    .source_path
-                    .starts_with("assets/functions/"),
-                "{} must be embedded from assets/functions, got {}",
-                function.id,
-                function.function_md.source_path
+                    .files
+                    .iter()
+                    .any(|file| file.path == "inference.toml")
             );
         }
     }
 
     #[test]
     fn builtin_function_presets_use_model_ids_only() {
-        for function in BUILTIN_FUNCTIONS {
-            let text = function.inference_config.text().unwrap();
+        for function in BUILTIN_ARTIFACT_PACKAGES {
+            let text = function
+                .files
+                .iter()
+                .find(|file| file.path == "inference.toml")
+                .unwrap()
+                .bytes;
+            let text = std::str::from_utf8(text).unwrap();
             let preset = agl_config::load_inference_preset_from_str(function.id, text).unwrap();
             assert!(!preset.backend.model_id.as_str().is_empty());
             assert!(!text.contains("/home/"));
@@ -222,8 +226,15 @@ tool_call_format = "gemma_function_call"
 
     #[test]
     fn gemma4_e2b_and_12b_presets_match_builtin_policy() {
-        let e2b = builtin_function("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
-        let e2b_text = e2b.inference_config.text().unwrap();
+        let e2b = builtin_artifact_package("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
+        let e2b_text = std::str::from_utf8(
+            e2b.files
+                .iter()
+                .find(|file| file.path == "inference.toml")
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
         let e2b_preset =
             agl_config::load_inference_preset_from_str("gemma4-e2b", e2b_text).unwrap();
         let e2b_runtime = e2b_preset.runtime.auto_policy().unwrap();
@@ -238,10 +249,19 @@ tool_call_format = "gemma_function_call"
         assert_eq!(e2b_runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
         assert!(!e2b_preset.runtime.mtp_enabled());
 
-        let twelve_b = builtin_function("gemma4-12b").expect("Gemma 4 12B must be embedded");
+        let twelve_b =
+            builtin_artifact_package("gemma4-12b").expect("Gemma 4 12B must be embedded");
         let twelve_b_preset = agl_config::load_inference_preset_from_str(
             "gemma4-12b",
-            twelve_b.inference_config.text().unwrap(),
+            std::str::from_utf8(
+                twelve_b
+                    .files
+                    .iter()
+                    .find(|file| file.path == "inference.toml")
+                    .unwrap()
+                    .bytes,
+            )
+            .unwrap(),
         )
         .unwrap();
         let twelve_b_runtime = twelve_b_preset.runtime.auto_policy().unwrap();
@@ -277,7 +297,7 @@ tool_call_format = "gemma_function_call"
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
         assert!(builtin_skill("missing").is_none());
-        assert!(builtin_function("missing").is_none());
+        assert!(builtin_artifact_package("missing").is_none());
         assert_eq!(builtin_skills_by_pack("missing").count(), 0);
     }
 

@@ -1,3 +1,4 @@
+mod adapter;
 mod loader;
 mod locator;
 mod manifest;
@@ -7,11 +8,15 @@ mod status;
 mod subagent;
 mod validation;
 
+pub use adapter::{
+    FunctionArtifactAdapter, builtin_source, directory_function_source, function_adapter_registry,
+    parse_function_envelope,
+};
 pub use loader::{LoadedFunction, LoadedSubagent, MarkdownSection, load_function};
 pub use locator::{
-    FunctionListEntry, FunctionLocator, FunctionSource, ProfileResolution,
+    FunctionListEntry, FunctionPackageLocation, FunctionPackageSource, ProfileResolution,
     default_local_profile_path, global_functions_root, global_profile_path, list_functions,
-    resolve_function_reference, resolve_profile, workspace_functions_root, workspace_profile_path,
+    resolve_function_package, resolve_profile, workspace_functions_root, workspace_profile_path,
 };
 pub use manifest::*;
 pub use render::render_function_context;

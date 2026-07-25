@@ -574,15 +574,31 @@ fn write_registry(assets: &[Asset], skills: &[Skill], functions: &[Function]) {
     }
     output.push_str("];\n");
 
-    output.push_str("pub static BUILTIN_FUNCTIONS: &[BuiltinFunction] = &[\n");
-    for function in functions {
+    for (index, function) in functions.iter().enumerate() {
         output.push_str(&format!(
-            "    BuiltinFunction {{ id: {}, function_md: &ASSET_{}, system_prompt: &ASSET_{}, inference_config: &ASSET_{}, tree_sha256: {} }},\n",
+            "static FUNCTION_{index}_FILES: &[BuiltinArtifactFile] = &[\n"
+        ));
+        output.push_str(&format!(
+            "    BuiltinArtifactFile {{ path: \"FUNCTION.md\", bytes: ASSET_{}.bytes }},\n",
+            function.function_asset_index
+        ));
+        output.push_str(&format!(
+            "    BuiltinArtifactFile {{ path: \"SYSTEM.md\", bytes: ASSET_{}.bytes }},\n",
+            function.system_prompt_asset_index
+        ));
+        output.push_str(&format!(
+            "    BuiltinArtifactFile {{ path: \"inference.toml\", bytes: ASSET_{}.bytes }},\n",
+            function.inference_config_asset_index
+        ));
+        output.push_str("];\n");
+    }
+
+    output.push_str("pub static BUILTIN_ARTIFACT_PACKAGES: &[BuiltinArtifactPackage] = &[\n");
+    for (index, function) in functions.iter().enumerate() {
+        output.push_str(&format!(
+            "    BuiltinArtifactPackage {{ type_id: \"function\", id: {}, version: \"1.0.0\", entrypoint: \"FUNCTION.md\", files: FUNCTION_{index}_FILES, digest: \"sha256:{}\" }},\n",
             rust_string(&function.id),
-            function.function_asset_index,
-            function.system_prompt_asset_index,
-            function.inference_config_asset_index,
-            rust_string(&function.tree_sha256),
+            function.tree_sha256,
         ));
     }
     output.push_str("];\n");

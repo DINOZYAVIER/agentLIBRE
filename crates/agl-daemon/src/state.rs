@@ -29,7 +29,7 @@ use agl_chat::{
     shared_terminal_registry,
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
-use agl_functions::RuntimeDelegationPlan;
+use agl_function::RuntimeDelegationPlan;
 use agl_ids::{
     DaemonInstanceId, EventId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
     TerminalSessionId, TurnId,
@@ -5939,7 +5939,7 @@ mod root_activity_capacity_tests {
 
     fn delegation_plan(max_depth: u32, max_descendants: u32) -> RuntimeDelegationPlan {
         RuntimeDelegationPlan {
-            budget: agl_functions::FunctionDelegationBudget {
+            budget: agl_function::FunctionDelegationBudget {
                 max_depth,
                 max_children_per_run: 64,
                 max_descendants,
