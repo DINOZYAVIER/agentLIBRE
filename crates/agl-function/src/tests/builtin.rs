@@ -13,8 +13,8 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let locator = resolve_function_reference("gemma4-12b", &workspace, &config).unwrap();
-    assert_eq!(locator.source, FunctionSource::Builtin);
+    let locator = resolve_function_package("gemma4-12b", &workspace, &config).unwrap();
+    assert_eq!(locator.source, FunctionPackageSource::Builtin);
 
     let loaded = load_function(locator).unwrap();
     assert_eq!(loaded.front_matter.id(), "gemma4-12b");
@@ -31,7 +31,7 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     );
 
     let runtime = resolve_runtime_function("gemma4-12b", &workspace, &config).unwrap();
-    assert_eq!(runtime.source, FunctionSource::Builtin);
+    assert_eq!(runtime.source, FunctionPackageSource::Builtin);
     assert_eq!(runtime.model_profile, None);
     assert_eq!(runtime.profile_path, None);
     assert!(runtime.inference_config_toml.is_some());
@@ -49,8 +49,8 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let locator = resolve_function_reference("gemma4-e2b", &workspace, &config).unwrap();
-    assert_eq!(locator.source, FunctionSource::Builtin);
+    let locator = resolve_function_package("gemma4-e2b", &workspace, &config).unwrap();
+    assert_eq!(locator.source, FunctionPackageSource::Builtin);
 
     let loaded = load_function(locator).unwrap();
     assert_eq!(loaded.front_matter.id(), "gemma4-e2b");
@@ -74,7 +74,7 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
     assert!(!inference.contains("[runtime.mtp]"));
 
     let runtime = resolve_runtime_function("gemma4-e2b", &workspace, &config).unwrap();
-    assert_eq!(runtime.source, FunctionSource::Builtin);
+    assert_eq!(runtime.source, FunctionPackageSource::Builtin);
     assert_eq!(runtime.model_profile, None);
     assert_eq!(runtime.profile_path, None);
     assert!(runtime.inference_config_toml.is_some());
@@ -94,7 +94,7 @@ fn lists_builtin_functions() {
 
     let builtin_functions = functions
         .iter()
-        .filter(|function| function.source == FunctionSource::Builtin)
+        .filter(|function| function.source == FunctionPackageSource::Builtin)
         .map(|function| (function.id.as_str(), function.valid))
         .collect::<Vec<_>>();
 
@@ -144,9 +144,9 @@ Code.
 "#,
     )
     .unwrap();
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "coding".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };
@@ -212,9 +212,9 @@ title: Coding
 "#,
     )
     .unwrap();
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "coding".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
-use crate::locator::{FunctionLocator, FunctionSource};
+use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_SYSTEM_PROMPT_FILE_NAME};
 use crate::subagent::{SubagentFrontMatter, load_declared_subagents};
 use crate::validation::validate_relative_function_file_path;
@@ -15,7 +15,7 @@ pub struct MarkdownSection {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LoadedFunction {
-    pub locator: FunctionLocator,
+    pub locator: FunctionPackageLocation,
     pub front_matter: AgentFunctionFrontMatter,
     pub system_prompt_path: PathBuf,
     pub system_prompt: String,
@@ -34,8 +34,8 @@ pub struct LoadedSubagent {
     pub source_digest: String,
 }
 
-pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
-    let builtin = if locator.source == FunctionSource::Builtin {
+pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction> {
+    let builtin = if locator.source == FunctionPackageSource::Builtin {
         Some(resolve_builtin_package(&locator.reference)?)
     } else {
         None
@@ -58,7 +58,7 @@ pub fn load_function(locator: FunctionLocator) -> Result<LoadedFunction> {
     );
     if !matches!(
         locator.source,
-        FunctionSource::Explicit | FunctionSource::Builtin
+        FunctionPackageSource::Explicit | FunctionPackageSource::Builtin
     ) {
         let directory_id = locator
             .root_dir

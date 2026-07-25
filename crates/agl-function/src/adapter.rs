@@ -60,7 +60,12 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
                 reason: "FUNCTION.md body is not supported".to_owned(),
             });
         }
-        front_matter.artifact.validate()?;
+        front_matter
+            .validate()
+            .map_err(|error| ArtifactError::AdapterPayload {
+                type_id: self.descriptor.type_id.to_string(),
+                reason: error.to_string(),
+            })?;
         Ok(front_matter.artifact)
     }
 
@@ -132,12 +137,14 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
 }
 
 pub fn directory_function_source(
+    source_id: agl_artifact::ArtifactSourceId,
+    tier: ArtifactSourceTier,
     root: impl Into<std::path::PathBuf>,
     registry: Arc<agl_artifact::ArtifactAdapterRegistry>,
 ) -> Arc<dyn ArtifactSource> {
     Arc::new(DirectoryArtifactSource::new(
-        "directory".parse().expect("directory source id is valid"),
-        ArtifactSourceTier::Workspace,
+        source_id,
+        tier,
         ArtifactSourceKind::Directory,
         root,
         registry,

@@ -14,7 +14,8 @@ artifact:
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
-  requires: []
+  requires:
+    - skill:repo-status@*
 title: Coding
 model:
   config: inference.toml

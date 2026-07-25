@@ -1,21 +1,23 @@
 use std::path::{Path, PathBuf};
 
+use agl_artifact::{ArtifactPackageRef, ArtifactResolver, ArtifactSourceTier};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::adapter::{builtin_source, directory_function_source, function_adapter_registry};
 use crate::loader::load_function;
 use crate::manifest::FUNCTION_FILE_NAME;
 use crate::validation::validate_function_id;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FunctionSource {
+pub enum FunctionPackageSource {
     Explicit,
     Workspace,
     Global,
     Builtin,
 }
 
-impl FunctionSource {
+impl FunctionPackageSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
@@ -27,16 +29,16 @@ impl FunctionSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct FunctionLocator {
+pub struct FunctionPackageLocation {
     pub reference: String,
-    pub source: FunctionSource,
+    pub source: FunctionPackageSource,
     pub path: PathBuf,
     pub root_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FunctionListEntry {
-    pub source: FunctionSource,
+    pub source: FunctionPackageSource,
     pub id: String,
     pub path: PathBuf,
     pub valid: bool,
@@ -107,11 +109,11 @@ pub fn resolve_profile(
     })
 }
 
-pub fn resolve_function_reference(
+pub fn resolve_function_package(
     reference: &str,
     workspace_root: impl AsRef<Path>,
     config_dir: impl AsRef<Path>,
-) -> Result<FunctionLocator> {
+) -> Result<FunctionPackageLocation> {
     ensure!(
         !reference.trim().is_empty(),
         "function reference cannot be empty"
@@ -122,63 +124,66 @@ pub fn resolve_function_reference(
             .parent()
             .map(Path::to_path_buf)
             .with_context(|| format!("function path has no parent: {}", path.display()))?;
-        return Ok(FunctionLocator {
+        return Ok(FunctionPackageLocation {
             reference: reference.to_string(),
-            source: FunctionSource::Explicit,
+            source: FunctionPackageSource::Explicit,
             path,
             root_dir,
         });
     }
 
     validate_function_id("function id", reference)?;
-    let workspace_path = workspace_functions_root(&workspace_root)
-        .join(reference)
-        .join(FUNCTION_FILE_NAME);
-    if workspace_path.is_file() {
-        return Ok(FunctionLocator {
-            reference: reference.to_string(),
-            source: FunctionSource::Workspace,
-            root_dir: workspace_path
-                .parent()
-                .expect("workspace function path has parent")
-                .to_path_buf(),
-            path: workspace_path,
-        });
-    }
-
-    let global_path = global_functions_root(&config_dir)
-        .join(reference)
-        .join(FUNCTION_FILE_NAME);
-    if global_path.is_file() {
-        return Ok(FunctionLocator {
-            reference: reference.to_string(),
-            source: FunctionSource::Global,
-            root_dir: global_path
-                .parent()
-                .expect("global function path has parent")
-                .to_path_buf(),
-            path: global_path,
-        });
-    }
-
-    if let Some(function) = agl_assets::builtin_artifact_package(reference) {
-        let path = builtin_package_path(function.id);
-        return Ok(FunctionLocator {
-            reference: reference.to_string(),
-            source: FunctionSource::Builtin,
-            root_dir: path
-                .parent()
-                .expect("builtin function path has parent")
-                .to_path_buf(),
-            path,
-        });
-    }
-
-    bail!(
-        "function `{reference}` not found; checked {}, {}, and builtin functions",
-        workspace_path.display(),
-        global_path.display()
-    )
+    let registry = function_adapter_registry()?;
+    let sources = vec![
+        directory_function_source(
+            "workspace".parse()?,
+            ArtifactSourceTier::Workspace,
+            workspace_root.as_ref().join(".agl"),
+            registry.clone(),
+        ),
+        directory_function_source(
+            "global".parse()?,
+            ArtifactSourceTier::User,
+            config_dir.as_ref(),
+            registry.clone(),
+        ),
+        builtin_source()?,
+    ];
+    let resolver = ArtifactResolver::new(registry, sources);
+    let package_ref = ArtifactPackageRef::parse(&format!("function:{reference}@*"))?;
+    let graph = resolver.resolve_and_validate(&package_ref, None)?;
+    let node = graph
+        .nodes
+        .get(&graph.root)
+        .context("resolved function graph is missing its root")?;
+    let (source, path) = match node.candidate.tier {
+        ArtifactSourceTier::Workspace => (
+            FunctionPackageSource::Workspace,
+            workspace_functions_root(&workspace_root)
+                .join(reference)
+                .join(FUNCTION_FILE_NAME),
+        ),
+        ArtifactSourceTier::User => (
+            FunctionPackageSource::Global,
+            global_functions_root(&config_dir)
+                .join(reference)
+                .join(FUNCTION_FILE_NAME),
+        ),
+        ArtifactSourceTier::Builtin => (
+            FunctionPackageSource::Builtin,
+            builtin_package_path(reference),
+        ),
+        tier => bail!("unsupported Function source tier {tier:?}"),
+    };
+    Ok(FunctionPackageLocation {
+        reference: reference.to_string(),
+        source,
+        root_dir: path
+            .parent()
+            .expect("function path has parent")
+            .to_path_buf(),
+        path,
+    })
 }
 
 pub fn list_functions(
@@ -187,12 +192,12 @@ pub fn list_functions(
 ) -> Result<Vec<FunctionListEntry>> {
     let mut entries = Vec::new();
     collect_function_entries(
-        FunctionSource::Workspace,
+        FunctionPackageSource::Workspace,
         workspace_functions_root(&workspace_root),
         &mut entries,
     )?;
     collect_function_entries(
-        FunctionSource::Global,
+        FunctionPackageSource::Global,
         global_functions_root(&config_dir),
         &mut entries,
     )?;
@@ -207,7 +212,7 @@ pub fn list_functions(
 }
 
 pub(crate) fn collect_function_entries(
-    source: FunctionSource,
+    source: FunctionPackageSource,
     root: PathBuf,
     entries: &mut Vec<FunctionListEntry>,
 ) -> Result<()> {
@@ -235,7 +240,7 @@ pub(crate) fn collect_function_entries(
         if !path.is_file() {
             continue;
         }
-        let locator = FunctionLocator {
+        let locator = FunctionPackageLocation {
             reference: id.clone(),
             source,
             path: path.clone(),
@@ -266,9 +271,9 @@ pub(crate) fn collect_function_entries(
 pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
     for function in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
         let path = builtin_package_path(function.id);
-        let locator = FunctionLocator {
+        let locator = FunctionPackageLocation {
             reference: function.id.to_string(),
-            source: FunctionSource::Builtin,
+            source: FunctionPackageSource::Builtin,
             path: path.clone(),
             root_dir: path
                 .parent()
@@ -277,7 +282,7 @@ pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
         };
         match load_function(locator) {
             Ok(loaded) => entries.push(FunctionListEntry {
-                source: FunctionSource::Builtin,
+                source: FunctionPackageSource::Builtin,
                 id: function.id.to_string(),
                 path: path.clone(),
                 valid: true,
@@ -285,7 +290,7 @@ pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
                 error: None,
             }),
             Err(err) => entries.push(FunctionListEntry {
-                source: FunctionSource::Builtin,
+                source: FunctionPackageSource::Builtin,
                 id: function.id.to_string(),
                 path,
                 valid: false,

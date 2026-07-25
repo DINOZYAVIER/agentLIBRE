@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::loader::load_function;
 use crate::locator::{
-    FunctionSource, looks_like_path, resolve_function_reference, resolve_profile,
+    FunctionPackageSource, looks_like_path, resolve_function_package, resolve_profile,
 };
 use crate::manifest::FunctionToolPolicy;
 use crate::subagent::RuntimeSubagent;
@@ -80,7 +80,7 @@ pub fn function_status_with_model_bindings(
         next_steps: Vec::new(),
     };
 
-    let locator = match resolve_function_reference(reference, workspace_root, config_dir) {
+    let locator = match resolve_function_package(reference, workspace_root, config_dir) {
         Ok(locator) => locator,
         Err(err) => {
             report.errors.push(format!("{err:#}"));
@@ -106,8 +106,8 @@ pub fn function_status_with_model_bindings(
     report.title = Some(loaded.front_matter.title.clone());
     report.system_prompt_path = Some(loaded.system_prompt_path.clone());
     report.inference_config_path = loaded.inference_config_path.clone();
-    report.inference_config_embedded =
-        loaded.locator.source == FunctionSource::Builtin && loaded.inference_config_toml.is_some();
+    report.inference_config_embedded = loaded.locator.source == FunctionPackageSource::Builtin
+        && loaded.inference_config_toml.is_some();
     if let Some(config_toml) = loaded.inference_config_toml.as_deref() {
         let source_name = loaded
             .inference_config_path

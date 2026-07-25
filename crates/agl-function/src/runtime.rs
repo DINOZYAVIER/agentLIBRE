@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::loader::{LoadedFunction, load_function};
-use crate::locator::{FunctionSource, resolve_function_reference, resolve_profile};
+use crate::locator::{FunctionPackageSource, resolve_function_package, resolve_profile};
 use crate::manifest::{
     FunctionDelegationBudget, FunctionToolMode, FunctionToolPolicy, RuntimeIdentityValidation,
 };
@@ -17,7 +17,7 @@ use crate::validation::join_paths;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RuntimeFunction {
     pub reference: String,
-    pub source: FunctionSource,
+    pub source: FunctionPackageSource,
     pub path: PathBuf,
     pub id: String,
     pub title: String,
@@ -77,7 +77,7 @@ pub(crate) fn resolve_runtime_function_with_profile_policy(
     config_dir: impl AsRef<Path>,
     require_profile: bool,
 ) -> Result<RuntimeFunction> {
-    let locator = resolve_function_reference(reference, &workspace_root, &config_dir)?;
+    let locator = resolve_function_package(reference, &workspace_root, &config_dir)?;
     let loaded = load_function(locator)?;
     let profile_path = if let Some(profile) = loaded.front_matter.model_profile() {
         let resolution = resolve_profile(profile, &workspace_root, &config_dir)?;

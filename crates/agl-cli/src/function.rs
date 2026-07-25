@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use agl_function::{
-    FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionSource,
+    FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionPackageSource,
     FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status,
-    global_functions_root, list_functions, load_function, resolve_function_reference,
+    global_functions_root, list_functions, load_function, resolve_function_package,
     workspace_functions_root,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
@@ -68,7 +68,7 @@ fn run_function_show(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let function = load_function(resolve_function_reference(
+    let function = load_function(resolve_function_package(
         &options.reference,
         &workspace_root,
         &runtime.paths.config_dir,
@@ -104,12 +104,12 @@ fn run_function_init(
     let (source, root) = if options.workspace {
         let workspace_root = runtime.resolve_workspace_root(None)?;
         (
-            FunctionSource::Workspace,
+            FunctionPackageSource::Workspace,
             workspace_functions_root(&workspace_root),
         )
     } else {
         (
-            FunctionSource::Global,
+            FunctionPackageSource::Global,
             global_functions_root(&runtime.paths.config_dir),
         )
     };

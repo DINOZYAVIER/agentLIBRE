@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use agl_artifact::{ArtifactEnvelope, FUNCTION_TYPE};
+use agl_artifact::{
+    ArtifactEnvelope, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
+};
 use agl_capabilities::CapabilityId;
 pub use agl_capabilities::FunctionToolPolicy;
 use anyhow::{Context, Result, anyhow, ensure};
@@ -97,6 +99,15 @@ impl AgentFunctionFrontMatter {
         }
         if let Some(skills) = &self.skills {
             skills.validate("skills.use")?;
+            for skill in &skills.use_ {
+                ensure!(
+                    self.artifact.requires.iter().any(|requirement| {
+                        requirement.type_id().as_str() == SKILL_TYPE
+                            && requirement.package_id().as_str() == skill
+                    }),
+                    "function skill `{skill}` must be declared in artifact.requires"
+                );
+            }
         }
         if let Some(tools) = &self.tools {
             tools.validate()?;
@@ -105,6 +116,13 @@ impl AgentFunctionFrontMatter {
             subagents.validate("subagents.use")?;
             for subagent in &subagents.use_ {
                 validate_function_id("subagent id", subagent)?;
+                ensure!(
+                    self.artifact.requires.iter().any(|requirement| {
+                        requirement.type_id().as_str() == SUBFUNCTION_TYPE
+                            && requirement.package_id().as_str() == subagent
+                    }),
+                    "function subagent `{subagent}` must be declared in artifact.requires"
+                );
             }
         }
         if let Some(delegation) = &self.delegation {
