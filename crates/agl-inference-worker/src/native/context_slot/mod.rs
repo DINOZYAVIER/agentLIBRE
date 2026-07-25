@@ -3,6 +3,7 @@ mod mtp;
 mod native;
 mod output;
 mod prompt;
+mod sampler;
 
 #[cfg(test)]
 mod tests;
