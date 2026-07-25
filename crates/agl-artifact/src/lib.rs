@@ -3,9 +3,13 @@
 //! This crate intentionally contains no package discovery or payload-specific
 //! code.  It is the dependency leaf for the artifact layer.
 
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use semver::{Version, VersionReq};
 use serde::de::Error as _;
@@ -70,6 +74,35 @@ pub enum ArtifactError {
     },
     #[error("no adapter is registered for artifact type `{type_id}`")]
     UnsupportedType { type_id: String },
+    #[error("invalid artifact relative path `{value}`")]
+    InvalidRelativePath { value: String },
+    #[error("invalid artifact entrypoint `{value}`")]
+    InvalidEntrypoint { value: String },
+    #[error("invalid artifact source ID `{value}`")]
+    InvalidSourceId { value: String },
+    #[error("artifact package file `{path}` is duplicated")]
+    DuplicatePackageFile { path: String },
+    #[error("artifact package file `{path}` was not found")]
+    PackageFileNotFound { path: String },
+    #[error("artifact package path `{path}` is not a regular file")]
+    PackagePathNotRegular { path: String },
+    #[error("artifact package path `{path}` is a symlink")]
+    PackageSymlinkRejected { path: String },
+    #[error("failed to inspect artifact package path `{path}`: {reason}")]
+    PackageIo { path: String, reason: String },
+    #[error(
+        "artifact candidate version `{candidate}` disagrees with envelope version `{envelope}`"
+    )]
+    CandidateVersionMismatch { candidate: String, envelope: String },
+    #[error("adapter `{type_id}` returned an envelope for `{actual_type}`")]
+    AdapterTypeMismatch {
+        type_id: String,
+        actual_type: String,
+    },
+    #[error("adapter `{type_id}` returned an envelope for package `{actual_id}`")]
+    AdapterPackageMismatch { type_id: String, actual_id: String },
+    #[error("adapter `{type_id}` rejected package payload: {reason}")]
+    AdapterPayload { type_id: String, reason: String },
 }
 
 impl ArtifactError {
@@ -94,6 +127,18 @@ impl ArtifactError {
             Self::ReservedRootCollision { .. } => "reserved_root_collision",
             Self::CoreRootMismatch { .. } => "core_root_mismatch",
             Self::UnsupportedType { .. } => "unsupported_type",
+            Self::InvalidRelativePath { .. } => "invalid_relative_path",
+            Self::InvalidEntrypoint { .. } => "invalid_entrypoint",
+            Self::InvalidSourceId { .. } => "invalid_source_id",
+            Self::DuplicatePackageFile { .. } => "duplicate_package_file",
+            Self::PackageFileNotFound { .. } => "package_file_not_found",
+            Self::PackagePathNotRegular { .. } => "package_path_not_regular",
+            Self::PackageSymlinkRejected { .. } => "package_symlink_rejected",
+            Self::PackageIo { .. } => "package_io",
+            Self::CandidateVersionMismatch { .. } => "candidate_version_mismatch",
+            Self::AdapterTypeMismatch { .. } => "adapter_type_mismatch",
+            Self::AdapterPackageMismatch { .. } => "adapter_package_mismatch",
+            Self::AdapterPayload { .. } => "adapter_payload",
         }
     }
 }
@@ -703,26 +748,147 @@ impl<'de> Deserialize<'de> for ArtifactEnvelope {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ArtifactRelativePath(String);
+
+impl ArtifactRelativePath {
+    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+        let value = value.into();
+        if !valid_relative_path(&value) {
+            return Err(ArtifactError::InvalidRelativePath { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn as_path(&self) -> PathBuf {
+        PathBuf::from(&self.0)
+    }
+}
+
+impl Display for ArtifactRelativePath {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ArtifactRelativePath {
+    type Err = ArtifactError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for ArtifactRelativePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactRelativePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ArtifactEntrypoint(ArtifactRelativePath);
+
+impl ArtifactEntrypoint {
+    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+        let value = value.into();
+        if value.is_empty() || value == "." || value == ".." {
+            return Err(ArtifactError::InvalidAdapterEntrypoint { value });
+        }
+        ArtifactRelativePath::new(value)
+            .map(Self)
+            .map_err(|error| match error {
+                ArtifactError::InvalidRelativePath { value } => {
+                    ArtifactError::InvalidAdapterEntrypoint { value }
+                }
+                other => other,
+            })
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn path(&self) -> &ArtifactRelativePath {
+        &self.0
+    }
+}
+
+impl Display for ArtifactEntrypoint {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ArtifactEntrypoint {
+    type Err = ArtifactError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for ArtifactEntrypoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactEntrypoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+fn valid_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && !value.contains('\\')
+        && !value.contains(':')
+        && !value.chars().any(|character| character.is_control())
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArtifactAdapterDescriptor {
     pub type_id: ArtifactTypeId,
     pub root: String,
-    pub entrypoint: String,
+    pub entrypoint: ArtifactEntrypoint,
 }
 
 impl ArtifactAdapterDescriptor {
     pub fn new(
         type_id: ArtifactTypeId,
         root: impl Into<String>,
-        entrypoint: impl Into<String>,
+        entrypoint: ArtifactEntrypoint,
     ) -> Result<Self, ArtifactError> {
         let root = root.into();
-        let entrypoint = entrypoint.into();
         if !valid_root(&root) {
             return Err(ArtifactError::InvalidAdapterRoot { value: root });
-        }
-        if !valid_entrypoint(&entrypoint) {
-            return Err(ArtifactError::InvalidAdapterEntrypoint { value: entrypoint });
         }
         Ok(Self {
             type_id,
@@ -732,81 +898,415 @@ impl ArtifactAdapterDescriptor {
     }
 }
 
-/// Minimal adapter boundary for H01. Payload reading and validation arrive in H02.
-pub trait ArtifactAdapter: Send + Sync {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor;
-}
+pub trait ArtifactPackageView: Send + Sync {
+    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError>;
 
-impl ArtifactAdapter for ArtifactAdapterDescriptor {
-    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
-        self
-    }
+    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError>;
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct InMemoryPackageView {
+    files: BTreeMap<ArtifactRelativePath, Vec<u8>>,
+}
+
+impl InMemoryPackageView {
+    pub fn new(
+        files: impl IntoIterator<Item = (ArtifactRelativePath, Vec<u8>)>,
+    ) -> Result<Self, ArtifactError> {
+        let mut view = Self::default();
+        for (path, content) in files {
+            view.insert(path, content)?;
+        }
+        Ok(view)
+    }
+
+    pub fn insert(
+        &mut self,
+        path: ArtifactRelativePath,
+        content: Vec<u8>,
+    ) -> Result<(), ArtifactError> {
+        if self.files.insert(path.clone(), content).is_some() {
+            return Err(ArtifactError::DuplicatePackageFile {
+                path: path.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl ArtifactPackageView for InMemoryPackageView {
+    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError> {
+        Ok(self.files.keys().cloned().collect())
+    }
+
+    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| ArtifactError::PackageFileNotFound {
+                path: path.to_string(),
+            })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectoryPackageView {
+    root: PathBuf,
+}
+
+impl DirectoryPackageView {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
+        let root = root.into();
+        let metadata = fs::symlink_metadata(&root).map_err(|error| package_io(&root, error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactError::PackageSymlinkRejected {
+                path: root.display().to_string(),
+            });
+        }
+        if !metadata.is_dir() {
+            return Err(ArtifactError::PackagePathNotRegular {
+                path: root.display().to_string(),
+            });
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn checked_path(&self, relative: &ArtifactRelativePath) -> Result<PathBuf, ArtifactError> {
+        let mut current = self.root.clone();
+        for component in relative.as_path().components() {
+            let Component::Normal(segment) = component else {
+                return Err(ArtifactError::InvalidRelativePath {
+                    value: relative.to_string(),
+                });
+            };
+            current.push(segment);
+            let metadata =
+                fs::symlink_metadata(&current).map_err(|error| package_io(&current, error))?;
+            if metadata.file_type().is_symlink() {
+                return Err(ArtifactError::PackageSymlinkRejected {
+                    path: relative.to_string(),
+                });
+            }
+        }
+        Ok(current)
+    }
+}
+
+impl ArtifactPackageView for DirectoryPackageView {
+    fn files(&self) -> Result<Vec<ArtifactRelativePath>, ArtifactError> {
+        let mut paths = Vec::new();
+        collect_directory_files(&self.root, "", &mut paths)?;
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn read_file(&self, path: &ArtifactRelativePath) -> Result<Vec<u8>, ArtifactError> {
+        let absolute = self.checked_path(path)?;
+        let metadata =
+            fs::symlink_metadata(&absolute).map_err(|error| package_io(&absolute, error))?;
+        if !metadata.is_file() {
+            return Err(ArtifactError::PackagePathNotRegular {
+                path: path.to_string(),
+            });
+        }
+        fs::read(&absolute).map_err(|error| package_io(&absolute, error))
+    }
+}
+
+fn collect_directory_files(
+    directory: &Path,
+    prefix: &str,
+    paths: &mut Vec<ArtifactRelativePath>,
+) -> Result<(), ArtifactError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| package_io(directory, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| package_io(directory, error))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| ArtifactError::PackageIo {
+                path: entry.path().display().to_string(),
+                reason: "package file name is not valid UTF-8".to_owned(),
+            })?;
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let metadata =
+            fs::symlink_metadata(entry.path()).map_err(|error| package_io(&entry.path(), error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ArtifactError::PackageSymlinkRejected { path: relative });
+        }
+        if metadata.is_dir() {
+            collect_directory_files(&entry.path(), &relative, paths)?;
+        } else if metadata.is_file() {
+            paths.push(ArtifactRelativePath::new(relative)?);
+        } else {
+            return Err(ArtifactError::PackagePathNotRegular { path: relative });
+        }
+    }
+    Ok(())
+}
+
+fn package_io(path: &Path, error: std::io::Error) -> ArtifactError {
+    ArtifactError::PackageIo {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ArtifactSourceId(String);
+
+impl ArtifactSourceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+        let value = value.into();
+        if value.is_empty()
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+            || !value.as_bytes()[0].is_ascii_lowercase()
+        {
+            return Err(ArtifactError::InvalidSourceId { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for ArtifactSourceId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ArtifactSourceId {
+    type Err = ArtifactError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for ArtifactSourceId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactSourceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSourceTier {
+    Explicit,
+    Workspace,
+    User,
+    System,
+    Builtin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactSourceKind {
+    Directory,
+    Git,
+    Embedded,
+}
+
+#[derive(Clone)]
+pub struct ArtifactCandidate {
+    pub type_id: ArtifactTypeId,
+    pub package_id: ArtifactPackageId,
+    pub version: ArtifactVersion,
+    pub source_id: ArtifactSourceId,
+    pub tier: ArtifactSourceTier,
+    pub kind: ArtifactSourceKind,
+    view: Arc<dyn ArtifactPackageView>,
+}
+
+impl fmt::Debug for ArtifactCandidate {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactCandidate")
+            .field("type_id", &self.type_id)
+            .field("package_id", &self.package_id)
+            .field("version", &self.version)
+            .field("source_id", &self.source_id)
+            .field("tier", &self.tier)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ArtifactCandidate {
+    pub fn new(
+        type_id: ArtifactTypeId,
+        package_id: ArtifactPackageId,
+        version: ArtifactVersion,
+        source_id: ArtifactSourceId,
+        tier: ArtifactSourceTier,
+        kind: ArtifactSourceKind,
+        view: Arc<dyn ArtifactPackageView>,
+    ) -> Self {
+        Self {
+            type_id,
+            package_id,
+            version,
+            source_id,
+            tier,
+            kind,
+            view,
+        }
+    }
+
+    pub fn view(&self) -> &dyn ArtifactPackageView {
+        self.view.as_ref()
+    }
+}
+
+pub trait ArtifactSource: Send + Sync {
+    fn id(&self) -> &ArtifactSourceId;
+    fn tier(&self) -> ArtifactSourceTier;
+    fn kind(&self) -> ArtifactSourceKind;
+    fn candidates(&self, type_id: &ArtifactTypeId)
+    -> Result<Vec<ArtifactCandidate>, ArtifactError>;
+}
+
+pub type ErasedArtifactPayload = Box<dyn Any + Send + Sync>;
+
+/// Adapter lifecycle completed in H02; payload implementations remain in domain crates.
+pub trait ArtifactAdapter: Send + Sync {
+    fn descriptor(&self) -> &ArtifactAdapterDescriptor;
+
+    fn extract_envelope(
+        &self,
+        package: &dyn ArtifactPackageView,
+    ) -> Result<ArtifactEnvelope, ArtifactError>;
+
+    fn validate_payload(
+        &self,
+        package: &dyn ArtifactPackageView,
+        envelope: &ArtifactEnvelope,
+    ) -> Result<ErasedArtifactPayload, ArtifactError>;
+}
+
+impl<T> ArtifactAdapter for Arc<T>
+where
+    T: ArtifactAdapter + ?Sized,
+{
+    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+        self.as_ref().descriptor()
+    }
+
+    fn extract_envelope(
+        &self,
+        package: &dyn ArtifactPackageView,
+    ) -> Result<ArtifactEnvelope, ArtifactError> {
+        self.as_ref().extract_envelope(package)
+    }
+
+    fn validate_payload(
+        &self,
+        package: &dyn ArtifactPackageView,
+        envelope: &ArtifactEnvelope,
+    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        self.as_ref().validate_payload(package, envelope)
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct ArtifactAdapterRegistry {
-    descriptors: BTreeMap<ArtifactTypeId, ArtifactAdapterDescriptor>,
+    adapters: BTreeMap<ArtifactTypeId, Arc<dyn ArtifactAdapter>>,
+}
+
+impl fmt::Debug for ArtifactAdapterRegistry {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactAdapterRegistry")
+            .field("types", &self.adapters.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl ArtifactAdapterRegistry {
-    pub fn new(
-        descriptors: impl IntoIterator<Item = ArtifactAdapterDescriptor>,
-    ) -> Result<Self, ArtifactError> {
+    pub fn new<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, ArtifactError>
+    where
+        A: ArtifactAdapter + 'static,
+    {
         let mut registry = Self::default();
-        for descriptor in descriptors {
-            registry.insert(descriptor)?;
+        for adapter in adapters {
+            registry.insert(Arc::new(adapter))?;
         }
         Ok(registry)
     }
 
     pub fn from_adapters<A>(adapters: impl IntoIterator<Item = A>) -> Result<Self, ArtifactError>
     where
-        A: ArtifactAdapter,
+        A: ArtifactAdapter + 'static,
     {
-        Self::new(
-            adapters
-                .into_iter()
-                .map(|adapter| adapter.descriptor().clone()),
-        )
+        Self::new(adapters)
     }
 
-    pub fn lookup(
-        &self,
-        type_id: &ArtifactTypeId,
-    ) -> Result<&ArtifactAdapterDescriptor, ArtifactError> {
-        self.descriptors
+    pub fn lookup(&self, type_id: &ArtifactTypeId) -> Result<&dyn ArtifactAdapter, ArtifactError> {
+        self.adapters
             .get(type_id)
+            .map(AsRef::as_ref)
             .ok_or_else(|| ArtifactError::UnsupportedType {
                 type_id: type_id.to_string(),
             })
     }
 
-    pub fn get(&self, type_id: &ArtifactTypeId) -> Option<&ArtifactAdapterDescriptor> {
-        self.descriptors.get(type_id)
+    pub fn get(&self, type_id: &ArtifactTypeId) -> Option<&dyn ArtifactAdapter> {
+        self.adapters.get(type_id).map(AsRef::as_ref)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &ArtifactAdapterDescriptor> {
-        self.descriptors.values()
+    pub fn iter(&self) -> impl Iterator<Item = &dyn ArtifactAdapter> {
+        self.adapters.values().map(AsRef::as_ref)
     }
 
-    fn insert(&mut self, descriptor: ArtifactAdapterDescriptor) -> Result<(), ArtifactError> {
-        if self.descriptors.contains_key(&descriptor.type_id) {
+    fn insert(&mut self, adapter: Arc<dyn ArtifactAdapter>) -> Result<(), ArtifactError> {
+        let descriptor = adapter.descriptor();
+        if self.adapters.contains_key(&descriptor.type_id) {
             return Err(ArtifactError::DuplicateAdapterType {
                 type_id: descriptor.type_id.to_string(),
             });
         }
         if self
-            .descriptors
+            .adapters
             .values()
-            .any(|existing| existing.root == descriptor.root)
+            .any(|existing| existing.descriptor().root == descriptor.root)
         {
             return Err(ArtifactError::DuplicateAdapterRoot {
-                root: descriptor.root,
+                root: descriptor.root.clone(),
             });
         }
         if !descriptor.type_id.is_core() && RESERVED_ROOTS.contains(&descriptor.root.as_str()) {
             return Err(ArtifactError::ReservedRootCollision {
-                root: descriptor.root,
+                root: descriptor.root.clone(),
             });
         }
         if let Some(expected) = core_root(descriptor.type_id.as_str())
@@ -815,13 +1315,403 @@ impl ArtifactAdapterRegistry {
             return Err(ArtifactError::CoreRootMismatch {
                 type_id: descriptor.type_id.to_string(),
                 expected: expected.to_owned(),
-                actual: descriptor.root,
+                actual: descriptor.root.clone(),
             });
         }
-        self.descriptors
-            .insert(descriptor.type_id.clone(), descriptor);
+        self.adapters.insert(descriptor.type_id.clone(), adapter);
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticArtifactSource {
+    source_id: ArtifactSourceId,
+    tier: ArtifactSourceTier,
+    kind: ArtifactSourceKind,
+    candidates: Vec<ArtifactCandidate>,
+}
+
+impl StaticArtifactSource {
+    pub fn new(
+        source_id: ArtifactSourceId,
+        tier: ArtifactSourceTier,
+        kind: ArtifactSourceKind,
+        candidates: Vec<ArtifactCandidate>,
+    ) -> Result<Self, ArtifactError> {
+        for candidate in &candidates {
+            if candidate.source_id != source_id || candidate.tier != tier || candidate.kind != kind
+            {
+                return Err(ArtifactError::PackageIo {
+                    path: candidate.package_id.to_string(),
+                    reason: "candidate provenance does not match source".to_owned(),
+                });
+            }
+        }
+        Ok(Self {
+            source_id,
+            tier,
+            kind,
+            candidates,
+        })
+    }
+}
+
+impl ArtifactSource for StaticArtifactSource {
+    fn id(&self) -> &ArtifactSourceId {
+        &self.source_id
+    }
+
+    fn tier(&self) -> ArtifactSourceTier {
+        self.tier
+    }
+
+    fn kind(&self) -> ArtifactSourceKind {
+        self.kind
+    }
+
+    fn candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        let mut candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| &candidate.type_id == type_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            (&left.package_id, &left.version, &left.source_id, left.kind).cmp(&(
+                &right.package_id,
+                &right.version,
+                &right.source_id,
+                right.kind,
+            ))
+        });
+        Ok(candidates)
+    }
+}
+
+pub struct DirectoryArtifactSource {
+    source_id: ArtifactSourceId,
+    tier: ArtifactSourceTier,
+    kind: ArtifactSourceKind,
+    root: PathBuf,
+    registry: Arc<ArtifactAdapterRegistry>,
+}
+
+impl fmt::Debug for DirectoryArtifactSource {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DirectoryArtifactSource")
+            .field("source_id", &self.source_id)
+            .field("tier", &self.tier)
+            .field("kind", &self.kind)
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DirectoryArtifactSource {
+    pub fn new(
+        source_id: ArtifactSourceId,
+        tier: ArtifactSourceTier,
+        kind: ArtifactSourceKind,
+        root: impl Into<PathBuf>,
+        registry: Arc<ArtifactAdapterRegistry>,
+    ) -> Self {
+        Self {
+            source_id,
+            tier,
+            kind,
+            root: root.into(),
+            registry,
+        }
+    }
+}
+
+impl ArtifactSource for DirectoryArtifactSource {
+    fn id(&self) -> &ArtifactSourceId {
+        &self.source_id
+    }
+
+    fn tier(&self) -> ArtifactSourceTier {
+        self.tier
+    }
+
+    fn kind(&self) -> ArtifactSourceKind {
+        self.kind
+    }
+
+    fn candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        let adapter = self.registry.lookup(type_id)?;
+        let typed_root = self.root.join(&adapter.descriptor().root);
+        match fs::symlink_metadata(&typed_root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ArtifactError::PackageSymlinkRejected {
+                    path: typed_root.display().to_string(),
+                });
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(ArtifactError::PackagePathNotRegular {
+                    path: typed_root.display().to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(package_io(&typed_root, error)),
+        }
+
+        let package_root = DirectoryPackageView::new(&typed_root)?;
+        let entrypoint = adapter.descriptor().entrypoint.to_string();
+        let mut candidates = Vec::new();
+        for file in package_root.files()? {
+            let file_name = file.to_string();
+            let prefix = if file_name == entrypoint {
+                ""
+            } else if let Some(prefix) = file_name.strip_suffix(&format!("/{entrypoint}")) {
+                prefix
+            } else {
+                continue;
+            };
+            if prefix.is_empty() {
+                continue;
+            }
+            let parts = prefix.split('/').collect::<Vec<_>>();
+            let (package_text, declared_version, package_dir_text) =
+                if let Some(version_text) = parts.last().copied() {
+                    if let Ok(version) = ArtifactVersion::new(version_text) {
+                        if parts.len() < 2 {
+                            continue;
+                        }
+                        let package_text = parts[..parts.len() - 1].join("/");
+                        (package_text, Some(version), prefix.to_owned())
+                    } else {
+                        (prefix.to_owned(), None, prefix.to_owned())
+                    }
+                } else {
+                    continue;
+                };
+            let package_id = ArtifactPackageId::new(package_text)?;
+            let view = DirectoryPackageView::new(typed_root.join(package_dir_text))?;
+            let envelope = adapter.extract_envelope(&view)?;
+            envelope.validate()?;
+            if envelope.type_id != *type_id {
+                return Err(ArtifactError::AdapterTypeMismatch {
+                    type_id: type_id.to_string(),
+                    actual_type: envelope.type_id.to_string(),
+                });
+            }
+            if envelope.id != package_id {
+                return Err(ArtifactError::AdapterPackageMismatch {
+                    type_id: type_id.to_string(),
+                    actual_id: envelope.id.to_string(),
+                });
+            }
+            let version = if let Some(declared_version) = declared_version {
+                if declared_version != envelope.version {
+                    return Err(ArtifactError::CandidateVersionMismatch {
+                        candidate: declared_version.to_string(),
+                        envelope: envelope.version.to_string(),
+                    });
+                }
+                declared_version
+            } else {
+                envelope.version
+            };
+            candidates.push(ArtifactCandidate::new(
+                type_id.clone(),
+                package_id,
+                version,
+                self.source_id.clone(),
+                self.tier,
+                self.kind,
+                Arc::new(view),
+            ));
+        }
+        candidates.sort_by(|left, right| {
+            (&left.package_id, &left.version).cmp(&(&right.package_id, &right.version))
+        });
+        Ok(candidates)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactDataClass {
+    Package,
+    Config,
+    State,
+    Cache,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArtifactPathRouter {
+    workspace_root: PathBuf,
+    data_root: PathBuf,
+    config_root: PathBuf,
+    state_root: PathBuf,
+    cache_root: PathBuf,
+    registry: Arc<ArtifactAdapterRegistry>,
+}
+
+impl ArtifactPathRouter {
+    pub fn new(
+        workspace_root: impl Into<PathBuf>,
+        data_root: impl Into<PathBuf>,
+        config_root: impl Into<PathBuf>,
+        state_root: impl Into<PathBuf>,
+        cache_root: impl Into<PathBuf>,
+        registry: Arc<ArtifactAdapterRegistry>,
+    ) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            data_root: data_root.into(),
+            config_root: config_root.into(),
+            state_root: state_root.into(),
+            cache_root: cache_root.into(),
+            registry,
+        }
+    }
+
+    pub fn root(
+        &self,
+        scope: ArtifactPathScope,
+        data_class: ArtifactDataClass,
+        type_id: &ArtifactTypeId,
+    ) -> Result<PathBuf, ArtifactError> {
+        let type_root = self.registry.lookup(type_id)?.descriptor().root.clone();
+        let root = match (scope, data_class) {
+            (ArtifactPathScope::Workspace, ArtifactDataClass::Package) => {
+                self.workspace_root.join(".agl")
+            }
+            (ArtifactPathScope::Workspace, ArtifactDataClass::Config) => {
+                self.workspace_root.join(".agl/config")
+            }
+            (ArtifactPathScope::Workspace, ArtifactDataClass::State) => {
+                self.workspace_root.join(".agl/state")
+            }
+            (ArtifactPathScope::Workspace, ArtifactDataClass::Cache) => {
+                self.workspace_root.join(".agl/cache")
+            }
+            (ArtifactPathScope::Xdg, ArtifactDataClass::Package) => self.data_root.clone(),
+            (ArtifactPathScope::Xdg, ArtifactDataClass::Config) => self.config_root.clone(),
+            (ArtifactPathScope::Xdg, ArtifactDataClass::State) => self.state_root.clone(),
+            (ArtifactPathScope::Xdg, ArtifactDataClass::Cache) => self.cache_root.clone(),
+        };
+        Ok(root.join(type_root))
+    }
+
+    pub fn workspace_package_root(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<PathBuf, ArtifactError> {
+        self.root(
+            ArtifactPathScope::Workspace,
+            ArtifactDataClass::Package,
+            type_id,
+        )
+    }
+
+    pub fn xdg_package_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
+        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Package, type_id)
+    }
+
+    pub fn workspace_config_root(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<PathBuf, ArtifactError> {
+        self.root(
+            ArtifactPathScope::Workspace,
+            ArtifactDataClass::Config,
+            type_id,
+        )
+    }
+
+    pub fn xdg_config_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
+        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Config, type_id)
+    }
+
+    pub fn workspace_package_path(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+        version: &ArtifactVersion,
+    ) -> Result<PathBuf, ArtifactError> {
+        Ok(append_package_version(
+            self.workspace_package_root(type_id)?,
+            package_id,
+            version,
+        ))
+    }
+
+    pub fn xdg_package_path(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+        version: &ArtifactVersion,
+    ) -> Result<PathBuf, ArtifactError> {
+        Ok(append_package_version(
+            self.xdg_package_root(type_id)?,
+            package_id,
+            version,
+        ))
+    }
+
+    pub fn workspace_config_path(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+    ) -> Result<PathBuf, ArtifactError> {
+        Ok(append_package_id(
+            self.workspace_config_root(type_id)?,
+            package_id,
+        ))
+    }
+
+    pub fn xdg_config_path(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+    ) -> Result<PathBuf, ArtifactError> {
+        Ok(append_package_id(
+            self.xdg_config_root(type_id)?,
+            package_id,
+        ))
+    }
+
+    pub fn state_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
+        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::State, type_id)
+    }
+
+    pub fn cache_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
+        self.root(ArtifactPathScope::Xdg, ArtifactDataClass::Cache, type_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ArtifactPathScope {
+    Workspace,
+    Xdg,
+}
+
+fn append_package_id(mut root: PathBuf, package_id: &ArtifactPackageId) -> PathBuf {
+    for segment in package_id.as_str().split('/') {
+        root.push(segment);
+    }
+    root
+}
+
+fn append_package_version(
+    root: PathBuf,
+    package_id: &ArtifactPackageId,
+    version: &ArtifactVersion,
+) -> PathBuf {
+    let mut path = append_package_id(root, package_id);
+    path.push(version.to_string());
+    path
 }
 
 fn valid_dotted_id(value: &str, minimum_segments: usize) -> bool {
@@ -844,18 +1734,6 @@ fn valid_root(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn valid_entrypoint(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && !value.starts_with('/')
-        && !value.contains('/')
-        && !value.contains('\\')
-        && !value
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-}
-
 fn core_root(type_id: &str) -> Option<&'static str> {
     match type_id {
         FUNCTION_TYPE => Some(FUNCTION_ROOT),
@@ -869,6 +1747,37 @@ fn core_root(type_id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestAdapter {
+        descriptor: ArtifactAdapterDescriptor,
+    }
+
+    impl ArtifactAdapter for TestAdapter {
+        fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+            &self.descriptor
+        }
+
+        fn extract_envelope(
+            &self,
+            _package: &dyn ArtifactPackageView,
+        ) -> Result<ArtifactEnvelope, ArtifactError> {
+            Err(ArtifactError::AdapterPayload {
+                type_id: self.descriptor.type_id.to_string(),
+                reason: "test adapter".to_owned(),
+            })
+        }
+
+        fn validate_payload(
+            &self,
+            _package: &dyn ArtifactPackageView,
+            _envelope: &ArtifactEnvelope,
+        ) -> Result<ErasedArtifactPayload, ArtifactError> {
+            Err(ArtifactError::AdapterPayload {
+                type_id: self.descriptor.type_id.to_string(),
+                reason: "test adapter".to_owned(),
+            })
+        }
+    }
 
     fn version(value: &str) -> ArtifactVersion {
         value.parse().unwrap()
@@ -949,23 +1858,33 @@ mod tests {
         let function = ArtifactAdapterDescriptor::new(
             ArtifactTypeId::function(),
             FUNCTION_ROOT,
-            "FUNCTION.md",
+            "FUNCTION.md".parse().unwrap(),
         )
         .unwrap();
-        let registry = ArtifactAdapterRegistry::new([function]).unwrap();
+        let registry = ArtifactAdapterRegistry::new([TestAdapter {
+            descriptor: function,
+        }])
+        .unwrap();
         assert_eq!(
-            registry.lookup(&ArtifactTypeId::function()).unwrap().root,
+            registry
+                .lookup(&ArtifactTypeId::function())
+                .unwrap()
+                .descriptor()
+                .root,
             FUNCTION_ROOT
         );
         assert!(matches!(
             registry.lookup(&ArtifactTypeId::skill()),
             Err(ArtifactError::UnsupportedType { .. })
         ));
-        let wrong =
-            ArtifactAdapterDescriptor::new(ArtifactTypeId::skill(), FUNCTION_ROOT, "SKILL.md")
-                .unwrap();
+        let wrong = ArtifactAdapterDescriptor::new(
+            ArtifactTypeId::skill(),
+            FUNCTION_ROOT,
+            "SKILL.md".parse().unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
-            ArtifactAdapterRegistry::new([wrong]),
+            ArtifactAdapterRegistry::new([TestAdapter { descriptor: wrong }]),
             Err(ArtifactError::CoreRootMismatch { .. })
         ));
     }
