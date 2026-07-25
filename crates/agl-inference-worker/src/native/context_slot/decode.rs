@@ -10,6 +10,7 @@ use super::super::{
     model::LlamaCppModel,
 };
 use super::output::IncrementalResponseClassifier;
+use super::sampler::Sampler;
 use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, native::*, prompt::*};
 use agl_inference::InferenceFinishReason;
 

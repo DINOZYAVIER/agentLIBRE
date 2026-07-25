@@ -9,6 +9,7 @@ use super::super::{
     generation::{LlamaCppGenerationControl, LlamaCppGenerationOutput},
     model::LlamaCppModel,
 };
+use super::sampler::Sampler;
 use super::{LlamaCppContextSlot, LlamaCppGenerationRequest, decode::*, native::*, prompt::*};
 use agl_inference::InferenceFinishReason;
 

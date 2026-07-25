@@ -8,8 +8,8 @@ use serde_json::json;
 
 use super::decode::*;
 use super::mtp::committed_verified_prefix;
-use super::native::grammar_trigger_inputs;
 use super::prompt::*;
+use super::sampler::grammar_trigger_inputs;
 use super::*;
 
 fn text(value: impl Into<String>) -> Option<Content> {
