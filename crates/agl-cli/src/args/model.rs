@@ -171,7 +171,7 @@ pub(crate) enum RepoCommand {
     ImportProfile(RepoImportProfileOptions),
     Status(RepoStatusOptions),
     VerifyTasks(TaskSpecVerifyOptions),
-    Artifact(ArtifactCommand),
+    Component(ComponentCommand),
     InstallHooks(RepoHooksOptions),
     ExportProfile(RepoExportProfileOptions),
 }
@@ -308,7 +308,7 @@ pub(crate) struct TaskSpecVerifyOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ArtifactCommand {
+pub(crate) enum ComponentCommand {
     Status(ArtifactStatusOptions),
     Verify(ArtifactStatusOptions),
     Sync(ArtifactSyncOptions),

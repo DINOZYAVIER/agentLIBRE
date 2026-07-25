@@ -1,18 +1,17 @@
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
 use super::ResolvedArtifact;
-use crate::{ArtifactLockFile, LockedArtifact, WorkspaceArtifact};
+use crate::{ArtifactLock, LockedWorkspaceComponent, WorkspaceComponent};
 
 pub(super) fn read_artifact_lock(
     lock_path: &Path,
     errors: &mut Vec<String>,
-) -> Option<ArtifactLockFile> {
+) -> Option<ArtifactLock> {
     match fs::read_to_string(lock_path) {
-        Ok(content) => match toml::from_str::<ArtifactLockFile>(&content) {
+        Ok(content) => match ArtifactLock::from_toml(&content) {
             Ok(lock) => Some(lock),
             Err(err) => {
                 errors.push(format!("artifact_lock_invalid: {err:#}"));
@@ -29,7 +28,7 @@ pub(super) fn read_artifact_lock(
 
 pub(super) fn validate_locked_artifact(
     resolved: &ResolvedArtifact,
-    locked: Option<&LockedArtifact>,
+    locked: Option<&LockedWorkspaceComponent>,
     actual_url: Option<&str>,
     actual_commit: Option<&str>,
     actual_tree: Option<&str>,
@@ -40,26 +39,14 @@ pub(super) fn validate_locked_artifact(
         warnings.push("lock_entry_missing".to_string());
         return;
     };
-    if locked.definition_hash != resolved.definition_hash {
+    if locked.definition_digest.as_deref() != Some(resolved.definition_hash.as_str()) {
         errors.push("definition_changed".to_string());
     }
-    if locked.storage != resolved.definition.kind {
-        errors.push("storage_changed".to_string());
+    if locked.kind != Some(resolved.definition.kind) {
+        errors.push("component_kind_changed".to_string());
     }
-    if locked.path != resolved.definition.path {
+    if locked.path.as_ref() != Some(&resolved.definition.path) {
         errors.push("path_changed".to_string());
-    }
-    if locked.required != resolved.definition.required {
-        errors.push("required_changed".to_string());
-    }
-    if locked.kind != resolved.kind {
-        errors.push("kind_changed".to_string());
-    }
-    if locked.access != resolved.definition.access {
-        errors.push("access_changed".to_string());
-    }
-    if locked.validation != resolved.definition.validation {
-        errors.push("validation_changed".to_string());
     }
 
     let expected_url = actual_url
@@ -87,19 +74,15 @@ pub(super) fn validate_locked_artifact(
 
 pub(super) fn artifact_lock_error_allows_refresh(error: &str) -> bool {
     error.ends_with(".definition_changed")
-        || error.ends_with(".storage_changed")
+        || error.ends_with(".component_kind_changed")
         || error.ends_with(".path_changed")
-        || error.ends_with(".required_changed")
-        || error.ends_with(".kind_changed")
-        || error.ends_with(".access_changed")
-        || error.ends_with(".validation_changed")
         || error.ends_with(".url_changed")
         || error.ends_with(".rev_changed")
         || error.ends_with(".commit_changed")
         || error.ends_with(".tree_changed")
 }
 
-pub(super) fn artifact_definition_hash(id: &str, artifact: &WorkspaceArtifact) -> String {
+pub(super) fn artifact_definition_hash(id: &str, artifact: &WorkspaceComponent) -> String {
     let mut hasher = Sha256::new();
     hasher.update(id.as_bytes());
     hasher.update(b"\0");
@@ -119,11 +102,4 @@ fn hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-pub(super) fn unix_ms_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
 }

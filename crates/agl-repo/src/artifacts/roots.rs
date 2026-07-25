@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{ArtifactKind, ArtifactStatus, UndeclaredArtifactRoot};
+use crate::{ArtifactDataClass, ArtifactStatus, UndeclaredArtifactRoot};
 
 const NON_ARTIFACT_WORKSPACE_ROOTS: [&str; 2] = ["functions", "inference"];
 
@@ -52,14 +52,14 @@ pub(super) fn undeclared_artifact_roots(
     Ok(roots)
 }
 
-fn suggested_migration_target(path: &Path) -> (ArtifactKind, PathBuf) {
+fn suggested_migration_target(path: &Path) -> (ArtifactDataClass, PathBuf) {
     match path.file_name().and_then(|name| name.to_str()) {
-        Some("cache") => (ArtifactKind::Cache, path.to_path_buf()),
-        Some("sources") => (ArtifactKind::Source, path.to_path_buf()),
+        Some("cache") => (ArtifactDataClass::Cache, path.to_path_buf()),
+        Some("sources") => (ArtifactDataClass::Package, path.to_path_buf()),
         Some(name) => (
-            ArtifactKind::Generated,
+            ArtifactDataClass::Config,
             PathBuf::from(".agl/generated").join(name),
         ),
-        None => (ArtifactKind::Generated, path.to_path_buf()),
+        None => (ArtifactDataClass::Config, path.to_path_buf()),
     }
 }

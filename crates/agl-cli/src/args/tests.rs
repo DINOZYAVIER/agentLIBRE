@@ -563,7 +563,7 @@ fn parse_repo_artifact_commands() {
             "tasks",
             "--strict",
         ],
-        CliCommand::Repo(RepoCommand::Artifact(ArtifactCommand::Status(
+        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Status(
             ArtifactStatusOptions {
                 json: true,
                 artifact: Some("tasks".to_string()),
@@ -573,8 +573,8 @@ fn parse_repo_artifact_commands() {
     );
 
     assert_command(
-        ["agl", "repo", "artifact", "sync", "--dry-run", "--json"],
-        CliCommand::Repo(RepoCommand::Artifact(ArtifactCommand::Sync(
+        ["agl", "repo", "component", "sync", "--dry-run", "--json"],
+        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Sync(
             ArtifactSyncOptions {
                 json: true,
                 dry_run: true,
@@ -584,8 +584,8 @@ fn parse_repo_artifact_commands() {
     );
 
     assert_command(
-        ["agl", "repo", "artifact", "lock", "--dry-run"],
-        CliCommand::Repo(RepoCommand::Artifact(ArtifactCommand::Lock(
+        ["agl", "repo", "component", "lock", "--dry-run"],
+        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Lock(
             ArtifactLockOptions {
                 json: false,
                 dry_run: true,

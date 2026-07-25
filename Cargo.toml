@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/agl-artifact",
     "crates/agl-assets",
     "crates/agl-capabilities",
     "crates/agl-chat",
@@ -46,6 +47,7 @@ repository = "https://github.com/agentlibre/agentLIBRE"
 
 [workspace.dependencies]
 agl-capabilities = { path = "crates/agl-capabilities" }
+agl-artifact = { path = "crates/agl-artifact" }
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
 agl-app = { path = "crates/agl-app" }
@@ -94,6 +96,7 @@ matrix-sdk = { version = "=0.18.0", default-features = false, features = ["bundl
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
+semver = { version = "1.0.28", features = ["serde"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 schemars = "1.2.1"
