@@ -102,7 +102,7 @@ pub fn function_status_with_model_bindings(
             return report;
         }
     };
-    report.id = Some(loaded.front_matter.id.clone());
+    report.id = Some(loaded.front_matter.id().to_owned());
     report.title = Some(loaded.front_matter.title.clone());
     report.system_prompt_path = Some(loaded.system_prompt_path.clone());
     report.inference_config_path = loaded.inference_config_path.clone();

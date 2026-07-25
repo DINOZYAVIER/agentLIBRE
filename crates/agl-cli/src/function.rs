@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agl_functions::{
+use agl_function::{
     FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionSource,
     FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status,
     global_functions_root, list_functions, load_function, resolve_function_reference,
@@ -210,7 +210,7 @@ fn doctor_timeout(
     workspace_root: &std::path::Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<Duration> {
-    let function = agl_functions::resolve_runtime_function(
+    let function = agl_function::resolve_runtime_function(
         reference,
         workspace_root,
         &runtime.paths.config_dir,
@@ -258,7 +258,7 @@ fn print_function_list_entry(function: &FunctionListEntry) {
 }
 
 fn print_loaded_function(function: &LoadedFunction) {
-    println!("function.id={}", function.front_matter.id);
+    println!("function.id={}", function.front_matter.id());
     println!("function.title={}", function.front_matter.title);
     println!("function.source={}", function.locator.source.as_str());
     println!("function.path={}", function.locator.path.display());

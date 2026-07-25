@@ -161,15 +161,16 @@ pub fn resolve_function_reference(
         });
     }
 
-    if let Some(function) = agl_assets::builtin_function(reference) {
+    if let Some(function) = agl_assets::builtin_artifact_package(reference) {
+        let path = builtin_package_path(function.id);
         return Ok(FunctionLocator {
             reference: reference.to_string(),
             source: FunctionSource::Builtin,
-            path: PathBuf::from(function.function_md.source_path),
-            root_dir: PathBuf::from(function.function_md.source_path)
+            root_dir: path
                 .parent()
-                .expect("builtin function source path has parent")
+                .expect("builtin function path has parent")
                 .to_path_buf(),
+            path,
         });
     }
 
@@ -195,7 +196,7 @@ pub fn list_functions(
         global_functions_root(&config_dir),
         &mut entries,
     )?;
-    collect_builtin_function_entries(&mut entries);
+    collect_builtin_entries(&mut entries);
     entries.sort_by(|left, right| {
         left.id
             .cmp(&right.id)
@@ -243,7 +244,7 @@ pub(crate) fn collect_function_entries(
         match load_function(locator) {
             Ok(function) => entries.push(FunctionListEntry {
                 source,
-                id: function.front_matter.id,
+                id: function.front_matter.id().to_owned(),
                 path,
                 valid: true,
                 title: Some(function.front_matter.title),
@@ -262,22 +263,23 @@ pub(crate) fn collect_function_entries(
     Ok(())
 }
 
-pub(crate) fn collect_builtin_function_entries(entries: &mut Vec<FunctionListEntry>) {
-    for function in agl_assets::BUILTIN_FUNCTIONS {
+pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
+    for function in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
+        let path = builtin_package_path(function.id);
         let locator = FunctionLocator {
             reference: function.id.to_string(),
             source: FunctionSource::Builtin,
-            path: PathBuf::from(function.function_md.source_path),
-            root_dir: PathBuf::from(function.function_md.source_path)
+            path: path.clone(),
+            root_dir: path
                 .parent()
-                .expect("builtin function source path has parent")
+                .expect("builtin function path has parent")
                 .to_path_buf(),
         };
         match load_function(locator) {
             Ok(loaded) => entries.push(FunctionListEntry {
                 source: FunctionSource::Builtin,
                 id: function.id.to_string(),
-                path: PathBuf::from(function.function_md.source_path),
+                path: path.clone(),
                 valid: true,
                 title: Some(loaded.front_matter.title),
                 error: None,
@@ -285,13 +287,17 @@ pub(crate) fn collect_builtin_function_entries(entries: &mut Vec<FunctionListEnt
             Err(err) => entries.push(FunctionListEntry {
                 source: FunctionSource::Builtin,
                 id: function.id.to_string(),
-                path: PathBuf::from(function.function_md.source_path),
+                path,
                 valid: false,
                 title: None,
                 error: Some(format!("{err:#}")),
             }),
         }
     }
+}
+
+fn builtin_package_path(id: &str) -> PathBuf {
+    PathBuf::from(format!("builtin:function/{id}/{FUNCTION_FILE_NAME}"))
 }
 
 pub(crate) fn looks_like_path(reference: &str) -> bool {

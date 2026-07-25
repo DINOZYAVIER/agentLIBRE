@@ -117,7 +117,7 @@ pub(crate) fn runtime_function_from_loaded(
         reference: loaded.locator.reference.clone(),
         source: loaded.locator.source,
         path: loaded.locator.path.clone(),
-        id: loaded.front_matter.id.clone(),
+        id: loaded.front_matter.id().to_owned(),
         title: loaded.front_matter.title.clone(),
         description: loaded.front_matter.description.clone(),
         model_profile: loaded.front_matter.model_profile().map(str::to_string),

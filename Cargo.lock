@@ -80,6 +80,7 @@ dependencies = [
 name = "agl-assets"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-config",
  "sha2 0.11.0",
 ]
@@ -106,7 +107,7 @@ dependencies = [
  "agl-config",
  "agl-content",
  "agl-events",
- "agl-functions",
+ "agl-function",
  "agl-host-tools",
  "agl-ids",
  "agl-inference",
@@ -140,7 +141,7 @@ dependencies = [
  "agl-content",
  "agl-cron",
  "agl-daemon",
- "agl-functions",
+ "agl-function",
  "agl-ids",
  "agl-inference",
  "agl-memory",
@@ -224,7 +225,7 @@ dependencies = [
  "agl-content",
  "agl-cron",
  "agl-events",
- "agl-functions",
+ "agl-function",
  "agl-ids",
  "agl-inference",
  "agl-models",
@@ -258,9 +259,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-functions"
+name = "agl-function"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-capabilities",
  "agl-config",

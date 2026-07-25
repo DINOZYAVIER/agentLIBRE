@@ -1,6 +1,14 @@
 ---
-schema: agentfunction/v1
-id: gemma4-26b
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: gemma4-26b
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Gemma4 26B-A4B
 description: Local Gemma4 26B-A4B QAT agent function with native Gemma tool-call formatting.
 model:

@@ -6,7 +6,7 @@ use agl_chat::{
     ToolAccessMode,
 };
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
-use agl_functions::{
+use agl_function::{
     FunctionStatusReport, function_status_with_model_bindings, load_function,
     resolve_function_reference,
 };

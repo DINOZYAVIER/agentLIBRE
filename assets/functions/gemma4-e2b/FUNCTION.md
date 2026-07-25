@@ -1,6 +1,14 @@
 ---
-schema: agentfunction/v1
-id: gemma4-e2b
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: gemma4-e2b
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Gemma 4 E2B
 description: Local Gemma 4 E2B official QAT function with native tool calls.
 model:
