@@ -14,7 +14,7 @@ use agl_repo::{
 use anyhow::{Context, Result, bail};
 
 use crate::args::{
-    ArtifactCommand, ArtifactLockOptions, ArtifactStatusOptions, ArtifactSyncOptions, RepoCommand,
+    ArtifactLockOptions, ArtifactStatusOptions, ArtifactSyncOptions, ComponentCommand, RepoCommand,
     RepoComponentInitOptions, RepoExportProfileOptions, RepoHooksOptions, RepoImportProfileOptions,
     RepoInitOptions, RepoStatusOptions, TaskSpecVerifyOptions,
 };
@@ -26,7 +26,7 @@ pub(crate) fn run_repo(command: RepoCommand) -> Result<()> {
         RepoCommand::ImportProfile(options) => run_repo_import_profile(options),
         RepoCommand::Status(options) => run_repo_status(options),
         RepoCommand::VerifyTasks(options) => run_repo_verify_tasks(options),
-        RepoCommand::Artifact(command) => run_repo_artifact(command),
+        RepoCommand::Component(command) => run_repo_component(command),
         RepoCommand::InstallHooks(options) => run_install_hooks(options),
         RepoCommand::ExportProfile(options) => run_repo_export_profile(options),
     }
@@ -133,17 +133,17 @@ fn run_repo_verify_tasks(options: TaskSpecVerifyOptions) -> Result<()> {
     Ok(())
 }
 
-fn run_repo_artifact(command: ArtifactCommand) -> Result<()> {
+fn run_repo_component(command: ComponentCommand) -> Result<()> {
     match command {
-        ArtifactCommand::Status(options) => run_repo_artifact_status(options, false),
-        ArtifactCommand::Verify(options) => run_repo_artifact_status(options, true),
-        ArtifactCommand::Sync(options) => run_repo_artifact_sync(options),
-        ArtifactCommand::Lock(options) => run_repo_artifact_lock(options),
+        ComponentCommand::Status(options) => run_repo_component_status(options, false),
+        ComponentCommand::Verify(options) => run_repo_component_status(options, true),
+        ComponentCommand::Sync(options) => run_repo_component_sync(options),
+        ComponentCommand::Lock(options) => run_repo_component_lock(options),
     }
 }
 
-fn run_repo_artifact_status(options: ArtifactStatusOptions, verify: bool) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "repo artifact status", "starting command");
+fn run_repo_component_status(options: ArtifactStatusOptions, verify: bool) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo component status", "starting command");
     let report = status_artifacts(
         std::env::current_dir().context("failed to resolve current directory")?,
         &AglArtifactStatusOptions {
@@ -160,8 +160,8 @@ fn run_repo_artifact_status(options: ArtifactStatusOptions, verify: bool) -> Res
     Ok(())
 }
 
-fn run_repo_artifact_sync(options: ArtifactSyncOptions) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "repo artifact sync", "starting command");
+fn run_repo_component_sync(options: ArtifactSyncOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo component sync", "starting command");
     let report = sync_artifacts(
         std::env::current_dir().context("failed to resolve current directory")?,
         &AglArtifactSyncOptions {
@@ -178,8 +178,8 @@ fn run_repo_artifact_sync(options: ArtifactSyncOptions) -> Result<()> {
     Ok(())
 }
 
-fn run_repo_artifact_lock(options: ArtifactLockOptions) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "repo artifact lock", "starting command");
+fn run_repo_component_lock(options: ArtifactLockOptions) -> Result<()> {
+    tracing::info!(target: "agentlibre::app", command = "repo component lock", "starting command");
     let report = lock_artifacts(
         std::env::current_dir().context("failed to resolve current directory")?,
         &AglArtifactLockOptions {

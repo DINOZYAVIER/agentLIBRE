@@ -3,6 +3,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub use agl_artifact::{
+    ArtifactAccess, ArtifactDataClass, ArtifactLock, LockedWorkspaceComponent, WorkspaceComponent,
+    WorkspaceComponentKind,
+};
+
 pub const AGL_DIR: &str = ".agl";
 pub const WORKSPACE_MANIFEST_PATH: &str = ".agl/workspace.toml";
 pub const ARTIFACT_LOCK_PATH: &str = ".agl/artifact-lock.toml";
@@ -152,7 +157,7 @@ pub enum RepoStatusState {
 pub struct ComponentStatus {
     pub name: String,
     pub path: PathBuf,
-    pub kind: WorkspaceArtifactKind,
+    pub kind: WorkspaceComponentKind,
     pub exists: bool,
     pub state: ComponentState,
     pub warnings: Vec<String>,
@@ -281,9 +286,9 @@ impl ArtifactStatusReport {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ArtifactStatus {
     pub id: String,
-    pub storage: WorkspaceArtifactKind,
+    pub storage: WorkspaceComponentKind,
     pub path: PathBuf,
-    pub kind: ArtifactKind,
+    pub kind: ArtifactDataClass,
     pub access: ArtifactAccess,
     pub required: bool,
     pub validation: Option<String>,
@@ -319,23 +324,23 @@ pub struct ArtifactStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UndeclaredArtifactRoot {
     pub path: PathBuf,
-    pub suggested_kind: ArtifactKind,
+    pub suggested_kind: ArtifactDataClass,
     pub suggested_target: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArtifactPathHandleRequest {
+pub struct ComponentPathHandleRequest {
     pub path: PathBuf,
     pub access: ArtifactAccess,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ArtifactHandle {
-    pub artifact_id: String,
+pub struct ComponentHandle {
+    pub component_id: String,
     pub root: PathBuf,
     pub relative_path: PathBuf,
     pub path_in_artifact: PathBuf,
-    pub kind: ArtifactKind,
+    pub kind: ArtifactDataClass,
     pub access: ArtifactAccess,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
@@ -397,7 +402,7 @@ pub struct ArtifactLockReport {
     pub lock_path: PathBuf,
     pub dry_run: bool,
     pub wrote: bool,
-    pub lock: ArtifactLockFile,
+    pub lock: ArtifactLock,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -406,39 +411,6 @@ impl ArtifactLockReport {
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactLockFile {
-    #[serde(default)]
-    pub locked_at_unix_ms: u64,
-    pub version: u32,
-    pub artifacts: BTreeMap<String, LockedArtifact>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedArtifact {
-    pub id: String,
-    pub storage: WorkspaceArtifactKind,
-    pub path: PathBuf,
-    pub required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    pub kind: ArtifactKind,
-    pub access: ArtifactAccess,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation: Option<String>,
-    pub definition_hash: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub materialized_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -477,12 +449,14 @@ pub enum HookInstallAction {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceManifest {
+pub struct RepoManifest {
     pub version: u32,
     pub profile: String,
     pub functions: WorkspaceFunctions,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub artifacts: BTreeMap<String, WorkspaceArtifact>,
+    pub sources: BTreeMap<String, agl_artifact::ArtifactSourceDeclaration>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifacts: BTreeMap<String, WorkspaceComponent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -505,31 +479,9 @@ pub struct WorkspaceProfile {
     pub version: u32,
     pub name: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub artifacts: BTreeMap<String, WorkspaceArtifact>,
+    pub components: BTreeMap<String, WorkspaceComponent>,
     #[serde(default)]
     pub policy: WorkspaceProfilePolicy,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkspaceArtifact {
-    pub kind: WorkspaceArtifactKind,
-    pub path: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
-    #[serde(default)]
-    pub required: bool,
-    pub access: ArtifactAccess,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validation: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub create: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -569,31 +521,4 @@ pub struct RepoExportProfileReport {
     pub profile_path: PathBuf,
     pub wrote: bool,
     pub profile: WorkspaceProfile,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WorkspaceArtifactKind {
-    Git,
-    Submodule,
-    Local,
-    Generated,
-    Ignored,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    Source,
-    Generated,
-    State,
-    Cache,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactAccess {
-    Read,
-    Write,
-    ReadWrite,
 }

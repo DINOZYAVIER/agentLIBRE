@@ -11,7 +11,7 @@ use agl_capabilities::{
     ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult,
     CapabilityId, OperationKind, ProviderDeclaration, ProviderId, StateEffect,
 };
-use agl_repo::{ArtifactAccess, ArtifactPathHandleRequest};
+use agl_repo::{ArtifactAccess, ComponentPathHandleRequest};
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -290,9 +290,9 @@ impl CoreTools {
             return Ok(());
         }
 
-        agl_repo::resolve_artifact_path_handle(
+        agl_repo::resolve_component_path_handle(
             &self.root,
-            &ArtifactPathHandleRequest {
+            &ComponentPathHandleRequest {
                 path: relative.to_path_buf(),
                 access: ArtifactAccess::Write,
             },
@@ -459,7 +459,7 @@ mod tests {
         let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
         let mut manifest = fs::read_to_string(&manifest_path).unwrap();
         manifest.push_str(&format!(
-            "\n[artifacts.{id}]\nkind = \"local\"\npath = {path:?}\nrequired = true\naccess = {access:?}\n"
+            "\n[components.{id}]\nkind = \"local\"\npath = {path:?}\nrequired = true\naccess = {access:?}\n"
         ));
         fs::write(manifest_path, manifest).unwrap();
     }

@@ -399,11 +399,11 @@ fn command_help_exits_successfully_for_advanced_commands() {
         &["repo", "import-profile", "--help"][..],
         &["repo", "status", "--help"][..],
         &["repo", "verify-tasks", "--help"][..],
-        &["repo", "artifact", "--help"][..],
-        &["repo", "artifact", "status", "--help"][..],
-        &["repo", "artifact", "verify", "--help"][..],
-        &["repo", "artifact", "sync", "--help"][..],
-        &["repo", "artifact", "lock", "--help"][..],
+        &["repo", "component", "--help"][..],
+        &["repo", "component", "status", "--help"][..],
+        &["repo", "component", "verify", "--help"][..],
+        &["repo", "component", "sync", "--help"][..],
+        &["repo", "component", "lock", "--help"][..],
         &["repo", "install-hooks", "--help"][..],
         &["repo", "export-profile", "--help"][..],
         &["daemon", "--help"][..],
@@ -1163,8 +1163,8 @@ fn repo_init_remains_the_advanced_manifest_only_command() {
     assert_contains(&stdout(&init), "state=initialized");
     assert!(repo.path().join(".agl/workspace.toml").is_file());
     let manifest = fs::read_to_string(repo.path().join(".agl/workspace.toml")).unwrap();
-    assert_contains(&manifest, "[functions]");
-    assert_contains(&manifest, "default = \"gemma4-e4b\"");
+    assert_contains(&manifest, "version = 2");
+    assert_contains(&manifest, "default_function = \"function:gemma4-e4b@^1.0\"");
     assert!(
         !repo.path().join(".agl/functions").exists(),
         "manifest-only init must not invent an artifact root"
@@ -1188,7 +1188,7 @@ fn init_accepts_local_workspace_profile_file() {
 version = 1
 name = "portable-repo-workflow"
 
-[artifacts.skills]
+[components.skills]
 kind = "git"
 path = ".agl/skills"
 url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
@@ -1196,7 +1196,7 @@ rev = "v0.2.0"
 required = true
 access = "read"
 
-[artifacts.tasks]
+[components.tasks]
 kind = "git"
 path = ".agl/tasks"
 url = "ssh://git@example.invalid/agentlibre/tasks.git"
@@ -1205,7 +1205,7 @@ required = true
 access = "read_write"
 validation = "agl.task_spec.v1"
 
-[artifacts.state]
+[components.state]
 kind = "ignored"
 path = ".agl/state"
 required = false
@@ -1256,7 +1256,7 @@ fn repo_export_profile_writes_portable_policy_manifest() {
     let content = fs::read_to_string(&out)
         .unwrap_or_else(|err| panic!("failed to read profile export {}: {err}", out.display()));
     assert_contains(&content, "[policy.hooks]");
-    assert!(!content.contains("[artifacts."));
+    assert!(!content.contains("[components."));
     assert!(
         !content.contains("SECRET_LOCAL_TRUST_SHOULD_NOT_EXPORT"),
         "profile export must not include local trust:\n{content}"
@@ -1307,7 +1307,7 @@ fn init_then_status_is_healthy_without_workspace_artifacts() {
     assert_contains(&status_stdout, "state=ok");
     assert!(!status_stdout.contains("component.skills"));
 
-    let artifact_status = run_agl_in(repo.path(), &["repo", "artifact", "status"]);
+    let artifact_status = run_agl_in(repo.path(), &["repo", "component", "status"]);
     assert_success_no_stderr(&artifact_status);
     let artifact_stdout = stdout(&artifact_status);
     assert_contains(&artifact_stdout, "state=ok");
@@ -2366,11 +2366,11 @@ fn git_run(root: &std::path::Path, args: &[&str]) {
 fn write_workspace_skill(repo: &std::path::Path, name: &str) {
     let manifest_path = repo.join(".agl/workspace.toml");
     let mut manifest = fs::read_to_string(&manifest_path).unwrap();
-    if !manifest.contains("[artifacts.skills]") {
+    if !manifest.contains("[components.skills]") {
         manifest.push_str(
             r#"
 
-[artifacts.skills]
+[components.skills]
 kind = "git"
 path = ".agl/skills"
 url = "ssh://git@example.invalid/agentlibre/skills.git"
