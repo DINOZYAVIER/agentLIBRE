@@ -7,6 +7,7 @@ use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use semver::{Version, VersionReq};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as ShaDigest, Sha256};
 use thiserror::Error;
 
 pub const ARTIFACT_SCHEMA: &str = "agentlibre.artifact/v1";
@@ -103,6 +105,42 @@ pub enum ArtifactError {
     AdapterPackageMismatch { type_id: String, actual_id: String },
     #[error("adapter `{type_id}` rejected package payload: {reason}")]
     AdapterPayload { type_id: String, reason: String },
+    #[error("ambiguous candidate for `{type_id}:{package_id}@{version}`: {sources:?}")]
+    AmbiguousCandidate {
+        type_id: String,
+        package_id: String,
+        version: String,
+        sources: Vec<String>,
+    },
+    #[error("no compatible candidate for `{type_id}:{package_id}`")]
+    NoCompatibleCandidate { type_id: String, package_id: String },
+    #[error("missing artifact dependency `{reference}` from `{parent}`")]
+    MissingDependency { parent: String, reference: String },
+    #[error("artifact dependency cycle: {path:?}")]
+    DependencyCycle { path: Vec<String> },
+    #[error("artifact constraints conflict for `{key}`: `{requirement}`")]
+    ConstraintConflict { key: String, requirement: String },
+    #[error("invalid package tree digest `{value}`")]
+    InvalidPackageDigest { value: String },
+    #[error("reserved mutable/control-plane file `{path}` is inside the package")]
+    ReservedPackageFile { path: String },
+    #[error("artifact lock has unsupported version `{version}`")]
+    UnsupportedLockVersion { version: u32 },
+    #[error("artifact lock is missing package `{key}`")]
+    LockMissingPackage { key: String },
+    #[error(
+        "artifact lock package `{key}` has drifted {field}: expected `{expected}`, got `{actual}`"
+    )]
+    LockDrift {
+        key: String,
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("artifact lock package key `{key}` is invalid")]
+    InvalidLockPackageKey { key: String },
+    #[error("failed to write artifact lock `{path}`: {reason}")]
+    LockIo { path: String, reason: String },
 }
 
 impl ArtifactError {
@@ -139,6 +177,18 @@ impl ArtifactError {
             Self::AdapterTypeMismatch { .. } => "adapter_type_mismatch",
             Self::AdapterPackageMismatch { .. } => "adapter_package_mismatch",
             Self::AdapterPayload { .. } => "adapter_payload",
+            Self::AmbiguousCandidate { .. } => "ambiguous_candidate",
+            Self::NoCompatibleCandidate { .. } => "no_compatible_candidate",
+            Self::MissingDependency { .. } => "missing_dependency",
+            Self::DependencyCycle { .. } => "dependency_cycle",
+            Self::ConstraintConflict { .. } => "constraint_conflict",
+            Self::InvalidPackageDigest { .. } => "invalid_package_digest",
+            Self::ReservedPackageFile { .. } => "reserved_package_file",
+            Self::UnsupportedLockVersion { .. } => "unsupported_lock_version",
+            Self::LockMissingPackage { .. } => "lock_missing_package",
+            Self::LockDrift { .. } => "lock_drift",
+            Self::InvalidLockPackageKey { .. } => "invalid_lock_package_key",
+            Self::LockIo { .. } => "lock_io",
         }
     }
 }
@@ -1712,6 +1762,612 @@ fn append_package_version(
     let mut path = append_package_id(root, package_id);
     path.push(version.to_string());
     path
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PackageTreeDigest(String);
+
+impl PackageTreeDigest {
+    pub fn new(value: impl Into<String>) -> Result<Self, ArtifactError> {
+        let value = value.into();
+        let valid = value.len() == 71
+            && value.starts_with("sha256:")
+            && value[7..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+        if !valid {
+            return Err(ArtifactError::InvalidPackageDigest { value });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for PackageTreeDigest {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PackageTreeDigest {
+    type Err = ArtifactError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for PackageTreeDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageTreeDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(D::Error::custom)
+    }
+}
+
+pub fn compute_package_digest(
+    view: &dyn ArtifactPackageView,
+) -> Result<PackageTreeDigest, ArtifactError> {
+    let mut files = view.files()?;
+    files.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentlibre.package-tree.v1\0");
+    let mut previous = None;
+    for path in files {
+        if previous.as_ref() == Some(&path) {
+            return Err(ArtifactError::DuplicatePackageFile {
+                path: path.to_string(),
+            });
+        }
+        if reserved_package_file(&path) {
+            return Err(ArtifactError::ReservedPackageFile {
+                path: path.to_string(),
+            });
+        }
+        let bytes = view.read_file(&path)?;
+        hasher.update((path.as_str().len() as u64).to_be_bytes());
+        hasher.update(path.as_str().as_bytes());
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+        previous = Some(path);
+    }
+    let digest = hasher.finalize();
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    PackageTreeDigest::new(format!("sha256:{hex}"))
+}
+
+fn reserved_package_file(path: &ArtifactRelativePath) -> bool {
+    let value = path.as_str();
+    value.starts_with(".agl/")
+        || value == "workspace.toml"
+        || value == "artifact-lock.toml"
+        || value == "skills.lock"
+        || value.starts_with("config/")
+        || value.starts_with("state/")
+        || value.starts_with("cache/")
+        || value.contains("/source-index")
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedWorkspaceComponent {
+    pub definition_digest: Option<String>,
+    pub source_id: Option<ArtifactSourceId>,
+    pub source_kind: Option<ArtifactSourceKind>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockedPackage {
+    pub type_id: ArtifactTypeId,
+    pub id: ArtifactPackageId,
+    pub version: ArtifactVersion,
+    pub source_tier: ArtifactSourceTier,
+    pub source_kind: ArtifactSourceKind,
+    pub source_id: ArtifactSourceId,
+    pub package_digest: PackageTreeDigest,
+    pub envelope_schema: ArtifactSchemaId,
+    pub payload_schema: ArtifactSchemaId,
+    #[serde(default)]
+    pub source_revision: Option<String>,
+    #[serde(default)]
+    pub source_tree: Option<String>,
+    pub dependencies: Vec<String>,
+}
+
+impl LockedPackage {
+    pub fn key(&self) -> String {
+        format!("{}:{}@{}", self.type_id, self.id, self.version)
+    }
+
+    fn validate(&self, key: &str) -> Result<(), ArtifactError> {
+        if self.key() != key {
+            return Err(ArtifactError::InvalidLockPackageKey {
+                key: key.to_owned(),
+            });
+        }
+        let mut sorted = self.dependencies.clone();
+        sorted.sort();
+        sorted.dedup();
+        if sorted != self.dependencies {
+            return Err(ArtifactError::LockDrift {
+                key: key.to_owned(),
+                field: "dependencies".to_owned(),
+                expected: sorted.join(","),
+                actual: self.dependencies.join(","),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactLock {
+    pub version: u32,
+    #[serde(default)]
+    pub components: BTreeMap<String, LockedWorkspaceComponent>,
+    #[serde(default)]
+    pub packages: BTreeMap<String, LockedPackage>,
+}
+
+impl ArtifactLock {
+    pub const VERSION: u32 = 2;
+
+    pub fn new(
+        components: BTreeMap<String, LockedWorkspaceComponent>,
+        packages: BTreeMap<String, LockedPackage>,
+    ) -> Result<Self, ArtifactError> {
+        let lock = Self {
+            version: Self::VERSION,
+            components,
+            packages,
+        };
+        lock.validate()?;
+        Ok(lock)
+    }
+
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        if self.version != Self::VERSION {
+            return Err(ArtifactError::UnsupportedLockVersion {
+                version: self.version,
+            });
+        }
+        for (key, package) in &self.packages {
+            package.validate(key)?;
+        }
+        Ok(())
+    }
+
+    pub fn to_toml(&self) -> Result<String, ArtifactError> {
+        self.validate()?;
+        toml::to_string(self).map_err(|error| ArtifactError::LockIo {
+            path: "<memory>".to_owned(),
+            reason: error.to_string(),
+        })
+    }
+
+    pub fn from_toml(value: &str) -> Result<Self, ArtifactError> {
+        let lock: Self = toml::from_str(value).map_err(|error| ArtifactError::LockIo {
+            path: "<memory>".to_owned(),
+            reason: error.to_string(),
+        })?;
+        lock.validate()?;
+        Ok(lock)
+    }
+
+    pub fn write_atomic(&self, path: impl AsRef<Path>) -> Result<(), ArtifactError> {
+        let path = path.as_ref();
+        let content = self.to_toml()?;
+        let temporary = path.with_extension("toml.tmp");
+        let result = (|| {
+            let mut file = fs::File::create(&temporary)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)?;
+            Ok::<(), std::io::Error>(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(ArtifactError::LockIo {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedArtifact {
+    pub candidate: ArtifactCandidate,
+    pub envelope: ArtifactEnvelope,
+    pub package_digest: PackageTreeDigest,
+    pub dependencies: Vec<String>,
+}
+
+impl ResolvedArtifact {
+    pub fn key(&self) -> String {
+        format!(
+            "{}:{}@{}",
+            self.candidate.type_id, self.candidate.package_id, self.candidate.version
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedArtifactGraph {
+    pub root: String,
+    pub nodes: BTreeMap<String, ResolvedArtifact>,
+}
+
+impl ResolvedArtifactGraph {
+    pub fn lock(&self) -> Result<ArtifactLock, ArtifactError> {
+        let mut packages = BTreeMap::new();
+        for node in self.nodes.values() {
+            let locked = LockedPackage {
+                type_id: node.candidate.type_id.clone(),
+                id: node.candidate.package_id.clone(),
+                version: node.candidate.version.clone(),
+                source_tier: node.candidate.tier,
+                source_kind: node.candidate.kind,
+                source_id: node.candidate.source_id.clone(),
+                package_digest: node.package_digest.clone(),
+                envelope_schema: node.envelope.schema.clone(),
+                payload_schema: node.envelope.payload_schema.clone(),
+                source_revision: None,
+                source_tree: None,
+                dependencies: node.dependencies.clone(),
+            };
+            packages.insert(locked.key(), locked);
+        }
+        ArtifactLock::new(BTreeMap::new(), packages)
+    }
+
+    pub fn verify_lock(&self, lock: &ArtifactLock) -> Result<(), ArtifactError> {
+        lock.validate()?;
+        for node in self.nodes.values() {
+            let key = node.key();
+            let Some(locked) = lock.packages.get(&key) else {
+                return Err(ArtifactError::LockMissingPackage { key });
+            };
+            compare_lock_field(
+                &key,
+                "package_digest",
+                node.package_digest.to_string(),
+                locked.package_digest.to_string(),
+            )?;
+            compare_lock_field(
+                &key,
+                "source_tier",
+                source_tier_name(locked.source_tier).to_owned(),
+                source_tier_name(node.candidate.tier).to_owned(),
+            )?;
+            compare_lock_field(
+                &key,
+                "source_kind",
+                source_kind_name(locked.source_kind).to_owned(),
+                source_kind_name(node.candidate.kind).to_owned(),
+            )?;
+            compare_lock_field(
+                &key,
+                "source_id",
+                locked.source_id.to_string(),
+                node.candidate.source_id.to_string(),
+            )?;
+            compare_lock_field(
+                &key,
+                "envelope_schema",
+                locked.envelope_schema.to_string(),
+                node.envelope.schema.to_string(),
+            )?;
+            compare_lock_field(
+                &key,
+                "payload_schema",
+                locked.payload_schema.to_string(),
+                node.envelope.payload_schema.to_string(),
+            )?;
+            compare_lock_field(
+                &key,
+                "dependencies",
+                locked.dependencies.join(","),
+                node.dependencies.join(","),
+            )?;
+        }
+        if lock.packages.len() != self.nodes.len() {
+            let extra = lock
+                .packages
+                .keys()
+                .find(|key| !self.nodes.contains_key(*key))
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            return Err(ArtifactError::LockDrift {
+                key: extra,
+                field: "packages".to_owned(),
+                expected: self.nodes.len().to_string(),
+                actual: lock.packages.len().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_payloads(
+        &self,
+        registry: &ArtifactAdapterRegistry,
+    ) -> Result<(), ArtifactError> {
+        for node in self.nodes.values() {
+            let adapter = registry.lookup(&node.candidate.type_id)?;
+            adapter.validate_payload(node.candidate.view(), &node.envelope)?;
+        }
+        Ok(())
+    }
+}
+
+fn compare_lock_field(
+    key: &str,
+    field: &str,
+    expected: String,
+    actual: String,
+) -> Result<(), ArtifactError> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(ArtifactError::LockDrift {
+            key: key.to_owned(),
+            field: field.to_owned(),
+            expected,
+            actual,
+        })
+    }
+}
+
+fn source_tier_name(value: ArtifactSourceTier) -> &'static str {
+    match value {
+        ArtifactSourceTier::Explicit => "explicit",
+        ArtifactSourceTier::Workspace => "workspace",
+        ArtifactSourceTier::User => "user",
+        ArtifactSourceTier::System => "system",
+        ArtifactSourceTier::Builtin => "builtin",
+    }
+}
+
+fn source_kind_name(value: ArtifactSourceKind) -> &'static str {
+    match value {
+        ArtifactSourceKind::Directory => "directory",
+        ArtifactSourceKind::Git => "git",
+        ArtifactSourceKind::Embedded => "embedded",
+    }
+}
+
+#[derive(Clone)]
+pub struct ArtifactResolver {
+    registry: Arc<ArtifactAdapterRegistry>,
+    sources: Vec<Arc<dyn ArtifactSource>>,
+}
+
+impl fmt::Debug for ArtifactResolver {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ArtifactResolver")
+            .field("source_count", &self.sources.len())
+            .finish()
+    }
+}
+
+impl ArtifactResolver {
+    pub fn new(
+        registry: Arc<ArtifactAdapterRegistry>,
+        sources: Vec<Arc<dyn ArtifactSource>>,
+    ) -> Self {
+        Self { registry, sources }
+    }
+
+    pub fn resolve(
+        &self,
+        root: &ArtifactPackageRef,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        let mut nodes = BTreeMap::new();
+        let mut stack = Vec::new();
+        let root_key = self.visit(
+            &root.type_id,
+            &root.package_id,
+            std::slice::from_ref(&root.version_req),
+            &mut stack,
+            &mut nodes,
+        )?;
+        Ok(ResolvedArtifactGraph {
+            root: root_key,
+            nodes,
+        })
+    }
+
+    pub fn resolve_with_lock(
+        &self,
+        root: &ArtifactPackageRef,
+        lock: &ArtifactLock,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        let graph = self.resolve(root)?;
+        graph.verify_lock(lock)?;
+        Ok(graph)
+    }
+
+    pub fn resolve_and_validate(
+        &self,
+        root: &ArtifactPackageRef,
+        lock: Option<&ArtifactLock>,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        let graph = self.resolve(root)?;
+        if let Some(lock) = lock {
+            graph.verify_lock(lock)?;
+        }
+        graph.validate_payloads(&self.registry)?;
+        Ok(graph)
+    }
+
+    fn visit(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+        constraints: &[ArtifactVersionReq],
+        stack: &mut Vec<String>,
+        nodes: &mut BTreeMap<String, ResolvedArtifact>,
+    ) -> Result<String, ArtifactError> {
+        let identity = format!("{}:{}", type_id, package_id);
+        if let Some(position) = stack.iter().position(|entry| entry == &identity) {
+            let mut cycle = stack[position..].to_vec();
+            cycle.push(identity);
+            return Err(ArtifactError::DependencyCycle { path: cycle });
+        }
+        if let Some(existing) = nodes.values().find(|node| {
+            node.candidate.type_id == *type_id && node.candidate.package_id == *package_id
+        }) {
+            for constraint in constraints {
+                if !constraint.matches(&existing.candidate.version) {
+                    return Err(ArtifactError::ConstraintConflict {
+                        key: existing.key(),
+                        requirement: constraint.to_string(),
+                    });
+                }
+            }
+            return Ok(existing.key());
+        }
+
+        let candidate = self.select_candidate(type_id, package_id, constraints)?;
+        let adapter = self.registry.lookup(type_id)?;
+        let envelope = adapter.extract_envelope(candidate.view())?;
+        envelope.validate()?;
+        if envelope.type_id != *type_id {
+            return Err(ArtifactError::AdapterTypeMismatch {
+                type_id: type_id.to_string(),
+                actual_type: envelope.type_id.to_string(),
+            });
+        }
+        if envelope.id != *package_id {
+            return Err(ArtifactError::AdapterPackageMismatch {
+                type_id: type_id.to_string(),
+                actual_id: envelope.id.to_string(),
+            });
+        }
+        if envelope.version != candidate.version {
+            return Err(ArtifactError::CandidateVersionMismatch {
+                candidate: candidate.version.to_string(),
+                envelope: envelope.version.to_string(),
+            });
+        }
+        let package_digest = compute_package_digest(candidate.view())?;
+        let key = format!("{}:{}@{}", type_id, package_id, candidate.version);
+        stack.push(identity);
+        let mut dependencies = Vec::new();
+        for requirement in &envelope.requires {
+            let dependency_key = self
+                .visit(
+                    requirement.type_id(),
+                    requirement.package_id(),
+                    std::slice::from_ref(&requirement.reference().version_req),
+                    stack,
+                    nodes,
+                )
+                .map_err(|error| match error {
+                    ArtifactError::NoCompatibleCandidate { .. } => {
+                        ArtifactError::MissingDependency {
+                            parent: key.clone(),
+                            reference: requirement.to_string(),
+                        }
+                    }
+                    other => other,
+                })?;
+            dependencies.push(dependency_key);
+        }
+        stack.pop();
+        dependencies.sort();
+        let node = ResolvedArtifact {
+            candidate,
+            envelope,
+            package_digest,
+            dependencies,
+        };
+        nodes.insert(key.clone(), node);
+        Ok(key)
+    }
+
+    fn select_candidate(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+        constraints: &[ArtifactVersionReq],
+    ) -> Result<ArtifactCandidate, ArtifactError> {
+        let mut sources = self.sources.clone();
+        sources.sort_by_key(|source| (source.tier(), source.id().clone()));
+        let explicit = sources
+            .iter()
+            .any(|source| source.tier() == ArtifactSourceTier::Explicit);
+        let tiers = [
+            ArtifactSourceTier::Explicit,
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceTier::User,
+            ArtifactSourceTier::System,
+            ArtifactSourceTier::Builtin,
+        ];
+        for tier in tiers {
+            if explicit && tier != ArtifactSourceTier::Explicit {
+                break;
+            }
+            let mut candidates = Vec::new();
+            for source in sources.iter().filter(|source| source.tier() == tier) {
+                candidates.extend(source.candidates(type_id)?.into_iter().filter(|candidate| {
+                    &candidate.package_id == package_id
+                        && constraints
+                            .iter()
+                            .all(|constraint| constraint.matches(&candidate.version))
+                }));
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+            let version = candidates
+                .iter()
+                .map(|candidate| &candidate.version)
+                .max()
+                .expect("non-empty candidates")
+                .clone();
+            let matching = candidates
+                .into_iter()
+                .filter(|candidate| candidate.version == version)
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                return Err(ArtifactError::AmbiguousCandidate {
+                    type_id: type_id.to_string(),
+                    package_id: package_id.to_string(),
+                    version: version.to_string(),
+                    sources: matching
+                        .iter()
+                        .map(|candidate| candidate.source_id.to_string())
+                        .collect(),
+                });
+            }
+            return Ok(matching.into_iter().next().expect("one candidate"));
+        }
+        Err(ArtifactError::NoCompatibleCandidate {
+            type_id: type_id.to_string(),
+            package_id: package_id.to_string(),
+        })
+    }
 }
 
 fn valid_dotted_id(value: &str, minimum_segments: usize) -> bool {

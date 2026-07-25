@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use agl_artifact::{
     AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactAdapterRegistry,
-    ArtifactCandidate, ArtifactDataClass, ArtifactEnvelope, ArtifactError, ArtifactPackageId,
-    ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter, ArtifactPathScope,
-    ArtifactRelativePath, ArtifactSource, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
-    ArtifactTypeId, ArtifactVersion, ArtifactVersionReq, DirectoryArtifactSource,
-    DirectoryPackageView, EXTENSION_ROOT, ErasedArtifactPayload, FUNCTION_ROOT,
-    InMemoryPackageView, SKILL_ROOT, StaticArtifactSource,
+    ArtifactCandidate, ArtifactDataClass, ArtifactEnvelope, ArtifactError, ArtifactLock,
+    ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
+    ArtifactPathScope, ArtifactRelativePath, ArtifactResolver, ArtifactSource, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, ArtifactVersion, ArtifactVersionReq,
+    DirectoryArtifactSource, DirectoryPackageView, EXTENSION_ROOT, ErasedArtifactPayload,
+    FUNCTION_ROOT, InMemoryPackageView, SKILL_ROOT, StaticArtifactSource,
 };
 
 struct FixtureAdapter {
@@ -379,6 +379,356 @@ fn path_router_derives_separate_scopes_without_touching_filesystem() {
             .unwrap(),
         PathBuf::from("/xdg/cache/functions")
     );
+}
+
+#[test]
+fn package_digest_matches_golden_vector_and_is_order_independent() {
+    let first = InMemoryPackageView::new(vec![
+        ("b.txt".parse().unwrap(), b"B".to_vec()),
+        ("a.txt".parse().unwrap(), b"A".to_vec()),
+    ])
+    .unwrap();
+    let second = InMemoryPackageView::new(vec![
+        ("a.txt".parse().unwrap(), b"A".to_vec()),
+        ("b.txt".parse().unwrap(), b"B".to_vec()),
+    ])
+    .unwrap();
+    let left = agl_artifact::compute_package_digest(&first).unwrap();
+    let right = agl_artifact::compute_package_digest(&second).unwrap();
+    assert_eq!(left, right);
+    assert_eq!(
+        left.to_string(),
+        "sha256:15ad0b9dce7df0c6839e598cc00e588881323770ebe311bbeadc0d5e01c23a25"
+    );
+    let forbidden = InMemoryPackageView::new(vec![(
+        "artifact-lock.toml".parse().unwrap(),
+        b"mutable".to_vec(),
+    )])
+    .unwrap();
+    assert!(matches!(
+        agl_artifact::compute_package_digest(&forbidden),
+        Err(ArtifactError::ReservedPackageFile { .. })
+    ));
+}
+
+#[test]
+fn resolver_obeys_tier_precedence_compatibility_and_ambiguity() {
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([LifecycleAdapter {
+            descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+        }])
+        .unwrap(),
+    );
+    let workspace = StaticArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "workspace",
+            ArtifactSourceTier::Workspace,
+            "2.0.0",
+            "function",
+            "example",
+            &[],
+            false,
+        )],
+    )
+    .unwrap();
+    let user = StaticArtifactSource::new(
+        "user".parse().unwrap(),
+        ArtifactSourceTier::User,
+        ArtifactSourceKind::Directory,
+        vec![
+            candidate_for(
+                "user",
+                ArtifactSourceTier::User,
+                "1.2.0",
+                "function",
+                "example",
+                &[],
+                false,
+            ),
+            candidate_for(
+                "user",
+                ArtifactSourceTier::User,
+                "1.5.0",
+                "function",
+                "example",
+                &[],
+                false,
+            ),
+        ],
+    )
+    .unwrap();
+    let resolver =
+        ArtifactResolver::new(registry, vec![Arc::new(workspace), Arc::new(user.clone())]);
+    let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
+    let graph = resolver.resolve(&root).unwrap();
+    let node = graph.nodes.get(&graph.root).unwrap();
+    assert_eq!(node.candidate.version, version("1.5.0"));
+
+    let ambiguous = StaticArtifactSource::new(
+        "user-two".parse().unwrap(),
+        ArtifactSourceTier::User,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "user-two",
+            ArtifactSourceTier::User,
+            "1.5.0",
+            "function",
+            "example",
+            &[],
+            false,
+        )],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(
+        Arc::new(
+            ArtifactAdapterRegistry::new([LifecycleAdapter {
+                descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+            }])
+            .unwrap(),
+        ),
+        vec![Arc::new(user), Arc::new(ambiguous)],
+    );
+    assert!(matches!(
+        resolver.resolve(&root),
+        Err(ArtifactError::AmbiguousCandidate { .. })
+    ));
+}
+
+#[test]
+fn explicit_sources_do_not_fall_through() {
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([LifecycleAdapter {
+            descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+        }])
+        .unwrap(),
+    );
+    let explicit = StaticArtifactSource::new(
+        "explicit".parse().unwrap(),
+        ArtifactSourceTier::Explicit,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "explicit",
+            ArtifactSourceTier::Explicit,
+            "2.0.0",
+            "function",
+            "example",
+            &[],
+            false,
+        )],
+    )
+    .unwrap();
+    let user = StaticArtifactSource::new(
+        "user".parse().unwrap(),
+        ArtifactSourceTier::User,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "user",
+            ArtifactSourceTier::User,
+            "1.0.0",
+            "function",
+            "example",
+            &[],
+            false,
+        )],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(registry, vec![Arc::new(explicit), Arc::new(user)]);
+    let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
+    assert!(matches!(
+        resolver.resolve(&root),
+        Err(ArtifactError::NoCompatibleCandidate { .. })
+    ));
+}
+
+#[test]
+fn graph_merges_dependencies_and_lock_is_deterministic() {
+    let function = ArtifactTypeId::function();
+    let skill = ArtifactTypeId::skill();
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([
+            LifecycleAdapter {
+                descriptor: descriptor(function.clone(), FUNCTION_ROOT, "FUNCTION.md"),
+            },
+            LifecycleAdapter {
+                descriptor: descriptor(skill.clone(), SKILL_ROOT, "SKILL.md"),
+            },
+        ])
+        .unwrap(),
+    );
+    let root_candidate = candidate_for(
+        "workspace",
+        ArtifactSourceTier::Workspace,
+        "1.0.0",
+        "function",
+        "example",
+        &["skill:workflow@^1.0"],
+        true,
+    );
+    let skill_candidate = candidate_for(
+        "workspace",
+        ArtifactSourceTier::Workspace,
+        "1.2.0",
+        "skill",
+        "workflow",
+        &[],
+        true,
+    );
+    let source = StaticArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        vec![root_candidate, skill_candidate],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(registry.clone(), vec![Arc::new(source)]);
+    let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
+    let graph = resolver.resolve(&root).unwrap();
+    assert_eq!(graph.nodes.len(), 2);
+    assert!(graph.validate_payloads(&registry).is_ok());
+    let lock = graph.lock().unwrap();
+    let first = lock.to_toml().unwrap();
+    let second = graph.lock().unwrap().to_toml().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(ArtifactLock::from_toml(&first).unwrap(), lock);
+    graph.verify_lock(&lock).unwrap();
+}
+
+#[test]
+fn resolver_reports_missing_dependencies_and_full_cycles() {
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([
+            LifecycleAdapter {
+                descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+            },
+            LifecycleAdapter {
+                descriptor: descriptor(ArtifactTypeId::skill(), SKILL_ROOT, "SKILL.md"),
+            },
+        ])
+        .unwrap(),
+    );
+    let missing = StaticArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "workspace",
+            ArtifactSourceTier::Workspace,
+            "1.0.0",
+            "function",
+            "example",
+            &["skill:missing@^1.0"],
+            false,
+        )],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(registry.clone(), vec![Arc::new(missing)]);
+    let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
+    assert!(matches!(
+        resolver.resolve(&root),
+        Err(ArtifactError::MissingDependency { .. })
+    ));
+
+    let cycle = StaticArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        vec![
+            candidate_for(
+                "workspace",
+                ArtifactSourceTier::Workspace,
+                "1.0.0",
+                "function",
+                "example",
+                &["skill:workflow@^1.0"],
+                false,
+            ),
+            candidate_for(
+                "workspace",
+                ArtifactSourceTier::Workspace,
+                "1.0.0",
+                "skill",
+                "workflow",
+                &["function:example@^1.0"],
+                false,
+            ),
+        ],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(registry, vec![Arc::new(cycle)]);
+    let error = resolver.resolve(&root).unwrap_err();
+    assert!(matches!(error, ArtifactError::DependencyCycle { .. }));
+    assert_eq!(error.code(), "dependency_cycle");
+}
+
+#[test]
+fn failed_lock_refresh_preserves_previous_bytes() {
+    let path = temp_dir("lock").join("artifact-lock.toml");
+    let lock = ArtifactLock::new(Default::default(), Default::default()).unwrap();
+    lock.write_atomic(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let mut invalid = lock;
+    invalid.version = 1;
+    assert!(invalid.write_atomic(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+fn candidate_for(
+    source_id: &str,
+    tier: ArtifactSourceTier,
+    version: &str,
+    type_name: &str,
+    id: &str,
+    requires: &[&str],
+    with_payload: bool,
+) -> ArtifactCandidate {
+    let envelope = envelope_for(type_name, id, version, requires);
+    let mut files = vec![
+        (
+            "artifact.json".parse().unwrap(),
+            serde_json::to_vec(&envelope).unwrap(),
+        ),
+        (
+            if type_name == "skill" {
+                "SKILL.md".parse().unwrap()
+            } else {
+                "FUNCTION.md".parse().unwrap()
+            },
+            b"entry".to_vec(),
+        ),
+    ];
+    if with_payload {
+        files.push(("payload.txt".parse().unwrap(), b"checked".to_vec()));
+    }
+    ArtifactCandidate::new(
+        type_name.parse().unwrap(),
+        id.parse().unwrap(),
+        version.parse().unwrap(),
+        source_id.parse().unwrap(),
+        tier,
+        ArtifactSourceKind::Directory,
+        Arc::new(InMemoryPackageView::new(files).unwrap()),
+    )
+}
+
+fn envelope_for(type_name: &str, id: &str, version: &str, requires: &[&str]) -> ArtifactEnvelope {
+    let schema = format!("agentlibre.{type_name}/v2");
+    serde_json::from_value(serde_json::json!({
+        "schema": "agentlibre.artifact/v1",
+        "type": type_name,
+        "id": id,
+        "version": version,
+        "payload_schema": schema,
+        "agl": {
+            "compatible": ">=1.0.0, <2.0.0",
+            "tested": ["1.0.0"]
+        },
+        "requires": requires
+    }))
+    .unwrap()
 }
 
 fn temp_dir(label: &str) -> PathBuf {
