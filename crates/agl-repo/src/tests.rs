@@ -12,13 +12,10 @@ fn init_workspace_with_artifacts(root: &Path) {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.tasks]
+[components.tasks]
 kind = "local"
 path = ".agl/tasks"
 required = true
@@ -26,14 +23,14 @@ access = "read_write"
 validation = "agl.task_spec.v1"
 create = ["."]
 
-[artifacts.reviews]
+[components.reviews]
 kind = "local"
 path = ".agl/reviews"
 required = false
 access = "read_write"
 create = ["."]
 
-[artifacts.state]
+[components.state]
 kind = "ignored"
 path = ".agl/state"
 required = false
@@ -148,9 +145,11 @@ fn init_creates_minimal_manifest_without_implicit_artifacts() {
     assert!(!root.join(".agl/skills").exists());
 
     let manifest = fs::read_to_string(root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
-    assert!(manifest.contains("[functions]"));
-    assert!(manifest.contains(&format!("default = \"{DEFAULT_FUNCTION}\"")));
-    assert!(!manifest.contains("[artifacts."));
+    assert!(manifest.contains("version = 2"));
+    assert!(manifest.contains(&format!(
+        "default_function = \"function:{DEFAULT_FUNCTION}@^1.0\""
+    )));
+    assert!(!manifest.contains("[components."));
     assert_eq!(report.next_steps, vec!["agl status".to_string()]);
 
     fs::remove_dir_all(root).unwrap();
@@ -187,10 +186,8 @@ fn init_repairs_missing_workspace_default_function() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
-
-[artifacts.state]
+version = 2
+[components.state]
 path = ".agl/state"
 kind = "ignored"
 required = false
@@ -287,17 +284,16 @@ fn artifact_status_reports_declared_artifacts() {
     assert!(report.artifacts.iter().any(|artifact| {
         artifact.id == "tasks"
             && artifact.path.as_path() == std::path::Path::new(".agl/tasks")
-            && artifact.kind == ArtifactKind::Source
+            && artifact.kind == ArtifactDataClass::Package
             && artifact.validation.as_deref() == Some("agl.task_spec.v1")
     }));
     assert!(report.artifacts.iter().any(|artifact| {
-        artifact.id == "tasks" && artifact.storage == WorkspaceArtifactKind::Local
+        artifact.id == "tasks" && artifact.storage == WorkspaceComponentKind::Local
     }));
     assert!(
-        report
-            .artifacts
-            .iter()
-            .any(|artifact| { artifact.id == "state" && artifact.kind == ArtifactKind::State })
+        report.artifacts.iter().any(|artifact| {
+            artifact.id == "state" && artifact.kind == ArtifactDataClass::State
+        })
     );
     assert!(
         report
@@ -378,12 +374,11 @@ fn artifact_lock_writes_definition_hashes() {
             .contains(&"artifact_lock_missing".to_string())
     );
     assert!(root.join(ARTIFACT_LOCK_PATH).is_file());
-    let locked = report.lock.artifacts.get("tasks").unwrap();
-    assert_eq!(locked.id, "tasks");
-    assert_eq!(locked.storage, WorkspaceArtifactKind::Local);
-    assert_eq!(locked.path, PathBuf::from(".agl/tasks"));
-    assert_eq!(locked.definition_hash.len(), 64);
-    assert_ne!(report.lock.locked_at_unix_ms, 0);
+    let locked = report.lock.components.get("tasks").unwrap();
+    assert_eq!(locked.kind, Some(WorkspaceComponentKind::Local));
+    assert_eq!(locked.path, Some(PathBuf::from(".agl/tasks")));
+    assert_eq!(locked.definition_digest.as_deref().unwrap().len(), 64);
+    assert_eq!(report.lock.version, 2);
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -403,13 +398,10 @@ fn artifact_lock_records_git_identity_and_detects_drift() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.tasks]
+[components.tasks]
 kind = "git"
 path = ".agl/tasks"
 required = true
@@ -427,8 +419,8 @@ access = "read_write"
     )
     .unwrap();
 
-    let locked = report.lock.artifacts.get("tasks").unwrap();
-    assert_eq!(locked.id, "tasks");
+    let locked = report.lock.components.get("tasks").unwrap();
+    assert_eq!(locked.kind, Some(WorkspaceComponentKind::Git));
     assert_eq!(locked.commit.as_deref(), Some(commit.trim()));
     assert_eq!(locked.tree.as_deref(), Some(tree.trim()));
 
@@ -468,7 +460,7 @@ access = "read_write"
     assert_eq!(
         refreshed
             .lock
-            .artifacts
+            .components
             .get("tasks")
             .unwrap()
             .commit
@@ -497,8 +489,8 @@ fn artifact_lock_rejects_entries_missing_definition_identity() {
         .unwrap()
         .lines()
         .filter(|line| {
-            !line.trim_start().starts_with("storage")
-                && !line.trim_start().starts_with("definition_hash")
+            !line.trim_start().starts_with("kind")
+                && !line.trim_start().starts_with("definition_digest")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -561,13 +553,10 @@ fn artifact_status_does_not_report_declared_source_parent_as_undeclared() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.core]
+[components.core]
 kind = "local"
 path = ".agl/sources/core"
 required = true
@@ -638,10 +627,9 @@ fn artifact_status_does_not_report_unrelated_stale_locks_when_scoped() {
     )
     .unwrap();
     let mut lock = report.lock;
-    let mut stale = lock.artifacts.get("tasks").unwrap().clone();
-    stale.id = "old".to_string();
-    stale.path = PathBuf::from(".agl/old");
-    lock.artifacts.insert("old".to_string(), stale);
+    let mut stale = lock.components.get("tasks").unwrap().clone();
+    stale.path = Some(PathBuf::from(".agl/old"));
+    lock.components.insert("old".to_string(), stale);
     fs::write(
         root.join(ARTIFACT_LOCK_PATH),
         toml::to_string(&lock).unwrap(),
@@ -689,25 +677,25 @@ fn artifact_path_handle_resolves_declared_writable_path() {
     let root = temp_root("artifact-handle");
     init_workspace_with_artifacts(&root);
 
-    let handle = resolve_artifact_path_handle(
+    let handle = resolve_component_path_handle(
         &root,
-        &ArtifactPathHandleRequest {
+        &ComponentPathHandleRequest {
             path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
             access: ArtifactAccess::Write,
         },
     )
     .unwrap();
 
-    assert_eq!(handle.artifact_id, "tasks");
+    assert_eq!(handle.component_id, "tasks");
     assert_eq!(handle.root, PathBuf::from(".agl/tasks"));
     assert_eq!(
         handle.path_in_artifact,
         PathBuf::from("AGL-001/00_overview.md")
     );
 
-    let err = resolve_artifact_path_handle(
+    let err = resolve_component_path_handle(
         &root,
-        &ArtifactPathHandleRequest {
+        &ComponentPathHandleRequest {
             path: PathBuf::from(".agl/skills/agl/skill/SKILL.md"),
             access: ArtifactAccess::Write,
         },
@@ -725,13 +713,10 @@ fn artifact_path_handle_does_not_treat_write_as_read() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.tasks]
+[components.tasks]
 kind = "local"
 path = ".agl/tasks"
 required = true
@@ -740,19 +725,19 @@ access = "write"
     )
     .unwrap();
 
-    let handle = resolve_artifact_path_handle(
+    let handle = resolve_component_path_handle(
         &root,
-        &ArtifactPathHandleRequest {
+        &ComponentPathHandleRequest {
             path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
             access: ArtifactAccess::Write,
         },
     )
     .unwrap();
-    assert_eq!(handle.artifact_id, "tasks");
+    assert_eq!(handle.component_id, "tasks");
 
-    let err = resolve_artifact_path_handle(
+    let err = resolve_component_path_handle(
         &root,
-        &ArtifactPathHandleRequest {
+        &ComponentPathHandleRequest {
             path: PathBuf::from(".agl/tasks/AGL-001/00_overview.md"),
             access: ArtifactAccess::Read,
         },
@@ -817,7 +802,7 @@ fn artifact_status_detects_locked_path_drift() {
     )
     .unwrap();
     let mut lock = report.lock;
-    lock.artifacts.get_mut("tasks").unwrap().path = PathBuf::from(".agl/other");
+    lock.components.get_mut("tasks").unwrap().path = Some(PathBuf::from(".agl/other"));
     fs::write(
         root.join(ARTIFACT_LOCK_PATH),
         toml::to_string_pretty(&lock).unwrap(),
@@ -851,13 +836,10 @@ fn artifact_status_rejects_paths_outside_agl() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.bad]
+[components.bad]
 kind = "local"
 path = "outside"
 access = "read"
@@ -896,7 +878,7 @@ fn init_can_apply_local_workspace_profile_file() {
 version = 1
 name = "portable-repo-workflow"
 
-[artifacts.skills]
+[components.skills]
 kind = "git"
 path = ".agl/skills"
 url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
@@ -904,7 +886,7 @@ rev = "v0.2.0"
 required = true
 access = "read"
 
-[artifacts.tasks]
+[components.tasks]
 kind = "git"
 path = ".agl/tasks"
 url = "ssh://git@example.invalid/agentlibre/tasks.git"
@@ -913,7 +895,7 @@ required = true
 access = "read_write"
 validation = "agl.task_spec.v1"
 
-[artifacts.reviews]
+[components.reviews]
 kind = "git"
 path = ".agl/reviews"
 url = "ssh://git@example.invalid/agentlibre/reviews.git"
@@ -921,7 +903,7 @@ rev = "main"
 required = true
 access = "read_write"
 
-[artifacts.state]
+[components.state]
 kind = "ignored"
 path = ".agl/state"
 required = false
@@ -942,12 +924,15 @@ create = ["."]
     .unwrap();
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
-    assert_eq!(manifest.profile, "portable-repo-workflow");
+    assert_eq!(manifest.profile, DEFAULT_PROFILE);
     assert_eq!(manifest.functions.default, DEFAULT_FUNCTION);
-    assert_eq!(manifest.artifacts["tasks"].kind, WorkspaceArtifactKind::Git);
+    assert_eq!(
+        manifest.artifacts["tasks"].kind,
+        WorkspaceComponentKind::Git
+    );
     assert_eq!(
         manifest.artifacts["reviews"].kind,
-        WorkspaceArtifactKind::Git
+        WorkspaceComponentKind::Git
     );
     assert!(root.join(".agl/state").is_dir());
     assert!(!root.join(".agl/tasks").exists());
@@ -1009,7 +994,7 @@ fn init_can_override_skills_and_externalize_tasks() {
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
     let skills = &manifest.artifacts["skills"];
-    assert_eq!(skills.kind, WorkspaceArtifactKind::Git);
+    assert_eq!(skills.kind, WorkspaceComponentKind::Git);
     assert_eq!(
         skills.url.as_deref(),
         Some("ssh://git@example.invalid/agentlibre/skills.git")
@@ -1017,7 +1002,7 @@ fn init_can_override_skills_and_externalize_tasks() {
     assert_eq!(skills.rev.as_deref(), Some("v1"));
 
     let tasks = &manifest.artifacts["tasks"];
-    assert_eq!(tasks.kind, WorkspaceArtifactKind::Git);
+    assert_eq!(tasks.kind, WorkspaceComponentKind::Git);
     assert_eq!(
         tasks.url.as_deref(),
         Some("ssh://git@example.invalid/agentlibre/specs.git")
@@ -1058,14 +1043,14 @@ fn init_accepts_generic_artifacts() {
     let manifest = read_manifest(&root.join(WORKSPACE_MANIFEST_PATH)).unwrap();
 
     let tasks = &manifest.artifacts["tasks"];
-    assert_eq!(tasks.kind, WorkspaceArtifactKind::Git);
+    assert_eq!(tasks.kind, WorkspaceComponentKind::Git);
     assert_eq!(
         tasks.url.as_deref(),
         Some("ssh://git@example.invalid/agentlibre/agl-specs.git")
     );
     assert_eq!(tasks.rev.as_deref(), Some("main"));
     let reviews = &manifest.artifacts["reviews"];
-    assert_eq!(reviews.kind, WorkspaceArtifactKind::Git);
+    assert_eq!(reviews.kind, WorkspaceComponentKind::Git);
     assert_eq!(
         reviews.url.as_deref(),
         Some("ssh://git@example.invalid/agentlibre/reviews.git")
@@ -1385,8 +1370,8 @@ fn export_profile_writes_policy_and_excludes_local_state() {
 
     assert!(report.wrote);
     assert_eq!(profile.name, DEFAULT_PROFILE);
-    assert!(profile.artifacts.contains_key("tasks"));
-    assert!(profile.artifacts.contains_key("state"));
+    assert!(profile.components.contains_key("tasks"));
+    assert!(profile.components.contains_key("state"));
     assert!(profile.policy.hooks.managed);
     assert_eq!(
         profile.policy.hooks.install,
@@ -1414,13 +1399,10 @@ fn export_profile_round_trips_artifact_identity() {
     fs::write(
         root.join(WORKSPACE_MANIFEST_PATH),
         r#"
-version = 1
-profile = "repo-workflow"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
-[functions]
-default = "gemma4-12b"
-
-[artifacts.skills]
+[components.skills]
 kind = "git"
 path = ".agl/skills"
 url = "ssh://git@example.invalid/agentlibre/skills.git"
@@ -1443,7 +1425,7 @@ access = "read"
     )
     .unwrap();
     let profile = read_workspace_profile(&out).unwrap();
-    let artifact = profile.artifacts.get("skills").unwrap();
+    let artifact = profile.components.get("skills").unwrap();
     assert_eq!(
         artifact.url.as_deref(),
         Some("ssh://git@example.invalid/agentlibre/skills.git")
@@ -1505,11 +1487,8 @@ fn workspace_manifest_rejects_removed_component_and_nested_artifact_shape() {
     fs::write(
         &manifest_path,
         r#"
-version = 1
-profile = "repo-workflow"
-
-[functions]
-default = "gemma4-12b"
+version = 2
+default_function = "function:gemma4-12b@^1.0"
 
 [components.tasks]
 path = ".agl/tasks"
@@ -1547,7 +1526,7 @@ fn profile_file_name_must_match_requested_non_default_profile() {
 version = 1
 name = "actual-profile"
 
-[artifacts.state]
+[components.state]
 kind = "ignored"
 path = ".agl/state"
 required = false
@@ -1582,7 +1561,7 @@ fn existing_plain_skills_directory_is_not_component_git_worktree() {
     manifest.push_str(
         r#"
 
-[artifacts.skills]
+[components.skills]
 kind = "git"
 path = ".agl/skills"
 url = "ssh://git@example.invalid/agentlibre/skills.git"

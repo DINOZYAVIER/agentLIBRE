@@ -358,14 +358,14 @@ mod tests {
 version = 1
 name = "team-profile"
 
-[artifacts.skills]
+[components.skills]
 kind = "local"
 path = ".agl/skills"
 required = true
 access = "read"
 create = ["."]
 
-[artifacts.tasks]
+[components.tasks]
 kind = "local"
 path = ".agl/tasks"
 required = true

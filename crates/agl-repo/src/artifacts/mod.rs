@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 
 use lock::{
-    artifact_definition_hash, artifact_lock_error_allows_refresh, read_artifact_lock, unix_ms_now,
+    artifact_definition_hash, artifact_lock_error_allows_refresh, read_artifact_lock,
     validate_locked_artifact,
 };
 use path::{
@@ -21,19 +21,20 @@ use roots::undeclared_artifact_roots;
 use schema::validate_artifact_schema;
 
 use crate::{
-    ARTIFACT_LOCK_PATH, ArtifactHandle, ArtifactKind, ArtifactLockOptions, ArtifactLockReport,
-    ArtifactPathHandleRequest, ArtifactReportState, ArtifactState, ArtifactStatus,
-    ArtifactStatusOptions, ArtifactStatusReport, ArtifactSyncAction, ArtifactSyncActionKind,
-    ArtifactSyncOptions, ArtifactSyncReport, DEFAULT_PROFILE, LockedArtifact,
-    WORKSPACE_MANIFEST_PATH, WorkspaceArtifact, WorkspaceArtifactKind, WorkspaceFunctions,
-    WorkspaceManifest, component_status, is_not_found, read_manifest, resolve_repo_root,
+    ARTIFACT_LOCK_PATH, ArtifactDataClass, ArtifactLock, ArtifactLockOptions, ArtifactLockReport,
+    ArtifactReportState, ArtifactState, ArtifactStatus, ArtifactStatusOptions,
+    ArtifactStatusReport, ArtifactSyncAction, ArtifactSyncActionKind, ArtifactSyncOptions,
+    ArtifactSyncReport, ComponentHandle, ComponentPathHandleRequest, DEFAULT_PROFILE,
+    LockedWorkspaceComponent, RepoManifest, WORKSPACE_MANIFEST_PATH, WorkspaceComponent,
+    WorkspaceComponentKind, WorkspaceFunctions, component_status, is_not_found, read_manifest,
+    resolve_repo_root,
 };
 
 #[derive(Clone, Debug)]
 struct ResolvedArtifact {
     id: String,
-    definition: WorkspaceArtifact,
-    kind: ArtifactKind,
+    definition: WorkspaceComponent,
+    kind: ArtifactDataClass,
     definition_hash: String,
 }
 
@@ -52,7 +53,7 @@ pub fn status_artifacts(
     for resolved in resolved {
         let locked = lock
             .as_ref()
-            .and_then(|lock| lock.artifacts.get(&resolved.id));
+            .and_then(|lock| lock.components.get(&resolved.id));
         all_artifacts.push(artifact_status(
             &workspace_root,
             resolved,
@@ -94,7 +95,7 @@ pub fn status_artifacts(
     }
 
     if let Some(lock) = &lock {
-        for id in lock.artifacts.keys() {
+        for id in lock.components.keys() {
             if options.artifact.is_none()
                 && !all_artifacts.iter().any(|artifact| &artifact.id == id)
             {
@@ -118,13 +119,13 @@ pub fn status_artifacts(
         .iter()
         .any(|artifact| artifact.state == ArtifactState::Missing)
     {
-        next_steps.push("agl repo artifact sync".to_string());
+        next_steps.push("agl repo component sync".to_string());
     }
     if !errors.is_empty() {
-        next_steps.push("inspect agl repo artifact status --json".to_string());
+        next_steps.push("inspect agl repo component status --json".to_string());
     } else if !all_artifacts.is_empty() && !lock_path.exists() {
         warnings.push("artifact_lock_missing".to_string());
-        next_steps.push("agl repo artifact lock".to_string());
+        next_steps.push("agl repo component lock".to_string());
     }
 
     let state = artifact_report_state(&warnings, &errors);
@@ -183,7 +184,7 @@ pub fn sync_artifacts(
             });
             continue;
         }
-        if artifact.kind == ArtifactKind::Cache {
+        if artifact.kind == ArtifactDataClass::Cache {
             continue;
         }
         for create in &artifact.create {
@@ -262,47 +263,37 @@ pub fn lock_artifacts(
         .cloned()
         .collect::<Vec<_>>();
     errors.retain(|error| !artifact_lock_error_allows_refresh(error));
-    let lock = crate::ArtifactLockFile {
-        locked_at_unix_ms: unix_ms_now(),
-        version: 1,
-        artifacts: status
-            .artifacts
-            .iter()
-            .map(|artifact| {
-                (
-                    artifact.id.clone(),
-                    LockedArtifact {
-                        id: artifact.id.clone(),
-                        storage: artifact.storage,
-                        path: artifact.path.clone(),
-                        required: artifact.required,
-                        url: artifact
-                            .actual_url
-                            .clone()
-                            .or_else(|| artifact.expected_url.clone()),
-                        rev: artifact.expected_rev.clone(),
-                        commit: artifact
-                            .actual_commit
-                            .clone()
-                            .or_else(|| artifact.expected_commit.clone()),
-                        tree: artifact
-                            .actual_tree
-                            .clone()
-                            .or_else(|| artifact.expected_tree.clone()),
-                        kind: artifact.kind,
-                        access: artifact.access,
-                        validation: artifact.validation.clone(),
-                        definition_hash: artifact.definition_hash.clone(),
-                        materialized_paths: artifact
-                            .create
-                            .iter()
-                            .map(|create| artifact_create_path(&artifact.path, create))
-                            .collect(),
-                    },
-                )
-            })
-            .collect(),
-    };
+    let components = status
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.id.clone(),
+                LockedWorkspaceComponent {
+                    kind: Some(artifact.storage),
+                    path: Some(artifact.path.clone()),
+                    definition_digest: Some(artifact.definition_hash.clone()),
+                    source_id: None,
+                    source_kind: None,
+                    url: artifact
+                        .actual_url
+                        .clone()
+                        .or_else(|| artifact.expected_url.clone()),
+                    rev: artifact.expected_rev.clone(),
+                    commit: artifact
+                        .actual_commit
+                        .clone()
+                        .or_else(|| artifact.expected_commit.clone()),
+                    tree: artifact
+                        .actual_tree
+                        .clone()
+                        .or_else(|| artifact.expected_tree.clone()),
+                },
+            )
+        })
+        .collect();
+    let lock = ArtifactLock::new(components, BTreeMap::new())
+        .map_err(|error| anyhow::anyhow!("failed to build artifact lock: {error}"))?;
 
     let mut wrote = false;
     if errors.is_empty() && (!options.strict || warnings.is_empty()) {
@@ -319,14 +310,8 @@ pub fn lock_artifacts(
                     format!("failed to create artifact lock dir {}", parent.display())
                 })?;
             }
-            let content =
-                toml::to_string_pretty(&lock).context("failed to render artifact lock")?;
-            fs::write(&status.lock_path, content).with_context(|| {
-                format!(
-                    "failed to write artifact lock {}",
-                    status.lock_path.display()
-                )
-            })?;
+            lock.write_atomic(&status.lock_path)
+                .map_err(|error| anyhow::anyhow!("failed to write artifact lock: {error}"))?;
             wrote = true;
             warnings.retain(|warning| {
                 warning != "artifact_lock_missing" && !warning.ends_with(".lock_entry_missing")
@@ -349,7 +334,7 @@ pub fn lock_artifacts(
 
 fn artifact_manifest_for_status(
     workspace_root: &Path,
-) -> Result<(WorkspaceManifest, Vec<String>, Vec<String>)> {
+) -> Result<(RepoManifest, Vec<String>, Vec<String>)> {
     let manifest_path = workspace_root.join(WORKSPACE_MANIFEST_PATH);
     match read_manifest(&manifest_path) {
         Ok(manifest) => Ok((manifest, Vec::new(), Vec::new())),
@@ -359,10 +344,11 @@ fn artifact_manifest_for_status(
             vec!["workspace_manifest_missing".to_string()],
         )),
         Err(err) => Ok((
-            WorkspaceManifest {
-                version: 1,
+            RepoManifest {
+                version: 2,
                 profile: DEFAULT_PROFILE.to_string(),
                 functions: WorkspaceFunctions::default(),
+                sources: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
             },
             Vec::new(),
@@ -373,7 +359,7 @@ fn artifact_manifest_for_status(
 
 fn resolve_artifacts(
     workspace_root: &Path,
-    manifest: &WorkspaceManifest,
+    manifest: &RepoManifest,
     errors: &mut Vec<String>,
 ) -> Vec<ResolvedArtifact> {
     let mut resolved = Vec::new();
@@ -403,29 +389,30 @@ fn resolve_artifacts(
     resolved
 }
 
-fn empty_workspace_manifest() -> WorkspaceManifest {
-    WorkspaceManifest {
-        version: 1,
+fn empty_workspace_manifest() -> RepoManifest {
+    RepoManifest {
+        version: 2,
         profile: DEFAULT_PROFILE.to_string(),
         functions: WorkspaceFunctions::default(),
+        sources: BTreeMap::new(),
         artifacts: BTreeMap::new(),
     }
 }
 
-fn artifact_kind(storage: WorkspaceArtifactKind) -> ArtifactKind {
+fn artifact_kind(storage: WorkspaceComponentKind) -> ArtifactDataClass {
     match storage {
-        WorkspaceArtifactKind::Generated => ArtifactKind::Generated,
-        WorkspaceArtifactKind::Ignored => ArtifactKind::State,
-        WorkspaceArtifactKind::Git
-        | WorkspaceArtifactKind::Submodule
-        | WorkspaceArtifactKind::Local => ArtifactKind::Source,
+        WorkspaceComponentKind::Generated => ArtifactDataClass::Config,
+        WorkspaceComponentKind::Ignored => ArtifactDataClass::State,
+        WorkspaceComponentKind::Git
+        | WorkspaceComponentKind::Submodule
+        | WorkspaceComponentKind::Local => ArtifactDataClass::Package,
     }
 }
 
 fn validate_artifact_definition(
     workspace_root: &Path,
     id: &str,
-    artifact: &WorkspaceArtifact,
+    artifact: &WorkspaceComponent,
     errors: &mut Vec<String>,
 ) {
     if id.trim().is_empty() {
@@ -456,14 +443,14 @@ fn validate_artifact_definition(
 fn artifact_status(
     workspace_root: &Path,
     resolved: ResolvedArtifact,
-    locked: Option<&LockedArtifact>,
+    locked: Option<&LockedWorkspaceComponent>,
     strict_schema: bool,
 ) -> ArtifactStatus {
     let absolute_path = workspace_root.join(&resolved.definition.path);
     let exists = absolute_path.exists();
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
-    let locked_definition_hash = locked.map(|locked| locked.definition_hash.clone());
+    let locked_definition_hash = locked.and_then(|locked| locked.definition_digest.clone());
 
     let component_status = component_status(workspace_root, &resolved.id, &resolved.definition);
     warnings.extend(component_status.warnings.clone());
@@ -537,10 +524,10 @@ fn artifact_status(
     }
 }
 
-pub fn resolve_artifact_path_handle(
+pub fn resolve_component_path_handle(
     start: impl AsRef<Path>,
-    request: &ArtifactPathHandleRequest,
-) -> Result<ArtifactHandle> {
+    request: &ComponentPathHandleRequest,
+) -> Result<ComponentHandle> {
     validate_artifact_subpath(&request.path)?;
     let status = status_artifacts(
         start,
@@ -600,8 +587,8 @@ pub fn resolve_artifact_path_handle(
         .unwrap_or_else(|_| Path::new(""))
         .to_path_buf();
 
-    Ok(ArtifactHandle {
-        artifact_id: artifact.id.clone(),
+    Ok(ComponentHandle {
+        component_id: artifact.id.clone(),
         root: artifact.path.clone(),
         relative_path: request.path.clone(),
         path_in_artifact,

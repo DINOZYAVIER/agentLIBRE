@@ -88,11 +88,11 @@ mod help {
     pub(super) const PROCESS_READ: &str = cli_help!("process/read");
     pub(super) const PROCESS_STATUS: &str = cli_help!("process/status");
     pub(super) const REPO: &str = cli_help!("repo");
-    pub(super) const REPO_ARTIFACT: &str = cli_help!("repo/artifact");
-    pub(super) const REPO_ARTIFACT_LOCK: &str = cli_help!("repo/artifact/lock");
-    pub(super) const REPO_ARTIFACT_STATUS: &str = cli_help!("repo/artifact/status");
-    pub(super) const REPO_ARTIFACT_SYNC: &str = cli_help!("repo/artifact/sync");
-    pub(super) const REPO_ARTIFACT_VERIFY: &str = cli_help!("repo/artifact/verify");
+    pub(super) const REPO_COMPONENT: &str = cli_help!("repo/component");
+    pub(super) const REPO_COMPONENT_LOCK: &str = cli_help!("repo/component/lock");
+    pub(super) const REPO_COMPONENT_STATUS: &str = cli_help!("repo/component/status");
+    pub(super) const REPO_COMPONENT_SYNC: &str = cli_help!("repo/component/sync");
+    pub(super) const REPO_COMPONENT_VERIFY: &str = cli_help!("repo/component/verify");
     pub(super) const REPO_EXPORT_PROFILE: &str = cli_help!("repo/export-profile");
     pub(super) const REPO_IMPORT_PROFILE: &str = cli_help!("repo/import-profile");
     pub(super) const REPO_INIT: &str = cli_help!("repo/init");
@@ -414,10 +414,10 @@ enum RepoCommands {
     #[command(long_about = help::REPO_VERIFY_TASKS)]
     VerifyTasks(TaskSpecVerifyArgs),
     /// Inspect and create declared .agl artifacts.
-    #[command(long_about = help::REPO_ARTIFACT)]
-    Artifact {
+    #[command(long_about = help::REPO_COMPONENT)]
+    Component {
         #[command(subcommand)]
-        command: ArtifactCommands,
+        command: ComponentCommands,
     },
     /// Install agentLIBRE git hooks for this repository.
     #[command(long_about = help::REPO_INSTALL_HOOKS)]
@@ -428,18 +428,18 @@ enum RepoCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum ArtifactCommands {
+enum ComponentCommands {
     /// Report declared .agl artifact status.
-    #[command(long_about = help::REPO_ARTIFACT_STATUS)]
+    #[command(long_about = help::REPO_COMPONENT_STATUS)]
     Status(ArtifactStatusArgs),
     /// Verify declared .agl artifacts.
-    #[command(long_about = help::REPO_ARTIFACT_VERIFY)]
+    #[command(long_about = help::REPO_COMPONENT_VERIFY)]
     Verify(ArtifactStatusArgs),
     /// Create missing declared artifact directories.
-    #[command(long_about = help::REPO_ARTIFACT_SYNC)]
+    #[command(long_about = help::REPO_COMPONENT_SYNC)]
     Sync(ArtifactSyncArgs),
     /// Write the artifact lock file.
-    #[command(long_about = help::REPO_ARTIFACT_LOCK)]
+    #[command(long_about = help::REPO_COMPONENT_LOCK)]
     Lock(ArtifactLockArgs),
 }
 
@@ -1868,8 +1868,8 @@ impl Cli {
                 RepoCommands::VerifyTasks(args) => {
                     RepoCommand::VerifyTasks(task_spec_verify_options(args))
                 }
-                RepoCommands::Artifact { command } => {
-                    RepoCommand::Artifact(artifact_command(command))
+                RepoCommands::Component { command } => {
+                    RepoCommand::Component(component_command(command))
                 }
                 RepoCommands::InstallHooks(args) => {
                     RepoCommand::InstallHooks(repo_hooks_options(args))
@@ -2083,16 +2083,16 @@ fn task_spec_verify_options(args: TaskSpecVerifyArgs) -> TaskSpecVerifyOptions {
     }
 }
 
-fn artifact_command(command: ArtifactCommands) -> ArtifactCommand {
+fn component_command(command: ComponentCommands) -> ComponentCommand {
     match command {
-        ArtifactCommands::Status(args) => ArtifactCommand::Status(artifact_status_options(args)),
-        ArtifactCommands::Verify(args) => ArtifactCommand::Verify(artifact_status_options(args)),
-        ArtifactCommands::Sync(args) => ArtifactCommand::Sync(ArtifactSyncOptions {
+        ComponentCommands::Status(args) => ComponentCommand::Status(artifact_status_options(args)),
+        ComponentCommands::Verify(args) => ComponentCommand::Verify(artifact_status_options(args)),
+        ComponentCommands::Sync(args) => ComponentCommand::Sync(ArtifactSyncOptions {
             json: args.json,
             dry_run: args.dry_run,
             strict: args.strict,
         }),
-        ArtifactCommands::Lock(args) => ArtifactCommand::Lock(ArtifactLockOptions {
+        ComponentCommands::Lock(args) => ComponentCommand::Lock(ArtifactLockOptions {
             json: args.json,
             dry_run: args.dry_run,
             strict: args.strict,

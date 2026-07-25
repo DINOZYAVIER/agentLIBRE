@@ -1187,6 +1187,158 @@ pub enum ArtifactSourceKind {
     Embedded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceComponentKind {
+    Git,
+    Submodule,
+    Local,
+    Generated,
+    Ignored,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSourceDeclaration {
+    pub kind: ArtifactSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+}
+
+impl ArtifactSourceDeclaration {
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        if let Some(path) = &self.path {
+            validate_workspace_relative_path(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceComponent {
+    pub kind: WorkspaceComponentKind,
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+    pub access: ArtifactAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub create: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspacePolicy {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceConfigReferences {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overlays: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceManifest {
+    pub version: u32,
+    pub default_function: ArtifactPackageRef,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, ArtifactSourceDeclaration>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, WorkspaceComponent>,
+    #[serde(default)]
+    pub policy: WorkspacePolicy,
+    #[serde(default)]
+    pub config: WorkspaceConfigReferences,
+}
+
+impl WorkspaceManifest {
+    pub const VERSION: u32 = 2;
+
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        if self.version != Self::VERSION {
+            return Err(ArtifactError::UnsupportedLockVersion {
+                version: self.version,
+            });
+        }
+        if self.default_function.type_id.as_str() != FUNCTION_TYPE {
+            return Err(ArtifactError::InvalidReference {
+                value: self.default_function.to_string(),
+                reason: "default_function must reference a function".to_owned(),
+            });
+        }
+        for (name, source) in &self.sources {
+            ArtifactSourceId::new(name.clone())?;
+            source.validate()?;
+        }
+        for component in self.components.values() {
+            validate_workspace_relative_path(&component.path)?;
+            for create in &component.create {
+                validate_workspace_create_path(create)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_toml(&self) -> Result<String, ArtifactError> {
+        self.validate()?;
+        toml::to_string(self).map_err(|error| ArtifactError::LockIo {
+            path: "<memory>".to_owned(),
+            reason: error.to_string(),
+        })
+    }
+
+    pub fn from_toml(value: &str) -> Result<Self, ArtifactError> {
+        let manifest: Self = toml::from_str(value).map_err(|error| ArtifactError::LockIo {
+            path: "<memory>".to_owned(),
+            reason: error.to_string(),
+        })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+}
+
+fn validate_workspace_relative_path(path: &Path) -> Result<(), ArtifactError> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| ArtifactError::InvalidRelativePath {
+            value: path.display().to_string(),
+        })?;
+    ArtifactRelativePath::new(value.to_owned()).map(|_| ())
+}
+
+fn validate_workspace_create_path(path: &Path) -> Result<(), ArtifactError> {
+    if path == Path::new(".") {
+        return Ok(());
+    }
+    validate_workspace_relative_path(path)
+}
+
 #[derive(Clone)]
 pub struct ArtifactCandidate {
     pub type_id: ArtifactTypeId,
@@ -1867,14 +2019,29 @@ fn reserved_package_file(path: &ArtifactRelativePath) -> bool {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockedWorkspaceComponent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<WorkspaceComponentKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ArtifactSourceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_kind: Option<ArtifactSourceKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LockedPackage {
+pub struct LockedArtifactPackage {
     pub type_id: ArtifactTypeId,
     pub id: ArtifactPackageId,
     pub version: ArtifactVersion,
@@ -1891,7 +2058,7 @@ pub struct LockedPackage {
     pub dependencies: Vec<String>,
 }
 
-impl LockedPackage {
+impl LockedArtifactPackage {
     pub fn key(&self) -> String {
         format!("{}:{}@{}", self.type_id, self.id, self.version)
     }
@@ -1924,7 +2091,7 @@ pub struct ArtifactLock {
     #[serde(default)]
     pub components: BTreeMap<String, LockedWorkspaceComponent>,
     #[serde(default)]
-    pub packages: BTreeMap<String, LockedPackage>,
+    pub packages: BTreeMap<String, LockedArtifactPackage>,
 }
 
 impl ArtifactLock {
@@ -1932,7 +2099,7 @@ impl ArtifactLock {
 
     pub fn new(
         components: BTreeMap<String, LockedWorkspaceComponent>,
-        packages: BTreeMap<String, LockedPackage>,
+        packages: BTreeMap<String, LockedArtifactPackage>,
     ) -> Result<Self, ArtifactError> {
         let lock = Self {
             version: Self::VERSION,
@@ -1948,6 +2115,22 @@ impl ArtifactLock {
             return Err(ArtifactError::UnsupportedLockVersion {
                 version: self.version,
             });
+        }
+        for (key, component) in &self.components {
+            for (field, present) in [
+                ("kind", component.kind.is_some()),
+                ("path", component.path.is_some()),
+                ("definition_digest", component.definition_digest.is_some()),
+            ] {
+                if !present {
+                    return Err(ArtifactError::LockDrift {
+                        key: key.clone(),
+                        field: field.to_owned(),
+                        expected: "present".to_owned(),
+                        actual: "missing".to_owned(),
+                    });
+                }
+            }
         }
         for (key, package) in &self.packages {
             package.validate(key)?;
@@ -2021,7 +2204,7 @@ impl ResolvedArtifactGraph {
     pub fn lock(&self) -> Result<ArtifactLock, ArtifactError> {
         let mut packages = BTreeMap::new();
         for node in self.nodes.values() {
-            let locked = LockedPackage {
+            let locked = LockedArtifactPackage {
                 type_id: node.candidate.type_id.clone(),
                 id: node.candidate.package_id.clone(),
                 version: node.candidate.version.clone(),

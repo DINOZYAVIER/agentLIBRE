@@ -480,6 +480,7 @@ dependencies = [
 name = "agl-repo"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "anyhow",
  "serde",
  "serde_json",

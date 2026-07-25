@@ -3,18 +3,24 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use agl_artifact as artifact_contract;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 mod artifacts;
 mod hooks;
 mod types;
+mod v2;
 
 pub use artifacts::{
-    lock_artifacts, resolve_artifact_path_handle, status_artifacts, sync_artifacts,
+    lock_artifacts, resolve_component_path_handle, status_artifacts, sync_artifacts,
 };
 pub use hooks::install_repo_hooks;
 pub use types::*;
+pub use v2::{
+    read_artifact_lock_v2, read_workspace_manifest_v2, write_artifact_lock_v2,
+    write_workspace_manifest_v2,
+};
 
 #[cfg(test)]
 pub(crate) use hooks::hook_content;
@@ -63,12 +69,12 @@ pub fn init_repo_workspace_with_default(
                 options.dry_run,
                 &mut changes,
             )?;
-        } else if artifact.kind == WorkspaceArtifactKind::Submodule {
+        } else if artifact.kind == WorkspaceComponentKind::Submodule {
             changes.push(RepoInitChange {
                 path: artifact.path.clone(),
                 action: RepoInitAction::DeclaredSubmodule,
             });
-        } else if artifact.kind == WorkspaceArtifactKind::Git {
+        } else if artifact.kind == WorkspaceComponentKind::Git {
             changes.push(RepoInitChange {
                 path: artifact.path.clone(),
                 action: RepoInitAction::DeclaredGitComponent,
@@ -197,7 +203,7 @@ pub fn status_repo_workspace(
 fn component_init_next_steps(components: &[ComponentStatus]) -> Vec<String> {
     let mut steps = BTreeSet::new();
     for component in components {
-        if component.kind != WorkspaceArtifactKind::Submodule {
+        if component.kind != WorkspaceComponentKind::Submodule {
             continue;
         }
         let needs_init = matches!(component.state, ComponentState::Missing)
@@ -249,7 +255,7 @@ pub fn init_repo_component(
 
     if !matches!(
         component.kind,
-        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
     ) {
         errors.push(format!(
             "component_not_git_backed: {} is {:?}",
@@ -269,7 +275,7 @@ pub fn init_repo_component(
         ));
     }
 
-    if component.kind == WorkspaceArtifactKind::Git {
+    if component.kind == WorkspaceComponentKind::Git {
         return init_git_component(workspace_root, manifest_path, options, &component);
     }
 
@@ -371,7 +377,7 @@ fn init_git_component(
     workspace_root: PathBuf,
     manifest_path: PathBuf,
     options: &RepoComponentInitOptions,
-    component: &WorkspaceArtifact,
+    component: &WorkspaceComponent,
 ) -> Result<RepoComponentInitReport> {
     let component_path = component.path.clone();
     let absolute_path = workspace_root.join(&component.path);
@@ -610,7 +616,7 @@ pub fn render_repo_profile_toml(start: impl AsRef<Path>) -> Result<String> {
     toml::to_string_pretty(&profile).context("failed to render workspace profile")
 }
 
-fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<WorkspaceManifest> {
+fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<RepoManifest> {
     let manifest = if let Some(profile_file) = &options.profile_file {
         let profile = read_workspace_profile(profile_file)?;
         if options.profile != DEFAULT_PROFILE && options.profile != profile.name {
@@ -620,11 +626,12 @@ fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<Wo
                 options.profile
             );
         }
-        WorkspaceManifest {
+        RepoManifest {
             version: profile.version,
             profile: profile.name,
             functions: WorkspaceFunctions::default(),
-            artifacts: profile.artifacts,
+            sources: BTreeMap::new(),
+            artifacts: profile.components,
         }
     } else {
         if options.profile != DEFAULT_PROFILE {
@@ -639,17 +646,18 @@ fn init_manifest(options: &RepoInitOptions, function_default: &str) -> Result<Wo
     Ok(manifest)
 }
 
-pub(crate) fn default_manifest() -> WorkspaceManifest {
-    WorkspaceManifest {
-        version: 1,
+pub(crate) fn default_manifest() -> RepoManifest {
+    RepoManifest {
+        version: 2,
         profile: DEFAULT_PROFILE.to_string(),
         functions: WorkspaceFunctions::default(),
+        sources: BTreeMap::new(),
         artifacts: BTreeMap::new(),
     }
 }
 
 fn apply_init_component_overrides(
-    manifest: &mut WorkspaceManifest,
+    manifest: &mut RepoManifest,
     options: &RepoInitOptions,
 ) -> Result<()> {
     if options.tasks_rev.is_some() && options.tasks_url.is_none() {
@@ -703,7 +711,7 @@ fn apply_init_component_overrides(
 }
 
 fn apply_artifact_override(
-    manifest: &mut WorkspaceManifest,
+    manifest: &mut RepoManifest,
     override_source: RepoArtifactOverride,
 ) -> Result<()> {
     validate_artifact_name(&override_source.name)?;
@@ -715,8 +723,8 @@ fn apply_artifact_override(
         .unwrap_or_else(|| default_artifact_component_path(&override_source.name));
     manifest.artifacts.insert(
         override_source.name.clone(),
-        WorkspaceArtifact {
-            kind: WorkspaceArtifactKind::Git,
+        WorkspaceComponent {
+            kind: WorkspaceComponentKind::Git,
             path,
             url: Some(override_source.url.clone()),
             rev: override_source.rev.clone(),
@@ -750,13 +758,13 @@ fn default_artifact_component_path(name: &str) -> PathBuf {
 }
 
 fn profile_from_workspace_manifest(
-    manifest: &WorkspaceManifest,
+    manifest: &RepoManifest,
     _status: &RepoStatusReport,
 ) -> WorkspaceProfile {
     WorkspaceProfile {
-        version: manifest.version,
+        version: 1,
         name: manifest.profile.clone(),
-        artifacts: manifest.artifacts.clone(),
+        components: manifest.artifacts.clone(),
         policy: WorkspaceProfilePolicy::default(),
     }
 }
@@ -815,7 +823,7 @@ fn create_dir_change(
 
 fn write_manifest_change(
     manifest_path: &Path,
-    manifest: &WorkspaceManifest,
+    manifest: &RepoManifest,
     options: &RepoInitOptions,
     function_default: &str,
     changes: &mut Vec<RepoInitChange>,
@@ -840,8 +848,9 @@ fn write_manifest_change(
         return Ok(());
     }
 
-    let content =
-        toml::to_string_pretty(manifest).context("failed to render workspace manifest")?;
+    let content = to_v2_manifest(manifest)
+        .and_then(|manifest| manifest.to_toml().map_err(|error| anyhow::anyhow!(error)))
+        .context("failed to render workspace manifest")?;
     if options.dry_run {
         changes.push(RepoInitChange {
             path: relative,
@@ -892,19 +901,11 @@ fn repair_manifest_function_default(
             manifest_path.display()
         )
     })?;
-    let functions = table
-        .entry("functions".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    if !functions.is_table() {
-        *functions = toml::Value::Table(toml::map::Map::new());
-    }
-    functions
-        .as_table_mut()
-        .expect("functions table was just initialized")
-        .insert(
-            "default".to_string(),
-            toml::Value::String(function_default.to_string()),
-        );
+    let default_function = format!("function:{function_default}@^1.0");
+    table.insert(
+        "default_function".to_string(),
+        toml::Value::String(default_function),
+    );
     let repaired =
         toml::to_string_pretty(&value).context("failed to render repaired workspace manifest")?;
     fs::write(manifest_path, repaired)
@@ -914,15 +915,167 @@ fn repair_manifest_function_default(
 
 fn manifest_value_has_valid_function_default(value: &toml::Value) -> bool {
     value
-        .get("functions")
-        .and_then(|functions| functions.get("default"))
+        .get("default_function")
         .and_then(toml::Value::as_str)
-        .is_some_and(is_valid_workspace_function_id)
+        .and_then(|value| artifact_contract::ArtifactPackageRef::parse(value).ok())
+        .is_some_and(|reference| {
+            reference.type_id.as_str() == artifact_contract::FUNCTION_TYPE
+                && is_valid_workspace_function_id(reference.package_id.as_str())
+        })
 }
 
-pub(crate) fn read_manifest(path: &Path) -> Result<WorkspaceManifest> {
+pub(crate) fn read_manifest(path: &Path) -> Result<RepoManifest> {
     let content = fs::read_to_string(path)?;
-    toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
+    let manifest = artifact_contract::WorkspaceManifest::from_toml(&content)
+        .map_err(|error| anyhow::anyhow!("failed to parse {}: {error}", path.display()))?;
+    validate_manifest_source_paths(path, &manifest)?;
+    from_v2_manifest(manifest)
+}
+
+fn validate_manifest_source_paths(
+    manifest_path: &Path,
+    manifest: &artifact_contract::WorkspaceManifest,
+) -> Result<()> {
+    let workspace_root = manifest_path
+        .parent()
+        .and_then(Path::parent)
+        .with_context(|| {
+            format!(
+                "workspace manifest has no workspace root: {}",
+                manifest_path.display()
+            )
+        })?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "failed to canonicalize workspace root for {}",
+                manifest_path.display()
+            )
+        })?;
+    for (name, source) in &manifest.sources {
+        let Some(path) = &source.path else {
+            continue;
+        };
+        let absolute = workspace_root.join(path);
+        if absolute.exists() {
+            let canonical = absolute.canonicalize().with_context(|| {
+                format!("failed to inspect source {name} at {}", absolute.display())
+            })?;
+            if !canonical.starts_with(&workspace_root) {
+                bail!(
+                    "source {name} path escapes workspace root: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn from_v2_manifest(manifest: artifact_contract::WorkspaceManifest) -> Result<RepoManifest> {
+    let artifacts = manifest
+        .components
+        .into_iter()
+        .map(|(name, component)| {
+            let kind = match component.kind {
+                artifact_contract::WorkspaceComponentKind::Git => WorkspaceComponentKind::Git,
+                artifact_contract::WorkspaceComponentKind::Submodule => {
+                    WorkspaceComponentKind::Submodule
+                }
+                artifact_contract::WorkspaceComponentKind::Local => WorkspaceComponentKind::Local,
+                artifact_contract::WorkspaceComponentKind::Generated => {
+                    WorkspaceComponentKind::Generated
+                }
+                artifact_contract::WorkspaceComponentKind::Ignored => {
+                    WorkspaceComponentKind::Ignored
+                }
+            };
+            let access = match component.access {
+                artifact_contract::ArtifactAccess::Read => ArtifactAccess::Read,
+                artifact_contract::ArtifactAccess::Write => ArtifactAccess::Write,
+                artifact_contract::ArtifactAccess::ReadWrite => ArtifactAccess::ReadWrite,
+            };
+            (
+                name,
+                WorkspaceComponent {
+                    kind,
+                    path: component.path,
+                    url: component.url,
+                    rev: component.rev,
+                    commit: component.commit,
+                    tree: component.tree,
+                    required: component.required,
+                    access,
+                    validation: component.validation,
+                    create: component.create,
+                },
+            )
+        })
+        .collect();
+    Ok(RepoManifest {
+        version: manifest.version,
+        profile: DEFAULT_PROFILE.to_string(),
+        functions: WorkspaceFunctions {
+            default: manifest.default_function.package_id.to_string(),
+        },
+        sources: manifest.sources,
+        artifacts,
+    })
+}
+
+fn to_v2_manifest(manifest: &RepoManifest) -> Result<artifact_contract::WorkspaceManifest> {
+    let default_function = format!("function:{}@^1.0", manifest.functions.default)
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid default function: {error}"))?;
+    let components = manifest
+        .artifacts
+        .iter()
+        .map(|(name, component)| {
+            let kind = match component.kind {
+                WorkspaceComponentKind::Git => artifact_contract::WorkspaceComponentKind::Git,
+                WorkspaceComponentKind::Submodule => {
+                    artifact_contract::WorkspaceComponentKind::Submodule
+                }
+                WorkspaceComponentKind::Local => artifact_contract::WorkspaceComponentKind::Local,
+                WorkspaceComponentKind::Generated => {
+                    artifact_contract::WorkspaceComponentKind::Generated
+                }
+                WorkspaceComponentKind::Ignored => {
+                    artifact_contract::WorkspaceComponentKind::Ignored
+                }
+            };
+            let access = match component.access {
+                ArtifactAccess::Read => artifact_contract::ArtifactAccess::Read,
+                ArtifactAccess::Write => artifact_contract::ArtifactAccess::Write,
+                ArtifactAccess::ReadWrite => artifact_contract::ArtifactAccess::ReadWrite,
+            };
+            (
+                name.clone(),
+                artifact_contract::WorkspaceComponent {
+                    kind,
+                    path: component.path.clone(),
+                    url: component.url.clone(),
+                    rev: component.rev.clone(),
+                    commit: component.commit.clone(),
+                    tree: component.tree.clone(),
+                    required: component.required,
+                    access,
+                    validation: component.validation.clone(),
+                    create: component.create.clone(),
+                },
+            )
+        })
+        .collect();
+    let result = artifact_contract::WorkspaceManifest {
+        version: 2,
+        default_function,
+        sources: manifest.sources.clone(),
+        components,
+        policy: Default::default(),
+        config: Default::default(),
+    };
+    result.validate().map_err(|error| anyhow::anyhow!(error))?;
+    Ok(result)
 }
 
 pub fn read_workspace_default_function(workspace_root: impl AsRef<Path>) -> Result<Option<String>> {
@@ -964,29 +1117,14 @@ pub fn write_workspace_default_function(
     let manifest_path = workspace_root.as_ref().join(WORKSPACE_MANIFEST_PATH);
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let mut value: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    let table = value.as_table_mut().with_context(|| {
-        format!(
-            "workspace manifest root must be a TOML table: {}",
-            manifest_path.display()
-        )
+    let mut manifest = artifact_contract::WorkspaceManifest::from_toml(&content)
+        .map_err(|error| anyhow::anyhow!("failed to parse {}: {error}", manifest_path.display()))?;
+    manifest.default_function = format!("function:{function_id}@^1.0")
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid workspace default function: {error}"))?;
+    let rendered = manifest.to_toml().map_err(|error| {
+        anyhow::anyhow!("failed to render workspace manifest with new default function: {error}")
     })?;
-    let functions = table
-        .entry("functions".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    if !functions.is_table() {
-        *functions = toml::Value::Table(toml::map::Map::new());
-    }
-    functions
-        .as_table_mut()
-        .expect("functions table was initialized above")
-        .insert(
-            "default".to_string(),
-            toml::Value::String(function_id.to_string()),
-        );
-    let rendered = toml::to_string_pretty(&value)
-        .context("failed to render workspace manifest with new default function")?;
     atomic_replace(&manifest_path, rendered.as_bytes())
         .with_context(|| format!("failed to update {}", manifest_path.display()))
 }
@@ -1031,8 +1169,8 @@ pub(crate) fn is_not_found(err: &anyhow::Error) -> bool {
         .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
 }
 
-fn validate_manifest(manifest: &WorkspaceManifest, errors: &mut Vec<String>) {
-    if manifest.version != 1 {
+fn validate_manifest(manifest: &RepoManifest, errors: &mut Vec<String>) {
+    if manifest.version != 2 {
         errors.push(format!(
             "unsupported_manifest_version: {}",
             manifest.version
@@ -1096,11 +1234,12 @@ fn validate_profile(profile: &WorkspaceProfile) -> Result<()> {
     }
     let mut errors = Vec::new();
     validate_manifest(
-        &WorkspaceManifest {
-            version: profile.version,
+        &RepoManifest {
+            version: 2,
             profile: profile.name.clone(),
             functions: WorkspaceFunctions::default(),
-            artifacts: profile.artifacts.clone(),
+            sources: BTreeMap::new(),
+            artifacts: profile.components.clone(),
         },
         &mut errors,
     );
@@ -1131,7 +1270,7 @@ pub(crate) fn validate_component_path(path: &Path) -> Result<()> {
 pub(crate) fn component_status(
     workspace_root: &Path,
     name: &str,
-    component: &WorkspaceArtifact,
+    component: &WorkspaceComponent,
 ) -> ComponentStatus {
     let mut status = ComponentStatus {
         name: name.to_string(),
@@ -1156,7 +1295,7 @@ pub(crate) fn component_status(
     };
 
     let absolute_path = workspace_root.join(&component.path);
-    if component.kind == WorkspaceArtifactKind::Submodule {
+    if component.kind == WorkspaceComponentKind::Submodule {
         let registered = submodule_registered(workspace_root, &component.path);
         status.submodule_registered = Some(registered);
         if !registered {
@@ -1172,11 +1311,11 @@ pub(crate) fn component_status(
 
     if !absolute_path.exists() {
         status.state = match component.kind {
-            WorkspaceArtifactKind::Submodule => ComponentState::Missing,
+            WorkspaceComponentKind::Submodule => ComponentState::Missing,
             _ => ComponentState::Invalid,
         };
         let issue = "missing".to_string();
-        if component.kind == WorkspaceArtifactKind::Submodule {
+        if component.kind == WorkspaceComponentKind::Submodule {
             status.warnings.push(issue);
         } else {
             status.errors.push(issue);
@@ -1187,7 +1326,7 @@ pub(crate) fn component_status(
 
     if matches!(
         component.kind,
-        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
     ) {
         fill_git_status(workspace_root, component, &mut status);
     }
@@ -1203,7 +1342,7 @@ pub(crate) fn component_status(
 
 fn fill_git_status(
     workspace_root: &Path,
-    component: &WorkspaceArtifact,
+    component: &WorkspaceComponent,
     status: &mut ComponentStatus,
 ) {
     let absolute_path = workspace_root.join(&component.path);

@@ -6,10 +6,12 @@ use agl_artifact::{
     AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactAdapterRegistry,
     ArtifactCandidate, ArtifactDataClass, ArtifactEnvelope, ArtifactError, ArtifactLock,
     ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
-    ArtifactPathScope, ArtifactRelativePath, ArtifactResolver, ArtifactSource, ArtifactSourceId,
-    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, ArtifactVersion, ArtifactVersionReq,
-    DirectoryArtifactSource, DirectoryPackageView, EXTENSION_ROOT, ErasedArtifactPayload,
-    FUNCTION_ROOT, InMemoryPackageView, SKILL_ROOT, StaticArtifactSource,
+    ArtifactPathScope, ArtifactRelativePath, ArtifactResolver, ArtifactSource,
+    ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
+    ArtifactTypeId, ArtifactVersion, ArtifactVersionReq, DirectoryArtifactSource,
+    DirectoryPackageView, EXTENSION_ROOT, ErasedArtifactPayload, FUNCTION_ROOT,
+    InMemoryPackageView, SKILL_ROOT, StaticArtifactSource, WorkspaceComponent,
+    WorkspaceComponentKind, WorkspaceManifest,
 };
 
 struct FixtureAdapter {
@@ -674,6 +676,66 @@ fn failed_lock_refresh_preserves_previous_bytes() {
     assert!(invalid.write_atomic(&path).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn workspace_v2_round_trips_and_rejects_v1_or_package_metadata() {
+    let manifest = WorkspaceManifest {
+        version: 2,
+        default_function: "function:example@^1.0".parse().unwrap(),
+        sources: Default::default(),
+        components: [(
+            "tasks".to_owned(),
+            WorkspaceComponent {
+                kind: WorkspaceComponentKind::Git,
+                path: ".agl/tasks".into(),
+                url: Some("https://example.invalid/tasks.git".to_owned()),
+                rev: Some("main".to_owned()),
+                commit: None,
+                tree: None,
+                required: true,
+                access: agl_artifact::ArtifactAccess::ReadWrite,
+                validation: Some("agl.task_spec.v1".to_owned()),
+                create: Vec::new(),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        policy: Default::default(),
+        config: Default::default(),
+    };
+    let encoded = manifest.to_toml().unwrap();
+    assert_eq!(WorkspaceManifest::from_toml(&encoded).unwrap(), manifest);
+    assert!(WorkspaceManifest::from_toml("version = 1\nprofile = \"repo-workflow\"\n").is_err());
+    assert!(
+        WorkspaceManifest::from_toml(
+            "version = 2\ndefault_function = \"function:example@^1\"\npackage = \"copied\"\n"
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn workspace_v2_rejects_source_path_escape() {
+    let manifest = WorkspaceManifest {
+        version: 2,
+        default_function: "function:example@^1.0".parse().unwrap(),
+        sources: [(
+            "local".to_owned(),
+            ArtifactSourceDeclaration {
+                kind: ArtifactSourceKind::Directory,
+                path: Some("../outside".into()),
+                url: None,
+                rev: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        components: Default::default(),
+        policy: Default::default(),
+        config: Default::default(),
+    };
+    assert!(manifest.to_toml().is_err());
 }
 
 fn candidate_for(
