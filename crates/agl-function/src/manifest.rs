@@ -1,15 +1,18 @@
 use std::collections::BTreeMap;
 
+use agl_artifact::{
+    ArtifactEnvelope, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
+};
 use agl_capabilities::CapabilityId;
 pub use agl_capabilities::FunctionToolPolicy;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::validation::{
     default_identity_fields, is_valid_identity_field, validate_extensions, validate_function_id,
     validate_relative_function_file_path, validate_unique_non_empty,
 };
-pub const FUNCTION_SCHEMA: &str = "agentfunction/v1";
+pub const FUNCTION_PAYLOAD_SCHEMA: &str = "agentlibre.function/v2";
 pub const SUBAGENT_SCHEMA: &str = "agentlibre/subagent/v1";
 pub const FUNCTION_FILE_NAME: &str = "FUNCTION.md";
 pub const FUNCTION_SYSTEM_PROMPT_FILE_NAME: &str = "SYSTEM.md";
@@ -37,8 +40,7 @@ impl FunctionToolMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentFunctionFrontMatter {
-    pub schema: String,
-    pub id: String,
+    pub artifact: ArtifactEnvelope,
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -67,13 +69,23 @@ pub struct AgentFunctionFrontMatter {
 }
 
 impl AgentFunctionFrontMatter {
+    pub fn id(&self) -> &str {
+        self.artifact.id.as_str()
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == FUNCTION_SCHEMA,
-            "unsupported function schema `{}`; expected `{FUNCTION_SCHEMA}`",
-            self.schema
+            self.artifact.type_id.as_str() == FUNCTION_TYPE,
+            "function artifact has type `{}`; expected `{FUNCTION_TYPE}`",
+            self.artifact.type_id
         );
-        validate_function_id("function id", &self.id)?;
+        ensure!(
+            self.artifact.payload_schema.as_str() == FUNCTION_PAYLOAD_SCHEMA,
+            "unsupported function payload schema `{}`; expected `{FUNCTION_PAYLOAD_SCHEMA}`",
+            self.artifact.payload_schema
+        );
+        self.artifact.validate().map_err(|error| anyhow!(error))?;
+        validate_function_id("function id", self.id())?;
         ensure!(
             !self.title.trim().is_empty(),
             "function title cannot be empty"
@@ -87,6 +99,15 @@ impl AgentFunctionFrontMatter {
         }
         if let Some(skills) = &self.skills {
             skills.validate("skills.use")?;
+            for skill in &skills.use_ {
+                ensure!(
+                    self.artifact.requires.iter().any(|requirement| {
+                        requirement.type_id().as_str() == SKILL_TYPE
+                            && requirement.package_id().as_str() == skill
+                    }),
+                    "function skill `{skill}` must be declared in artifact.requires"
+                );
+            }
         }
         if let Some(tools) = &self.tools {
             tools.validate()?;
@@ -95,6 +116,13 @@ impl AgentFunctionFrontMatter {
             subagents.validate("subagents.use")?;
             for subagent in &subagents.use_ {
                 validate_function_id("subagent id", subagent)?;
+                ensure!(
+                    self.artifact.requires.iter().any(|requirement| {
+                        requirement.type_id().as_str() == SUBFUNCTION_TYPE
+                            && requirement.package_id().as_str() == subagent
+                    }),
+                    "function subagent `{subagent}` must be declared in artifact.requires"
+                );
             }
         }
         if let Some(delegation) = &self.delegation {

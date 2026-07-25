@@ -5,9 +5,9 @@ fn graph_fixture(
     case: &str,
     root_subagents: &[&str],
     subagents: &[(&str, &str)],
-) -> (PathBuf, FunctionLocator) {
+) -> (PathBuf, FunctionPackageLocation) {
     let root =
-        std::env::temp_dir().join(format!("agl-functions-graph-{}-{case}", std::process::id()));
+        std::env::temp_dir().join(format!("agl-function-graph-{}-{case}", std::process::id()));
     let function_root = root.join("graph");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(function_root.join("subagents")).unwrap();
@@ -15,10 +15,14 @@ fn graph_fixture(
         .iter()
         .map(|id| format!("    - {id}\n"))
         .collect::<String>();
+    let requires = root_subagents
+        .iter()
+        .map(|id| format!("    - function:{id}@*\n"))
+        .collect::<String>();
     std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nschema: agentfunction/v1\nid: graph\ntitle: Graph\nsubagents:\n  use:\n{selected}delegation:\n  max_depth: 4\n  max_children_per_run: 4\n  max_descendants: 8\n  max_total_output_tokens: 4096\n  timeout_seconds: 600\n---\n"
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: graph\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n{requires}title: Graph\nsubagents:\n  use:\n{selected}delegation:\n  max_depth: 4\n  max_children_per_run: 4\n  max_descendants: 8\n  max_total_output_tokens: 4096\n  timeout_seconds: 600\n---\n"
             ),
         )
         .unwrap();
@@ -34,9 +38,9 @@ fn graph_fixture(
         )
         .unwrap();
     }
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "graph".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };
@@ -55,15 +59,24 @@ fn subagent_document(id: &str, children: &[&str]) -> String {
 
 #[test]
 fn renders_subagent_context() {
-    let root = std::env::temp_dir().join(format!("agl-functions-render-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("agl-function-render-{}", std::process::id()));
     let function_root = root.join("coding");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(function_root.join("subagents")).unwrap();
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - function:reviewer@*
 title: Coding
 subagents:
   use:
@@ -111,9 +124,9 @@ Review.
 "#,
     )
     .unwrap();
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "coding".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };

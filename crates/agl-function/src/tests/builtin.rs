@@ -5,7 +5,7 @@ use crate::*;
 #[test]
 fn resolves_builtin_gemma4_function_with_embedded_config() {
     let root = std::env::temp_dir().join(format!(
-        "agl-functions-builtin-gemma4-{}",
+        "agl-function-builtin-gemma4-{}",
         std::process::id()
     ));
     let workspace = root.join("workspace");
@@ -13,14 +13,14 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let locator = resolve_function_reference("gemma4-12b", &workspace, &config).unwrap();
-    assert_eq!(locator.source, FunctionSource::Builtin);
+    let locator = resolve_function_package("gemma4-12b", &workspace, &config).unwrap();
+    assert_eq!(locator.source, FunctionPackageSource::Builtin);
 
     let loaded = load_function(locator).unwrap();
-    assert_eq!(loaded.front_matter.id, "gemma4-12b");
+    assert_eq!(loaded.front_matter.id(), "gemma4-12b");
     assert_eq!(
         loaded.inference_config_path.as_deref(),
-        Some(Path::new("assets/functions/gemma4-12b/inference.toml"))
+        Some(Path::new("builtin:function/gemma4-12b/inference.toml"))
     );
     assert!(
         loaded
@@ -31,7 +31,7 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     );
 
     let runtime = resolve_runtime_function("gemma4-12b", &workspace, &config).unwrap();
-    assert_eq!(runtime.source, FunctionSource::Builtin);
+    assert_eq!(runtime.source, FunctionPackageSource::Builtin);
     assert_eq!(runtime.model_profile, None);
     assert_eq!(runtime.profile_path, None);
     assert!(runtime.inference_config_toml.is_some());
@@ -41,7 +41,7 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
 #[test]
 fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
     let root = std::env::temp_dir().join(format!(
-        "agl-functions-builtin-gemma4-e2b-{}",
+        "agl-function-builtin-gemma4-e2b-{}",
         std::process::id()
     ));
     let workspace = root.join("workspace");
@@ -49,11 +49,11 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let locator = resolve_function_reference("gemma4-e2b", &workspace, &config).unwrap();
-    assert_eq!(locator.source, FunctionSource::Builtin);
+    let locator = resolve_function_package("gemma4-e2b", &workspace, &config).unwrap();
+    assert_eq!(locator.source, FunctionPackageSource::Builtin);
 
     let loaded = load_function(locator).unwrap();
-    assert_eq!(loaded.front_matter.id, "gemma4-e2b");
+    assert_eq!(loaded.front_matter.id(), "gemma4-e2b");
     assert_eq!(
         loaded.front_matter.runtime_tool_mode(),
         Some(FunctionToolMode::ReadOnly)
@@ -74,7 +74,7 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
     assert!(!inference.contains("[runtime.mtp]"));
 
     let runtime = resolve_runtime_function("gemma4-e2b", &workspace, &config).unwrap();
-    assert_eq!(runtime.source, FunctionSource::Builtin);
+    assert_eq!(runtime.source, FunctionPackageSource::Builtin);
     assert_eq!(runtime.model_profile, None);
     assert_eq!(runtime.profile_path, None);
     assert!(runtime.inference_config_toml.is_some());
@@ -84,7 +84,7 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
 #[test]
 fn lists_builtin_functions() {
     let root =
-        std::env::temp_dir().join(format!("agl-functions-list-builtin-{}", std::process::id()));
+        std::env::temp_dir().join(format!("agl-function-list-builtin-{}", std::process::id()));
     let workspace = root.join("workspace");
     let config = root.join("config");
     let _ = std::fs::remove_dir_all(&root);
@@ -94,7 +94,7 @@ fn lists_builtin_functions() {
 
     let builtin_functions = functions
         .iter()
-        .filter(|function| function.source == FunctionSource::Builtin)
+        .filter(|function| function.source == FunctionPackageSource::Builtin)
         .map(|function| (function.id.as_str(), function.valid))
         .collect::<Vec<_>>();
 
@@ -113,7 +113,7 @@ fn lists_builtin_functions() {
 
 #[test]
 fn rejects_function_body_in_manifest() {
-    let root = std::env::temp_dir().join(format!("agl-functions-body-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("agl-function-body-{}", std::process::id()));
     let function_root = root.join("coding");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&function_root).unwrap();
@@ -125,8 +125,16 @@ fn rejects_function_body_in_manifest() {
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 ---
 
@@ -136,9 +144,9 @@ Code.
 "#,
     )
     .unwrap();
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "coding".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };
@@ -155,8 +163,16 @@ Code.
 #[test]
 fn rejects_prompt_field_in_manifest() {
     let content = r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 prompt:
   system: SYSTEM.md
@@ -174,23 +190,31 @@ prompt:
 
 #[test]
 fn rejects_missing_system_prompt_file() {
-    let root = std::env::temp_dir().join(format!("agl-functions-system-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("agl-function-system-{}", std::process::id()));
     let function_root = root.join("coding");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&function_root).unwrap();
     std::fs::write(
         function_root.join(FUNCTION_FILE_NAME),
         r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 ---
 "#,
     )
     .unwrap();
-    let locator = FunctionLocator {
+    let locator = FunctionPackageLocation {
         reference: "coding".to_string(),
-        source: FunctionSource::Workspace,
+        source: FunctionPackageSource::Workspace,
         path: function_root.join(FUNCTION_FILE_NAME),
         root_dir: function_root,
     };

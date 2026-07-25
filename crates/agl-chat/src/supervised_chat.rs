@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agl_content::Content;
-use agl_functions::RuntimeDelegationPlan;
+use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, RunId, SessionId, TurnId};
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{DurableRunDraft, RunBudget, RunKind, RunState};

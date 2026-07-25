@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 build = "build.rs"
 
+[dependencies]
+agl-artifact.workspace = true
+
 [build-dependencies]
 agl-config.workspace = true
 sha2.workspace = true

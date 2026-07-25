@@ -9,7 +9,7 @@ use agl_capabilities::{
 };
 use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
-use agl_functions::{RuntimeDelegationPlan, RuntimeSubagentSpec};
+use agl_function::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
 use agl_store::{
     AglStore, ChildRunAdmission, ChildRunDraft, DelegationTreeBudget, DurableRunRecord, RunBudget,

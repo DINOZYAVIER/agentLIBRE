@@ -5,8 +5,17 @@ use crate::*;
 #[test]
 fn parses_function_document() {
     let content = r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - skill:repo-status@*
 title: Coding
 model:
   config: inference.toml
@@ -27,7 +36,7 @@ skills:
 
     let (front_matter, body) = parse_function_document(content).unwrap();
 
-    assert_eq!(front_matter.id, "coding");
+    assert_eq!(front_matter.id(), "coding");
     assert_eq!(front_matter.model_profile(), None);
     assert_eq!(front_matter.model_config_path(), Some("inference.toml"));
     assert_eq!(
@@ -88,7 +97,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
     ];
 
     let root =
-        std::env::temp_dir().join(format!("agl-functions-tool-policy-{}", std::process::id()));
+        std::env::temp_dir().join(format!("agl-function-tool-policy-{}", std::process::id()));
     let workspace = root.join("workspace");
     let config = root.join("config");
     let _ = std::fs::remove_dir_all(&root);
@@ -100,7 +109,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
         std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nschema: agentfunction/v1\nid: {id}\ntitle: Policy {index}\n{}---\n",
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires: []\ntitle: Policy {index}\n{}---\n",
                 case.tools_yaml
             ),
         )
@@ -134,8 +143,16 @@ fn runtime_function_preserves_function_tool_policy_states() {
 #[test]
 fn rejects_model_profile_and_config_together() {
     let content = r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 model:
   profile: local
@@ -155,8 +172,16 @@ model:
 #[test]
 fn rejects_unknown_fields_without_extension_prefix() {
     let content = r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 unknown: true
 ---

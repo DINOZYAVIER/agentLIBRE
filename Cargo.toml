@@ -8,7 +8,7 @@ members = [
     "crates/agl-cli",
     "crates/agl-cron",
     "crates/agl-daemon",
-    "crates/agl-functions",
+    "crates/agl-function",
     "crates/agl-tools",
     "crates/agl-hooks",
     "crates/agl-host-tools",
@@ -56,7 +56,7 @@ agl-chat = { path = "crates/agl-chat" }
 agl-client = { path = "crates/agl-client" }
 agl-cron = { path = "crates/agl-cron" }
 agl-daemon = { path = "crates/agl-daemon" }
-agl-functions = { path = "crates/agl-functions" }
+agl-function = { path = "crates/agl-function" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-content = { path = "crates/agl-content" }

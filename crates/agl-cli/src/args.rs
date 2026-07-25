@@ -2168,9 +2168,9 @@ fn function_command(command: FunctionCommands) -> Result<FunctionCommand> {
             })
         }
         FunctionCommands::Init(args) => {
-            agl_functions::validate_function_id("function id", &args.id)?;
+            agl_function::validate_function_id("function id", &args.id)?;
             if let Some(profile) = &args.model_profile {
-                agl_functions::validate_function_id("model profile", profile)?;
+                agl_function::validate_function_id("model profile", profile)?;
             }
             FunctionCommand::Init(FunctionInitOptions {
                 id: args.id,

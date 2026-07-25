@@ -6,9 +6,9 @@ use agl_chat::{
     ToolAccessMode,
 };
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
-use agl_functions::{
+use agl_function::{
     FunctionStatusReport, function_status_with_model_bindings, load_function,
-    resolve_function_reference,
+    resolve_function_package,
 };
 use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
 use agl_models::RuntimePlan;
@@ -65,7 +65,7 @@ pub(crate) fn run_function_smoke(
         "function static validation failed: {}",
         static_status.errors.join("; ")
     );
-    let loaded = load_function(resolve_function_reference(
+    let loaded = load_function(resolve_function_package(
         &request.reference,
         &request.workspace_root,
         &runtime.paths.config_dir,

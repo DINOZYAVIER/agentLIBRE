@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::loader::{LoadedFunction, LoadedSubagent, markdown_sections, parse_subagent_document};
-use crate::locator::{FunctionSource, resolve_profile};
+use crate::locator::{FunctionPackageSource, resolve_profile};
 use crate::manifest::{
     AgentFunctionFrontMatter, FunctionDelegationBudget, FunctionMemory, FunctionToolMode,
     FunctionToolPolicy, SUBAGENT_SCHEMA, SelectionBlock,
@@ -199,7 +199,7 @@ pub struct RuntimeSubagentSpec {
     pub children: Vec<String>,
     pub limits: SubagentLimits,
     pub system_body: String,
-    pub source: FunctionSource,
+    pub source: FunctionPackageSource,
     pub source_path: PathBuf,
     pub source_digest: String,
     pub spec_digest: String,

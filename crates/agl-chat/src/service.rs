@@ -6,7 +6,7 @@ use std::time::Instant;
 use agl_capabilities::CapabilityId;
 use agl_content::{Content, ContentPart};
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_functions::RuntimeDelegationPlan;
+use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
 use agl_loop::{

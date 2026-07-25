@@ -16,7 +16,7 @@ use agl_config::{
     resolve_inference_preset_with_bindings,
 };
 use agl_content::Content;
-use agl_functions::{
+use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
     RuntimeSubagentSpec, resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
 };

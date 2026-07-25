@@ -515,7 +515,7 @@ fn package_auto_policy(
     workspace_root: &Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<agl_config::AutoRuntimePolicy> {
-    let function = agl_functions::resolve_runtime_function(
+    let function = agl_function::resolve_runtime_function(
         &package.function_id,
         workspace_root,
         &runtime.paths.config_dir,

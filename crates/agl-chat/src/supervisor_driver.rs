@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use agl_capabilities::CapabilityId;
 use agl_config::ResolvedInferenceConfig;
 use agl_content::Content;
-use agl_functions::RuntimeDelegationPlan;
+use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
 use agl_loop::{EffectOutcome, TurnEffect, TurnEffectResult};
 use agl_store::{AglStore, DurableRunRecord, EffectDeliveryClass, RunKind, RunState, RunUsage};
