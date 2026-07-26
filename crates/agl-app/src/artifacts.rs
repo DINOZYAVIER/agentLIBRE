@@ -1,16 +1,17 @@
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agl_artifact::{
     ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactSource, ArtifactSourceId,
     ArtifactSourceKind, ArtifactSourceTier, DirectoryArtifactSource, InMemoryPackageView,
-    StaticArtifactSource,
+    StaticArtifactSource, WorkspaceManifest,
 };
 use agl_function::FunctionArtifactAdapter;
 use agl_model::ModelArtifactAdapter;
 use agl_runtime::AgentLibrePaths;
 use agl_skill::SkillArtifactAdapter;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 #[derive(Clone)]
 pub struct ArtifactComposition {
@@ -53,8 +54,41 @@ pub fn compose_artifacts(
             registry.clone(),
         )));
     }
+    add_declared_sources(&mut sources, &workspace_root, &registry)?;
     sources.push(builtin_source()?);
     Ok(ArtifactComposition { registry, sources })
+}
+
+fn add_declared_sources(
+    sources: &mut Vec<Arc<dyn ArtifactSource>>,
+    workspace_root: &PathBuf,
+    registry: &Arc<ArtifactAdapterRegistry>,
+) -> Result<()> {
+    let manifest_path = workspace_root.join(".agl/workspace.toml");
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let manifest = WorkspaceManifest::from_toml(&fs::read_to_string(&manifest_path)?)?;
+    for (name, declaration) in manifest.sources {
+        let kind = declaration.kind;
+        let root = match kind {
+            ArtifactSourceKind::Directory => workspace_root.join(
+                declaration
+                    .path
+                    .context("local artifact source is missing its path")?,
+            ),
+            ArtifactSourceKind::Git => workspace_root.join(".agl/sources").join(&name),
+            ArtifactSourceKind::Embedded => continue,
+        };
+        sources.push(Arc::new(DirectoryArtifactSource::new(
+            ArtifactSourceId::new(name)?,
+            ArtifactSourceTier::Workspace,
+            kind,
+            root,
+            registry.clone(),
+        )));
+    }
+    Ok(())
 }
 
 fn system_config_roots() -> Vec<PathBuf> {
@@ -103,7 +137,10 @@ mod tests {
     #[test]
     fn composition_registers_all_core_adapters_and_source_tiers() {
         let paths = AgentLibrePaths::from_agl_home(std::env::temp_dir().join("agl-app-test-home"));
-        let composition = compose_artifacts(&paths, std::env::temp_dir()).unwrap();
+        let workspace =
+            std::env::temp_dir().join(format!("agl-app-composition-{}", std::process::id()));
+        fs::create_dir_all(&workspace).unwrap();
+        let composition = compose_artifacts(&paths, &workspace).unwrap();
         assert_eq!(composition.registry.iter().count(), 3);
         assert!(
             composition
@@ -123,5 +160,6 @@ mod tests {
                 .iter()
                 .any(|source| source.tier() == ArtifactSourceTier::User)
         );
+        fs::remove_dir_all(workspace).unwrap();
     }
 }
