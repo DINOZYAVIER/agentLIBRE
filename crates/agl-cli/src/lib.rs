@@ -47,6 +47,7 @@ use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, anyhow, bail};
 
 mod args;
+mod artifact;
 mod config;
 mod doctor;
 mod function;
@@ -70,6 +71,7 @@ use args::{
     SkillListSourceArg, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
     SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
+use artifact::run_artifact;
 use config::run_config;
 use function::run_function;
 use init::run_init;
@@ -272,6 +274,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Process(ProcessCommand::Attach(_))
         | CliCommand::Inference(InferenceCommand::Run(_)) => CliRuntimeProfile::Interactive,
         CliCommand::Config(_)
+        | CliCommand::Artifact(_)
         | CliCommand::Cron(_)
         | CliCommand::Function(_)
         | CliCommand::Init(_)
@@ -301,6 +304,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
             Ok(())
         }
         CliCommand::Config(command) => run_config(command, runtime),
+        CliCommand::Artifact(command) => run_artifact(command, runtime),
         CliCommand::Cron(command) => run_cron(command, runtime),
         CliCommand::Store(command) => run_store(command, runtime),
         CliCommand::Function(command) => run_function(command, runtime),

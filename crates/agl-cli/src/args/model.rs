@@ -17,6 +17,7 @@ pub(crate) enum CliCommand {
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
+    Artifact(ArtifactCommand),
     Cron(CronCommand),
     Store(StoreCommand),
     Function(FunctionCommand),
@@ -31,6 +32,51 @@ pub(crate) enum CliCommand {
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
     Run(RunOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ArtifactCommand {
+    List(ArtifactListOptions),
+    Inspect(ArtifactReferenceOptions),
+    Resolve(ArtifactReferenceOptions),
+    Graph(ArtifactReferenceOptions),
+    Lock(ArtifactLockCommandOptions),
+    Source(ArtifactSourceCommand),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactListOptions {
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactReferenceOptions {
+    pub(crate) reference: String,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArtifactLockCommandOptions {
+    pub(crate) refresh: bool,
+    pub(crate) json: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ArtifactSourceCommand {
+    List {
+        json: bool,
+    },
+    Add {
+        name: String,
+        git: Option<String>,
+        local: Option<PathBuf>,
+        rev: Option<String>,
+        json: bool,
+    },
+    Remove {
+        name: String,
+        json: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

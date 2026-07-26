@@ -135,6 +135,8 @@ dependencies = [
 name = "agl-cli"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
+ "agl-assets",
  "agl-capabilities",
  "agl-chat",
  "agl-client",
