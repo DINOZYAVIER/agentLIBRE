@@ -881,7 +881,7 @@ name = "portable-repo-workflow"
 [components.skills]
 kind = "git"
 path = ".agl/skills"
-url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
+url = "ssh://git@example.invalid/agentlibre/agl-skill.git"
 rev = "v0.2.0"
 required = true
 access = "read"

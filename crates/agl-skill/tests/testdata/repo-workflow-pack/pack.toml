@@ -1,0 +1,14 @@
+version = 1
+name = "agl/repo-workflow"
+pack_version = "0.1.0"
+profile = "repo-workflow"
+agentlibre_version = ">=1.0.0-alpha.7"
+
+[submodule]
+path = ".agl/skills"
+url = "https://github.com/DINOZYAVIER/agl-core-skills.git"
+rev = "v0.1.2"
+
+[[skills]]
+name = "repo-change"
+path = "agl/repo-change"

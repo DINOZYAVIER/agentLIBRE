@@ -118,7 +118,7 @@ dependencies = [
  "agl-process",
  "agl-runtime",
  "agl-session",
- "agl-skills",
+ "agl-skill",
  "agl-store",
  "agl-supervisor",
  "agl-tools",
@@ -151,7 +151,7 @@ dependencies = [
  "agl-protocol",
  "agl-repo",
  "agl-runtime",
- "agl-skills",
+ "agl-skill",
  "agl-store",
  "anyhow",
  "clap",
@@ -233,7 +233,7 @@ dependencies = [
  "agl-protocol",
  "agl-runtime",
  "agl-session",
- "agl-skills",
+ "agl-skill",
  "agl-store",
  "agl-supervisor",
  "anyhow",
@@ -291,7 +291,7 @@ dependencies = [
  "agl-content",
  "agl-ids",
  "agl-process",
- "agl-skills",
+ "agl-skill",
  "agl-store",
  "agl-tools",
  "anyhow",
@@ -522,7 +522,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-skills"
+name = "agl-skill"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-assets",

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use agl_capabilities::{
     ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult, CapabilityId,
 };
-use agl_skills::{
+use agl_skill::{
     SkillHarness, SkillLockOptions, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
     lock_workspace_skills, revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
     workspace_skill_report_with_trust,
@@ -224,7 +224,7 @@ fn parse_args<T: DeserializeOwned>(capability_id: &str, arguments: Value) -> Res
         .with_context(|| format!("{capability_id} arguments are invalid"))
 }
 
-fn report_value(capability_id: &str, report: &agl_skills::WorkspaceSkillReport) -> Result<Value> {
+fn report_value(capability_id: &str, report: &agl_skill::WorkspaceSkillReport) -> Result<Value> {
     Ok(json!({
         "capability_id": capability_id,
         "report": report,

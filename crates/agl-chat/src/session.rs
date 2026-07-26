@@ -36,7 +36,7 @@ use agl_runtime::{
     AgentLibreRuntimeConfig, RenderedRuntimeFeatureContext, RuntimeFeatureRenderOptions,
     render_runtime_feature_context,
 };
-use agl_skills::{
+use agl_skill::{
     SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
     SkillFolderPrepareReport, SkillToolRouting, SkillToolRoutingView,
     build_verified_context_bundle, prepare_workspace_skill_artifact_write,
@@ -1738,7 +1738,7 @@ pub(crate) fn resolve_subagent_effective_capabilities(
 }
 
 fn selected_skill_hook_batches(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
 ) -> Result<Vec<TurnHookBatch>> {
@@ -1770,7 +1770,7 @@ fn selected_skill_hook_batches(
 
 #[cfg(test)]
 fn selected_skill_visible_tools(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
@@ -1789,7 +1789,7 @@ fn selected_skill_visible_tools(
 
 #[cfg(test)]
 fn selected_skill_visible_tools_with_dynamic_grants(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
@@ -1826,7 +1826,7 @@ struct RuntimeCapabilityBoundary<'a> {
 }
 
 fn resolve_effective_capabilities(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     tool_mode: ToolAccessMode,
@@ -1897,7 +1897,7 @@ fn visible_tools_from_effective(effective: &EffectiveCapabilitySet) -> Vec<Visib
 }
 
 fn derive_skill_tool_routing(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     selected_skills: &[SkillId],
     effective: &EffectiveCapabilitySet,
 ) -> Result<SkillToolRoutingView> {
@@ -1957,7 +1957,7 @@ fn derive_skill_tool_routing(
 }
 
 fn admit_dynamic_permission_grants(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     tool_catalog: &ToolCatalog,
     selected_skills: &[SkillId],
     store_root: &std::path::Path,
@@ -2044,7 +2044,7 @@ struct SelectedSkillGrantPolicy {
 }
 
 fn selected_skill_grant_policy(
-    skill_registry: &agl_skills::SkillRegistry,
+    skill_registry: &agl_skill::SkillRegistry,
     selected_skills: &[SkillId],
 ) -> Result<SelectedSkillGrantPolicy> {
     let mut policy = SelectedSkillGrantPolicy::default();

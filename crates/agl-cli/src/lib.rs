@@ -35,7 +35,7 @@ use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreProcessMode,
     AgentLibreRuntimeConfig, AgentLibreWorkspaceConfig, init_tracing,
 };
-use agl_skills::{
+use agl_skill::{
     SkillFolderCreateSituation, SkillFolderSyncActionKind,
     SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport,
     SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
@@ -2139,11 +2139,11 @@ fn skill_folder_create_situation(when: SkillFolderCreateSituation) -> &'static s
     }
 }
 
-fn skill_report_state(state: agl_skills::SkillReportState) -> &'static str {
+fn skill_report_state(state: agl_skill::SkillReportState) -> &'static str {
     match state {
-        agl_skills::SkillReportState::Ok => "ok",
-        agl_skills::SkillReportState::Warning => "warning",
-        agl_skills::SkillReportState::Invalid => "invalid",
+        agl_skill::SkillReportState::Ok => "ok",
+        agl_skill::SkillReportState::Warning => "warning",
+        agl_skill::SkillReportState::Invalid => "invalid",
     }
 }
 
