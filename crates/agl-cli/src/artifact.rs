@@ -1,17 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agl_app::compose_artifacts;
 use agl_artifact::{
-    ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactPackageRef,
-    ArtifactResolver, ArtifactSource, ArtifactSourceDeclaration, ArtifactSourceId,
-    ArtifactSourceKind, ArtifactSourceTier, DirectoryArtifactSource, InMemoryPackageView,
-    PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph, StaticArtifactSource,
-    compute_package_digest,
+    ArtifactAdapterRegistry, ArtifactPackageRef, ArtifactResolver, ArtifactSource,
+    ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
+    PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph, compute_package_digest,
 };
-use agl_function::FunctionArtifactAdapter;
-use agl_model::ModelArtifactAdapter;
 use agl_runtime::AgentLibreRuntimeConfig;
-use agl_skill::SkillArtifactAdapter;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -81,80 +77,12 @@ pub(crate) fn run_artifact(
 
 fn context(runtime: &AgentLibreRuntimeConfig) -> Result<ArtifactContext> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let registry = Arc::new(ArtifactAdapterRegistry::from_dyn([
-        Arc::new(FunctionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(SkillArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-        Arc::new(ModelArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
-    ])?);
-    let mut sources: Vec<Arc<dyn ArtifactSource>> = Vec::new();
-    sources.push(Arc::new(DirectoryArtifactSource::new(
-        "workspace".parse()?,
-        ArtifactSourceTier::Workspace,
-        ArtifactSourceKind::Directory,
-        workspace_root.join(".agl"),
-        registry.clone(),
-    )));
-    sources.push(Arc::new(DirectoryArtifactSource::new(
-        "user".parse()?,
-        ArtifactSourceTier::User,
-        ArtifactSourceKind::Directory,
-        runtime.paths.config_dir.clone(),
-        registry.clone(),
-    )));
-    for (index, root) in system_config_roots().into_iter().enumerate() {
-        sources.push(Arc::new(DirectoryArtifactSource::new(
-            ArtifactSourceId::new(format!("system-{index}"))?,
-            ArtifactSourceTier::System,
-            ArtifactSourceKind::Directory,
-            root,
-            registry.clone(),
-        )));
-    }
-    sources.push(builtin_source()?);
+    let composition = compose_artifacts(&runtime.paths, &workspace_root)?;
     Ok(ArtifactContext {
-        registry,
-        sources,
+        registry: composition.registry,
+        sources: composition.sources,
         workspace_root,
     })
-}
-
-fn system_config_roots() -> Vec<PathBuf> {
-    std::env::var_os("XDG_CONFIG_DIRS")
-        .map(|value| {
-            std::env::split_paths(&value)
-                .map(|path| path.join("agentLIBRE"))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![PathBuf::from("/etc/xdg/agentLIBRE")])
-}
-
-fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id: ArtifactSourceId = "builtin".parse()?;
-    let mut candidates = Vec::new();
-    for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
-        let files = package
-            .files
-            .iter()
-            .map(|file| {
-                Ok::<_, agl_artifact::ArtifactError>((file.path.parse()?, file.bytes.to_vec()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        candidates.push(ArtifactCandidate::new(
-            package.type_id.parse()?,
-            package.id.parse()?,
-            package.version.parse()?,
-            source_id.clone(),
-            ArtifactSourceTier::Builtin,
-            ArtifactSourceKind::Embedded,
-            Arc::new(InMemoryPackageView::new(files)?),
-        ));
-    }
-    Ok(Arc::new(StaticArtifactSource::new(
-        source_id,
-        ArtifactSourceTier::Builtin,
-        ArtifactSourceKind::Embedded,
-        candidates,
-    )?))
 }
 
 fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
