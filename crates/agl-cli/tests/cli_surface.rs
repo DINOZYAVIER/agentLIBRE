@@ -119,7 +119,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["skill", "status", "--help"][..],
         &["skill", "verify", "--help"][..],
         &["skill", "sync-folders", "--help"][..],
-        &["skill", "lock", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
         &["cron", "--help"][..],
@@ -975,7 +974,7 @@ fn skill_help_explains_workspace_skill_use() {
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Skill use:");
-    assert_contains(&stdout, "SKILL.md lists the skill name");
+    assert_contains(&stdout, "SKILL.md embeds the common package identity");
     assert_contains(
         &stdout,
         ".agl/artifact-lock.toml records the exact workspace package identity and digest",
@@ -1415,10 +1414,17 @@ fn skill_verify_reports_trusted_workspace_skill_as_usable() {
         "skill-verify-trust",
         "repo-change",
         r#"---
-name: repo-change
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-change
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1433,7 +1439,10 @@ Body.
 "#,
     );
     let home_arg = home.path_string();
-    let lock = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "lock"]);
+    let lock = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "repo", "component", "lock"],
+    );
     assert_success(&lock);
     let trust = run_agl_in(
         repo.path(),
@@ -1463,10 +1472,17 @@ fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
         "skill-status-duplicate-create",
         "bad-dupe",
         r#"---
-name: bad-dupe
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-dupe
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad duplicate folder create rule.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1512,10 +1528,17 @@ fn skill_status_json_groups_invalid_artifact_path_diagnostic() {
         "skill-status-invalid-path",
         "bad-path",
         r#"---
-name: bad-path
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-path
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad folder path.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -2374,10 +2397,17 @@ access = "read"
         skill_dir.join("SKILL.md"),
         format!(
             r#"---
-name: {name}
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: {name}
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate

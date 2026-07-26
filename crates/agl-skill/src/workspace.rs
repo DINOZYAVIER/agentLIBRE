@@ -1,8 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_artifact::{
+    ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
+    StaticArtifactSource,
+};
 use agl_capabilities::{CapabilityId, SkillId};
 use agl_repo::{
     ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceComponentKind,
@@ -12,9 +18,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RegisteredSkill, SkillArtifactAccess, SkillArtifactKind, SkillFolderCreateRule,
-    SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource, SkillTrustState,
-    builtin_registry,
+    RegisteredSkill, SkillArtifactAccess, SkillArtifactAdapter, SkillArtifactKind,
+    SkillFolderCreateRule, SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource,
+    SkillTrustState, builtin_registry, skill_adapter_registry,
 };
 
 const SKILLS_COMPONENT: &str = "skills";
@@ -846,7 +852,17 @@ fn discover_workspace_skills(
     collect_skill_manifests(&component_root, &mut manifests)?;
     manifests.sort();
 
-    let tree = component.actual_tree.as_deref().unwrap_or("unknown");
+    let adapter_registry = skill_adapter_registry()?;
+    let adapter = SkillArtifactAdapter::default();
+    let source_id: ArtifactSourceId = "workspace-skills".parse()?;
+    let skill_type: ArtifactTypeId = "skill".parse()?;
+    let mut candidates = Vec::new();
+    let mut paths = BTreeMap::new();
+    let source = if component.kind == WorkspaceComponentKind::Submodule {
+        SkillSource::Core
+    } else {
+        SkillSource::Local
+    };
     let mut skills = Vec::with_capacity(manifests.len());
     for manifest in manifests {
         let skill_dir = manifest.parent().unwrap_or(&component_root);
@@ -872,18 +888,19 @@ fn discover_workspace_skills(
             }
         };
 
-        let source = if component.kind == WorkspaceComponentKind::Submodule {
-            SkillSource::Core
-        } else {
-            SkillSource::Local
+        let view = match DirectoryPackageView::new(skill_dir) {
+            Ok(view) => view,
+            Err(err) => {
+                skills.push(invalid_skill_status(
+                    workspace_root,
+                    skill_dir,
+                    &err.to_string(),
+                ));
+                continue;
+            }
         };
-        match SkillHarness::parse_workspace_dir_with_source(
-            skill_dir,
-            &component_root,
-            tree,
-            source,
-        ) {
-            Ok(harness) => skills.push(status_from_harness(workspace_root, path, harness)),
+        let envelope = match adapter.extract_envelope(&view) {
+            Ok(envelope) => envelope,
             Err(err) => {
                 let mut status = invalid_skill_status(workspace_root, skill_dir, &err.to_string());
                 status.source_path = Some(slash_path(
@@ -893,8 +910,60 @@ fn discover_workspace_skills(
                         .unwrap_or(&skill_dir.join("SKILL.md")),
                 ));
                 skills.push(status);
+                continue;
             }
-        }
+        };
+        let candidate = ArtifactCandidate::new(
+            skill_type.clone(),
+            envelope.id.clone(),
+            envelope.version.clone(),
+            source_id.clone(),
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceKind::Directory,
+            Arc::new(view),
+        );
+        paths.insert(envelope.id.to_string(), (path, source));
+        candidates.push(candidate);
+    }
+
+    let source = StaticArtifactSource::new(
+        source_id,
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        candidates,
+    )?;
+    let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![Arc::new(source)]);
+    for (package_id, (path, skill_source)) in paths {
+        let root = ArtifactPackageRef::parse(&format!("skill:{package_id}@*"))?;
+        let graph = match resolver.resolve_and_validate(&root, None) {
+            Ok(graph) => graph,
+            Err(err) => {
+                skills.push(invalid_skill_status(
+                    workspace_root,
+                    &workspace_root.join(&path),
+                    &err.to_string(),
+                ));
+                continue;
+            }
+        };
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved workspace skill root is missing")?;
+        let payload = adapter_registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let mut harness = *payload
+            .downcast::<SkillHarness>()
+            .map_err(|_| anyhow::anyhow!("skill adapter returned an invalid payload"))?;
+        harness.source = skill_source;
+        let source_path = path
+            .strip_prefix(&component.path)
+            .unwrap_or(&path)
+            .join("SKILL.md");
+        harness.source_path = slash_path(&source_path);
+        harness.tree_sha256 = node.package_digest.to_string();
+        skills.push(status_from_harness(workspace_root, path, harness));
     }
 
     Ok(skills)
