@@ -3,8 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str;
 
-use agl_artifact::{ArtifactEnvelope, ArtifactVersion, SKILL_TYPE};
-use agl_assets::{BuiltinArtifactFile, BuiltinArtifactPackage};
+use agl_artifact::{
+    ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
+};
+use agl_assets::BuiltinArtifactPackage;
 use agl_capabilities::{CapabilityId, HookId, OperationKind, SkillId, StateEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +69,11 @@ pub struct SkillHarness {
     pub source_path: String,
     pub manifest_sha256: String,
     pub tree_sha256: String,
+}
+
+struct SkillPackageFile<'a> {
+    path: &'a str,
+    bytes: &'a [u8],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -137,11 +144,76 @@ impl SkillHarness {
             .collect::<Vec<_>>();
         parse_skill_text(
             skill.id,
-            "agl",
+            Some("agl"),
             &format!("builtin:{}/{}", skill.id, skill.entrypoint),
             manifest.bytes,
-            &references,
+            &references
+                .iter()
+                .map(|file| SkillPackageFile {
+                    path: file.path,
+                    bytes: file.bytes,
+                })
+                .collect::<Vec<_>>(),
             skill.digest,
+            SkillSource::Core,
+            text,
+        )
+    }
+
+    pub fn parse_package_view(
+        package: &dyn ArtifactPackageView,
+        package_id: &str,
+        source: SkillSource,
+    ) -> Result<Self, SkillManifestError> {
+        let entrypoint = "SKILL.md"
+            .parse()
+            .expect("skill adapter entrypoint is a valid artifact path");
+        let manifest_bytes =
+            package
+                .read_file(&entrypoint)
+                .map_err(|error| SkillManifestError::ReadManifest {
+                    source_path: format!("package:{package_id}/SKILL.md"),
+                    message: error.to_string(),
+                })?;
+        let text =
+            str::from_utf8(&manifest_bytes).map_err(|_| SkillManifestError::InvalidUtf8 {
+                source_path: format!("package:{package_id}/SKILL.md"),
+            })?;
+        let mut owned_references = Vec::new();
+        for path in package
+            .files()
+            .map_err(|error| SkillManifestError::ReadManifest {
+                source_path: format!("package:{package_id}"),
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .filter(|path| path.as_str().starts_with("references/"))
+        {
+            let bytes = package.read_file(&path).map_err(|_error| {
+                SkillManifestError::MissingReference {
+                    path: path.to_string(),
+                }
+            })?;
+            owned_references.push((path.to_string(), bytes));
+        }
+        let references = owned_references
+            .iter()
+            .map(|(path, bytes)| SkillPackageFile { path, bytes })
+            .collect::<Vec<_>>();
+        let digest = compute_package_digest(package)
+            .map_err(|error| SkillManifestError::ReadManifest {
+                source_path: format!("package:{package_id}"),
+                message: error.to_string(),
+            })?
+            .to_string();
+        parse_skill_text(
+            package_id,
+            None,
+            &format!("package:{package_id}/SKILL.md"),
+            &manifest_bytes,
+            &references,
+            &digest,
+            source,
             text,
         )
     }
@@ -150,6 +222,20 @@ impl SkillHarness {
         skill_dir: impl AsRef<Path>,
         component_root: impl AsRef<Path>,
         tree_sha256: &str,
+    ) -> Result<Self, SkillManifestError> {
+        Self::parse_workspace_dir_with_source(
+            skill_dir,
+            component_root,
+            tree_sha256,
+            SkillSource::Local,
+        )
+    }
+
+    pub fn parse_workspace_dir_with_source(
+        skill_dir: impl AsRef<Path>,
+        component_root: impl AsRef<Path>,
+        tree_sha256: &str,
+        source: SkillSource,
     ) -> Result<Self, SkillManifestError> {
         let skill_dir = skill_dir.as_ref();
         let component_root = component_root.as_ref();
@@ -168,6 +254,7 @@ impl SkillHarness {
             &source_path,
             &bytes,
             tree_sha256,
+            source,
             text,
         )
     }
@@ -423,11 +510,12 @@ impl std::error::Error for SkillManifestError {}
 
 fn parse_skill_text(
     expected_id: &str,
-    expected_pack: &str,
+    expected_pack: Option<&str>,
     source_path: &str,
     manifest_bytes: &[u8],
-    reference_assets: &[&BuiltinArtifactFile],
+    reference_assets: &[SkillPackageFile<'_>],
     tree_sha256: &str,
+    source: SkillSource,
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
@@ -438,14 +526,16 @@ fn parse_skill_text(
             actual: actual_id,
         });
     }
-    if expected_pack != raw.pack.as_str() {
+    if let Some(expected_pack) = expected_pack
+        && expected_pack != raw.pack.as_str()
+    {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
             expected: expected_pack.to_string(),
             actual: raw.pack.clone(),
         });
     }
     validate_skill_artifact(&raw.artifact, source_path)?;
-    let source = SkillSource::Core;
+    let source = source;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(reference_assets, &reference_policy.include)?;
@@ -461,7 +551,7 @@ fn parse_skill_text(
         description: raw.description,
         version: raw.artifact.version.clone(),
         source,
-        pack: expected_pack.to_string(),
+        pack: raw.pack,
         required_hooks: raw.required_hooks,
         allowed_tools: raw.allowed_tools,
         requestable_tools: raw.requestable_tools,
@@ -486,6 +576,7 @@ fn parse_workspace_text(
     source_path: &str,
     manifest_bytes: &[u8],
     tree_sha256: &str,
+    source: SkillSource,
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
@@ -505,7 +596,7 @@ fn parse_workspace_text(
         name: raw.artifact.id.as_str().to_owned(),
         description: raw.description,
         version: raw.artifact.version.clone(),
-        source: SkillSource::Local,
+        source,
         pack: raw.pack,
         required_hooks: raw.required_hooks,
         allowed_tools: raw.allowed_tools,
@@ -570,7 +661,7 @@ fn normalize_raw_manifest(
     Ok(())
 }
 
-fn split_frontmatter<'a>(
+pub(crate) fn split_frontmatter<'a>(
     source_path: &str,
     text: &'a str,
 ) -> Result<(&'a str, &'a str), SkillManifestError> {
@@ -817,12 +908,12 @@ fn validate_artifact_path(path: &Path) -> Result<(), SkillManifestError> {
 }
 
 fn resolve_references(
-    reference_assets: &[&BuiltinArtifactFile],
+    reference_assets: &[SkillPackageFile<'_>],
     includes: &[String],
 ) -> Result<Vec<SkillReference>, SkillManifestError> {
     let mut references_by_path = BTreeMap::new();
     for asset in reference_assets {
-        references_by_path.insert(asset.path.to_string(), *asset);
+        references_by_path.insert(asset.path.to_string(), asset);
     }
     let mut resolved = Vec::with_capacity(includes.len());
     for include in includes {
@@ -1059,10 +1150,17 @@ mod tests {
     fn frontmatter_rejects_unknown_fields() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1088,10 +1186,17 @@ Body.
     fn frontmatter_rejects_invalid_hook_ids() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - Bad Hook
@@ -1118,10 +1223,17 @@ Body.
     fn frontmatter_rejects_duplicate_references() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1152,10 +1264,17 @@ Body.
     fn frontmatter_parses_permissions() {
         let skill = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1188,10 +1307,17 @@ Body.
     fn frontmatter_parses_permission_routing_fields() {
         let skill = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1265,10 +1391,17 @@ Body.
     fn frontmatter_rejects_allowed_requestable_overlap() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1301,10 +1434,17 @@ Body.
     fn frontmatter_rejects_template_tool_outside_requestable_set() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1341,10 +1481,17 @@ Body.
     fn frontmatter_rejects_duplicate_permission_scopes() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1378,10 +1525,17 @@ Body.
     fn frontmatter_parses_artifact_declarations() {
         let skill = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1426,10 +1580,17 @@ Body.
     fn frontmatter_rejects_artifact_paths_outside_agl() {
         let err = parse_fixture(
             r#"---
-name: task-spec
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: task-spec
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Write specs.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:task_spec.validate
@@ -1461,11 +1622,12 @@ Body.
     fn parse_fixture(text: &str) -> Result<SkillHarness, SkillManifestError> {
         parse_skill_text(
             "task-spec",
-            "agl",
+            Some("agl"),
             "assets/core-skills/agl/task-spec/SKILL.md",
             b"",
             &[],
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            SkillSource::Local,
             text,
         )
     }
@@ -1479,10 +1641,17 @@ Body.
         fs::write(
             skill_dir.join("SKILL.md"),
             r#"---
-name: repo-change
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-change
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1521,10 +1690,17 @@ Review changes.
         fs::write(
             skill_dir.join("SKILL.md"),
             r#"---
-name: repo-review
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-review
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: core
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1540,7 +1716,13 @@ Body.
         )
         .unwrap();
 
-        let skill = SkillHarness::parse_workspace_dir(&skill_dir, &root, "tree-sha").unwrap();
+        let skill = SkillHarness::parse_workspace_dir_with_source(
+            &skill_dir,
+            &root,
+            "tree-sha",
+            SkillSource::Core,
+        )
+        .unwrap();
 
         assert_eq!(skill.id.as_str(), "repo-review");
         assert_eq!(skill.source, SkillSource::Core);
@@ -1557,11 +1739,19 @@ Body.
         fs::write(
             skill_dir.join("SKILL.md"),
             r#"---
-name: repo-change
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-change
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: workspace
 pack: agl
+source: workspace
 required_hooks:
   - core:repo_path.validate
 allowed_tools: []
@@ -1580,7 +1770,7 @@ Body.
 
         match err {
             SkillManifestError::InvalidYaml { message, .. } => {
-                assert!(message.contains("unknown variant `workspace`"), "{message}");
+                assert!(message.contains("unknown field `source`"), "{message}");
             }
             other => panic!("expected invalid YAML source error, got {other:?}"),
         }

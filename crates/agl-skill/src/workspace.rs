@@ -1011,7 +1011,17 @@ fn discover_workspace_skills(
             }
         };
 
-        match SkillHarness::parse_workspace_dir(skill_dir, &component_root, tree) {
+        let source = if component.kind == WorkspaceComponentKind::Submodule {
+            SkillSource::Core
+        } else {
+            SkillSource::Local
+        };
+        match SkillHarness::parse_workspace_dir_with_source(
+            skill_dir,
+            &component_root,
+            tree,
+            source,
+        ) {
             Ok(harness) => skills.push(status_from_harness(workspace_root, path, harness)),
             Err(err) => {
                 let mut status = invalid_skill_status(workspace_root, skill_dir, &err.to_string());

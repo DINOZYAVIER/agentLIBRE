@@ -42,7 +42,16 @@ fn invalid_workspace_manifest_is_reported() {
     fs::write(
         skill_dir.join("SKILL.md"),
         r#"---
-name: bad-skill
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-skill
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad.
 ---
 Body.
@@ -70,10 +79,17 @@ fn invalid_submodule_skill_reports_manifest_diagnostic_without_component_noise()
         "invalid-submodule-skill",
         "bad-dupe",
         r#"---
-name: bad-dupe
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-dupe
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad duplicate folder create rule.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -133,10 +149,17 @@ fn invalid_submodule_skill_artifact_path_reports_manifest_diagnostic() {
         "invalid-artifact-path",
         "bad-path",
         r#"---
-name: bad-path
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-path
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad folder path.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -970,7 +993,7 @@ fn write_workspace_skill(
 fn write_skill_with_source(
     skill_dir: &Path,
     name: &str,
-    source_kind: &str,
+    _source_kind: &str,
     allowed_tools: &[&str],
     requestable_tools: &[&str],
 ) {
@@ -981,10 +1004,17 @@ fn write_skill_with_source(
         skill_dir.join("SKILL.md"),
         format!(
             r#"---
-name: {name}
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: {name}
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: {source_kind}
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1011,10 +1041,17 @@ fn write_workspace_skill_with_folders(skill_dir: &Path, name: &str, folders_yaml
         skill_dir.join("SKILL.md"),
         format!(
             r#"---
-name: {name}
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: {name}
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate

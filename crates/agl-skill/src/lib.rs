@@ -1,3 +1,4 @@
+mod adapter;
 mod context;
 mod manifest;
 mod pack;
@@ -7,6 +8,10 @@ mod workspace;
 #[cfg(test)]
 mod audit;
 
+pub use adapter::{
+    SkillArtifactAdapter, builtin_source, directory_skill_source, parse_skill_envelope,
+    skill_adapter_registry,
+};
 pub use context::{
     SkillContextBlock, SkillContextBundle, SkillContextError, SkillContextEvidence,
     SkillContextReferenceEvidence, SkillPermissionRequestTemplateEvidence, SkillToolRouting,

@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
+use agl_artifact::{ArtifactPackageRef, ArtifactResolver};
 use agl_capabilities::{CapabilityId, HookId, SkillId};
 use agl_tools::{ToolCatalog, ToolCatalogError};
 
+use crate::adapter::{builtin_source, skill_adapter_registry};
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
 use serde::{Deserialize, Serialize};
@@ -78,12 +80,35 @@ impl SkillRegistry {
 
     pub fn from_builtin_assets() -> Result<Self, SkillRegistryError> {
         let mut registry = Self::new();
+        let adapter_registry = skill_adapter_registry()
+            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        let source = builtin_source()
+            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![source]);
         for skill in agl_assets::BUILTIN_ARTIFACT_PACKAGES
             .iter()
             .filter(|package| package.type_id == "skill")
         {
-            let harness =
-                SkillHarness::parse_builtin(skill).map_err(SkillRegistryError::Manifest)?;
+            let root = ArtifactPackageRef::parse(&format!("skill:{}@*", skill.id))
+                .map_err(SkillRegistryError::Artifact)?;
+            let graph = resolver
+                .resolve_and_validate(&root, None)
+                .map_err(SkillRegistryError::Artifact)?;
+            let node = graph
+                .nodes
+                .get(&graph.root)
+                .expect("resolved builtin skill root must exist");
+            let payload = adapter_registry
+                .lookup(&node.candidate.type_id)
+                .map_err(SkillRegistryError::Artifact)?
+                .validate_payload(node.candidate.view(), &node.envelope)
+                .map_err(SkillRegistryError::Artifact)?;
+            let mut harness = *payload.downcast::<SkillHarness>().map_err(|_| {
+                SkillRegistryError::ArtifactMessage(
+                    "skill adapter returned an invalid payload".to_owned(),
+                )
+            })?;
+            harness.source = SkillSource::Core;
             registry.register(RegisteredSkill::trusted_builtin(harness))?;
         }
         Ok(registry)
@@ -266,6 +291,8 @@ pub enum SkillRegistryError {
         tools: Vec<CapabilityId>,
     },
     ToolCatalog(ToolCatalogError),
+    Artifact(agl_artifact::ArtifactError),
+    ArtifactMessage(String),
 }
 
 impl std::fmt::Display for SkillRegistryError {
@@ -295,6 +322,8 @@ impl std::fmt::Display for SkillRegistryError {
                 write!(f, "skill `{id}` is missing allowed tools: {tools}")
             }
             Self::ToolCatalog(err) => write!(f, "{err}"),
+            Self::Artifact(err) => write!(f, "artifact error: {err}"),
+            Self::ArtifactMessage(message) => write!(f, "artifact adapter error: {message}"),
         }
     }
 }
@@ -318,7 +347,7 @@ mod tests {
 
         assert_eq!(skill.trust, SkillTrustState::TrustedByBinary);
         assert_eq!(skill.harness.manifest_sha256.len(), 64);
-        assert_eq!(skill.harness.tree_sha256.len(), 64);
+        assert_eq!(skill.harness.tree_sha256.len(), "sha256:".len() + 64);
         assert_eq!(
             registry
                 .by_pack("agl")
