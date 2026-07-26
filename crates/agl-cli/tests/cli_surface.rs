@@ -1410,22 +1410,6 @@ fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
 }
 
 #[test]
-fn skill_lock_refuses_plain_workspace_skills_directory() {
-    let repo = TempRepo::new("skill-lock-plain-dir");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    write_workspace_skill(repo.path(), "repo-change");
-
-    let output = run_agl_in(repo.path(), &["skill", "lock"]);
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=invalid");
-    assert_contains(&stdout, "error=skills_component_not_usable");
-    assert_contains(&stderr(&output), "workspace skill lock failed");
-}
-
-#[test]
 fn skill_verify_reports_trusted_workspace_skill_as_usable() {
     let (repo, _source, home) = submodule_workspace_with_skill(
         "skill-verify-trust",

@@ -18,12 +18,6 @@ use crate::{
 };
 
 const SKILLS_COMPONENT: &str = "skills";
-const SKILLS_LOCK_PATH: &str = ".agl/skills.lock";
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SkillLockOptions {
-    pub dry_run: bool,
-}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillFolderSyncOptions {
@@ -155,23 +149,6 @@ pub struct SkillArtifactFolderReadiness {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct SkillLockReport {
-    pub workspace_root: PathBuf,
-    pub lock_path: PathBuf,
-    pub dry_run: bool,
-    pub wrote: bool,
-    pub lock: Option<SkillsLockFile>,
-    pub warnings: Vec<String>,
-    pub errors: Vec<String>,
-}
-
-impl SkillLockReport {
-    pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SkillFolderSyncReport {
     pub workspace_root: PathBuf,
     pub dry_run: bool,
@@ -210,38 +187,6 @@ pub enum SkillFolderSyncActionKind {
 }
 
 pub type SkillFolderPrepareReport = SkillFolderSyncReport;
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SkillsLockFile {
-    pub version: u32,
-    pub locked_at: String,
-    #[serde(default)]
-    pub skills: Vec<LockedSkill>,
-    pub components: BTreeMap<String, LockedComponent>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedComponent {
-    pub path: PathBuf,
-    pub kind: WorkspaceComponentKind,
-    pub remote: String,
-    #[serde(rename = "ref")]
-    pub ref_name: String,
-    pub commit: String,
-    pub tree: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedSkill {
-    pub name: String,
-    pub source: String,
-    pub path: PathBuf,
-    pub component: String,
-    pub locked_at: String,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillTrustOptions {
@@ -321,9 +266,9 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         },
     )?;
     let workspace_root = status.workspace_root.clone();
-    let lock_path = workspace_root.join(SKILLS_LOCK_PATH);
+    let lock_path = workspace_root.join(agl_repo::ARTIFACT_LOCK_PATH);
     let component = status.components.into_iter().next();
-    let mut warnings = status.warnings;
+    let warnings = status.warnings;
     let mut errors = status.errors;
 
     if component.is_none() {
@@ -358,16 +303,6 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         if !skill.errors.is_empty() {
             errors.extend(skill_error_keys(skill));
         }
-    }
-
-    if component.is_some() || lock_path.exists() {
-        append_lock_diagnostics(
-            component.as_ref(),
-            &skills,
-            &lock_path,
-            &mut warnings,
-            &mut errors,
-        );
     }
 
     let mut report = WorkspaceSkillReport {
@@ -767,80 +702,6 @@ pub fn trusted_workspace_registry(
     Ok(registry)
 }
 
-pub fn lock_workspace_skills(
-    start: impl AsRef<Path>,
-    options: &SkillLockOptions,
-) -> Result<SkillLockReport> {
-    let report = workspace_skill_report(start)?;
-    let mut errors = Vec::new();
-
-    let Some(component) = report.component.as_ref() else {
-        errors.push("skills_component_not_configured".to_string());
-        return lock_error_report(report, options, errors);
-    };
-
-    if !component_git_usable(component) {
-        errors.push("skills_component_not_usable".to_string());
-    }
-
-    let valid_skills = report
-        .skills
-        .iter()
-        .filter(|skill| skill.valid)
-        .collect::<Vec<_>>();
-    if valid_skills.is_empty() {
-        errors.push("no_valid_workspace_skills".to_string());
-    }
-    for skill in &report.skills {
-        if !skill.valid {
-            errors.extend(skill_error_keys(skill));
-        }
-    }
-
-    if !errors.is_empty() {
-        return lock_error_report(report, options, errors);
-    }
-
-    let existing = read_skills_lock(&report.lock_path).ok();
-    let locked_at = existing
-        .as_ref()
-        .map(|lock| lock.locked_at.clone())
-        .unwrap_or_else(lock_timestamp);
-    let lock = build_skills_lock(component, &valid_skills, existing.as_ref(), locked_at)?;
-    let content = toml::to_string_pretty(&lock).context("failed to render skills lock")?;
-    let existing_content = fs::read_to_string(&report.lock_path).ok();
-    let wrote = existing_content.as_deref() != Some(content.as_str()) && !options.dry_run;
-
-    if wrote {
-        if let Some(parent) = report.lock_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
-        fs::write(&report.lock_path, content)
-            .with_context(|| format!("failed to write {}", report.lock_path.display()))?;
-    }
-
-    let warnings = if options.dry_run {
-        report.warnings
-    } else {
-        report
-            .warnings
-            .into_iter()
-            .filter(|warning| warning != "skills_lock_missing")
-            .collect()
-    };
-
-    Ok(SkillLockReport {
-        workspace_root: report.workspace_root,
-        lock_path: report.lock_path,
-        dry_run: options.dry_run,
-        wrote,
-        lock: Some(lock),
-        warnings,
-        errors: Vec::new(),
-    })
-}
-
 pub fn trust_workspace_skill(
     start: impl AsRef<Path>,
     trust_store_path: impl AsRef<Path>,
@@ -954,22 +815,6 @@ pub fn revoke_workspace_skill(
         record: Some(record),
         warnings: report.warnings,
         errors: Vec::new(),
-    })
-}
-
-fn lock_error_report(
-    report: WorkspaceSkillReport,
-    options: &SkillLockOptions,
-    errors: Vec<String>,
-) -> Result<SkillLockReport> {
-    Ok(SkillLockReport {
-        workspace_root: report.workspace_root,
-        lock_path: report.lock_path,
-        dry_run: options.dry_run,
-        wrote: false,
-        lock: None,
-        warnings: report.warnings,
-        errors,
     })
 }
 
@@ -1276,142 +1121,6 @@ fn has_extra_tools(left: &[CapabilityId], right: &[CapabilityId]) -> bool {
     left.iter().any(|tool| !right.contains(tool))
 }
 
-fn append_lock_diagnostics(
-    component: Option<&ComponentStatus>,
-    skills: &[WorkspaceSkillStatus],
-    lock_path: &Path,
-    warnings: &mut Vec<String>,
-    errors: &mut Vec<String>,
-) {
-    if !lock_path.exists() {
-        warnings.push("skills_lock_missing".to_string());
-        return;
-    }
-
-    let lock = match read_skills_lock(lock_path) {
-        Ok(lock) => lock,
-        Err(err) => {
-            errors.push(format!("skills_lock_invalid: {err:#}"));
-            return;
-        }
-    };
-
-    let Some(component) = component else {
-        errors.push("skills_lock_without_component".to_string());
-        return;
-    };
-    let Some(locked_component) = lock.components.get(SKILLS_COMPONENT) else {
-        errors.push("skills_lock_component_missing".to_string());
-        return;
-    };
-
-    if Some(&locked_component.remote) != component.actual_url.as_ref() {
-        errors.push("skills_lock_remote_mismatch".to_string());
-    }
-    if Some(&locked_component.commit) != component.actual_commit.as_ref() {
-        errors.push("skills_lock_commit_mismatch".to_string());
-    }
-    if Some(&locked_component.tree) != component.actual_tree.as_ref() {
-        errors.push("skills_lock_tree_mismatch".to_string());
-    }
-
-    let locked_skills = lock
-        .skills
-        .iter()
-        .map(|skill| skill.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for skill in skills.iter().filter(|skill| skill.valid) {
-        if let Some(name) = &skill.name
-            && !locked_skills.contains(name.as_str())
-        {
-            errors.push(format!("skills_lock_entry_missing: {name}"));
-        }
-    }
-}
-
-fn build_skills_lock(
-    component: &ComponentStatus,
-    skills: &[&WorkspaceSkillStatus],
-    existing: Option<&SkillsLockFile>,
-    locked_at: String,
-) -> Result<SkillsLockFile> {
-    if !matches!(
-        component.kind,
-        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
-    ) {
-        bail!("skills component must be Git-backed");
-    }
-    let remote = component
-        .actual_url
-        .clone()
-        .context("skills component has no origin remote")?;
-    let commit = component
-        .actual_commit
-        .clone()
-        .context("skills component has no HEAD commit")?;
-    let tree = component
-        .actual_tree
-        .clone()
-        .context("skills component has no HEAD tree")?;
-    let ref_name = component
-        .expected_rev
-        .clone()
-        .unwrap_or_else(|| "HEAD".to_string());
-
-    let existing_timestamps = existing
-        .map(|lock| {
-            lock.skills
-                .iter()
-                .map(|skill| (skill.name.clone(), skill.locked_at.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-
-    let mut locked_skills = skills
-        .iter()
-        .filter_map(|skill| {
-            let name = skill.name.clone()?;
-            let source = skill
-                .source
-                .clone()
-                .unwrap_or_else(|| SkillSource::Local.as_str().to_string());
-            Some(LockedSkill {
-                locked_at: existing_timestamps
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_else(|| locked_at.clone()),
-                name,
-                source,
-                path: skill.path.clone(),
-                component: SKILLS_COMPONENT.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    locked_skills.sort_by(|left, right| left.name.cmp(&right.name));
-
-    Ok(SkillsLockFile {
-        version: 1,
-        locked_at,
-        skills: locked_skills,
-        components: BTreeMap::from([(
-            SKILLS_COMPONENT.to_string(),
-            LockedComponent {
-                path: component.path.clone(),
-                kind: component.kind,
-                remote,
-                ref_name,
-                commit,
-                tree,
-            },
-        )]),
-    })
-}
-
-fn read_skills_lock(path: &Path) -> Result<SkillsLockFile> {
-    let content = fs::read_to_string(path)?;
-    toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
-}
-
 fn read_trust_store(path: &Path) -> Result<SkillTrustStore> {
     match fs::read_to_string(path) {
         Ok(content) => {
@@ -1573,7 +1282,7 @@ fn build_trust_record(
             .actual_tree
             .clone()
             .context("skills component has no HEAD tree")?,
-        approved_at: lock_timestamp(),
+        approved_at: trust_timestamp(),
         agentlibre_version: agentlibre_version.to_string(),
         revoked: false,
         revoked_at: None,
@@ -1656,7 +1365,7 @@ fn revoke_trust_record(
     identity: &TrustedSkillRecord,
 ) -> Option<TrustedSkillRecord> {
     let mut revoked = None;
-    let revoked_at = lock_timestamp();
+    let revoked_at = trust_timestamp();
     for record in &mut store.records {
         if trust_identity_matches(record, identity) {
             record.revoked = true;
@@ -1675,6 +1384,14 @@ fn trust_identity_matches(left: &TrustedSkillRecord, right: &TrustedSkillRecord)
         && left.ref_name == right.ref_name
         && left.commit == right.commit
         && left.tree == right.tree
+}
+
+fn trust_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{seconds:010}Z")
 }
 
 fn refresh_workspace_skill_report_derived(report: &mut WorkspaceSkillReport) {
@@ -1789,7 +1506,7 @@ fn append_report_diagnostic(
     if message.starts_with("component.") || message.starts_with("skill.") {
         return;
     }
-    if message.starts_with("skills_lock") {
+    if message.starts_with("artifact_lock") {
         diagnostics.push(WorkspaceSkillDiagnostic {
             severity,
             scope: WorkspaceSkillDiagnosticScope::Lock,
@@ -2017,9 +1734,9 @@ fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
     if report
         .warnings
         .iter()
-        .any(|warning| warning == "skills_lock_missing")
+        .any(|warning| warning == "artifact_lock_missing")
     {
-        next_steps.push("agl skill lock".to_string());
+        next_steps.push("agl repo component lock".to_string());
     }
     if report.skills.iter().any(|skill| {
         skill.artifact_folders.iter().any(|folder| {
@@ -2034,13 +1751,13 @@ fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
     }) {
         next_steps.push("agl skill sync-folders".to_string());
     }
-    if report.errors.iter().any(|error| {
-        error.contains("skills_lock_commit_mismatch")
-            || error.contains("skills_lock_tree_mismatch")
-            || error.contains("skills_lock_remote_mismatch")
-            || error.contains("skills_lock_entry_missing")
-    }) {
-        next_steps.push("review .agl/skills and run agl skill lock".to_string());
+    if report
+        .errors
+        .iter()
+        .any(|error| error.starts_with("artifact_lock_"))
+    {
+        next_steps
+            .push("review .agl/artifact-lock.toml and run agl repo component lock".to_string());
     }
     if report
         .errors
@@ -2090,14 +1807,3 @@ fn skill_folder_create_situation_key(situation: SkillFolderCreateSituation) -> &
         SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
     }
 }
-
-fn lock_timestamp() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("unix:{seconds}")
-}
-
-#[cfg(test)]
-mod tests;
