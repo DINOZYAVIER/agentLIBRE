@@ -330,6 +330,150 @@ default_function = "function:gemma4-e4b@^1.0"
 }
 
 #[test]
+fn artifact_list_reports_invalid_payload_in_complete_json_inventory() {
+    let repo = TempRepo::new("artifact-list-invalid");
+    let home = TempHome::new("artifact-list-invalid");
+    fs::create_dir_all(repo.path().join(".agl/skills/invalid")).unwrap();
+    fs::write(
+        repo.path().join(".agl/workspace.toml"),
+        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join(".agl/skills/invalid/SKILL.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: invalid
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+description: Invalid payload fixture.
+pack: test
+required_hooks: []
+allowed_tools: []
+context_budget_tokens: 0
+references:
+  include: []
+guarantees:
+  - list reports this failure
+---
+Body.
+"#,
+    )
+    .unwrap();
+
+    let output = run_agl_in(
+        repo.path(),
+        &["--home", &home.path_string(), "artifact", "list", "--json"],
+    );
+
+    assert_failure(&output);
+    let inventory: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let entries = inventory.as_array().unwrap();
+    assert!(
+        entries.len() > 1,
+        "inventory must include valid candidates too"
+    );
+    let invalid = entries
+        .iter()
+        .find(|entry| entry["exact_reference"] == "skill:invalid@1.0.0")
+        .unwrap();
+    assert_eq!(invalid["validation_status"], "invalid");
+    assert_eq!(invalid["error"]["code"], "invalid_payload");
+    let terminal: serde_json::Value = serde_json::from_str(&stderr(&output)).unwrap();
+    assert_eq!(terminal["error"]["code"], "artifact_error");
+}
+
+#[test]
+fn artifact_inspect_selects_the_root_when_a_dependency_sorts_first() {
+    let repo = TempRepo::new("artifact-inspect-root");
+    let home = TempHome::new("artifact-inspect-root");
+    fs::create_dir_all(repo.path().join(".agl/skills/root-skill")).unwrap();
+    fs::write(
+        repo.path().join(".agl/workspace.toml"),
+        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.path().join(".agl/skills/root-skill/SKILL.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: root-skill
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - function:gemma4-e4b@^1.0
+description: Root projection fixture.
+pack: test
+required_hooks: []
+allowed_tools: []
+context_budget_tokens: 128
+references:
+  include: []
+guarantees:
+  - inspect returns the root
+---
+Body.
+"#,
+    )
+    .unwrap();
+
+    let output = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home.path_string(),
+            "artifact",
+            "inspect",
+            "skill:root-skill@*",
+            "--json",
+        ],
+    );
+
+    assert_success_no_stderr(&output);
+    let inspected: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(inspected["exact_reference"], "skill:root-skill@1.0.0");
+}
+
+#[test]
+fn artifact_json_failures_distinguish_missing_and_incompatible_versions() {
+    let repo = TempRepo::new("artifact-json-errors");
+    let home = TempHome::new("artifact-json-errors");
+    fs::create_dir_all(repo.path().join(".agl")).unwrap();
+    fs::write(
+        repo.path().join(".agl/workspace.toml"),
+        "version = 2\ndefault_function = \"function:gemma4-e4b@^1.0\"\n",
+    )
+    .unwrap();
+    let home = home.path_string();
+
+    for (reference, code) in [
+        ("function:no-such-function@*", "not_found"),
+        ("function:gemma4-e4b@^99", "incompatible_version"),
+    ] {
+        let output = run_agl_in(
+            repo.path(),
+            &["--home", &home, "artifact", "inspect", reference, "--json"],
+        );
+        assert_failure(&output);
+        assert_empty_stdout(&output);
+        let diagnostic: serde_json::Value = serde_json::from_str(&stderr(&output)).unwrap();
+        assert_eq!(diagnostic["error"]["code"], code);
+        assert!(diagnostic["error"]["context"].is_object());
+    }
+}
+
+#[test]
 fn process_list_fails_clearly_when_daemon_is_unavailable() {
     let home = TempHome::new("process-daemon-unavailable");
     let output = run_agl(&["--home", &home.path_string(), "process", "list", "--json"]);
