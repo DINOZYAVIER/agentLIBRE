@@ -2127,11 +2127,11 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&list_stdout, "function id=gemma4-e4b source=builtin");
     assert_contains(
         &list_stdout,
-        "function id=gemma4-e2b source=builtin path=assets/functions/gemma4-e2b/FUNCTION.md valid=true",
+        "function id=gemma4-e2b source=builtin path=builtin:function/gemma4-e2b/FUNCTION.md valid=true",
     );
     assert_contains(
         &list_stdout,
-        "function id=gemma4-12b source=builtin path=assets/functions/gemma4-12b/FUNCTION.md valid=true",
+        "function id=gemma4-12b source=builtin path=builtin:function/gemma4-12b/FUNCTION.md valid=true",
     );
     assert_contains(&list_stdout, "function id=gemma4-26b source=builtin");
     assert_contains(&list_stdout, "function id=gemma4-31b source=builtin");
@@ -2143,7 +2143,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&status_stdout, "function.source=builtin");
     assert_contains(
         &status_stdout,
-        "function.model.config_path=assets/functions/gemma4-12b/inference.toml",
+        "function.model.config_path=builtin:function/gemma4-12b/inference.toml",
     );
     assert_contains(&status_stdout, "function.model.config_embedded=true");
     assert_contains(&status_stdout, "function.model.id=gemma4-12b");
