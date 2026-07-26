@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use agl_artifact::{
     AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactAdapterRegistry,
-    ArtifactCandidate, ArtifactDataClass, ArtifactEnvelope, ArtifactError, ArtifactLock,
-    ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
+    ArtifactCandidate, ArtifactConfigLayer, ArtifactDataClass, ArtifactEnvelope, ArtifactError,
+    ArtifactLock, ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
     ArtifactPathScope, ArtifactRelativePath, ArtifactResolver, ArtifactSource,
     ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
     ArtifactTypeId, ArtifactVersion, ArtifactVersionReq, DirectoryArtifactSource,
@@ -459,6 +459,37 @@ fn path_router_derives_separate_scopes_without_touching_filesystem() {
             .unwrap(),
         PathBuf::from("/xdg/cache/functions")
     );
+}
+
+#[test]
+fn config_layers_are_ordered_and_identify_override_presence() {
+    let root = temp_dir("config-layers");
+    fs::create_dir_all(root.join(".agl/config/functions/example")).unwrap();
+    fs::write(
+        root.join(".agl/config/functions/example/config.toml"),
+        b"enabled = true",
+    )
+    .unwrap();
+    let adapter = LifecycleAdapter {
+        descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+    };
+    let registry = Arc::new(ArtifactAdapterRegistry::new([adapter]).unwrap());
+    let router = ArtifactPathRouter::new(
+        &root,
+        root.join("data"),
+        root.join("config"),
+        root.join("state"),
+        root.join("cache"),
+        registry,
+    );
+    let layers = router
+        .config_layers(&ArtifactTypeId::function(), &"example".parse().unwrap())
+        .unwrap();
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0].layer, ArtifactConfigLayer::PackageDefaults);
+    assert!(!layers[1].present);
+    assert!(layers[2].present);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

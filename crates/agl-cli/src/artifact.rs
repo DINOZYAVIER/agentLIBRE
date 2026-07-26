@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use agl_app::compose_artifacts;
 use agl_artifact::{
-    ArtifactAdapterRegistry, ArtifactPackageRef, ArtifactResolver, ArtifactSource,
-    ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
-    PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph, compute_package_digest,
+    ArtifactAdapterRegistry, ArtifactConfigEvidence, ArtifactPackageRef, ArtifactPathRouter,
+    ArtifactResolver, ArtifactSource, ArtifactSourceDeclaration, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact,
+    ResolvedArtifactGraph, compute_package_digest,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail, ensure};
@@ -20,6 +21,7 @@ struct ArtifactContext {
     registry: Arc<ArtifactAdapterRegistry>,
     sources: Vec<Arc<dyn ArtifactSource>>,
     workspace_root: PathBuf,
+    router: ArtifactPathRouter,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -35,6 +37,8 @@ struct ArtifactProjection {
     source_revision: Option<String>,
     package_digest: PackageTreeDigest,
     dependencies: Vec<String>,
+    config_layers: Vec<ArtifactConfigEvidence>,
+    config_validation_status: &'static str,
     lock_state: &'static str,
 }
 
@@ -79,8 +83,16 @@ fn context(runtime: &AgentLibreRuntimeConfig) -> Result<ArtifactContext> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
     let composition = compose_artifacts(&runtime.paths, &workspace_root)?;
     Ok(ArtifactContext {
-        registry: composition.registry,
+        registry: composition.registry.clone(),
         sources: composition.sources,
+        router: ArtifactPathRouter::new(
+            workspace_root.clone(),
+            runtime.paths.data_dir.clone(),
+            runtime.paths.config_dir.clone(),
+            runtime.paths.state_dir.clone(),
+            runtime.paths.cache_dir.clone(),
+            composition.registry,
+        ),
         workspace_root,
     })
 }
@@ -110,6 +122,10 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
                     source_revision: None,
                     package_digest: digest,
                     dependencies: envelope.requires.iter().map(ToString::to_string).collect(),
+                    config_layers: context
+                        .router
+                        .config_layers(&candidate.type_id, &candidate.package_id)?,
+                    config_validation_status: "package_validated",
                     lock_state: lock
                         .as_ref()
                         .and_then(|value| value.packages.get(&key))
@@ -161,7 +177,7 @@ fn run_reference(
     let resolver = ArtifactResolver::new(context.registry.clone(), context.sources.clone());
     let lock = read_lock(&context).ok();
     let graph = resolver.resolve_and_validate(&reference, lock.as_ref())?;
-    let projection = graph_projection(&graph, lock.as_ref());
+    let projection = graph_projection(&graph, lock.as_ref(), &context.router);
     if options.json {
         if operation == "inspect" {
             let root = projection
@@ -318,11 +334,12 @@ fn read_lock(context: &ArtifactContext) -> Result<agl_artifact::ArtifactLock> {
 fn graph_projection(
     graph: &ResolvedArtifactGraph,
     lock: Option<&agl_artifact::ArtifactLock>,
+    router: &ArtifactPathRouter,
 ) -> ArtifactGraphProjection {
     let nodes = graph
         .nodes
         .values()
-        .map(|node| projection(node, lock))
+        .map(|node| projection(node, lock, router))
         .collect();
     ArtifactGraphProjection {
         root: graph.root.clone(),
@@ -333,6 +350,7 @@ fn graph_projection(
 fn projection(
     node: &ResolvedArtifact,
     lock: Option<&agl_artifact::ArtifactLock>,
+    router: &ArtifactPathRouter,
 ) -> ArtifactProjection {
     let key = node.key();
     ArtifactProjection {
@@ -347,6 +365,10 @@ fn projection(
         source_revision: None,
         package_digest: node.package_digest.clone(),
         dependencies: node.dependencies.clone(),
+        config_layers: router
+            .config_layers(&node.candidate.type_id, &node.candidate.package_id)
+            .unwrap_or_default(),
+        config_validation_status: "package_validated",
         lock_state: lock
             .and_then(|lock| lock.packages.get(&key))
             .map(|_| "locked")

@@ -1894,6 +1894,32 @@ impl ArtifactPathRouter {
         ))
     }
 
+    pub fn config_layers(
+        &self,
+        type_id: &ArtifactTypeId,
+        package_id: &ArtifactPackageId,
+    ) -> Result<Vec<ArtifactConfigEvidence>, ArtifactError> {
+        let user = self.xdg_config_path(type_id, package_id)?;
+        let workspace = self.workspace_config_path(type_id, package_id)?;
+        Ok(vec![
+            ArtifactConfigEvidence {
+                layer: ArtifactConfigLayer::PackageDefaults,
+                path: None,
+                present: true,
+            },
+            ArtifactConfigEvidence {
+                layer: ArtifactConfigLayer::User,
+                path: Some(user.clone()),
+                present: user.exists(),
+            },
+            ArtifactConfigEvidence {
+                layer: ArtifactConfigLayer::Workspace,
+                path: Some(workspace.clone()),
+                present: workspace.exists(),
+            },
+        ])
+    }
+
     pub fn state_root(&self, type_id: &ArtifactTypeId) -> Result<PathBuf, ArtifactError> {
         self.root(ArtifactPathScope::Xdg, ArtifactDataClass::State, type_id)
     }
@@ -1907,6 +1933,22 @@ impl ArtifactPathRouter {
 pub enum ArtifactPathScope {
     Workspace,
     Xdg,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactConfigLayer {
+    PackageDefaults,
+    User,
+    Workspace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactConfigEvidence {
+    pub layer: ArtifactConfigLayer,
+    pub path: Option<PathBuf>,
+    pub present: bool,
 }
 
 fn append_package_id(mut root: PathBuf, package_id: &ArtifactPackageId) -> PathBuf {
