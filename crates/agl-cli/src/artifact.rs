@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agl_app::compose_artifacts;
+use agl_app::{compose_artifacts, resolve_composed_artifacts};
 use agl_artifact::{
     ArtifactAdapterRegistry, ArtifactConfigEvidence, ArtifactPackageRef, ArtifactPathRouter,
-    ArtifactResolver, ArtifactSource, ArtifactSourceDeclaration, ArtifactSourceId,
-    ArtifactSourceKind, ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact,
-    ResolvedArtifactGraph, compute_package_digest,
+    ArtifactSource, ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind,
+    ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph,
+    compute_package_digest,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail, ensure};
@@ -174,9 +174,13 @@ fn run_reference(
     let context = context(runtime)?;
     let reference = ArtifactPackageRef::parse(&options.reference)
         .with_context(|| format!("artifact.invalid_reference: {}", options.reference))?;
-    let resolver = ArtifactResolver::new(context.registry.clone(), context.sources.clone());
     let lock = read_lock(&context).ok();
-    let graph = resolver.resolve_and_validate(&reference, lock.as_ref())?;
+    let graph = resolve_composed_artifacts(
+        &runtime.paths,
+        &context.workspace_root,
+        &reference,
+        lock.as_ref(),
+    )?;
     let projection = graph_projection(&graph, lock.as_ref(), &context.router);
     if options.json {
         if operation == "inspect" {
@@ -208,8 +212,17 @@ fn run_lock(options: ArtifactLockCommandOptions, runtime: &AgentLibreRuntimeConf
     let context = context(runtime)?;
     let manifest_path = context.workspace_root.join(".agl/workspace.toml");
     let manifest = agl_repo::read_workspace_manifest_v2(&manifest_path)?;
-    let resolver = ArtifactResolver::new(context.registry.clone(), context.sources.clone());
-    let graph = resolver.resolve(&manifest.default_function)?;
+    let existing_lock = read_lock(&context).ok();
+    let graph = resolve_composed_artifacts(
+        &runtime.paths,
+        &context.workspace_root,
+        &manifest.default_function,
+        if options.refresh {
+            None
+        } else {
+            existing_lock.as_ref()
+        },
+    )?;
     let lock_path = context.workspace_root.join(".agl/artifact-lock.toml");
     if options.refresh {
         let lock = graph.lock()?;
