@@ -171,7 +171,6 @@ impl SkillHarness {
             .to_string();
         parse_skill_text(
             package_id,
-            None,
             &format!("package:{package_id}/SKILL.md"),
             &manifest_bytes,
             &references,
@@ -473,7 +472,6 @@ impl std::error::Error for SkillManifestError {}
 
 fn parse_skill_text(
     expected_id: &str,
-    expected_pack: Option<&str>,
     source_path: &str,
     manifest_bytes: &[u8],
     reference_assets: &[SkillPackageFile<'_>],
@@ -489,16 +487,7 @@ fn parse_skill_text(
             actual: actual_id,
         });
     }
-    if let Some(expected_pack) = expected_pack
-        && expected_pack != raw.pack.as_str()
-    {
-        return Err(SkillManifestError::BuiltinIdentityMismatch {
-            expected: expected_pack.to_string(),
-            actual: raw.pack.clone(),
-        });
-    }
     validate_skill_artifact(&raw.artifact, source_path)?;
-    let source = source;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_references(reference_assets, &reference_policy.include)?;
@@ -1494,7 +1483,6 @@ Body.
     fn parse_fixture(text: &str) -> Result<SkillHarness, SkillManifestError> {
         parse_skill_text(
             "task-spec",
-            Some("agl"),
             "assets/core-skills/agl/task-spec/SKILL.md",
             b"",
             &[],
