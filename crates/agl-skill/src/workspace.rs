@@ -1,29 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agl_artifact::{
+    ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
+    StaticArtifactSource,
+};
 use agl_capabilities::{CapabilityId, SkillId};
 use agl_repo::{
-    ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceArtifactKind,
+    ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceComponentKind,
     status_repo_workspace,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RegisteredSkill, SkillArtifactAccess, SkillArtifactKind, SkillFolderCreateRule,
-    SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource, SkillTrustState,
-    builtin_registry,
+    RegisteredSkill, SkillArtifactAccess, SkillArtifactAdapter, SkillArtifactKind,
+    SkillFolderCreateRule, SkillFolderCreateSituation, SkillHarness, SkillRegistry, SkillSource,
+    SkillTrustState, builtin_registry, skill_adapter_registry,
 };
 
 const SKILLS_COMPONENT: &str = "skills";
-const SKILLS_LOCK_PATH: &str = ".agl/skills.lock";
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SkillLockOptions {
-    pub dry_run: bool,
-}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SkillFolderSyncOptions {
@@ -108,7 +108,7 @@ pub struct WorkspaceSkillStatus {
     pub path: PathBuf,
     pub source_path: Option<String>,
     pub description: Option<String>,
-    pub version: Option<u64>,
+    pub version: Option<String>,
     pub source: Option<String>,
     pub pack: Option<String>,
     pub allowed_tools: Vec<String>,
@@ -155,23 +155,6 @@ pub struct SkillArtifactFolderReadiness {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct SkillLockReport {
-    pub workspace_root: PathBuf,
-    pub lock_path: PathBuf,
-    pub dry_run: bool,
-    pub wrote: bool,
-    pub lock: Option<SkillsLockFile>,
-    pub warnings: Vec<String>,
-    pub errors: Vec<String>,
-}
-
-impl SkillLockReport {
-    pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SkillFolderSyncReport {
     pub workspace_root: PathBuf,
     pub dry_run: bool,
@@ -210,38 +193,6 @@ pub enum SkillFolderSyncActionKind {
 }
 
 pub type SkillFolderPrepareReport = SkillFolderSyncReport;
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SkillsLockFile {
-    pub version: u32,
-    pub locked_at: String,
-    #[serde(default)]
-    pub skills: Vec<LockedSkill>,
-    pub components: BTreeMap<String, LockedComponent>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedComponent {
-    pub path: PathBuf,
-    pub kind: WorkspaceArtifactKind,
-    pub remote: String,
-    #[serde(rename = "ref")]
-    pub ref_name: String,
-    pub commit: String,
-    pub tree: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LockedSkill {
-    pub name: String,
-    pub source: String,
-    pub path: PathBuf,
-    pub component: String,
-    pub locked_at: String,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillTrustOptions {
@@ -287,7 +238,7 @@ pub struct SkillTrustStore {
 impl Default for SkillTrustStore {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             records: Vec::new(),
         }
     }
@@ -299,6 +250,10 @@ pub struct TrustedSkillRecord {
     pub skill_name: String,
     pub source: String,
     pub workspace_root: PathBuf,
+    #[serde(default)]
+    pub artifact_identity: String,
+    #[serde(default)]
+    pub package_digest: String,
     pub remote: String,
     #[serde(rename = "ref")]
     pub ref_name: String,
@@ -321,7 +276,7 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         },
     )?;
     let workspace_root = status.workspace_root.clone();
-    let lock_path = workspace_root.join(SKILLS_LOCK_PATH);
+    let lock_path = workspace_root.join(agl_repo::ARTIFACT_LOCK_PATH);
     let component = status.components.into_iter().next();
     let mut warnings = status.warnings;
     let mut errors = status.errors;
@@ -341,6 +296,14 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         Vec::new()
     };
 
+    append_artifact_lock_diagnostics(
+        &lock_path,
+        component.as_ref(),
+        !skills.is_empty(),
+        &mut warnings,
+        &mut errors,
+    );
+
     mark_duplicate_skills(&mut skills);
     mark_builtin_shadows(&mut skills)?;
 
@@ -358,16 +321,6 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
         if !skill.errors.is_empty() {
             errors.extend(skill_error_keys(skill));
         }
-    }
-
-    if component.is_some() || lock_path.exists() {
-        append_lock_diagnostics(
-            component.as_ref(),
-            &skills,
-            &lock_path,
-            &mut warnings,
-            &mut errors,
-        );
     }
 
     let mut report = WorkspaceSkillReport {
@@ -393,7 +346,12 @@ pub fn workspace_skill_report_with_trust(
     trust_store_path: impl AsRef<Path>,
 ) -> Result<WorkspaceSkillReport> {
     let mut report = workspace_skill_report(start)?;
-    let store = read_trust_store(trust_store_path.as_ref())?;
+    let trust_store_path = trust_store_path.as_ref();
+    let mut store = read_trust_store(trust_store_path)?;
+    if migrate_legacy_trust_records(&report, &mut store)? {
+        store.version = 2;
+        write_trust_store(trust_store_path, &store)?;
+    }
     apply_trust_store(&mut report, &store);
     refresh_workspace_skill_report_derived(&mut report);
     Ok(report)
@@ -767,80 +725,6 @@ pub fn trusted_workspace_registry(
     Ok(registry)
 }
 
-pub fn lock_workspace_skills(
-    start: impl AsRef<Path>,
-    options: &SkillLockOptions,
-) -> Result<SkillLockReport> {
-    let report = workspace_skill_report(start)?;
-    let mut errors = Vec::new();
-
-    let Some(component) = report.component.as_ref() else {
-        errors.push("skills_component_not_configured".to_string());
-        return lock_error_report(report, options, errors);
-    };
-
-    if !component_git_usable(component) {
-        errors.push("skills_component_not_usable".to_string());
-    }
-
-    let valid_skills = report
-        .skills
-        .iter()
-        .filter(|skill| skill.valid)
-        .collect::<Vec<_>>();
-    if valid_skills.is_empty() {
-        errors.push("no_valid_workspace_skills".to_string());
-    }
-    for skill in &report.skills {
-        if !skill.valid {
-            errors.extend(skill_error_keys(skill));
-        }
-    }
-
-    if !errors.is_empty() {
-        return lock_error_report(report, options, errors);
-    }
-
-    let existing = read_skills_lock(&report.lock_path).ok();
-    let locked_at = existing
-        .as_ref()
-        .map(|lock| lock.locked_at.clone())
-        .unwrap_or_else(lock_timestamp);
-    let lock = build_skills_lock(component, &valid_skills, existing.as_ref(), locked_at)?;
-    let content = toml::to_string_pretty(&lock).context("failed to render skills lock")?;
-    let existing_content = fs::read_to_string(&report.lock_path).ok();
-    let wrote = existing_content.as_deref() != Some(content.as_str()) && !options.dry_run;
-
-    if wrote {
-        if let Some(parent) = report.lock_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
-        fs::write(&report.lock_path, content)
-            .with_context(|| format!("failed to write {}", report.lock_path.display()))?;
-    }
-
-    let warnings = if options.dry_run {
-        report.warnings
-    } else {
-        report
-            .warnings
-            .into_iter()
-            .filter(|warning| warning != "skills_lock_missing")
-            .collect()
-    };
-
-    Ok(SkillLockReport {
-        workspace_root: report.workspace_root,
-        lock_path: report.lock_path,
-        dry_run: options.dry_run,
-        wrote,
-        lock: Some(lock),
-        warnings,
-        errors: Vec::new(),
-    })
-}
-
 pub fn trust_workspace_skill(
     start: impl AsRef<Path>,
     trust_store_path: impl AsRef<Path>,
@@ -881,6 +765,7 @@ pub fn trust_workspace_skill(
     let record = record.expect("record checked above");
     validate_trust_target_tools(skill.expect("skill checked above"))?;
     let mut store = read_trust_store(&trust_store_path)?;
+    store.version = 2;
     upsert_trust_record(&mut store, record.clone());
     write_trust_store(&trust_store_path, &store)?;
 
@@ -926,6 +811,7 @@ pub fn revoke_workspace_skill(
 
     let identity = record.expect("record checked above");
     let mut store = read_trust_store(&trust_store_path)?;
+    store.version = 2;
     let revoked = revoke_trust_record(&mut store, &identity);
     if revoked.is_none() {
         errors.push("trust_record_not_found".to_string());
@@ -957,22 +843,6 @@ pub fn revoke_workspace_skill(
     })
 }
 
-fn lock_error_report(
-    report: WorkspaceSkillReport,
-    options: &SkillLockOptions,
-    errors: Vec<String>,
-) -> Result<SkillLockReport> {
-    Ok(SkillLockReport {
-        workspace_root: report.workspace_root,
-        lock_path: report.lock_path,
-        dry_run: options.dry_run,
-        wrote: false,
-        lock: None,
-        warnings: report.warnings,
-        errors,
-    })
-}
-
 fn discover_workspace_skills(
     workspace_root: &Path,
     component: &ComponentStatus,
@@ -985,7 +855,17 @@ fn discover_workspace_skills(
     collect_skill_manifests(&component_root, &mut manifests)?;
     manifests.sort();
 
-    let tree = component.actual_tree.as_deref().unwrap_or("unknown");
+    let adapter_registry = skill_adapter_registry()?;
+    let adapter = SkillArtifactAdapter::default();
+    let source_id: ArtifactSourceId = "workspace-skills".parse()?;
+    let skill_type: ArtifactTypeId = "skill".parse()?;
+    let mut candidates = Vec::new();
+    let mut paths = BTreeMap::new();
+    let source = if component.kind == WorkspaceComponentKind::Submodule {
+        SkillSource::Core
+    } else {
+        SkillSource::Local
+    };
     let mut skills = Vec::with_capacity(manifests.len());
     for manifest in manifests {
         let skill_dir = manifest.parent().unwrap_or(&component_root);
@@ -1011,8 +891,19 @@ fn discover_workspace_skills(
             }
         };
 
-        match SkillHarness::parse_workspace_dir(skill_dir, &component_root, tree) {
-            Ok(harness) => skills.push(status_from_harness(workspace_root, path, harness)),
+        let view = match DirectoryPackageView::new(skill_dir) {
+            Ok(view) => view,
+            Err(err) => {
+                skills.push(invalid_skill_status(
+                    workspace_root,
+                    skill_dir,
+                    &err.to_string(),
+                ));
+                continue;
+            }
+        };
+        let envelope = match adapter.extract_envelope(&view) {
+            Ok(envelope) => envelope,
             Err(err) => {
                 let mut status = invalid_skill_status(workspace_root, skill_dir, &err.to_string());
                 status.source_path = Some(slash_path(
@@ -1022,8 +913,60 @@ fn discover_workspace_skills(
                         .unwrap_or(&skill_dir.join("SKILL.md")),
                 ));
                 skills.push(status);
+                continue;
             }
-        }
+        };
+        let candidate = ArtifactCandidate::new(
+            skill_type.clone(),
+            envelope.id.clone(),
+            envelope.version.clone(),
+            source_id.clone(),
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceKind::Directory,
+            Arc::new(view),
+        );
+        paths.insert(envelope.id.to_string(), (path, source));
+        candidates.push(candidate);
+    }
+
+    let source = StaticArtifactSource::new(
+        source_id,
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        candidates,
+    )?;
+    let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![Arc::new(source)]);
+    for (package_id, (path, skill_source)) in paths {
+        let root = ArtifactPackageRef::parse(&format!("skill:{package_id}@*"))?;
+        let graph = match resolver.resolve_and_validate(&root, None) {
+            Ok(graph) => graph,
+            Err(err) => {
+                skills.push(invalid_skill_status(
+                    workspace_root,
+                    &workspace_root.join(&path),
+                    &err.to_string(),
+                ));
+                continue;
+            }
+        };
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved workspace skill root is missing")?;
+        let payload = adapter_registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let mut harness = *payload
+            .downcast::<SkillHarness>()
+            .map_err(|_| anyhow::anyhow!("skill adapter returned an invalid payload"))?;
+        harness.source = skill_source;
+        let source_path = path
+            .strip_prefix(&component.path)
+            .unwrap_or(&path)
+            .join("SKILL.md");
+        harness.source_path = slash_path(&source_path);
+        harness.tree_sha256 = node.package_digest.to_string();
+        skills.push(status_from_harness(workspace_root, path, harness));
     }
 
     Ok(skills)
@@ -1061,7 +1004,7 @@ fn status_from_harness(
         path,
         source_path: Some(harness.source_path.clone()),
         description: Some(harness.description.clone()),
-        version: Some(harness.version),
+        version: Some(harness.version.to_string()),
         source: Some(harness.source.as_str().to_string()),
         pack: Some(harness.pack.clone()),
         allowed_tools: harness
@@ -1266,142 +1209,6 @@ fn has_extra_tools(left: &[CapabilityId], right: &[CapabilityId]) -> bool {
     left.iter().any(|tool| !right.contains(tool))
 }
 
-fn append_lock_diagnostics(
-    component: Option<&ComponentStatus>,
-    skills: &[WorkspaceSkillStatus],
-    lock_path: &Path,
-    warnings: &mut Vec<String>,
-    errors: &mut Vec<String>,
-) {
-    if !lock_path.exists() {
-        warnings.push("skills_lock_missing".to_string());
-        return;
-    }
-
-    let lock = match read_skills_lock(lock_path) {
-        Ok(lock) => lock,
-        Err(err) => {
-            errors.push(format!("skills_lock_invalid: {err:#}"));
-            return;
-        }
-    };
-
-    let Some(component) = component else {
-        errors.push("skills_lock_without_component".to_string());
-        return;
-    };
-    let Some(locked_component) = lock.components.get(SKILLS_COMPONENT) else {
-        errors.push("skills_lock_component_missing".to_string());
-        return;
-    };
-
-    if Some(&locked_component.remote) != component.actual_url.as_ref() {
-        errors.push("skills_lock_remote_mismatch".to_string());
-    }
-    if Some(&locked_component.commit) != component.actual_commit.as_ref() {
-        errors.push("skills_lock_commit_mismatch".to_string());
-    }
-    if Some(&locked_component.tree) != component.actual_tree.as_ref() {
-        errors.push("skills_lock_tree_mismatch".to_string());
-    }
-
-    let locked_skills = lock
-        .skills
-        .iter()
-        .map(|skill| skill.name.as_str())
-        .collect::<BTreeSet<_>>();
-    for skill in skills.iter().filter(|skill| skill.valid) {
-        if let Some(name) = &skill.name
-            && !locked_skills.contains(name.as_str())
-        {
-            errors.push(format!("skills_lock_entry_missing: {name}"));
-        }
-    }
-}
-
-fn build_skills_lock(
-    component: &ComponentStatus,
-    skills: &[&WorkspaceSkillStatus],
-    existing: Option<&SkillsLockFile>,
-    locked_at: String,
-) -> Result<SkillsLockFile> {
-    if !matches!(
-        component.kind,
-        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
-    ) {
-        bail!("skills component must be Git-backed");
-    }
-    let remote = component
-        .actual_url
-        .clone()
-        .context("skills component has no origin remote")?;
-    let commit = component
-        .actual_commit
-        .clone()
-        .context("skills component has no HEAD commit")?;
-    let tree = component
-        .actual_tree
-        .clone()
-        .context("skills component has no HEAD tree")?;
-    let ref_name = component
-        .expected_rev
-        .clone()
-        .unwrap_or_else(|| "HEAD".to_string());
-
-    let existing_timestamps = existing
-        .map(|lock| {
-            lock.skills
-                .iter()
-                .map(|skill| (skill.name.clone(), skill.locked_at.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-        .unwrap_or_default();
-
-    let mut locked_skills = skills
-        .iter()
-        .filter_map(|skill| {
-            let name = skill.name.clone()?;
-            let source = skill
-                .source
-                .clone()
-                .unwrap_or_else(|| SkillSource::Local.as_str().to_string());
-            Some(LockedSkill {
-                locked_at: existing_timestamps
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_else(|| locked_at.clone()),
-                name,
-                source,
-                path: skill.path.clone(),
-                component: SKILLS_COMPONENT.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-    locked_skills.sort_by(|left, right| left.name.cmp(&right.name));
-
-    Ok(SkillsLockFile {
-        version: 1,
-        locked_at,
-        skills: locked_skills,
-        components: BTreeMap::from([(
-            SKILLS_COMPONENT.to_string(),
-            LockedComponent {
-                path: component.path.clone(),
-                kind: component.kind,
-                remote,
-                ref_name,
-                commit,
-                tree,
-            },
-        )]),
-    })
-}
-
-fn read_skills_lock(path: &Path) -> Result<SkillsLockFile> {
-    let content = fs::read_to_string(path)?;
-    toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
-}
-
 fn read_trust_store(path: &Path) -> Result<SkillTrustStore> {
     match fs::read_to_string(path) {
         Ok(content) => {
@@ -1504,6 +1311,117 @@ fn classify_trust_state(
     }
 }
 
+fn migrate_legacy_trust_records(
+    report: &WorkspaceSkillReport,
+    store: &mut SkillTrustStore,
+) -> Result<bool> {
+    if !locked_source_matches_report(report)? {
+        return Ok(false);
+    }
+    let Some(component) = report.component.as_ref() else {
+        return Ok(false);
+    };
+    let mut migrated = false;
+    for record in &mut store.records {
+        if !record.artifact_identity.is_empty() || !record.package_digest.is_empty() {
+            continue;
+        }
+        let Some(skill) = report
+            .skills
+            .iter()
+            .find(|skill| skill.name.as_deref() == Some(record.skill_name.as_str()))
+        else {
+            continue;
+        };
+        if record.source != skill.source.as_deref().unwrap_or_default()
+            || record.workspace_root != report.workspace_root
+            || record.remote != component.actual_url.clone().unwrap_or_default()
+            || record.ref_name
+                != component
+                    .expected_rev
+                    .clone()
+                    .unwrap_or_else(|| "HEAD".to_string())
+            || record.commit != component.actual_commit.clone().unwrap_or_default()
+            || record.tree != component.actual_tree.clone().unwrap_or_default()
+        {
+            continue;
+        }
+        let identity = build_trust_record(report, skill, &record.agentlibre_version)?;
+        record.artifact_identity = identity.artifact_identity;
+        record.package_digest = identity.package_digest;
+        migrated = true;
+    }
+    Ok(migrated)
+}
+
+fn locked_source_matches_report(report: &WorkspaceSkillReport) -> Result<bool> {
+    let Some(component) = report.component.as_ref() else {
+        return Ok(false);
+    };
+    let lock = match agl_repo::read_artifact_lock_v2(
+        report.workspace_root.join(agl_repo::ARTIFACT_LOCK_PATH),
+    ) {
+        Ok(lock) => lock,
+        Err(_) => return Ok(false),
+    };
+    let Some(locked) = lock.components.get(SKILLS_COMPONENT) else {
+        return Ok(false);
+    };
+    Ok(locked.kind == Some(component.kind)
+        && locked.path.as_ref() == Some(&component.path)
+        && locked.url.as_deref() == component.actual_url.as_deref()
+        && locked.rev == component.expected_rev
+        && locked.commit.as_deref() == component.actual_commit.as_deref()
+        && locked.tree.as_deref() == component.actual_tree.as_deref())
+}
+
+fn append_artifact_lock_diagnostics(
+    lock_path: &Path,
+    component: Option<&ComponentStatus>,
+    has_skills: bool,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    let Some(component) = component else {
+        return;
+    };
+    let lock = match agl_repo::read_artifact_lock_v2(lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.root_cause().is::<std::io::Error>() => {
+            warnings.push("artifact_lock_missing".to_string());
+            return;
+        }
+        Err(error) => {
+            errors.push(format!("artifact_lock_invalid: {error:#}"));
+            return;
+        }
+    };
+    let Some(locked) = lock.components.get(SKILLS_COMPONENT) else {
+        if has_skills {
+            errors.push("artifact_lock_entry_missing".to_string());
+        }
+        return;
+    };
+    if locked.kind != Some(component.kind) {
+        errors.push("artifact_lock_kind_mismatch".to_string());
+    }
+    if locked.path.as_ref() != Some(&component.path) {
+        errors.push("artifact_lock_path_mismatch".to_string());
+    }
+    if locked.url.as_deref() != component.actual_url.as_deref() {
+        errors.push("artifact_lock_remote_mismatch".to_string());
+    }
+    if locked.rev != component.expected_rev {
+        errors.push("artifact_lock_ref_mismatch".to_string());
+    }
+    if locked.commit.as_deref() != component.actual_commit.as_deref() {
+        errors.push("artifact_lock_commit_mismatch".to_string());
+    }
+    if locked.tree.as_deref() != component.actual_tree.as_deref() {
+        errors.push("artifact_lock_tree_mismatch".to_string());
+    }
+}
+
 fn find_trust_target<'a>(
     report: &'a WorkspaceSkillReport,
     name: &str,
@@ -1547,6 +1465,33 @@ fn build_trust_record(
         skill_name: name,
         source,
         workspace_root: report.workspace_root.clone(),
+        artifact_identity: format!(
+            "{}:{}@{}",
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .type_id,
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .id,
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .version,
+        ),
+        package_digest: skill
+            .harness
+            .as_ref()
+            .context("skill harness is missing")?
+            .tree_sha256
+            .clone(),
         remote: component
             .actual_url
             .clone()
@@ -1563,7 +1508,7 @@ fn build_trust_record(
             .actual_tree
             .clone()
             .context("skills component has no HEAD tree")?,
-        approved_at: lock_timestamp(),
+        approved_at: trust_timestamp(),
         agentlibre_version: agentlibre_version.to_string(),
         revoked: false,
         revoked_at: None,
@@ -1635,8 +1580,8 @@ fn upsert_trust_record(store: &mut SkillTrustStore, record: TrustedSkillRecord) 
             left.workspace_root
                 .cmp(&right.workspace_root)
                 .then_with(|| left.skill_name.cmp(&right.skill_name))
-                .then_with(|| left.commit.cmp(&right.commit))
-                .then_with(|| left.tree.cmp(&right.tree))
+                .then_with(|| left.artifact_identity.cmp(&right.artifact_identity))
+                .then_with(|| left.package_digest.cmp(&right.package_digest))
         });
     }
 }
@@ -1646,7 +1591,7 @@ fn revoke_trust_record(
     identity: &TrustedSkillRecord,
 ) -> Option<TrustedSkillRecord> {
     let mut revoked = None;
-    let revoked_at = lock_timestamp();
+    let revoked_at = trust_timestamp();
     for record in &mut store.records {
         if trust_identity_matches(record, identity) {
             record.revoked = true;
@@ -1658,13 +1603,27 @@ fn revoke_trust_record(
 }
 
 fn trust_identity_matches(left: &TrustedSkillRecord, right: &TrustedSkillRecord) -> bool {
-    left.skill_name == right.skill_name
+    !left.artifact_identity.is_empty()
+        && !right.artifact_identity.is_empty()
+        && !left.package_digest.is_empty()
+        && !right.package_digest.is_empty()
+        && left.artifact_identity == right.artifact_identity
+        && left.package_digest == right.package_digest
+        && left.skill_name == right.skill_name
         && left.source == right.source
         && left.workspace_root == right.workspace_root
         && left.remote == right.remote
         && left.ref_name == right.ref_name
         && left.commit == right.commit
         && left.tree == right.tree
+}
+
+fn trust_timestamp() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{seconds:010}Z")
 }
 
 fn refresh_workspace_skill_report_derived(report: &mut WorkspaceSkillReport) {
@@ -1779,7 +1738,7 @@ fn append_report_diagnostic(
     if message.starts_with("component.") || message.starts_with("skill.") {
         return;
     }
-    if message.starts_with("skills_lock") {
+    if message.starts_with("artifact_lock") {
         diagnostics.push(WorkspaceSkillDiagnostic {
             severity,
             scope: WorkspaceSkillDiagnosticScope::Lock,
@@ -1940,10 +1899,10 @@ fn diagnostic_code(message: &str) -> String {
 fn component_git_usable(component: &ComponentStatus) -> bool {
     matches!(
         component.kind,
-        WorkspaceArtifactKind::Git | WorkspaceArtifactKind::Submodule
+        WorkspaceComponentKind::Git | WorkspaceComponentKind::Submodule
     ) && component.exists
         && component.state == ComponentState::Ok
-        && (component.kind != WorkspaceArtifactKind::Submodule
+        && (component.kind != WorkspaceComponentKind::Submodule
             || (component.submodule_registered == Some(true)
                 && component.gitlink_present == Some(true)))
         && component.tracked_dirty == Some(false)
@@ -2007,9 +1966,9 @@ fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
     if report
         .warnings
         .iter()
-        .any(|warning| warning == "skills_lock_missing")
+        .any(|warning| warning == "artifact_lock_missing")
     {
-        next_steps.push("agl skill lock".to_string());
+        next_steps.push("agl repo component lock".to_string());
     }
     if report.skills.iter().any(|skill| {
         skill.artifact_folders.iter().any(|folder| {
@@ -2024,13 +1983,13 @@ fn workspace_skill_next_steps(report: &WorkspaceSkillReport) -> Vec<String> {
     }) {
         next_steps.push("agl skill sync-folders".to_string());
     }
-    if report.errors.iter().any(|error| {
-        error.contains("skills_lock_commit_mismatch")
-            || error.contains("skills_lock_tree_mismatch")
-            || error.contains("skills_lock_remote_mismatch")
-            || error.contains("skills_lock_entry_missing")
-    }) {
-        next_steps.push("review .agl/skills and run agl skill lock".to_string());
+    if report
+        .errors
+        .iter()
+        .any(|error| error.starts_with("artifact_lock_"))
+    {
+        next_steps
+            .push("review .agl/artifact-lock.toml and run agl repo component lock".to_string());
     }
     if report
         .errors
@@ -2079,14 +2038,6 @@ fn skill_folder_create_situation_key(situation: SkillFolderCreateSituation) -> &
         SkillFolderCreateSituation::RuntimePrepare => "runtime_prepare",
         SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
     }
-}
-
-fn lock_timestamp() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("unix:{seconds}")
 }
 
 #[cfg(test)]

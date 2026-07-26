@@ -1,8 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use agl_artifact::{
+    ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
+};
 use agl_capabilities::{CapabilityId, HookId, SkillId};
 use agl_tools::{ToolCatalog, ToolCatalogError};
 
+use crate::adapter::{builtin_source, skill_adapter_registry};
 use crate::manifest::{SkillHarness, SkillManifestError, SkillSource};
 
 use serde::{Deserialize, Serialize};
@@ -77,10 +82,54 @@ impl SkillRegistry {
     }
 
     pub fn from_builtin_assets() -> Result<Self, SkillRegistryError> {
+        let source = builtin_source()
+            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        Self::from_sources(vec![source])
+    }
+
+    pub fn from_sources(sources: Vec<Arc<dyn ArtifactSource>>) -> Result<Self, SkillRegistryError> {
         let mut registry = Self::new();
-        for skill in agl_assets::BUILTIN_SKILLS {
-            let harness =
-                SkillHarness::parse_builtin(skill).map_err(SkillRegistryError::Manifest)?;
+        let adapter_registry = skill_adapter_registry()
+            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        let skill_type: ArtifactTypeId = "skill".parse().map_err(SkillRegistryError::Artifact)?;
+        let mut candidates = Vec::new();
+        for source in &sources {
+            candidates.extend(
+                source
+                    .candidates(&skill_type)
+                    .map_err(SkillRegistryError::Artifact)?,
+            );
+        }
+        let resolver = ArtifactResolver::new(adapter_registry.clone(), sources);
+        let mut resolved = BTreeSet::new();
+        for candidate in candidates {
+            let root = ArtifactPackageRef::parse(&format!("skill:{}@*", candidate.package_id))
+                .map_err(SkillRegistryError::Artifact)?;
+            let graph = resolver
+                .resolve_and_validate(&root, None)
+                .map_err(SkillRegistryError::Artifact)?;
+            let node = graph
+                .nodes
+                .get(&graph.root)
+                .expect("resolved builtin skill root must exist");
+            if !resolved.insert(graph.root.clone()) {
+                continue;
+            }
+            let payload = adapter_registry
+                .lookup(&node.candidate.type_id)
+                .map_err(SkillRegistryError::Artifact)?
+                .validate_payload(node.candidate.view(), &node.envelope)
+                .map_err(SkillRegistryError::Artifact)?;
+            let mut harness = *payload.downcast::<SkillHarness>().map_err(|_| {
+                SkillRegistryError::ArtifactMessage(
+                    "skill adapter returned an invalid payload".to_owned(),
+                )
+            })?;
+            harness.source = match node.candidate.tier {
+                ArtifactSourceTier::Builtin => SkillSource::Core,
+                ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
+                ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+            };
             registry.register(RegisteredSkill::trusted_builtin(harness))?;
         }
         Ok(registry)
@@ -263,6 +312,8 @@ pub enum SkillRegistryError {
         tools: Vec<CapabilityId>,
     },
     ToolCatalog(ToolCatalogError),
+    Artifact(agl_artifact::ArtifactError),
+    ArtifactMessage(String),
 }
 
 impl std::fmt::Display for SkillRegistryError {
@@ -292,6 +343,8 @@ impl std::fmt::Display for SkillRegistryError {
                 write!(f, "skill `{id}` is missing allowed tools: {tools}")
             }
             Self::ToolCatalog(err) => write!(f, "{err}"),
+            Self::Artifact(err) => write!(f, "artifact error: {err}"),
+            Self::ArtifactMessage(message) => write!(f, "artifact adapter error: {message}"),
         }
     }
 }
@@ -315,7 +368,7 @@ mod tests {
 
         assert_eq!(skill.trust, SkillTrustState::TrustedByBinary);
         assert_eq!(skill.harness.manifest_sha256.len(), 64);
-        assert_eq!(skill.harness.tree_sha256.len(), 64);
+        assert_eq!(skill.harness.tree_sha256.len(), "sha256:".len() + 64);
         assert_eq!(
             registry
                 .by_pack("agl")

@@ -45,7 +45,6 @@ version = 1
 "skill.inspect" = "agl-host-tools/skills"
 "skill.status" = "agl-host-tools/skills"
 "skill.verify" = "agl-host-tools/skills"
-"skill.lock" = "agl-host-tools/skills"
 "skill.trust" = "agl-host-tools/skills"
 "skill.revoke" = "agl-host-tools/skills"
 "permissions.status" = "agl-tools/permissions"

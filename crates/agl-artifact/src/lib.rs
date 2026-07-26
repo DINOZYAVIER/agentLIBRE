@@ -2009,7 +2009,6 @@ fn reserved_package_file(path: &ArtifactRelativePath) -> bool {
     value.starts_with(".agl/")
         || value == "workspace.toml"
         || value == "artifact-lock.toml"
-        || value == "skills.lock"
         || value.starts_with("config/")
         || value.starts_with("state/")
         || value.starts_with("cache/")

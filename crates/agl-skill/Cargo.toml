@@ -1,11 +1,12 @@
 [package]
-name = "agl-skills"
+name = "agl-skill"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-artifact.workspace = true
 agl-capabilities.workspace = true
 agl-assets.workspace = true
 agl-repo.workspace = true

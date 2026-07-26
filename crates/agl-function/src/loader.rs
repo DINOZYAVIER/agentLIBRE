@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
-use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_SYSTEM_PROMPT_FILE_NAME};
+use crate::manifest::{
+    AgentFunctionFrontMatter, FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME,
+};
 use crate::subagent::{SubagentFrontMatter, load_declared_subagents};
 use crate::validation::validate_relative_function_file_path;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -190,10 +192,10 @@ pub(crate) fn resolve_builtin_package(
         .with_context(|| format!("builtin function `{reference}` is not embedded"))
 }
 
-fn function_file(
-    function: &agl_assets::BuiltinArtifactPackage,
+fn function_file<'a>(
+    function: &'a agl_assets::BuiltinArtifactPackage,
     path: &str,
-) -> Result<&agl_assets::BuiltinArtifactFile> {
+) -> Result<&'a agl_assets::BuiltinArtifactFile> {
     function
         .files
         .iter()

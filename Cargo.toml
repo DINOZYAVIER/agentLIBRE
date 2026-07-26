@@ -25,7 +25,7 @@ members = [
     "crates/agl-protocol",
     "crates/agl-repo",
     "crates/agl-session",
-    "crates/agl-skills",
+    "crates/agl-skill",
     "crates/agl-turn",
     "crates/agl-config",
     "crates/agl-content",
@@ -76,7 +76,7 @@ agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }
 agl-session = { path = "crates/agl-session" }
-agl-skills = { path = "crates/agl-skills" }
+agl-skill = { path = "crates/agl-skill" }
 agl-store = { path = "crates/agl-store" }
 agl-supervisor = { path = "crates/agl-supervisor" }
 anyhow = "1.0.103"

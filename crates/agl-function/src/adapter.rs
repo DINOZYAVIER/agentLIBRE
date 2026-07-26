@@ -8,7 +8,8 @@ use agl_artifact::{
 };
 use anyhow::{Context, Result};
 
-use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_FILE_NAME, parse_function_document};
+use crate::loader::parse_function_document;
+use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_FILE_NAME};
 
 #[derive(Clone, Debug)]
 pub struct FunctionArtifactAdapter {
@@ -110,7 +111,7 @@ pub fn function_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRe
 }
 
 pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
-    let source_id = "builtin".parse()?;
+    let source_id: agl_artifact::ArtifactSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
     for package in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
         let files = package

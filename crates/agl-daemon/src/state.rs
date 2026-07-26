@@ -3330,7 +3330,7 @@ impl DaemonState {
                     .map(|session| session.execution_context.workspace_root.clone())
                     .unwrap_or_else(|| self.runtime.paths.config_dir.clone());
                 let trust_store = self.runtime.paths.state_dir.join("skill-trust.toml");
-                agl_skills::trusted_workspace_registry(&workspace, &trust_store)
+                agl_skill::trusted_workspace_registry(&workspace, &trust_store)
                     .map_err(application_runtime_error)?
                     .skills()
                     .iter()
