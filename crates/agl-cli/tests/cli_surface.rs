@@ -33,6 +33,7 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
+    assert_contains(&stdout, "artifact");
     assert_contains(&stdout, "model");
     assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
@@ -82,6 +83,16 @@ fn command_help_exits_successfully_for_public_commands() {
         &["config", "--help"][..],
         &["config", "paths", "--help"][..],
         &["config", "init", "--help"][..],
+        &["artifact", "--help"][..],
+        &["artifact", "list", "--help"][..],
+        &["artifact", "inspect", "--help"][..],
+        &["artifact", "resolve", "--help"][..],
+        &["artifact", "graph", "--help"][..],
+        &["artifact", "lock", "--help"][..],
+        &["artifact", "source", "--help"][..],
+        &["artifact", "source", "list", "--help"][..],
+        &["artifact", "source", "add", "--help"][..],
+        &["artifact", "source", "remove", "--help"][..],
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
