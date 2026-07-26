@@ -524,10 +524,11 @@ fn package_auto_policy(
     workspace_root: &Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<agl_config::AutoRuntimePolicy> {
-    let function = agl_function::resolve_runtime_function(
-        package.id.as_str(),
+    let function = agl_runtime::resolve_composed_runtime_function(
+        &runtime.paths,
         workspace_root,
-        &runtime.paths.config_dir,
+        package.id.as_str(),
+        true,
     )?;
     let toml = function
         .inference_config_toml

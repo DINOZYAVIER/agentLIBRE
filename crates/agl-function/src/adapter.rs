@@ -1,14 +1,19 @@
+#[cfg(test)]
 use std::sync::Arc;
 
 use agl_artifact::{
-    ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactCandidate, ArtifactEntrypoint,
-    ArtifactEnvelope, ArtifactError, ArtifactPackageRef, ArtifactPackageView, ArtifactResolver,
-    ArtifactSource, ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId,
-    DirectoryArtifactSource, ErasedArtifactPayload, InMemoryPackageView, StaticArtifactSource,
+    ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactEntrypoint, ArtifactEnvelope,
+    ArtifactError, ArtifactPackageView, ArtifactTypeId, ErasedArtifactPayload,
+};
+#[cfg(test)]
+use agl_artifact::{
+    ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceKind,
+    ArtifactSourceTier, DirectoryArtifactSource, InMemoryPackageView, StaticArtifactSource,
 };
 use anyhow::{Context, Result, ensure};
 
 use crate::loader::parse_function_document;
+#[cfg(test)]
 use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{AgentFunctionFrontMatter, FUNCTION_FILE_NAME};
 
@@ -105,6 +110,7 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
     }
 }
 
+#[cfg(test)]
 pub fn function_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRegistry>> {
     let adapters: [Arc<dyn ArtifactAdapter>; 2] = [
         Arc::new(FunctionArtifactAdapter::default()),
@@ -115,6 +121,7 @@ pub fn function_adapter_registry() -> Result<Arc<agl_artifact::ArtifactAdapterRe
     )?))
 }
 
+#[cfg(test)]
 pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
     let source_id: agl_artifact::ArtifactSourceId = "builtin".parse()?;
     let mut candidates = Vec::new();
@@ -124,15 +131,18 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
             .iter()
             .map(|file| Ok::<_, ArtifactError>((file.path.parse()?, file.bytes.to_vec())))
             .collect::<Result<Vec<_>, _>>()?;
-        candidates.push(ArtifactCandidate::new(
-            package.type_id.parse()?,
-            package.id.parse()?,
-            package.version.parse()?,
-            source_id.clone(),
-            ArtifactSourceTier::Builtin,
-            ArtifactSourceKind::Embedded,
-            Arc::new(InMemoryPackageView::new(files)?),
-        ));
+        candidates.push(
+            ArtifactCandidate::new(
+                package.type_id.parse()?,
+                package.id.parse()?,
+                package.version.parse()?,
+                source_id.clone(),
+                ArtifactSourceTier::Builtin,
+                ArtifactSourceKind::Embedded,
+                Arc::new(InMemoryPackageView::new(files)?),
+            )
+            .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
+        );
     }
     Ok(Arc::new(StaticArtifactSource::new(
         source_id,
@@ -142,6 +152,7 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
     )?))
 }
 
+#[cfg(test)]
 pub fn directory_function_source(
     source_id: agl_artifact::ArtifactSourceId,
     tier: ArtifactSourceTier,
@@ -167,6 +178,7 @@ pub fn parse_function_envelope(content: &str) -> Result<AgentFunctionFrontMatter
     Ok(front_matter)
 }
 
+#[cfg(test)]
 pub fn validate_function_model_contract(
     front_matter: &AgentFunctionFrontMatter,
     inference_config: Option<&str>,
@@ -191,7 +203,6 @@ pub fn validate_function_model_contract(
         "function `{}` must declare exactly one Model dependency for its inference config",
         front_matter.id()
     );
-    let model_requirement = model_requirements[0];
     let registry = function_adapter_registry()?;
     let mut sources = Vec::new();
     if locator.source != FunctionPackageSource::Builtin {
@@ -238,6 +249,40 @@ pub fn validate_function_model_contract(
         front_matter.artifact.version
     ))?;
     let graph = resolver.resolve_and_validate(&reference, None)?;
+    validate_resolved_function_model_contract(
+        front_matter,
+        Some(inference_config),
+        &graph,
+        &registry,
+    )
+}
+
+pub fn validate_resolved_function_model_contract(
+    front_matter: &AgentFunctionFrontMatter,
+    inference_config: Option<&str>,
+    graph: &agl_artifact::ResolvedArtifactGraph,
+    registry: &agl_artifact::ArtifactAdapterRegistry,
+) -> Result<()> {
+    let model_requirements = front_matter
+        .artifact
+        .requires
+        .iter()
+        .filter(|requirement| requirement.type_id().as_str() == "model")
+        .collect::<Vec<_>>();
+    let Some(inference_config) = inference_config else {
+        ensure!(
+            model_requirements.is_empty(),
+            "function `{}` declares a Model dependency without an inference config",
+            front_matter.id()
+        );
+        return Ok(());
+    };
+    ensure!(
+        model_requirements.len() == 1,
+        "function `{}` must declare exactly one Model dependency for its inference config",
+        front_matter.id()
+    );
+    let model_requirement = model_requirements[0];
     let model_node = graph
         .nodes
         .values()

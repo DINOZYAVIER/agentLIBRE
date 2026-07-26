@@ -1,14 +1,21 @@
 use std::path::{Path, PathBuf};
 
+use agl_artifact::{
+    ArtifactCandidate, ArtifactPackageView, ArtifactRelativePath, ArtifactSourceKind,
+    ArtifactSourceTier,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
+#[cfg(test)]
 use crate::adapter::validate_function_model_contract;
 use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{
     AgentFunctionFrontMatter, FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME,
 };
-use crate::subagent::{SubagentFrontMatter, load_declared_subagents};
+use crate::subagent::{
+    SubagentFrontMatter, load_declared_subagents, load_declared_subagents_from_view,
+};
 use crate::validation::validate_relative_function_file_path;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MarkdownSection {
@@ -37,7 +44,7 @@ pub struct LoadedSubagent {
     pub source_digest: String,
 }
 
-pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction> {
+pub(crate) fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction> {
     let builtin = if locator.source == FunctionPackageSource::Builtin {
         Some(resolve_builtin_package(&locator.reference)?)
     } else {
@@ -80,6 +87,7 @@ pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction>
     let system_prompt_sections = markdown_sections(&system_prompt);
     let (inference_config_path, inference_config_toml) =
         load_function_inference_config(&locator.root_dir, &front_matter, builtin)?;
+    #[cfg(test)]
     validate_function_model_contract(&front_matter, inference_config_toml.as_deref(), &locator)?;
     Ok(LoadedFunction {
         locator,
@@ -91,6 +99,71 @@ pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction>
         inference_config_toml,
         subagents,
     })
+}
+
+pub fn load_function_candidate(candidate: &ArtifactCandidate) -> Result<LoadedFunction> {
+    let content = read_package_text(candidate.view(), FUNCTION_FILE_NAME)?;
+    let (front_matter, body) =
+        parse_function_document(&content).context("failed to parse resolved Function payload")?;
+    front_matter.validate()?;
+    ensure!(
+        body.trim().is_empty(),
+        "FUNCTION.md body is not supported; put system instructions in SYSTEM.md"
+    );
+    ensure!(
+        front_matter.id() == candidate.package_id.as_str(),
+        "function id `{}` does not match resolved candidate `{}`",
+        front_matter.id(),
+        candidate.package_id
+    );
+    let source = match (candidate.tier, candidate.kind) {
+        (ArtifactSourceTier::Explicit, _) => FunctionPackageSource::Explicit,
+        (ArtifactSourceTier::Workspace, _) => FunctionPackageSource::Workspace,
+        (_, ArtifactSourceKind::Embedded) => FunctionPackageSource::Builtin,
+        _ => FunctionPackageSource::Global,
+    };
+    let root_dir = candidate.package_root.clone().unwrap_or_else(|| {
+        PathBuf::from(format!(
+            "artifact/function/{}@{}",
+            candidate.package_id, candidate.version
+        ))
+    });
+    let locator = FunctionPackageLocation {
+        reference: format!("function:{}@{}", candidate.package_id, candidate.version),
+        source,
+        path: root_dir.join(FUNCTION_FILE_NAME),
+        root_dir: root_dir.clone(),
+    };
+    let system_prompt = read_package_text(candidate.view(), FUNCTION_SYSTEM_PROMPT_FILE_NAME)?;
+    ensure!(
+        !system_prompt.trim().is_empty(),
+        "function system prompt cannot be empty"
+    );
+    let system_prompt_path = root_dir.join(FUNCTION_SYSTEM_PROMPT_FILE_NAME);
+    let inference_config_toml = front_matter
+        .model_config_path()
+        .map(|path| read_package_text(candidate.view(), path))
+        .transpose()?;
+    let inference_config_path = front_matter
+        .model_config_path()
+        .map(|path| root_dir.join(path));
+    let subagents = load_declared_subagents_from_view(candidate.view(), &root_dir, &front_matter)?;
+    Ok(LoadedFunction {
+        locator,
+        front_matter,
+        system_prompt_sections: markdown_sections(&system_prompt),
+        system_prompt,
+        system_prompt_path,
+        inference_config_path,
+        inference_config_toml,
+        subagents,
+    })
+}
+
+fn read_package_text(package: &dyn ArtifactPackageView, path: &str) -> Result<String> {
+    let relative = ArtifactRelativePath::new(path.to_owned())?;
+    let bytes = package.read_file(&relative)?;
+    String::from_utf8(bytes).with_context(|| format!("{path} is not UTF-8"))
 }
 
 pub(crate) fn load_function_system_prompt(

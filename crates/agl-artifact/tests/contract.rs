@@ -345,6 +345,10 @@ fn adapter_lifecycle_returns_checked_payload_and_directory_candidates() {
     );
     assert_eq!(candidates[0].version, version("1.0.0"));
     assert_eq!(candidates[0].kind, ArtifactSourceKind::Git);
+    assert_eq!(
+        candidates[0].package_root.as_deref(),
+        Some(package.as_path())
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -650,7 +654,7 @@ fn explicit_sources_do_not_fall_through() {
     let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
     assert!(matches!(
         resolver.resolve(&root),
-        Err(ArtifactError::NoCompatibleCandidate { .. })
+        Err(ArtifactError::IncompatibleVersion { .. })
     ));
 }
 
@@ -705,6 +709,47 @@ fn graph_merges_dependencies_and_lock_is_deterministic() {
     assert_eq!(first, second);
     assert_eq!(ArtifactLock::from_toml(&first).unwrap(), lock);
     graph.verify_lock(&lock).unwrap();
+}
+
+#[test]
+fn git_provenance_is_locked_and_drift_is_distinct_from_package_digest() {
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([LifecycleAdapter {
+            descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+        }])
+        .unwrap(),
+    );
+    let mut candidate = candidate_for(
+        "git-source",
+        ArtifactSourceTier::Workspace,
+        "1.0.0",
+        "function",
+        "example",
+        &[],
+        true,
+    );
+    candidate.kind = ArtifactSourceKind::Git;
+    candidate = candidate.with_source_provenance("a".repeat(40), "b".repeat(40));
+    let source = StaticArtifactSource::new(
+        "git-source".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Git,
+        vec![candidate],
+    )
+    .unwrap();
+    let graph = ArtifactResolver::new(registry, vec![Arc::new(source)])
+        .resolve(&"function:example@^1.0".parse().unwrap())
+        .unwrap();
+    let mut lock = graph.lock().unwrap();
+    let package = lock.packages.values_mut().next().unwrap();
+    assert_eq!(
+        package.source_revision.as_deref(),
+        Some("a".repeat(40).as_str())
+    );
+    package.source_revision = Some("c".repeat(40));
+
+    let error = graph.verify_lock(&lock).unwrap_err();
+    assert_eq!(error.code(), "source_drift");
 }
 
 #[test]

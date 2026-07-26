@@ -130,15 +130,18 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
             .iter()
             .map(|file| Ok::<_, ArtifactError>((file.path.parse()?, file.bytes.to_vec())))
             .collect::<Result<Vec<_>, _>>()?;
-        candidates.push(ArtifactCandidate::new(
-            package.type_id.parse()?,
-            package.id.parse()?,
-            package.version.parse()?,
-            source_id.clone(),
-            ArtifactSourceTier::Builtin,
-            ArtifactSourceKind::Embedded,
-            Arc::new(InMemoryPackageView::new(files)?),
-        ));
+        candidates.push(
+            ArtifactCandidate::new(
+                package.type_id.parse()?,
+                package.id.parse()?,
+                package.version.parse()?,
+                source_id.clone(),
+                ArtifactSourceTier::Builtin,
+                ArtifactSourceKind::Embedded,
+                Arc::new(InMemoryPackageView::new(files)?),
+            )
+            .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
+        );
     }
     Ok(Arc::new(StaticArtifactSource::new(
         source_id,

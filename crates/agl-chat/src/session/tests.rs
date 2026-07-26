@@ -915,7 +915,7 @@ tool_call_format = "hermes_json"
         std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
             format!(
-                "---\nschema: agentfunction/v1\nid: {}\ntitle: Function policy test\n{}---\n",
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires: []\ntitle: Function policy test\n{}---\n",
                 case.id, case.tools_yaml
             ),
         )
@@ -1019,6 +1019,77 @@ tool_call_format = "hermes_json"
     }
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn inference_session_rejects_function_package_digest_drift() {
+    let root = temp_store_root("function-lock-drift");
+    let workspace = root.join("workspace");
+    let function_root = workspace.join(".agl/functions/locked");
+    std::fs::create_dir_all(&function_root).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: locked
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+title: Locked Function
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Original prompt.\n").unwrap();
+    let paths = agl_runtime::AgentLibrePaths::from_agl_home(root.join("home"));
+    let reference: agl_artifact::ArtifactPackageRef = "function:locked@*".parse().unwrap();
+    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let lock = composition
+        .resolve_for_lock_refresh(&reference)
+        .unwrap()
+        .lock()
+        .unwrap();
+    lock.write_atomic(workspace.join(".agl/artifact-lock.toml"))
+        .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Mutated prompt.\n").unwrap();
+
+    let runtime = AgentLibreRuntimeConfig {
+        paths,
+        logging: agl_runtime::AgentLibreLoggingConfig::default(),
+        history: agl_runtime::AgentLibreHistoryConfig::default(),
+        workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        inference: agl_runtime::AgentLibreInferenceConfig::default(),
+        execution: agl_runtime::AgentLibreExecutionConfig::default(),
+    };
+    let error = match InferenceSession::new(
+        InferenceOptions {
+            config: Some(root.join("unused-config.toml")),
+            function_ref: Some("locked".to_owned()),
+            workspace_root: Some(workspace),
+            ..Default::default()
+        },
+        &runtime,
+        None,
+        session_id(),
+        crate::inference_client::test_inference_client(),
+    ) {
+        Ok(_) => panic!("mutated locked Function package must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error
+            .downcast_ref::<agl_artifact::ArtifactError>()
+            .unwrap()
+            .code(),
+        "digest_drift"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

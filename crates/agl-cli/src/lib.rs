@@ -136,10 +136,19 @@ pub fn run_cli() {
         _ => {}
     }
 
+    let artifact_json = match &command {
+        CliCommand::Artifact(command) => artifact::json_requested(command),
+        _ => false,
+    };
     let runtime = match runtime_for_command(&command, invocation.home) {
         Ok(runtime) => runtime,
         Err(err) => {
-            eprintln!("error: failed to resolve agentLIBRE runtime: {err:#}");
+            let err = err.context("failed to resolve agentLIBRE runtime");
+            if artifact_json {
+                artifact::print_error_json(&err);
+            } else {
+                eprintln!("error: {err:#}");
+            }
             process::exit(1);
         }
     };
@@ -165,7 +174,11 @@ pub fn run_cli() {
 
     if let Err(err) = run(command, &runtime) {
         tracing::error!(target: "agentlibre::app", error = %err, "agentLIBRE command failed");
-        eprintln!("error: {err:#}");
+        if artifact_json {
+            artifact::print_error_json(&err);
+        } else {
+            eprintln!("error: {err:#}");
+        }
         process::exit(1);
     }
 }
@@ -1374,19 +1387,12 @@ fn resolve_run_function_defaults(
                 runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
             let require_profile = options.config.is_none()
                 && std::env::var_os("AGL_LOCAL_INFERENCE_CONFIG").is_none();
-            if require_profile {
-                agl_function::resolve_runtime_function(
-                    reference,
-                    &workspace_root,
-                    &runtime.paths.config_dir,
-                )
-            } else {
-                agl_function::resolve_runtime_function_allow_missing_profile(
-                    reference,
-                    &workspace_root,
-                    &runtime.paths.config_dir,
-                )
-            }
+            agl_runtime::resolve_composed_runtime_function(
+                &runtime.paths,
+                &workspace_root,
+                reference,
+                require_profile,
+            )
             .with_context(|| format!("failed to resolve function `{reference}`"))
         })
         .transpose()

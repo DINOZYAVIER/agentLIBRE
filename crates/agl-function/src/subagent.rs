@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use agl_artifact::{ArtifactPackageView, ArtifactRelativePath};
 use agl_capabilities::CapabilityId;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -321,6 +322,82 @@ pub(crate) fn load_declared_subagents(
         load_subagent_graph_node(function_root, subagent_id, &mut visiting, &mut subagents)?;
     }
     Ok(subagents.into_values().collect())
+}
+
+pub(crate) fn load_declared_subagents_from_view(
+    package: &dyn ArtifactPackageView,
+    display_root: &Path,
+    front_matter: &AgentFunctionFrontMatter,
+) -> Result<Vec<LoadedSubagent>> {
+    let mut subagents = BTreeMap::new();
+    let mut visiting = Vec::new();
+    for subagent_id in front_matter.selected_subagents() {
+        load_subagent_graph_node_from_view(
+            package,
+            display_root,
+            subagent_id,
+            &mut visiting,
+            &mut subagents,
+        )?;
+    }
+    Ok(subagents.into_values().collect())
+}
+
+fn load_subagent_graph_node_from_view(
+    package: &dyn ArtifactPackageView,
+    display_root: &Path,
+    subagent_id: &str,
+    visiting: &mut Vec<String>,
+    loaded: &mut BTreeMap<String, LoadedSubagent>,
+) -> Result<()> {
+    validate_function_id("subagent id", subagent_id)?;
+    if loaded.contains_key(subagent_id) {
+        return Ok(());
+    }
+    if let Some(index) = visiting
+        .iter()
+        .position(|candidate| candidate == subagent_id)
+    {
+        let mut cycle = visiting[index..].to_vec();
+        cycle.push(subagent_id.to_string());
+        bail!("subagent graph contains a cycle: {}", cycle.join(" -> "));
+    }
+    visiting.push(subagent_id.to_owned());
+    let relative = ArtifactRelativePath::new(format!("subagents/{subagent_id}.md"))?;
+    let content = String::from_utf8(package.read_file(&relative)?)
+        .with_context(|| format!("declared subagent `{subagent_id}` is not UTF-8"))?;
+    let source_digest = sha256_text(&content);
+    let (front_matter, body) = parse_subagent_document(&content)
+        .with_context(|| format!("failed to parse subagent {relative}"))?;
+    front_matter.validate()?;
+    ensure!(
+        front_matter.id == subagent_id,
+        "subagent id `{}` does not match declared id `{subagent_id}`",
+        front_matter.id
+    );
+    ensure!(
+        !body.trim().is_empty(),
+        "subagent `{subagent_id}` system body cannot be empty"
+    );
+    for child in &front_matter.subagents.use_ {
+        ensure!(
+            child != subagent_id,
+            "subagent `{subagent_id}` cannot delegate to itself"
+        );
+        load_subagent_graph_node_from_view(package, display_root, child, visiting, loaded)?;
+    }
+    visiting.pop();
+    loaded.insert(
+        subagent_id.to_owned(),
+        LoadedSubagent {
+            path: display_root.join(relative.as_str()),
+            sections: markdown_sections(&body),
+            front_matter,
+            body,
+            source_digest,
+        },
+    );
+    Ok(())
 }
 
 pub(crate) fn load_subagent_graph_node(

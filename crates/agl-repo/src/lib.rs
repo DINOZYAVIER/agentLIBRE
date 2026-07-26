@@ -18,9 +18,39 @@ pub use artifacts::{
 pub use hooks::install_repo_hooks;
 pub use types::*;
 pub use v2::{
-    read_artifact_lock_v2, read_workspace_manifest_v2, write_artifact_lock_v2,
+    read_artifact_lock_v2, read_optional_artifact_lock_v2, read_workspace_manifest_v2,
+    replace_artifact_lock_components_v2, replace_artifact_lock_packages_v2, write_artifact_lock_v2,
     write_workspace_manifest_v2,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitSourceProvenance {
+    pub revision: String,
+    pub tree: String,
+}
+
+pub fn resolve_artifact_source_root(
+    workspace_root: impl AsRef<Path>,
+    name: &str,
+    source: &artifact_contract::ArtifactSourceDeclaration,
+) -> Result<PathBuf> {
+    let workspace_root = workspace_root
+        .as_ref()
+        .canonicalize()
+        .context("failed to resolve artifact workspace root")?;
+    resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
+}
+
+pub fn git_source_provenance(root: impl AsRef<Path>) -> Result<GitSourceProvenance> {
+    let root = root.as_ref();
+    let revision = git_output(root, ["rev-parse", "HEAD"])?.trim().to_owned();
+    let tree = git_output(root, ["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .to_owned();
+    ensure!(!revision.is_empty(), "Git artifact source has no revision");
+    ensure!(!tree.is_empty(), "Git artifact source has no tree");
+    Ok(GitSourceProvenance { revision, tree })
+}
 
 pub fn materialize_artifact_source(
     start: impl AsRef<Path>,
@@ -32,19 +62,7 @@ pub fn materialize_artifact_source(
     let target = workspace_root.join(".agl/sources").join(source_id.as_str());
     match source.kind {
         artifact_contract::ArtifactSourceKind::Directory => {
-            let relative = source
-                .path
-                .as_ref()
-                .context("local artifact source is missing its path")?;
-            let absolute = workspace_root.join(relative);
-            let canonical = absolute
-                .canonicalize()
-                .with_context(|| format!("failed to resolve local artifact source {name}"))?;
-            ensure!(
-                canonical.starts_with(&workspace_root),
-                "local artifact source {name} escapes the workspace"
-            );
-            Ok(canonical)
+            resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
         }
         artifact_contract::ArtifactSourceKind::Git => {
             let url = source
@@ -80,12 +98,58 @@ pub fn materialize_artifact_source(
             }
             git_run(&target, &["checkout", "--quiet", rev])
                 .with_context(|| format!("failed to checkout artifact source {name} at {rev}"))?;
-            Ok(target)
+            resolve_artifact_source_root_in_workspace(&workspace_root, name, source)
         }
         artifact_contract::ArtifactSourceKind::Embedded => {
             bail!("embedded artifact sources cannot be materialized")
         }
     }
+}
+
+fn resolve_artifact_source_root_in_workspace(
+    workspace_root: &Path,
+    name: &str,
+    source: &artifact_contract::ArtifactSourceDeclaration,
+) -> Result<PathBuf> {
+    let unresolved = match source.kind {
+        artifact_contract::ArtifactSourceKind::Directory => {
+            let relative = source
+                .path
+                .as_ref()
+                .context("local artifact source is missing its path")?;
+            workspace_root.join(relative)
+        }
+        artifact_contract::ArtifactSourceKind::Git => {
+            workspace_root.join(".agl/sources").join(name)
+        }
+        artifact_contract::ArtifactSourceKind::Embedded => {
+            bail!("embedded artifact sources do not have a filesystem root")
+        }
+    };
+    let metadata = fs::symlink_metadata(&unresolved)
+        .with_context(|| format!("failed to resolve artifact source {name}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow::Error::new(
+            artifact_contract::ArtifactError::PathEscape {
+                path: unresolved.display().to_string(),
+            },
+        ));
+    }
+    ensure!(
+        metadata.is_dir(),
+        "artifact source {name} path is not a directory"
+    );
+    let canonical = unresolved
+        .canonicalize()
+        .with_context(|| format!("failed to resolve artifact source {name}"))?;
+    if !canonical.starts_with(workspace_root) {
+        return Err(anyhow::Error::new(
+            artifact_contract::ArtifactError::PathEscape {
+                path: canonical.display().to_string(),
+            },
+        ));
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]

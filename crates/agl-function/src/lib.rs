@@ -8,22 +8,33 @@ mod status;
 mod subagent;
 mod validation;
 
+#[cfg(test)]
+pub(crate) use adapter::validate_function_model_contract;
 pub use adapter::{
-    FunctionArtifactAdapter, builtin_source, directory_function_source, function_adapter_registry,
-    parse_function_envelope, validate_function_model_contract,
+    FunctionArtifactAdapter, parse_function_envelope, validate_resolved_function_model_contract,
 };
-pub use loader::{LoadedFunction, LoadedSubagent, MarkdownSection, load_function};
+#[cfg(test)]
+pub(crate) use loader::load_function;
+pub use loader::{LoadedFunction, LoadedSubagent, MarkdownSection, load_function_candidate};
+#[cfg(test)]
+pub(crate) use locator::resolve_function_package;
 pub use locator::{
     FunctionListEntry, FunctionPackageLocation, FunctionPackageSource, ProfileResolution,
     default_local_profile_path, global_functions_root, global_profile_path, list_functions,
-    resolve_function_package, resolve_profile, workspace_functions_root, workspace_profile_path,
+    resolve_profile, workspace_functions_root, workspace_profile_path,
 };
 pub use manifest::*;
 pub use render::render_function_context;
 pub use runtime::{
-    RuntimeFunction, resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
+    RuntimeFunction, runtime_function_from_candidate, runtime_function_from_resolved_graph,
 };
-pub use status::{FunctionStatusReport, function_status, function_status_with_model_bindings};
+#[cfg(test)]
+pub(crate) use runtime::{
+    resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
+};
+#[cfg(test)]
+pub(crate) use status::function_status;
+pub use status::{FunctionStatusReport, function_status_from_loaded};
 pub use subagent::*;
 pub use validation::{is_valid_function_id, validate_function_id};
 

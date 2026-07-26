@@ -1,4 +1,3 @@
-mod artifacts;
 mod chat_presentation;
 mod commands;
 mod history;
@@ -8,7 +7,6 @@ mod service;
 mod suggestions;
 mod terminals;
 
-pub use artifacts::*;
 pub use chat_presentation::*;
 pub use commands::*;
 pub use history::*;
