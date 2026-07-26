@@ -135,7 +135,7 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     let mut invalid_count = 0_usize;
     for source in &context.composition.sources {
         for adapter in context.composition.registry.iter() {
-            for candidate in source.candidates(&adapter.descriptor().type_id)? {
+            for candidate in source.inventory_candidates(&adapter.descriptor().type_id)? {
                 let validation = validate_list_candidate(adapter, &candidate);
                 let (envelope, digest, validation_error) = match validation {
                     Ok((envelope, digest)) => (Some(envelope), Some(digest), None),
@@ -227,6 +227,9 @@ fn validate_list_candidate(
     adapter: &dyn ArtifactAdapter,
     candidate: &ArtifactCandidate,
 ) -> std::result::Result<(ArtifactEnvelope, PackageTreeDigest), ArtifactError> {
+    if let Some(error) = candidate.discovery_error() {
+        return Err(error.clone());
+    }
     let envelope = adapter.extract_envelope(candidate.view())?;
     envelope.validate()?;
     if envelope.type_id != candidate.type_id {
@@ -541,7 +544,8 @@ fn artifact_diagnostic(error: &ArtifactError) -> ArtifactDiagnostic {
             "actual": actual,
         }),
         ArtifactError::DependencyCycle { path } => serde_json::json!({"path": path}),
-        ArtifactError::AdapterPayload { type_id, reason } => {
+        ArtifactError::AdapterEnvelope { type_id, reason }
+        | ArtifactError::AdapterPayload { type_id, reason } => {
             serde_json::json!({"type": type_id, "reason": reason})
         }
         ArtifactError::PathEscape { path } | ArtifactError::PackageSymlinkRejected { path } => {

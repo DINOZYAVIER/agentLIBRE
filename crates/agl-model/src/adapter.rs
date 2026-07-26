@@ -53,12 +53,12 @@ impl ArtifactAdapter for ModelArtifactAdapter {
         let bytes = package.read_file(&path)?;
         let document: ModelDocument =
             toml::from_str(std::str::from_utf8(&bytes).map_err(|error| {
-                ArtifactError::AdapterPayload {
+                ArtifactError::AdapterEnvelope {
                     type_id: self.descriptor.type_id.to_string(),
                     reason: format!("MODEL.toml is not UTF-8: {error}"),
                 }
             })?)
-            .map_err(|error| ArtifactError::AdapterPayload {
+            .map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("failed to parse MODEL.toml: {error}"),
             })?;
@@ -69,7 +69,7 @@ impl ArtifactAdapter for ModelArtifactAdapter {
             });
         }
         if document.artifact.payload_schema.as_str() != MODEL_PAYLOAD_SCHEMA {
-            return Err(ArtifactError::AdapterPayload {
+            return Err(ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!(
                     "unsupported model payload schema `{}`; expected {MODEL_PAYLOAD_SCHEMA}",

@@ -49,11 +49,11 @@ impl ArtifactAdapter for SkillArtifactAdapter {
         let entrypoint = SKILL_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
-            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterPayload {
+            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("SKILL.md is not UTF-8: {error}"),
             })?;
-        parse_skill_envelope(content).map_err(|error| ArtifactError::AdapterPayload {
+        parse_skill_envelope(content).map_err(|error| ArtifactError::AdapterEnvelope {
             type_id: self.descriptor.type_id.to_string(),
             reason: error.to_string(),
         })

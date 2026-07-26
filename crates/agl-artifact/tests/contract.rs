@@ -65,7 +65,7 @@ impl ArtifactAdapter for LifecycleAdapter {
         let path: ArtifactRelativePath = "artifact.json".parse().unwrap();
         let bytes = package.read_file(&path)?;
         let envelope: ArtifactEnvelope =
-            serde_json::from_slice(&bytes).map_err(|error| ArtifactError::AdapterPayload {
+            serde_json::from_slice(&bytes).map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
@@ -349,6 +349,58 @@ fn adapter_lifecycle_returns_checked_payload_and_directory_candidates() {
         candidates[0].package_root.as_deref(),
         Some(package.as_path())
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn directory_inventory_preserves_invalid_envelope_but_resolution_stays_fail_closed() {
+    let descriptor = descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md");
+    let registry =
+        Arc::new(ArtifactAdapterRegistry::new([LifecycleAdapter { descriptor }]).unwrap());
+    let root = temp_dir("invalid-envelope-inventory");
+    let package = root.join(FUNCTION_ROOT).join("broken");
+    fs::create_dir_all(&package).unwrap();
+    let mut invalid = envelope_json();
+    invalid["schema"] = serde_json::json!("agentlibre.artifact/v999");
+    fs::write(
+        package.join("artifact.json"),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
+    fs::write(package.join("payload.txt"), b"unchecked").unwrap();
+    fs::write(package.join("FUNCTION.md"), b"entry").unwrap();
+    let source = Arc::new(DirectoryArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        &root,
+        registry.clone(),
+    ));
+
+    assert!(matches!(
+        source.candidates(&ArtifactTypeId::function()),
+        Err(ArtifactError::AdapterEnvelope { .. })
+    ));
+    let inventory = source
+        .inventory_candidates(&ArtifactTypeId::function())
+        .unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(
+        inventory[0].package_id,
+        "broken".parse::<ArtifactPackageId>().unwrap()
+    );
+    assert_eq!(inventory[0].version, version("0.0.0-invalid"));
+    assert!(matches!(
+        inventory[0].discovery_error(),
+        Some(ArtifactError::AdapterEnvelope { .. })
+    ));
+
+    let resolver = ArtifactResolver::new(registry, vec![source]);
+    let reference: ArtifactPackageRef = "function:broken@*".parse().unwrap();
+    assert!(matches!(
+        resolver.resolve(&reference),
+        Err(ArtifactError::AdapterEnvelope { .. })
+    ));
     fs::remove_dir_all(root).unwrap();
 }
 

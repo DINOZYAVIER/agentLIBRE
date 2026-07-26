@@ -52,12 +52,12 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
         let entrypoint: agl_artifact::ArtifactRelativePath = FUNCTION_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
-            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterPayload {
+            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("FUNCTION.md is not UTF-8: {error}"),
             })?;
         let (front_matter, body) =
-            parse_function_document(content).map_err(|error| ArtifactError::AdapterPayload {
+            parse_function_document(content).map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;
@@ -69,7 +69,7 @@ impl ArtifactAdapter for FunctionArtifactAdapter {
         }
         front_matter
             .validate()
-            .map_err(|error| ArtifactError::AdapterPayload {
+            .map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: error.to_string(),
             })?;

@@ -105,6 +105,8 @@ pub enum ArtifactError {
     },
     #[error("adapter `{type_id}` returned an envelope for package `{actual_id}`")]
     AdapterPackageMismatch { type_id: String, actual_id: String },
+    #[error("adapter `{type_id}` rejected package envelope: {reason}")]
+    AdapterEnvelope { type_id: String, reason: String },
     #[error("adapter `{type_id}` rejected package payload: {reason}")]
     AdapterPayload { type_id: String, reason: String },
     #[error("ambiguous candidate for `{type_id}:{package_id}@{version}`: {sources:?}")]
@@ -171,7 +173,8 @@ impl ArtifactError {
             | Self::DuplicateRequirement { .. }
             | Self::CandidateVersionMismatch { .. }
             | Self::AdapterTypeMismatch { .. }
-            | Self::AdapterPackageMismatch { .. } => "invalid_envelope",
+            | Self::AdapterPackageMismatch { .. }
+            | Self::AdapterEnvelope { .. } => "invalid_envelope",
             Self::InvalidAdapterRoot { .. } => "invalid_adapter_root",
             Self::InvalidAdapterEntrypoint { .. } => "invalid_adapter_entrypoint",
             Self::DuplicateAdapterType { .. } => "duplicate_adapter_type",
@@ -1366,6 +1369,7 @@ pub struct ArtifactCandidate {
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
     pub package_root: Option<PathBuf>,
+    discovery_error: Option<ArtifactError>,
     view: Arc<dyn ArtifactPackageView>,
 }
 
@@ -1404,6 +1408,7 @@ impl ArtifactCandidate {
             source_revision: None,
             source_tree: None,
             package_root: None,
+            discovery_error: None,
             view,
         }
     }
@@ -1423,6 +1428,15 @@ impl ArtifactCandidate {
         self
     }
 
+    fn with_discovery_error(mut self, error: ArtifactError) -> Self {
+        self.discovery_error = Some(error);
+        self
+    }
+
+    pub fn discovery_error(&self) -> Option<&ArtifactError> {
+        self.discovery_error.as_ref()
+    }
+
     pub fn view(&self) -> &dyn ArtifactPackageView {
         self.view.as_ref()
     }
@@ -1434,6 +1448,13 @@ pub trait ArtifactSource: Send + Sync {
     fn kind(&self) -> ArtifactSourceKind;
     fn candidates(&self, type_id: &ArtifactTypeId)
     -> Result<Vec<ArtifactCandidate>, ArtifactError>;
+
+    fn inventory_candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.candidates(type_id)
+    }
 }
 
 pub type ErasedArtifactPayload = Box<dyn Any + Send + Sync>;
@@ -1691,24 +1712,11 @@ impl DirectoryArtifactSource {
         self.source_tree = Some(source_tree.into());
         self
     }
-}
 
-impl ArtifactSource for DirectoryArtifactSource {
-    fn id(&self) -> &ArtifactSourceId {
-        &self.source_id
-    }
-
-    fn tier(&self) -> ArtifactSourceTier {
-        self.tier
-    }
-
-    fn kind(&self) -> ArtifactSourceKind {
-        self.kind
-    }
-
-    fn candidates(
+    fn scan_candidates(
         &self,
         type_id: &ArtifactTypeId,
+        preserve_invalid_envelopes: bool,
     ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
         let adapter = self.registry.lookup(type_id)?;
         let typed_root = self.root.join(&adapter.descriptor().root);
@@ -1761,30 +1769,43 @@ impl ArtifactSource for DirectoryArtifactSource {
             let package_id = ArtifactPackageId::new(package_text)?;
             let package_root = typed_root.join(package_dir_text);
             let view = DirectoryPackageView::new(&package_root)?;
-            let envelope = adapter.extract_envelope(&view)?;
-            envelope.validate()?;
-            if envelope.type_id != *type_id {
-                return Err(ArtifactError::AdapterTypeMismatch {
-                    type_id: type_id.to_string(),
-                    actual_type: envelope.type_id.to_string(),
-                });
-            }
-            if envelope.id != package_id {
-                return Err(ArtifactError::AdapterPackageMismatch {
-                    type_id: type_id.to_string(),
-                    actual_id: envelope.id.to_string(),
-                });
-            }
-            let version = if let Some(declared_version) = declared_version {
-                if declared_version != envelope.version {
-                    return Err(ArtifactError::CandidateVersionMismatch {
-                        candidate: declared_version.to_string(),
-                        envelope: envelope.version.to_string(),
+            let validated_version = (|| {
+                let envelope = adapter.extract_envelope(&view)?;
+                envelope.validate()?;
+                if envelope.type_id != *type_id {
+                    return Err(ArtifactError::AdapterTypeMismatch {
+                        type_id: type_id.to_string(),
+                        actual_type: envelope.type_id.to_string(),
                     });
                 }
-                declared_version
-            } else {
-                envelope.version
+                if envelope.id != package_id {
+                    return Err(ArtifactError::AdapterPackageMismatch {
+                        type_id: type_id.to_string(),
+                        actual_id: envelope.id.to_string(),
+                    });
+                }
+                if let Some(declared_version) = &declared_version {
+                    if declared_version != &envelope.version {
+                        return Err(ArtifactError::CandidateVersionMismatch {
+                            candidate: declared_version.to_string(),
+                            envelope: envelope.version.to_string(),
+                        });
+                    }
+                    Ok(declared_version.clone())
+                } else {
+                    Ok(envelope.version)
+                }
+            })();
+            let (version, discovery_error) = match validated_version {
+                Ok(version) => (version, None),
+                Err(error) if preserve_invalid_envelopes => (
+                    declared_version.clone().unwrap_or_else(|| {
+                        ArtifactVersion::new("0.0.0-invalid")
+                            .expect("invalid-envelope inventory version is valid SemVer")
+                    }),
+                    Some(error),
+                ),
+                Err(error) => return Err(error),
             };
             let mut candidate = ArtifactCandidate::new(
                 type_id.clone(),
@@ -1796,6 +1817,9 @@ impl ArtifactSource for DirectoryArtifactSource {
                 Arc::new(view),
             )
             .with_package_root(package_root);
+            if let Some(error) = discovery_error {
+                candidate = candidate.with_discovery_error(error);
+            }
             if let (Some(revision), Some(tree)) = (&self.source_revision, &self.source_tree) {
                 candidate = candidate.with_source_provenance(revision.clone(), tree.clone());
             }
@@ -1805,6 +1829,34 @@ impl ArtifactSource for DirectoryArtifactSource {
             (&left.package_id, &left.version).cmp(&(&right.package_id, &right.version))
         });
         Ok(candidates)
+    }
+}
+
+impl ArtifactSource for DirectoryArtifactSource {
+    fn id(&self) -> &ArtifactSourceId {
+        &self.source_id
+    }
+
+    fn tier(&self) -> ArtifactSourceTier {
+        self.tier
+    }
+
+    fn kind(&self) -> ArtifactSourceKind {
+        self.kind
+    }
+
+    fn candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.scan_candidates(type_id, false)
+    }
+
+    fn inventory_candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.scan_candidates(type_id, true)
     }
 }
 
