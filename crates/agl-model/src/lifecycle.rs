@@ -794,7 +794,7 @@ mod tests {
 
     fn roots() -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
-            "agl-models-lifecycle-{}-{}",
+            "agl-model-lifecycle-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));

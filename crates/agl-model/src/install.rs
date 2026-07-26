@@ -670,7 +670,7 @@ mod tests {
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "agl-models-install-{}-{}",
+            "agl-model-install-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));

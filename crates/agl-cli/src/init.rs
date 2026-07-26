@@ -7,7 +7,7 @@ use agl_config::{
     load_model_bindings_or_empty, model_bindings_path, write_model_bindings,
 };
 use agl_inference::{InferenceDeviceInfo, InferenceDeviceKind};
-use agl_models::{
+use agl_model::{
     HostResources, InstallRecordState, InstallSource, LlamaDeviceInfo, LlamaDeviceKind,
     ModelArtifactRole, ModelBindingPatch, ModelCacheStatus, ModelCatalog, ModelDownloadRequest,
     ModelDownloadWorker, ModelFit, ModelFitKind, ModelInstallRecord, ModelInstallStore,
@@ -142,7 +142,7 @@ fn run_init_inner(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<SetupReport> {
     tracing::info!(target: "agentlibre::app", command = "init", "starting guided setup");
-    options.offline |= agl_models::hugging_face_offline();
+    options.offline |= agl_model::hugging_face_offline();
     let workspace_start = runtime.resolve_workspace_root(None)?;
     let workspace_probe = status_repo_workspace(
         &workspace_start,
@@ -180,7 +180,7 @@ fn run_init_inner(
         .into_iter()
         .map(model_device_info)
         .collect::<Vec<_>>();
-    let host = HostResources::inspect(agl_models::hugging_face_cache_dir(), devices)?;
+    let host = HostResources::inspect(agl_model::hugging_face_cache_dir(), devices)?;
     let effective_low_memory_consent = options.allow_low_memory
         || previous_checkpoint
             .as_ref()

@@ -1009,7 +1009,7 @@ impl DaemonState {
             .runtime
             .validate()
             .map_err(|error| invalid(format!("invalid setup runtime plan: {error}")))?;
-        let runtime_plan = agl_models::RuntimePlan {
+        let runtime_plan = agl_model::RuntimePlan {
             profile_id: request.runtime_plan.profile_id,
             selected_device: request.runtime_plan.selected_device,
             runtime: request.runtime_plan.runtime,

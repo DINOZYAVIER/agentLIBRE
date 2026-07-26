@@ -11,7 +11,7 @@ use agl_function::{
     resolve_function_package,
 };
 use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
-use agl_models::RuntimePlan;
+use agl_model::RuntimePlan;
 use agl_protocol::{
     AssistantItemState, DaemonCapability, ProtocolRunState, ProtocolToolMode, RunBudgetRequest,
     RunSubmitRequest, RunSubscribeRequest, SessionFinishReason, SessionFinishRequest,

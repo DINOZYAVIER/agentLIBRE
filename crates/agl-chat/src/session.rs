@@ -27,7 +27,7 @@ use agl_inference::{
     InferenceRequest, InferenceResponse,
 };
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
-use agl_models::{
+use agl_model::{
     HostResources, LlamaDeviceInfo, LlamaDeviceKind, ModelCatalog, RuntimePlanSet, RuntimePlanner,
     hugging_face_cache_dir,
 };
