@@ -6,8 +6,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-artifact.workspace = true
+agl-assets.workspace = true
+agl-function.workspace = true
 agl-ids.workspace = true
+agl-model.workspace = true
 agl-process.workspace = true
+agl-repo.workspace = true
+agl-skill.workspace = true
 anyhow.workspace = true
 directories.workspace = true
 serde.workspace = true

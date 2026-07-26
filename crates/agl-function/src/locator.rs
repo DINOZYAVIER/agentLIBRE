@@ -1,9 +1,13 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use agl_artifact::{ArtifactPackageRef, ArtifactResolver, ArtifactSourceTier};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result};
+#[cfg(test)]
+use anyhow::{bail, ensure};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::adapter::{builtin_source, directory_function_source, function_adapter_registry};
 use crate::loader::load_function;
 use crate::manifest::FUNCTION_FILE_NAME;
@@ -109,6 +113,7 @@ pub fn resolve_profile(
     })
 }
 
+#[cfg(test)]
 pub fn resolve_function_package(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -308,6 +313,7 @@ fn builtin_package_path(id: &str) -> PathBuf {
     PathBuf::from(format!("builtin:function/{id}/{FUNCTION_FILE_NAME}"))
 }
 
+#[cfg(test)]
 pub(crate) fn looks_like_path(reference: &str) -> bool {
     reference.contains('/')
         || reference.contains('\\')
@@ -315,6 +321,7 @@ pub(crate) fn looks_like_path(reference: &str) -> bool {
         || reference.starts_with('.')
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_function_file_path(path: PathBuf) -> PathBuf {
     if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
         path

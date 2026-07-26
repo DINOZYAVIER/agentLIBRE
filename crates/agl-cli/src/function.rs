@@ -2,11 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use agl_artifact::{ArtifactSourceTier, ArtifactTypeId};
 use agl_function::{
     FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME, FunctionListEntry, FunctionPackageSource,
-    FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status,
-    global_functions_root, list_functions, load_function, resolve_function_package,
-    workspace_functions_root,
+    FunctionStatusReport, FunctionToolPolicy, LoadedFunction, function_status_from_loaded,
+    load_function_candidate, workspace_functions_root,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail};
@@ -36,11 +36,52 @@ fn run_function_list(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
+    let composition = agl_runtime::compose_artifacts(&runtime.paths, &workspace_root)?;
+    let mut functions = Vec::new();
+    for source in &composition.sources {
+        for candidate in source.candidates(&ArtifactTypeId::function())? {
+            let loaded = load_function_candidate(&candidate);
+            functions.push(match loaded {
+                Ok(function) => FunctionListEntry {
+                    source: function.locator.source,
+                    id: function.front_matter.id().to_owned(),
+                    path: function.locator.path,
+                    valid: true,
+                    title: Some(function.front_matter.title),
+                    error: None,
+                },
+                Err(error) => FunctionListEntry {
+                    source: function_source(candidate.tier),
+                    id: candidate.package_id.to_string(),
+                    path: candidate
+                        .package_root
+                        .clone()
+                        .unwrap_or_else(|| {
+                            PathBuf::from(format!(
+                                "artifact/function/{}@{}",
+                                candidate.package_id, candidate.version
+                            ))
+                        })
+                        .join(FUNCTION_FILE_NAME),
+                    valid: false,
+                    title: None,
+                    error: Some(format!("{error:#}")),
+                },
+            });
+        }
+    }
+    functions.sort_by(|left, right| {
+        (&left.id, left.source.as_str(), &left.path).cmp(&(
+            &right.id,
+            right.source.as_str(),
+            &right.path,
+        ))
+    });
     let report = FunctionListReport {
         workspace_root: workspace_root.clone(),
         workspace_functions_root: workspace_functions_root(&workspace_root),
-        global_functions_root: global_functions_root(&runtime.paths.config_dir),
-        functions: list_functions(&workspace_root, &runtime.paths.config_dir)?,
+        user_functions_root: runtime.paths.data_dir.join("functions"),
+        functions,
     };
 
     crate::print_json_or(options.json, &report, || {
@@ -51,8 +92,8 @@ fn run_function_list(
             report.workspace_functions_root.display()
         );
         println!(
-            "global_functions_root={}",
-            report.global_functions_root.display()
+            "user_functions_root={}",
+            report.user_functions_root.display()
         );
         for function in &report.functions {
             print_function_list_entry(function);
@@ -68,11 +109,7 @@ fn run_function_show(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let function = load_function(resolve_function_package(
-        &options.reference,
-        &workspace_root,
-        &runtime.paths.config_dir,
-    )?)?;
+    let function = resolve_loaded_function(runtime, &workspace_root, &options.reference)?;
 
     crate::print_json_or(options.json, &function, || print_loaded_function(&function))
 }
@@ -82,10 +119,13 @@ fn run_function_status(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<()> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
-    let report = function_status(
+    let loaded = resolve_loaded_function(runtime, &workspace_root, &options.reference)?;
+    let report = function_status_from_loaded(
         &options.reference,
+        loaded,
         &workspace_root,
         &runtime.paths.config_dir,
+        None,
     );
     print_status_report(options.json, &report)?;
     if !report.errors.is_empty() {
@@ -95,6 +135,20 @@ fn run_function_status(
         bail!("function status has warnings");
     }
     Ok(())
+}
+
+pub(crate) fn resolve_loaded_function(
+    runtime: &AgentLibreRuntimeConfig,
+    workspace_root: &std::path::Path,
+    reference: &str,
+) -> Result<LoadedFunction> {
+    let composition = agl_runtime::compose_artifacts(&runtime.paths, workspace_root)?;
+    let graph = composition.resolve_function_reference(workspace_root, reference)?;
+    let root = graph
+        .nodes
+        .get(&graph.root)
+        .context("resolved Function graph has no root candidate")?;
+    load_function_candidate(&root.candidate)
 }
 
 fn run_function_init(
@@ -110,7 +164,7 @@ fn run_function_init(
     } else {
         (
             FunctionPackageSource::Global,
-            global_functions_root(&runtime.paths.config_dir),
+            runtime.paths.data_dir.join("functions"),
         )
     };
     let function_dir = root.join(&options.id);
@@ -179,6 +233,15 @@ fn run_function_init(
     })
 }
 
+fn function_source(tier: ArtifactSourceTier) -> FunctionPackageSource {
+    match tier {
+        ArtifactSourceTier::Explicit => FunctionPackageSource::Explicit,
+        ArtifactSourceTier::Workspace => FunctionPackageSource::Workspace,
+        ArtifactSourceTier::Builtin => FunctionPackageSource::Builtin,
+        ArtifactSourceTier::User | ArtifactSourceTier::System => FunctionPackageSource::Global,
+    }
+}
+
 fn run_function_doctor(
     options: FunctionDoctorOptions,
     runtime: &AgentLibreRuntimeConfig,
@@ -210,10 +273,11 @@ fn doctor_timeout(
     workspace_root: &std::path::Path,
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<Duration> {
-    let function = agl_function::resolve_runtime_function(
-        reference,
+    let function = agl_runtime::resolve_composed_runtime_function(
+        &runtime.paths,
         workspace_root,
-        &runtime.paths.config_dir,
+        reference,
+        true,
     )?;
     let seconds = function
         .inference_config_toml
@@ -467,7 +531,7 @@ fn title_from_id(id: &str) -> String {
 struct FunctionListReport {
     workspace_root: PathBuf,
     workspace_functions_root: PathBuf,
-    global_functions_root: PathBuf,
+    user_functions_root: PathBuf,
     functions: Vec<FunctionListEntry>,
 }
 

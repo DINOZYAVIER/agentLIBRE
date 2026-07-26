@@ -49,11 +49,11 @@ impl ArtifactAdapter for SkillArtifactAdapter {
         let entrypoint = SKILL_FILE_NAME.parse()?;
         let content = package.read_file(&entrypoint)?;
         let content =
-            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterPayload {
+            std::str::from_utf8(&content).map_err(|error| ArtifactError::AdapterEnvelope {
                 type_id: self.descriptor.type_id.to_string(),
                 reason: format!("SKILL.md is not UTF-8: {error}"),
             })?;
-        parse_skill_envelope(content).map_err(|error| ArtifactError::AdapterPayload {
+        parse_skill_envelope(content).map_err(|error| ArtifactError::AdapterEnvelope {
             type_id: self.descriptor.type_id.to_string(),
             reason: error.to_string(),
         })
@@ -130,15 +130,18 @@ pub fn builtin_source() -> Result<Arc<dyn ArtifactSource>> {
             .iter()
             .map(|file| Ok::<_, ArtifactError>((file.path.parse()?, file.bytes.to_vec())))
             .collect::<Result<Vec<_>, _>>()?;
-        candidates.push(ArtifactCandidate::new(
-            package.type_id.parse()?,
-            package.id.parse()?,
-            package.version.parse()?,
-            source_id.clone(),
-            ArtifactSourceTier::Builtin,
-            ArtifactSourceKind::Embedded,
-            Arc::new(InMemoryPackageView::new(files)?),
-        ));
+        candidates.push(
+            ArtifactCandidate::new(
+                package.type_id.parse()?,
+                package.id.parse()?,
+                package.version.parse()?,
+                source_id.clone(),
+                ArtifactSourceTier::Builtin,
+                ArtifactSourceKind::Embedded,
+                Arc::new(InMemoryPackageView::new(files)?),
+            )
+            .with_package_root(format!("builtin:{}/{}", package.type_id, package.id)),
+        );
     }
     Ok(Arc::new(StaticArtifactSource::new(
         source_id,

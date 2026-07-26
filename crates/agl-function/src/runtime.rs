@@ -4,8 +4,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-use crate::loader::{LoadedFunction, load_function};
-use crate::locator::{FunctionPackageSource, resolve_function_package, resolve_profile};
+use agl_artifact::{ArtifactAdapterRegistry, ArtifactCandidate, ResolvedArtifactGraph};
+
+#[cfg(test)]
+use crate::loader::load_function;
+use crate::loader::{LoadedFunction, load_function_candidate};
+#[cfg(test)]
+use crate::locator::resolve_function_package;
+use crate::locator::{FunctionPackageSource, resolve_profile};
 use crate::manifest::{
     FunctionDelegationBudget, FunctionToolMode, FunctionToolPolicy, RuntimeIdentityValidation,
 };
@@ -55,6 +61,7 @@ impl RuntimeFunction {
     }
 }
 
+#[cfg(test)]
 pub fn resolve_runtime_function(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -63,6 +70,7 @@ pub fn resolve_runtime_function(
     resolve_runtime_function_with_profile_policy(reference, workspace_root, config_dir, true)
 }
 
+#[cfg(test)]
 pub fn resolve_runtime_function_allow_missing_profile(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -71,6 +79,7 @@ pub fn resolve_runtime_function_allow_missing_profile(
     resolve_runtime_function_with_profile_policy(reference, workspace_root, config_dir, false)
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_runtime_function_with_profile_policy(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -79,6 +88,81 @@ pub(crate) fn resolve_runtime_function_with_profile_policy(
 ) -> Result<RuntimeFunction> {
     let locator = resolve_function_package(reference, &workspace_root, &config_dir)?;
     let loaded = load_function(locator)?;
+    let profile_path = if let Some(profile) = loaded.front_matter.model_profile() {
+        let resolution = resolve_profile(profile, &workspace_root, &config_dir)?;
+        match resolution.selected_path {
+            Some(path) => Some(path),
+            None if require_profile => {
+                bail!(
+                    "inference profile `{profile}` not found; checked {}",
+                    join_paths(&resolution.candidates)
+                );
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let subagent_specs = resolve_runtime_subagent_specs(
+        &loaded,
+        workspace_root.as_ref(),
+        config_dir.as_ref(),
+        require_profile,
+    )?;
+    Ok(runtime_function_from_loaded(
+        loaded,
+        profile_path,
+        subagent_specs,
+    ))
+}
+
+pub fn runtime_function_from_candidate(
+    candidate: &ArtifactCandidate,
+    workspace_root: impl AsRef<Path>,
+    config_dir: impl AsRef<Path>,
+    require_profile: bool,
+) -> Result<RuntimeFunction> {
+    let loaded = load_function_candidate(candidate)?;
+    runtime_function_from_loaded_with_profile_policy(
+        loaded,
+        workspace_root,
+        config_dir,
+        require_profile,
+    )
+}
+
+pub fn runtime_function_from_resolved_graph(
+    graph: &ResolvedArtifactGraph,
+    registry: &ArtifactAdapterRegistry,
+    workspace_root: impl AsRef<Path>,
+    config_dir: impl AsRef<Path>,
+    require_profile: bool,
+) -> Result<RuntimeFunction> {
+    let root = graph
+        .nodes
+        .get(&graph.root)
+        .ok_or_else(|| anyhow::anyhow!("resolved Function graph has no root candidate"))?;
+    let loaded = load_function_candidate(&root.candidate)?;
+    crate::validate_resolved_function_model_contract(
+        &loaded.front_matter,
+        loaded.inference_config_toml.as_deref(),
+        graph,
+        registry,
+    )?;
+    runtime_function_from_loaded_with_profile_policy(
+        loaded,
+        workspace_root,
+        config_dir,
+        require_profile,
+    )
+}
+
+fn runtime_function_from_loaded_with_profile_policy(
+    loaded: LoadedFunction,
+    workspace_root: impl AsRef<Path>,
+    config_dir: impl AsRef<Path>,
+    require_profile: bool,
+) -> Result<RuntimeFunction> {
     let profile_path = if let Some(profile) = loaded.front_matter.model_profile() {
         let resolution = resolve_profile(profile, &workspace_root, &config_dir)?;
         match resolution.selected_path {

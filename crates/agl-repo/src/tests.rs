@@ -353,6 +353,39 @@ fn artifact_sync_creates_missing_declared_roots() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn local_artifact_source_rejects_a_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("local-source-symlink-escape");
+    let outside = std::env::temp_dir().join(format!(
+        "agl-repo-local-source-outside-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, root.join("linked-source")).unwrap();
+    let declaration = artifact_contract::ArtifactSourceDeclaration {
+        kind: artifact_contract::ArtifactSourceKind::Directory,
+        path: Some(PathBuf::from("linked-source")),
+        url: None,
+        rev: None,
+    };
+
+    let error = materialize_artifact_source(&root, "linked", &declaration).unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<artifact_contract::ArtifactError>()
+            .unwrap()
+            .code(),
+        "path_escape"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
 #[test]
 fn artifact_lock_writes_definition_hashes() {
     let root = temp_root("artifact-lock");

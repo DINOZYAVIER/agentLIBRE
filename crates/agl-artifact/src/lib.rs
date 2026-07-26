@@ -90,6 +90,8 @@ pub enum ArtifactError {
     PackagePathNotRegular { path: String },
     #[error("artifact package path `{path}` is a symlink")]
     PackageSymlinkRejected { path: String },
+    #[error("artifact source path escapes its workspace boundary: `{path}`")]
+    PathEscape { path: String },
     #[error("failed to inspect artifact package path `{path}`: {reason}")]
     PackageIo { path: String, reason: String },
     #[error(
@@ -103,6 +105,8 @@ pub enum ArtifactError {
     },
     #[error("adapter `{type_id}` returned an envelope for package `{actual_id}`")]
     AdapterPackageMismatch { type_id: String, actual_id: String },
+    #[error("adapter `{type_id}` rejected package envelope: {reason}")]
+    AdapterEnvelope { type_id: String, reason: String },
     #[error("adapter `{type_id}` rejected package payload: {reason}")]
     AdapterPayload { type_id: String, reason: String },
     #[error("ambiguous candidate for `{type_id}:{package_id}@{version}`: {sources:?}")]
@@ -112,8 +116,17 @@ pub enum ArtifactError {
         version: String,
         sources: Vec<String>,
     },
-    #[error("no compatible candidate for `{type_id}:{package_id}`")]
-    NoCompatibleCandidate { type_id: String, package_id: String },
+    #[error("artifact package `{type_id}:{package_id}` was not found")]
+    PackageNotFound { type_id: String, package_id: String },
+    #[error(
+        "artifact package `{type_id}:{package_id}` has no version compatible with {requirements:?}; available versions: {available:?}"
+    )]
+    IncompatibleVersion {
+        type_id: String,
+        package_id: String,
+        requirements: Vec<String>,
+        available: Vec<String>,
+    },
     #[error("missing artifact dependency `{reference}` from `{parent}`")]
     MissingDependency { parent: String, reference: String },
     #[error("artifact dependency cycle: {path:?}")]
@@ -145,19 +158,23 @@ pub enum ArtifactError {
 
 impl ArtifactError {
     /// Stable machine-readable code for diagnostics and CLI projections.
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidTypeId { .. } => "invalid_type_id",
             Self::InvalidPackageId { .. } => "invalid_package_id",
-            Self::InvalidSchemaId { .. } => "invalid_schema_id",
             Self::InvalidVersion { .. } => "invalid_version",
             Self::InvalidVersionReq { .. } => "invalid_version_requirement",
             Self::InvalidReference { .. } => "invalid_reference",
-            Self::EmptyTestedVersions => "empty_tested_versions",
-            Self::TestedVersionIncompatible { .. } => "tested_version_incompatible",
-            Self::InvalidEnvelopeSchema { .. } => "invalid_envelope_schema",
-            Self::PayloadSchemaConflicts { .. } => "payload_schema_conflicts",
-            Self::DuplicateRequirement { .. } => "duplicate_requirement",
+            Self::InvalidSchemaId { .. }
+            | Self::EmptyTestedVersions
+            | Self::TestedVersionIncompatible { .. }
+            | Self::InvalidEnvelopeSchema { .. }
+            | Self::PayloadSchemaConflicts { .. }
+            | Self::DuplicateRequirement { .. }
+            | Self::CandidateVersionMismatch { .. }
+            | Self::AdapterTypeMismatch { .. }
+            | Self::AdapterPackageMismatch { .. }
+            | Self::AdapterEnvelope { .. } => "invalid_envelope",
             Self::InvalidAdapterRoot { .. } => "invalid_adapter_root",
             Self::InvalidAdapterEntrypoint { .. } => "invalid_adapter_entrypoint",
             Self::DuplicateAdapterType { .. } => "duplicate_adapter_type",
@@ -165,30 +182,32 @@ impl ArtifactError {
             Self::ReservedRootCollision { .. } => "reserved_root_collision",
             Self::CoreRootMismatch { .. } => "core_root_mismatch",
             Self::UnsupportedType { .. } => "unsupported_type",
-            Self::InvalidRelativePath { .. } => "invalid_relative_path",
+            Self::InvalidRelativePath { .. } => "path_escape",
             Self::InvalidEntrypoint { .. } => "invalid_entrypoint",
             Self::InvalidSourceId { .. } => "invalid_source_id",
             Self::DuplicatePackageFile { .. } => "duplicate_package_file",
             Self::PackageFileNotFound { .. } => "package_file_not_found",
             Self::PackagePathNotRegular { .. } => "package_path_not_regular",
-            Self::PackageSymlinkRejected { .. } => "package_symlink_rejected",
+            Self::PackageSymlinkRejected { .. } | Self::PathEscape { .. } => "path_escape",
             Self::PackageIo { .. } => "package_io",
-            Self::CandidateVersionMismatch { .. } => "candidate_version_mismatch",
-            Self::AdapterTypeMismatch { .. } => "adapter_type_mismatch",
-            Self::AdapterPackageMismatch { .. } => "adapter_package_mismatch",
-            Self::AdapterPayload { .. } => "adapter_payload",
+            Self::AdapterPayload { .. } => "invalid_payload",
             Self::AmbiguousCandidate { .. } => "ambiguous_candidate",
-            Self::NoCompatibleCandidate { .. } => "no_compatible_candidate",
-            Self::MissingDependency { .. } => "missing_dependency",
+            Self::PackageNotFound { .. } | Self::MissingDependency { .. } => "not_found",
+            Self::IncompatibleVersion { .. } => "incompatible_version",
             Self::DependencyCycle { .. } => "dependency_cycle",
-            Self::ConstraintConflict { .. } => "constraint_conflict",
+            Self::ConstraintConflict { .. } => "incompatible_version",
             Self::InvalidPackageDigest { .. } => "invalid_package_digest",
             Self::ReservedPackageFile { .. } => "reserved_package_file",
-            Self::UnsupportedLockVersion { .. } => "unsupported_lock_version",
-            Self::LockMissingPackage { .. } => "lock_missing_package",
-            Self::LockDrift { .. } => "lock_drift",
-            Self::InvalidLockPackageKey { .. } => "invalid_lock_package_key",
-            Self::LockIo { .. } => "lock_io",
+            Self::UnsupportedLockVersion { .. } => "lock_stale",
+            Self::LockMissingPackage { .. } => "lock_missing",
+            Self::LockDrift { field, .. } if field == "package_digest" => "digest_drift",
+            Self::LockDrift { field, .. }
+                if field == "source_revision" || field == "source_tree" =>
+            {
+                "source_drift"
+            }
+            Self::LockDrift { .. } => "lock_stale",
+            Self::InvalidLockPackageKey { .. } | Self::LockIo { .. } => "lock_stale",
         }
     }
 }
@@ -1347,6 +1366,10 @@ pub struct ArtifactCandidate {
     pub source_id: ArtifactSourceId,
     pub tier: ArtifactSourceTier,
     pub kind: ArtifactSourceKind,
+    pub source_revision: Option<String>,
+    pub source_tree: Option<String>,
+    pub package_root: Option<PathBuf>,
+    discovery_error: Option<ArtifactError>,
     view: Arc<dyn ArtifactPackageView>,
 }
 
@@ -1360,6 +1383,7 @@ impl fmt::Debug for ArtifactCandidate {
             .field("source_id", &self.source_id)
             .field("tier", &self.tier)
             .field("kind", &self.kind)
+            .field("package_root", &self.package_root)
             .finish_non_exhaustive()
     }
 }
@@ -1381,8 +1405,36 @@ impl ArtifactCandidate {
             source_id,
             tier,
             kind,
+            source_revision: None,
+            source_tree: None,
+            package_root: None,
+            discovery_error: None,
             view,
         }
+    }
+
+    pub fn with_source_provenance(
+        mut self,
+        source_revision: impl Into<String>,
+        source_tree: impl Into<String>,
+    ) -> Self {
+        self.source_revision = Some(source_revision.into());
+        self.source_tree = Some(source_tree.into());
+        self
+    }
+
+    pub fn with_package_root(mut self, package_root: impl Into<PathBuf>) -> Self {
+        self.package_root = Some(package_root.into());
+        self
+    }
+
+    fn with_discovery_error(mut self, error: ArtifactError) -> Self {
+        self.discovery_error = Some(error);
+        self
+    }
+
+    pub fn discovery_error(&self) -> Option<&ArtifactError> {
+        self.discovery_error.as_ref()
     }
 
     pub fn view(&self) -> &dyn ArtifactPackageView {
@@ -1396,6 +1448,13 @@ pub trait ArtifactSource: Send + Sync {
     fn kind(&self) -> ArtifactSourceKind;
     fn candidates(&self, type_id: &ArtifactTypeId)
     -> Result<Vec<ArtifactCandidate>, ArtifactError>;
+
+    fn inventory_candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.candidates(type_id)
+    }
 }
 
 pub type ErasedArtifactPayload = Box<dyn Any + Send + Sync>;
@@ -1609,6 +1668,8 @@ pub struct DirectoryArtifactSource {
     kind: ArtifactSourceKind,
     root: PathBuf,
     registry: Arc<ArtifactAdapterRegistry>,
+    source_revision: Option<String>,
+    source_tree: Option<String>,
 }
 
 impl fmt::Debug for DirectoryArtifactSource {
@@ -1637,26 +1698,25 @@ impl DirectoryArtifactSource {
             kind,
             root: root.into(),
             registry,
+            source_revision: None,
+            source_tree: None,
         }
     }
-}
 
-impl ArtifactSource for DirectoryArtifactSource {
-    fn id(&self) -> &ArtifactSourceId {
-        &self.source_id
+    pub fn with_source_provenance(
+        mut self,
+        source_revision: impl Into<String>,
+        source_tree: impl Into<String>,
+    ) -> Self {
+        self.source_revision = Some(source_revision.into());
+        self.source_tree = Some(source_tree.into());
+        self
     }
 
-    fn tier(&self) -> ArtifactSourceTier {
-        self.tier
-    }
-
-    fn kind(&self) -> ArtifactSourceKind {
-        self.kind
-    }
-
-    fn candidates(
+    fn scan_candidates(
         &self,
         type_id: &ArtifactTypeId,
+        preserve_invalid_envelopes: bool,
     ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
         let adapter = self.registry.lookup(type_id)?;
         let typed_root = self.root.join(&adapter.descriptor().root);
@@ -1707,33 +1767,47 @@ impl ArtifactSource for DirectoryArtifactSource {
                     continue;
                 };
             let package_id = ArtifactPackageId::new(package_text)?;
-            let view = DirectoryPackageView::new(typed_root.join(package_dir_text))?;
-            let envelope = adapter.extract_envelope(&view)?;
-            envelope.validate()?;
-            if envelope.type_id != *type_id {
-                return Err(ArtifactError::AdapterTypeMismatch {
-                    type_id: type_id.to_string(),
-                    actual_type: envelope.type_id.to_string(),
-                });
-            }
-            if envelope.id != package_id {
-                return Err(ArtifactError::AdapterPackageMismatch {
-                    type_id: type_id.to_string(),
-                    actual_id: envelope.id.to_string(),
-                });
-            }
-            let version = if let Some(declared_version) = declared_version {
-                if declared_version != envelope.version {
-                    return Err(ArtifactError::CandidateVersionMismatch {
-                        candidate: declared_version.to_string(),
-                        envelope: envelope.version.to_string(),
+            let package_root = typed_root.join(package_dir_text);
+            let view = DirectoryPackageView::new(&package_root)?;
+            let validated_version = (|| {
+                let envelope = adapter.extract_envelope(&view)?;
+                envelope.validate()?;
+                if envelope.type_id != *type_id {
+                    return Err(ArtifactError::AdapterTypeMismatch {
+                        type_id: type_id.to_string(),
+                        actual_type: envelope.type_id.to_string(),
                     });
                 }
-                declared_version
-            } else {
-                envelope.version
+                if envelope.id != package_id {
+                    return Err(ArtifactError::AdapterPackageMismatch {
+                        type_id: type_id.to_string(),
+                        actual_id: envelope.id.to_string(),
+                    });
+                }
+                if let Some(declared_version) = &declared_version {
+                    if declared_version != &envelope.version {
+                        return Err(ArtifactError::CandidateVersionMismatch {
+                            candidate: declared_version.to_string(),
+                            envelope: envelope.version.to_string(),
+                        });
+                    }
+                    Ok(declared_version.clone())
+                } else {
+                    Ok(envelope.version)
+                }
+            })();
+            let (version, discovery_error) = match validated_version {
+                Ok(version) => (version, None),
+                Err(error) if preserve_invalid_envelopes => (
+                    declared_version.clone().unwrap_or_else(|| {
+                        ArtifactVersion::new("0.0.0-invalid")
+                            .expect("invalid-envelope inventory version is valid SemVer")
+                    }),
+                    Some(error),
+                ),
+                Err(error) => return Err(error),
             };
-            candidates.push(ArtifactCandidate::new(
+            let mut candidate = ArtifactCandidate::new(
                 type_id.clone(),
                 package_id,
                 version,
@@ -1741,12 +1815,48 @@ impl ArtifactSource for DirectoryArtifactSource {
                 self.tier,
                 self.kind,
                 Arc::new(view),
-            ));
+            )
+            .with_package_root(package_root);
+            if let Some(error) = discovery_error {
+                candidate = candidate.with_discovery_error(error);
+            }
+            if let (Some(revision), Some(tree)) = (&self.source_revision, &self.source_tree) {
+                candidate = candidate.with_source_provenance(revision.clone(), tree.clone());
+            }
+            candidates.push(candidate);
         }
         candidates.sort_by(|left, right| {
             (&left.package_id, &left.version).cmp(&(&right.package_id, &right.version))
         });
         Ok(candidates)
+    }
+}
+
+impl ArtifactSource for DirectoryArtifactSource {
+    fn id(&self) -> &ArtifactSourceId {
+        &self.source_id
+    }
+
+    fn tier(&self) -> ArtifactSourceTier {
+        self.tier
+    }
+
+    fn kind(&self) -> ArtifactSourceKind {
+        self.kind
+    }
+
+    fn candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.scan_candidates(type_id, false)
+    }
+
+    fn inventory_candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        self.scan_candidates(type_id, true)
     }
 }
 
@@ -2131,6 +2241,21 @@ impl LockedArtifactPackage {
                 actual: self.dependencies.join(","),
             });
         }
+        if self.source_kind == ArtifactSourceKind::Git {
+            for (field, value) in [
+                ("source_revision", self.source_revision.as_deref()),
+                ("source_tree", self.source_tree.as_deref()),
+            ] {
+                if value.is_none_or(str::is_empty) {
+                    return Err(ArtifactError::LockDrift {
+                        key: key.to_owned(),
+                        field: field.to_owned(),
+                        expected: "present".to_owned(),
+                        actual: "missing".to_owned(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -2252,7 +2377,9 @@ pub struct ResolvedArtifactGraph {
 }
 
 impl ResolvedArtifactGraph {
-    pub fn lock(&self) -> Result<ArtifactLock, ArtifactError> {
+    pub fn package_lock_entries(
+        &self,
+    ) -> Result<BTreeMap<String, LockedArtifactPackage>, ArtifactError> {
         let mut packages = BTreeMap::new();
         for node in self.nodes.values() {
             let locked = LockedArtifactPackage {
@@ -2265,13 +2392,20 @@ impl ResolvedArtifactGraph {
                 package_digest: node.package_digest.clone(),
                 envelope_schema: node.envelope.schema.clone(),
                 payload_schema: node.envelope.payload_schema.clone(),
-                source_revision: None,
-                source_tree: None,
+                source_revision: node.candidate.source_revision.clone(),
+                source_tree: node.candidate.source_tree.clone(),
                 dependencies: node.dependencies.clone(),
             };
             packages.insert(locked.key(), locked);
         }
-        ArtifactLock::new(BTreeMap::new(), packages)
+        for (key, package) in &packages {
+            package.validate(key)?;
+        }
+        Ok(packages)
+    }
+
+    pub fn lock(&self) -> Result<ArtifactLock, ArtifactError> {
+        ArtifactLock::new(BTreeMap::new(), self.package_lock_entries()?)
     }
 
     pub fn verify_lock(&self, lock: &ArtifactLock) -> Result<(), ArtifactError> {
@@ -2284,8 +2418,8 @@ impl ResolvedArtifactGraph {
             compare_lock_field(
                 &key,
                 "package_digest",
-                node.package_digest.to_string(),
                 locked.package_digest.to_string(),
+                node.package_digest.to_string(),
             )?;
             compare_lock_field(
                 &key,
@@ -2307,6 +2441,18 @@ impl ResolvedArtifactGraph {
             )?;
             compare_lock_field(
                 &key,
+                "source_revision",
+                locked.source_revision.clone().unwrap_or_default(),
+                node.candidate.source_revision.clone().unwrap_or_default(),
+            )?;
+            compare_lock_field(
+                &key,
+                "source_tree",
+                locked.source_tree.clone().unwrap_or_default(),
+                node.candidate.source_tree.clone().unwrap_or_default(),
+            )?;
+            compare_lock_field(
+                &key,
                 "envelope_schema",
                 locked.envelope_schema.to_string(),
                 node.envelope.schema.to_string(),
@@ -2323,20 +2469,6 @@ impl ResolvedArtifactGraph {
                 locked.dependencies.join(","),
                 node.dependencies.join(","),
             )?;
-        }
-        if lock.packages.len() != self.nodes.len() {
-            let extra = lock
-                .packages
-                .keys()
-                .find(|key| !self.nodes.contains_key(*key))
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_owned());
-            return Err(ArtifactError::LockDrift {
-                key: extra,
-                field: "packages".to_owned(),
-                expected: self.nodes.len().to_string(),
-                actual: lock.packages.len().to_string(),
-            });
         }
         Ok(())
     }
@@ -2518,12 +2650,10 @@ impl ArtifactResolver {
                     nodes,
                 )
                 .map_err(|error| match error {
-                    ArtifactError::NoCompatibleCandidate { .. } => {
-                        ArtifactError::MissingDependency {
-                            parent: key.clone(),
-                            reference: requirement.to_string(),
-                        }
-                    }
+                    ArtifactError::PackageNotFound { .. } => ArtifactError::MissingDependency {
+                        parent: key.clone(),
+                        reference: requirement.to_string(),
+                    },
                     other => other,
                 })?;
             dependencies.push(dependency_key);
@@ -2558,18 +2688,25 @@ impl ArtifactResolver {
             ArtifactSourceTier::System,
             ArtifactSourceTier::Builtin,
         ];
+        let mut available = BTreeSet::new();
         for tier in tiers {
             if explicit && tier != ArtifactSourceTier::Explicit {
                 break;
             }
             let mut candidates = Vec::new();
             for source in sources.iter().filter(|source| source.tier() == tier) {
-                candidates.extend(source.candidates(type_id)?.into_iter().filter(|candidate| {
-                    &candidate.package_id == package_id
-                        && constraints
-                            .iter()
-                            .all(|constraint| constraint.matches(&candidate.version))
-                }));
+                for candidate in source.candidates(type_id)? {
+                    if &candidate.package_id != package_id {
+                        continue;
+                    }
+                    available.insert(candidate.version.to_string());
+                    if constraints
+                        .iter()
+                        .all(|constraint| constraint.matches(&candidate.version))
+                    {
+                        candidates.push(candidate);
+                    }
+                }
             }
             if candidates.is_empty() {
                 continue;
@@ -2597,10 +2734,19 @@ impl ArtifactResolver {
             }
             return Ok(matching.into_iter().next().expect("one candidate"));
         }
-        Err(ArtifactError::NoCompatibleCandidate {
-            type_id: type_id.to_string(),
-            package_id: package_id.to_string(),
-        })
+        if available.is_empty() {
+            Err(ArtifactError::PackageNotFound {
+                type_id: type_id.to_string(),
+                package_id: package_id.to_string(),
+            })
+        } else {
+            Err(ArtifactError::IncompatibleVersion {
+                type_id: type_id.to_string(),
+                package_id: package_id.to_string(),
+                requirements: constraints.iter().map(ToString::to_string).collect(),
+                available: available.into_iter().collect(),
+            })
+        }
     }
 }
 

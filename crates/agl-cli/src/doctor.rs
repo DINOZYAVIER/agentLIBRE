@@ -6,10 +6,7 @@ use agl_chat::{
     ToolAccessMode,
 };
 use agl_client::{AgentLibreClient, ClientError, RunSubscriptionEvent};
-use agl_function::{
-    FunctionStatusReport, function_status_with_model_bindings, load_function,
-    resolve_function_package,
-};
+use agl_function::{FunctionStatusReport, function_status_from_loaded};
 use agl_inference::{ModelManager, ModelManagerOptions, WorkerModelRuntime};
 use agl_model::RuntimePlan;
 use agl_protocol::{
@@ -54,8 +51,14 @@ pub(crate) fn run_function_smoke(
     runtime: &AgentLibreRuntimeConfig,
     request: FunctionSmokeRequest,
 ) -> Result<FunctionSmokeReport> {
-    let static_status = function_status_with_model_bindings(
+    let loaded = crate::function::resolve_loaded_function(
+        runtime,
+        &request.workspace_root,
         &request.reference,
+    )?;
+    let static_status = function_status_from_loaded(
+        &request.reference,
+        loaded.clone(),
         &request.workspace_root,
         &runtime.paths.config_dir,
         request.bindings_path.as_deref(),
@@ -65,11 +68,6 @@ pub(crate) fn run_function_smoke(
         "function static validation failed: {}",
         static_status.errors.join("; ")
     );
-    let loaded = load_function(resolve_function_package(
-        &request.reference,
-        &request.workspace_root,
-        &runtime.paths.config_dir,
-    )?)?;
     let prompt = loaded
         .front_matter
         .doctor

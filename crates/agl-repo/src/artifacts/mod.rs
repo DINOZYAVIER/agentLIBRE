@@ -249,7 +249,7 @@ pub fn lock_artifacts(
     options: &ArtifactLockOptions,
 ) -> Result<ArtifactLockReport> {
     let status = status_artifacts(
-        start,
+        start.as_ref(),
         &ArtifactStatusOptions {
             artifact: None,
             strict: options.strict,
@@ -263,7 +263,7 @@ pub fn lock_artifacts(
         .cloned()
         .collect::<Vec<_>>();
     errors.retain(|error| !artifact_lock_error_allows_refresh(error));
-    let components = status
+    let components: BTreeMap<String, LockedWorkspaceComponent> = status
         .artifacts
         .iter()
         .map(|artifact| {
@@ -292,7 +292,10 @@ pub fn lock_artifacts(
             )
         })
         .collect();
-    let lock = ArtifactLock::new(components, BTreeMap::new())
+    let packages = crate::read_optional_artifact_lock_v2(&status.lock_path)?
+        .map(|lock| lock.packages)
+        .unwrap_or_default();
+    let lock = ArtifactLock::new(components.clone(), packages)
         .map_err(|error| anyhow::anyhow!("failed to build artifact lock: {error}"))?;
 
     let mut wrote = false;
@@ -310,8 +313,7 @@ pub fn lock_artifacts(
                     format!("failed to create artifact lock dir {}", parent.display())
                 })?;
             }
-            lock.write_atomic(&status.lock_path)
-                .map_err(|error| anyhow::anyhow!("failed to write artifact lock: {error}"))?;
+            crate::replace_artifact_lock_components_v2(&status.lock_path, components)?;
             wrote = true;
             warnings.retain(|warning| {
                 warning != "artifact_lock_missing" && !warning.ends_with(".lock_entry_missing")

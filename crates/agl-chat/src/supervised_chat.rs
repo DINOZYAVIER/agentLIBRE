@@ -415,8 +415,17 @@ mod tests {
         std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-schema: agentfunction/v1
-id: coordinator
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coordinator
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - function:reviewer@^1.0
 title: Coordinator
 description: Delegates one review.
 subagents:
@@ -430,6 +439,32 @@ delegation:
   timeout_seconds: 30
 ---
 "#,
+        )
+        .unwrap();
+        let reviewer_function_root = root.join(".agl/functions/reviewer");
+        std::fs::create_dir_all(&reviewer_function_root).unwrap();
+        std::fs::write(
+            reviewer_function_root.join("FUNCTION.md"),
+            r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: reviewer
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+title: Reviewer
+description: Reviews one bounded task.
+---
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            reviewer_function_root.join("SYSTEM.md"),
+            "Review one bounded task.\n",
         )
         .unwrap();
         std::fs::write(
