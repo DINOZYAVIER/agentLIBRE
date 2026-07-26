@@ -1,6 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use agl_artifact::{ArtifactPackageRef, ArtifactResolver, ArtifactTypeId};
+use agl_artifact::{
+    ArtifactPackageRef, ArtifactResolver, ArtifactSource, ArtifactSourceTier, ArtifactTypeId,
+};
 use agl_capabilities::{CapabilityId, HookId, SkillId};
 use agl_tools::{ToolCatalog, ToolCatalogError};
 
@@ -79,16 +82,26 @@ impl SkillRegistry {
     }
 
     pub fn from_builtin_assets() -> Result<Self, SkillRegistryError> {
+        let source = builtin_source()
+            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        Self::from_sources(vec![source])
+    }
+
+    pub fn from_sources(sources: Vec<Arc<dyn ArtifactSource>>) -> Result<Self, SkillRegistryError> {
         let mut registry = Self::new();
         let adapter_registry = skill_adapter_registry()
             .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
-        let source = builtin_source()
-            .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
         let skill_type: ArtifactTypeId = "skill".parse().map_err(SkillRegistryError::Artifact)?;
-        let candidates = source
-            .candidates(&skill_type)
-            .map_err(SkillRegistryError::Artifact)?;
-        let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![source]);
+        let mut candidates = Vec::new();
+        for source in &sources {
+            candidates.extend(
+                source
+                    .candidates(&skill_type)
+                    .map_err(SkillRegistryError::Artifact)?,
+            );
+        }
+        let resolver = ArtifactResolver::new(adapter_registry.clone(), sources);
+        let mut resolved = BTreeSet::new();
         for candidate in candidates {
             let root = ArtifactPackageRef::parse(&format!("skill:{}@*", candidate.package_id))
                 .map_err(SkillRegistryError::Artifact)?;
@@ -99,6 +112,9 @@ impl SkillRegistry {
                 .nodes
                 .get(&graph.root)
                 .expect("resolved builtin skill root must exist");
+            if !resolved.insert(graph.root.clone()) {
+                continue;
+            }
             let payload = adapter_registry
                 .lookup(&node.candidate.type_id)
                 .map_err(SkillRegistryError::Artifact)?
@@ -109,7 +125,11 @@ impl SkillRegistry {
                     "skill adapter returned an invalid payload".to_owned(),
                 )
             })?;
-            harness.source = SkillSource::Core;
+            harness.source = match node.candidate.tier {
+                ArtifactSourceTier::Builtin => SkillSource::Core,
+                ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
+                ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+            };
             registry.register(RegisteredSkill::trusted_builtin(harness))?;
         }
         Ok(registry)

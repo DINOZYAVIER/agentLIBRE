@@ -238,7 +238,7 @@ pub struct SkillTrustStore {
 impl Default for SkillTrustStore {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             records: Vec::new(),
         }
     }
@@ -349,6 +349,7 @@ pub fn workspace_skill_report_with_trust(
     let trust_store_path = trust_store_path.as_ref();
     let mut store = read_trust_store(trust_store_path)?;
     if migrate_legacy_trust_records(&report, &mut store)? {
+        store.version = 2;
         write_trust_store(trust_store_path, &store)?;
     }
     apply_trust_store(&mut report, &store);
@@ -764,6 +765,7 @@ pub fn trust_workspace_skill(
     let record = record.expect("record checked above");
     validate_trust_target_tools(skill.expect("skill checked above"))?;
     let mut store = read_trust_store(&trust_store_path)?;
+    store.version = 2;
     upsert_trust_record(&mut store, record.clone());
     write_trust_store(&trust_store_path, &store)?;
 
@@ -809,6 +811,7 @@ pub fn revoke_workspace_skill(
 
     let identity = record.expect("record checked above");
     let mut store = read_trust_store(&trust_store_path)?;
+    store.version = 2;
     let revoked = revoke_trust_record(&mut store, &identity);
     if revoked.is_none() {
         errors.push("trust_record_not_found".to_string());
