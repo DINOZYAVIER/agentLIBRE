@@ -3,6 +3,8 @@ pub enum BuiltinAssetKind {
     SystemPrompt,
     ModelCatalog,
     ModelBenchmarkEvidence,
+    ModelDescriptor,
+    ModelEvidence,
     Skill,
     SkillReference,
     SkillAsset,
@@ -51,7 +53,7 @@ pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
 pub fn builtin_artifact_package(id: &str) -> Option<&'static BuiltinArtifactPackage> {
     BUILTIN_ARTIFACT_PACKAGES
         .iter()
-        .find(|package| package.id == id)
+        .find(|package| package.type_id == "function" && package.id == id)
 }
 
 pub fn default_system_prompt() -> &'static BuiltinAsset {

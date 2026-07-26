@@ -1,0 +1,62 @@
+[artifact]
+schema = "agentlibre.artifact/v1"
+type = "model"
+id = "gemma4-e2b"
+version = "1.0.0"
+payload_schema = "agentlibre.model/v2"
+
+[artifact.agl]
+compatible = ">=1.0.0-alpha.12"
+tested = ["1.0.0-alpha.12"]
+
+[[artifact.requires]]
+type = "function"
+id = "gemma4-e2b"
+version = "^1.0"
+
+display_name = "Gemma 4 E2B QAT Q4_0"
+capabilities = ["text", "tools"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "google/gemma-4-E2B-it-qat-q4_0-gguf"
+upstream_revision = "675cff42a74c774d6cb76f76d8eacb49b48c9b93"
+
+[[weights]]
+role = "main"
+model_id = "gemma4-e2b"
+filename = "gemma-4-E2B_q4_0-it.gguf"
+byte_size = 3349514112
+sha256 = "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd"
+required = true
+
+[[profiles]]
+id = "cpu-8gb-32768"
+device = "cpu"
+benchmark_evidence = "evidence/20260723-five-gemma4-rx7900xtx.md"
+required_total_ram_bytes = 7000000000
+required_available_ram_bytes = 6000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 32768
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 120
+expected_speed = "usable"
+
+[[profiles]]
+id = "gpu-rx7900xtx-32768"
+device = "gpu"
+pci_device_id = "1002:744c"
+pci_subsystem_id = "1da2:471e"
+benchmark_evidence = "evidence/20260723-five-gemma4-rx7900xtx.md"
+required_total_ram_bytes = 7000000000
+required_available_ram_bytes = 6000000000
+required_vram_bytes = 3753902080
+gpu_layers = 999
+context_tokens = 32768
+batch_size = 512
+ubatch_size = 256
+threads = 8
+smoke_timeout_seconds = 120
+expected_speed = "fast"

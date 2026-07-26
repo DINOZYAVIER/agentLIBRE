@@ -12,6 +12,8 @@ enum AssetKind {
     SystemPrompt,
     ModelCatalog,
     ModelBenchmarkEvidence,
+    ModelDescriptor,
+    ModelEvidence,
     Skill,
     SkillReference,
     SkillAsset,
@@ -26,6 +28,8 @@ impl AssetKind {
             Self::SystemPrompt => "BuiltinAssetKind::SystemPrompt",
             Self::ModelCatalog => "BuiltinAssetKind::ModelCatalog",
             Self::ModelBenchmarkEvidence => "BuiltinAssetKind::ModelBenchmarkEvidence",
+            Self::ModelDescriptor => "BuiltinAssetKind::ModelDescriptor",
+            Self::ModelEvidence => "BuiltinAssetKind::ModelEvidence",
             Self::Skill => "BuiltinAssetKind::Skill",
             Self::SkillReference => "BuiltinAssetKind::SkillReference",
             Self::SkillAsset => "BuiltinAssetKind::SkillAsset",
@@ -72,6 +76,12 @@ fn main() {
     add_system_prompt(&mut assets, repo_root, &assets_root);
     add_model_catalog(&mut assets, repo_root, &assets_root);
     add_model_benchmark_evidence(&mut assets, repo_root, &assets_root);
+    add_models(
+        &mut assets,
+        &mut packages,
+        repo_root,
+        &assets_root.join("models"),
+    );
     add_skills(&mut assets, &mut packages, repo_root, &builtin_skills_root);
     add_functions(
         &mut assets,
@@ -82,6 +92,81 @@ fn main() {
     validate_unique_asset_ids(&assets);
     validate_unique_package_ids(&packages);
     write_registry(&assets, &packages);
+}
+
+fn add_models(
+    assets: &mut Vec<Asset>,
+    packages: &mut Vec<ArtifactPackage>,
+    repo_root: &Path,
+    models_root: &Path,
+) {
+    for model_dir in read_dir_sorted(models_root)
+        .into_iter()
+        .filter(|path| path.is_dir() && path.join("MODEL.toml").is_file())
+    {
+        reject_symlink(&model_dir);
+        let id = model_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("model directory must have a UTF-8 name");
+        validate_name(id, "builtin model directory");
+        let descriptor = model_dir.join("MODEL.toml");
+        if !descriptor.is_file() {
+            panic!("builtin model {id} is missing MODEL.toml");
+        }
+        let descriptor_text = fs::read_to_string(&descriptor)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", descriptor.display()));
+        let document: toml::Value = toml::from_str(&descriptor_text)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", descriptor.display()));
+        let artifact = document
+            .get("artifact")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("model {id} has no artifact table"));
+        let artifact_id = artifact
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("model {id} has no artifact id"));
+        let version = artifact
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("model {id} has no artifact version"));
+        if artifact_id != id {
+            panic!("model directory {id} does not match artifact id {artifact_id}");
+        }
+        let descriptor_index = assets.len();
+        assets.push(asset(
+            &format!("model:{id}/MODEL.toml"),
+            AssetKind::ModelDescriptor,
+            repo_root,
+            &descriptor,
+        ));
+        let mut files = vec![("MODEL.toml".to_string(), descriptor_index)];
+        let evidence_root = model_dir.join("evidence");
+        if evidence_root.is_dir() {
+            let evidence_indices = add_resource_dir(
+                assets,
+                repo_root,
+                &evidence_root,
+                id,
+                AssetKind::ModelEvidence,
+                "evidence",
+            );
+            files.extend(package_resource_files(
+                assets,
+                &model_dir,
+                &evidence_indices,
+            ));
+        }
+        let digest = package_tree_hash(assets, &files);
+        packages.push(ArtifactPackage {
+            type_id: "model".to_string(),
+            id: id.to_string(),
+            version: version.to_string(),
+            entrypoint: "MODEL.toml".to_string(),
+            files,
+            digest,
+        });
+    }
 }
 
 fn add_system_prompt(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Path) {
