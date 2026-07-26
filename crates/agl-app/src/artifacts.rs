@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agl_artifact::{
@@ -79,7 +79,7 @@ pub fn compose_artifacts(
 
 fn add_declared_sources(
     sources: &mut Vec<Arc<dyn ArtifactSource>>,
-    workspace_root: &PathBuf,
+    workspace_root: &Path,
     registry: &Arc<ArtifactAdapterRegistry>,
 ) -> Result<()> {
     let manifest_path = workspace_root.join(".agl/workspace.toml");

@@ -154,9 +154,9 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     } else {
         for package in projections {
             println!(
-                "{} {} {} {} {}",
+                "{} {:?} {} {} {}",
                 package.exact_reference,
-                format!("{:?}", package.source_tier),
+                package.source_tier,
                 package.source_id,
                 package.package_digest,
                 package.lock_state
