@@ -490,8 +490,17 @@ fn setup_smoke_session_uses_inline_staged_state_without_publishing_it() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-schema: agentfunction/v1
-id: setup-smoke
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: setup-smoke
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - model:setup-smoke-model@^1.0
 title: Setup smoke
 model:
   config: inference.toml
@@ -509,6 +518,45 @@ doctor:
     )
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Run the setup smoke.\n").unwrap();
+    let model_root = workspace.join(".agl/models/setup-smoke-model");
+    std::fs::create_dir_all(model_root.join("evidence")).unwrap();
+    std::fs::write(
+        model_root.join("MODEL.toml"),
+        r#"artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "setup-smoke-model", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+
+display_name = "Setup smoke fixture"
+capabilities = ["text", "tools"]
+license = "test-only"
+license_url = "https://example.invalid/license"
+repository = "agentlibre/setup-smoke-fixture"
+upstream_revision = "0000000000000000000000000000000000000000"
+
+[[weights]]
+role = "main"
+model_id = "setup-smoke-model"
+filename = "setup-smoke-model.gguf"
+byte_size = 18
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+required = true
+
+[[profiles]]
+id = "cpu-test"
+device = "cpu"
+benchmark_evidence = "evidence/cpu.md"
+required_total_ram_bytes = 1024
+required_available_ram_bytes = 512
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 4096
+batch_size = 128
+ubatch_size = 64
+threads = 2
+smoke_timeout_seconds = 30
+expected_speed = "test"
+"#,
+    )
+    .unwrap();
+    std::fs::write(model_root.join("evidence/cpu.md"), "Test-only evidence.\n").unwrap();
     std::fs::write(
         function_root.join("inference.toml"),
         r#"[backend]
@@ -1208,8 +1256,17 @@ fn daemon_delegation_uses_the_same_durable_child_path() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-schema: agentfunction/v1
-id: coordinator
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coordinator
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - function:reviewer@^1.0
 title: Coordinator
 subagents:
   use:
@@ -1225,6 +1282,32 @@ delegation:
     )
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Delegate the review.\n").unwrap();
+    let reviewer_function_root = workspace.join(".agl/functions/reviewer");
+    std::fs::create_dir_all(&reviewer_function_root).unwrap();
+    std::fs::write(
+        reviewer_function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: reviewer
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+title: Reviewer
+description: Reviews one daemon task.
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        reviewer_function_root.join("SYSTEM.md"),
+        "Review one daemon task.\n",
+    )
+    .unwrap();
     std::fs::write(
         function_root.join("subagents/reviewer.md"),
         r#"---
@@ -1324,8 +1407,17 @@ fn oversized_activity_budget_is_rejected_before_root_run_persistence() {
     std::fs::write(
         function_root.join("FUNCTION.md"),
         r#"---
-schema: agentfunction/v1
-id: wide-coordinator
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: wide-coordinator
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - function:reviewer@^1.0
 title: Wide Coordinator
 subagents:
   use:
@@ -1341,6 +1433,32 @@ delegation:
     )
     .unwrap();
     std::fs::write(function_root.join("SYSTEM.md"), "Delegate bounded work.\n").unwrap();
+    let reviewer_function_root = workspace.join(".agl/functions/reviewer");
+    std::fs::create_dir_all(&reviewer_function_root).unwrap();
+    std::fs::write(
+        reviewer_function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: reviewer
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+title: Reviewer
+description: Reviews bounded work.
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        reviewer_function_root.join("SYSTEM.md"),
+        "Review bounded work.\n",
+    )
+    .unwrap();
     std::fs::write(
         function_root.join("subagents/reviewer.md"),
         r#"---

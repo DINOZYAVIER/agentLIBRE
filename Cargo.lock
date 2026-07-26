@@ -110,6 +110,7 @@ dependencies = [
 name = "agl-chat"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-capabilities",
  "agl-config",
@@ -508,8 +509,14 @@ dependencies = [
 name = "agl-runtime"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
+ "agl-assets",
+ "agl-function",
  "agl-ids",
+ "agl-model",
  "agl-process",
+ "agl-repo",
+ "agl-skill",
  "anyhow",
  "directories",
  "serde",

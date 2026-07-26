@@ -2,13 +2,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+#[cfg(test)]
 use crate::loader::load_function;
-use crate::locator::{
-    FunctionPackageSource, looks_like_path, resolve_function_package, resolve_profile,
-};
+use crate::locator::{FunctionPackageSource, resolve_profile};
+#[cfg(test)]
+use crate::locator::{looks_like_path, resolve_function_package};
 use crate::manifest::FunctionToolPolicy;
 use crate::subagent::RuntimeSubagent;
-use crate::validation::{is_valid_function_id, join_paths};
+#[cfg(test)]
+use crate::validation::is_valid_function_id;
+use crate::validation::join_paths;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct FunctionStatusReport {
     pub reference: String,
@@ -37,6 +40,7 @@ pub struct FunctionStatusReport {
     pub next_steps: Vec<String>,
 }
 
+#[cfg(test)]
 pub fn function_status(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -45,6 +49,7 @@ pub fn function_status(
     function_status_with_model_bindings(reference, workspace_root, config_dir, None)
 }
 
+#[cfg(test)]
 pub fn function_status_with_model_bindings(
     reference: &str,
     workspace_root: impl AsRef<Path>,
@@ -53,7 +58,54 @@ pub fn function_status_with_model_bindings(
 ) -> FunctionStatusReport {
     let workspace_root = workspace_root.as_ref();
     let config_dir = config_dir.as_ref();
-    let mut report = FunctionStatusReport {
+    let mut report = empty_function_status(reference);
+
+    let locator = match resolve_function_package(reference, workspace_root, config_dir) {
+        Ok(locator) => locator,
+        Err(err) => {
+            report.errors.push(format!("{err:#}"));
+            if !looks_like_path(reference) && is_valid_function_id(reference) {
+                report
+                    .next_steps
+                    .push(format!("agl function init {reference} --workspace"));
+            }
+            return report;
+        }
+    };
+    report.source = Some(locator.source.as_str().to_string());
+    report.path = Some(locator.path.clone());
+
+    let loaded = match load_function(locator) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            report.errors.push(format!("{err:#}"));
+            return report;
+        }
+    };
+    populate_function_status(report, loaded, workspace_root, config_dir, model_bindings)
+}
+
+pub fn function_status_from_loaded(
+    reference: &str,
+    loaded: crate::LoadedFunction,
+    workspace_root: impl AsRef<Path>,
+    config_dir: impl AsRef<Path>,
+    model_bindings: Option<&Path>,
+) -> FunctionStatusReport {
+    let mut report = empty_function_status(reference);
+    report.source = Some(loaded.locator.source.as_str().to_owned());
+    report.path = Some(loaded.locator.path.clone());
+    populate_function_status(
+        report,
+        loaded,
+        workspace_root.as_ref(),
+        config_dir.as_ref(),
+        model_bindings,
+    )
+}
+
+fn empty_function_status(reference: &str) -> FunctionStatusReport {
+    FunctionStatusReport {
         reference: reference.to_string(),
         state: "invalid".to_string(),
         source: None,
@@ -78,30 +130,16 @@ pub fn function_status_with_model_bindings(
         warnings: Vec::new(),
         errors: Vec::new(),
         next_steps: Vec::new(),
-    };
+    }
+}
 
-    let locator = match resolve_function_package(reference, workspace_root, config_dir) {
-        Ok(locator) => locator,
-        Err(err) => {
-            report.errors.push(format!("{err:#}"));
-            if !looks_like_path(reference) && is_valid_function_id(reference) {
-                report
-                    .next_steps
-                    .push(format!("agl function init {reference} --workspace"));
-            }
-            return report;
-        }
-    };
-    report.source = Some(locator.source.as_str().to_string());
-    report.path = Some(locator.path.clone());
-
-    let loaded = match load_function(locator) {
-        Ok(loaded) => loaded,
-        Err(err) => {
-            report.errors.push(format!("{err:#}"));
-            return report;
-        }
-    };
+fn populate_function_status(
+    mut report: FunctionStatusReport,
+    loaded: crate::LoadedFunction,
+    workspace_root: &Path,
+    config_dir: &Path,
+    model_bindings: Option<&Path>,
+) -> FunctionStatusReport {
     report.id = Some(loaded.front_matter.id().to_owned());
     report.title = Some(loaded.front_matter.title.clone());
     report.system_prompt_path = Some(loaded.system_prompt_path.clone());

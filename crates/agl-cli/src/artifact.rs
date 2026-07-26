@@ -1,14 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use agl_app::{compose_artifacts, resolve_composed_artifacts};
 use agl_artifact::{
-    ArtifactAdapterRegistry, ArtifactConfigEvidence, ArtifactPackageRef, ArtifactPathRouter,
-    ArtifactSource, ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind,
-    ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact, ResolvedArtifactGraph,
-    compute_package_digest,
+    ArtifactAdapter, ArtifactCandidate, ArtifactConfigEvidence, ArtifactEnvelope, ArtifactError,
+    ArtifactPackageRef, ArtifactPathRouter, ArtifactSourceDeclaration, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, PackageTreeDigest, ResolvedArtifact,
+    ResolvedArtifactGraph, compute_package_digest,
 };
-use agl_runtime::AgentLibreRuntimeConfig;
+use agl_runtime::{AgentLibreRuntimeConfig, ArtifactComposition, compose_artifacts};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
@@ -18,10 +16,8 @@ use crate::args::{
 
 #[derive(Clone)]
 struct ArtifactContext {
-    registry: Arc<ArtifactAdapterRegistry>,
-    sources: Vec<Arc<dyn ArtifactSource>>,
+    composition: ArtifactComposition,
     workspace_root: PathBuf,
-    router: ArtifactPathRouter,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -35,11 +31,26 @@ struct ArtifactProjection {
     source_kind: ArtifactSourceKind,
     source_id: String,
     source_revision: Option<String>,
-    package_digest: PackageTreeDigest,
+    source_tree: Option<String>,
+    package_digest: Option<PackageTreeDigest>,
     dependencies: Vec<String>,
     config_layers: Vec<ArtifactConfigEvidence>,
-    config_validation_status: &'static str,
+    validation_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ArtifactDiagnostic>,
     lock_state: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ArtifactDiagnostic {
+    code: &'static str,
+    message: String,
+    context: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactErrorEnvelope {
+    error: ArtifactDiagnostic,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,33 +90,60 @@ pub(crate) fn run_artifact(
     }
 }
 
+pub(crate) fn json_requested(command: &ArtifactCommand) -> bool {
+    match command {
+        ArtifactCommand::List(options) => options.json,
+        ArtifactCommand::Inspect(options)
+        | ArtifactCommand::Resolve(options)
+        | ArtifactCommand::Graph(options) => options.json,
+        ArtifactCommand::Lock(options) => options.json,
+        ArtifactCommand::Source(ArtifactSourceCommand::List { json })
+        | ArtifactCommand::Source(ArtifactSourceCommand::Add { json, .. })
+        | ArtifactCommand::Source(ArtifactSourceCommand::Remove { json, .. }) => *json,
+    }
+}
+
+pub(crate) fn print_error_json(error: &anyhow::Error) {
+    let diagnostic = error
+        .downcast_ref::<ArtifactError>()
+        .map(artifact_diagnostic)
+        .unwrap_or_else(|| ArtifactDiagnostic {
+            code: "artifact_error",
+            message: format!("{error:#}"),
+            context: serde_json::json!({}),
+        });
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&ArtifactErrorEnvelope { error: diagnostic })
+            .expect("artifact error envelope is serializable")
+    );
+}
+
 fn context(runtime: &AgentLibreRuntimeConfig) -> Result<ArtifactContext> {
     let workspace_root = runtime.resolve_workspace_root(None)?;
     let composition = compose_artifacts(&runtime.paths, &workspace_root)?;
     Ok(ArtifactContext {
-        registry: composition.registry.clone(),
-        sources: composition.sources,
-        router: ArtifactPathRouter::new(
-            workspace_root.clone(),
-            runtime.paths.data_dir.clone(),
-            runtime.paths.config_dir.clone(),
-            runtime.paths.state_dir.clone(),
-            runtime.paths.cache_dir.clone(),
-            composition.registry,
-        ),
+        composition,
         workspace_root,
     })
 }
 
 fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     let context = context(runtime)?;
-    let lock = read_lock(&context).ok();
+    let lock = context.composition.lock.as_ref();
     let mut projections = Vec::new();
-    for source in &context.sources {
-        for adapter in context.registry.iter() {
-            for candidate in source.candidates(&adapter.descriptor().type_id)? {
-                let envelope = adapter.extract_envelope(candidate.view())?;
-                let digest = compute_package_digest(candidate.view())?;
+    let mut invalid_count = 0_usize;
+    for source in &context.composition.sources {
+        for adapter in context.composition.registry.iter() {
+            for candidate in source.inventory_candidates(&adapter.descriptor().type_id)? {
+                let validation = validate_list_candidate(adapter, &candidate);
+                let (envelope, digest, validation_error) = match validation {
+                    Ok((envelope, digest)) => (Some(envelope), Some(digest), None),
+                    Err(error) => (None, None, Some(error)),
+                };
+                if validation_error.is_some() {
+                    invalid_count += 1;
+                }
                 let key = format!(
                     "{}:{}@{}",
                     candidate.type_id, candidate.package_id, candidate.version
@@ -115,19 +153,28 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
                     package_id: candidate.package_id.to_string(),
                     version: candidate.version.to_string(),
                     exact_reference: key.clone(),
-                    required_reference: Some(envelope_reference(&envelope)),
+                    required_reference: envelope.as_ref().map(envelope_reference),
                     source_tier: candidate.tier,
                     source_kind: candidate.kind,
                     source_id: candidate.source_id.to_string(),
-                    source_revision: None,
+                    source_revision: candidate.source_revision.clone(),
+                    source_tree: candidate.source_tree.clone(),
                     package_digest: digest,
-                    dependencies: envelope.requires.iter().map(ToString::to_string).collect(),
+                    dependencies: envelope
+                        .as_ref()
+                        .map(|value| value.requires.iter().map(ToString::to_string).collect())
+                        .unwrap_or_default(),
                     config_layers: context
+                        .composition
                         .router
                         .config_layers(&candidate.type_id, &candidate.package_id)?,
-                    config_validation_status: "package_validated",
+                    validation_status: if validation_error.is_some() {
+                        "invalid"
+                    } else {
+                        "package_validated"
+                    },
+                    error: validation_error.as_ref().map(artifact_diagnostic),
                     lock_state: lock
-                        .as_ref()
                         .and_then(|value| value.packages.get(&key))
                         .map(|_| "locked")
                         .unwrap_or("unlocked"),
@@ -149,7 +196,7 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
                 &right.source_tier,
             ))
     });
-    if json {
+    let output = if json {
         crate::print_json(&projections)
     } else {
         for package in projections {
@@ -158,12 +205,54 @@ fn run_list(json: bool, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
                 package.exact_reference,
                 package.source_tier,
                 package.source_id,
-                package.package_digest,
+                package
+                    .package_digest
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "-".to_owned()),
                 package.lock_state
             );
         }
         Ok(())
+    };
+    output?;
+    ensure!(
+        invalid_count == 0,
+        "artifact list contains {invalid_count} invalid candidate(s)"
+    );
+    Ok(())
+}
+
+fn validate_list_candidate(
+    adapter: &dyn ArtifactAdapter,
+    candidate: &ArtifactCandidate,
+) -> std::result::Result<(ArtifactEnvelope, PackageTreeDigest), ArtifactError> {
+    if let Some(error) = candidate.discovery_error() {
+        return Err(error.clone());
     }
+    let envelope = adapter.extract_envelope(candidate.view())?;
+    envelope.validate()?;
+    if envelope.type_id != candidate.type_id {
+        return Err(ArtifactError::AdapterTypeMismatch {
+            type_id: candidate.type_id.to_string(),
+            actual_type: envelope.type_id.to_string(),
+        });
+    }
+    if envelope.id != candidate.package_id {
+        return Err(ArtifactError::AdapterPackageMismatch {
+            type_id: candidate.type_id.to_string(),
+            actual_id: envelope.id.to_string(),
+        });
+    }
+    if envelope.version != candidate.version {
+        return Err(ArtifactError::CandidateVersionMismatch {
+            candidate: candidate.version.to_string(),
+            envelope: envelope.version.to_string(),
+        });
+    }
+    let digest = compute_package_digest(candidate.view())?;
+    adapter.validate_payload(candidate.view(), &envelope)?;
+    Ok((envelope, digest))
 }
 
 fn run_reference(
@@ -174,19 +263,18 @@ fn run_reference(
     let context = context(runtime)?;
     let reference = ArtifactPackageRef::parse(&options.reference)
         .with_context(|| format!("artifact.invalid_reference: {}", options.reference))?;
-    let lock = read_lock(&context).ok();
-    let graph = resolve_composed_artifacts(
-        &runtime.paths,
-        &context.workspace_root,
-        &reference,
-        lock.as_ref(),
-    )?;
-    let projection = graph_projection(&graph, lock.as_ref(), &context.router);
+    let graph = context.composition.resolve(&reference)?;
+    let projection = graph_projection(
+        &graph,
+        context.composition.lock.as_ref(),
+        &context.composition.router,
+    );
     if options.json {
         if operation == "inspect" {
             let root = projection
                 .nodes
-                .first()
+                .iter()
+                .find(|node| node.exact_reference == projection.root)
                 .context("resolved graph has no root")?;
             crate::print_json(root)
         } else {
@@ -195,7 +283,8 @@ fn run_reference(
     } else if operation == "inspect" {
         let root = projection
             .nodes
-            .first()
+            .iter()
+            .find(|node| node.exact_reference == projection.root)
             .context("resolved graph has no root")?;
         print_projection(root);
         Ok(())
@@ -212,23 +301,18 @@ fn run_lock(options: ArtifactLockCommandOptions, runtime: &AgentLibreRuntimeConf
     let context = context(runtime)?;
     let manifest_path = context.workspace_root.join(".agl/workspace.toml");
     let manifest = agl_repo::read_workspace_manifest_v2(&manifest_path)?;
-    let existing_lock = read_lock(&context).ok();
-    let graph = resolve_composed_artifacts(
-        &runtime.paths,
-        &context.workspace_root,
-        &manifest.default_function,
-        if options.refresh {
-            None
-        } else {
-            existing_lock.as_ref()
-        },
-    )?;
+    let graph = if options.refresh {
+        context
+            .composition
+            .resolve_for_lock_refresh(&manifest.default_function)?
+    } else {
+        context.composition.resolve(&manifest.default_function)?
+    };
     let lock_path = context.workspace_root.join(".agl/artifact-lock.toml");
     if options.refresh {
-        let lock = graph.lock()?;
-        agl_repo::write_artifact_lock_v2(&lock_path, &lock)?;
+        agl_repo::replace_artifact_lock_packages_v2(&lock_path, graph.package_lock_entries()?)?;
     }
-    let lock = read_lock(&context).ok();
+    let lock = agl_repo::read_optional_artifact_lock_v2(&lock_path)?;
     let projection = ArtifactLockProjection {
         path: lock_path,
         root: graph.root.clone(),
@@ -309,15 +393,11 @@ fn run_source(command: ArtifactSourceCommand, runtime: &AgentLibreRuntimeConfig)
             };
             declaration.validate()?;
             let source_kind = declaration.kind;
-            let materialized_root = if source_kind == ArtifactSourceKind::Git {
-                Some(agl_repo::materialize_artifact_source(
-                    &workspace_root,
-                    &name,
-                    &declaration,
-                )?)
-            } else {
-                None
-            };
+            let materialized_root = Some(agl_repo::materialize_artifact_source(
+                &workspace_root,
+                &name,
+                &declaration,
+            )?);
             manifest.sources.insert(name.clone(), declaration);
             agl_repo::write_workspace_manifest_v2(&path, &manifest)?;
             let result = ArtifactSourceProjection {
@@ -347,10 +427,6 @@ fn run_source(command: ArtifactSourceCommand, runtime: &AgentLibreRuntimeConfig)
             }
         }
     }
-}
-
-fn read_lock(context: &ArtifactContext) -> Result<agl_artifact::ArtifactLock> {
-    agl_repo::read_artifact_lock_v2(context.workspace_root.join(".agl/artifact-lock.toml"))
 }
 
 fn graph_projection(
@@ -384,13 +460,15 @@ fn projection(
         source_tier: node.candidate.tier,
         source_kind: node.candidate.kind,
         source_id: node.candidate.source_id.to_string(),
-        source_revision: None,
-        package_digest: node.package_digest.clone(),
+        source_revision: node.candidate.source_revision.clone(),
+        source_tree: node.candidate.source_tree.clone(),
+        package_digest: Some(node.package_digest.clone()),
         dependencies: node.dependencies.clone(),
         config_layers: router
             .config_layers(&node.candidate.type_id, &node.candidate.package_id)
             .unwrap_or_default(),
-        config_validation_status: "package_validated",
+        validation_status: "package_validated",
+        error: None,
         lock_state: lock
             .and_then(|lock| lock.packages.get(&key))
             .map(|_| "locked")
@@ -405,7 +483,11 @@ fn print_projection(value: &ArtifactProjection) {
         value.source_id,
         value.source_tier,
         value.source_kind,
-        value.package_digest,
+        value
+            .package_digest
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "-".to_owned()),
         value.lock_state
     );
     for dependency in &value.dependencies {
@@ -415,4 +497,65 @@ fn print_projection(value: &ArtifactProjection) {
 
 fn envelope_reference(envelope: &agl_artifact::ArtifactEnvelope) -> String {
     format!("{}:{}@{}", envelope.type_id, envelope.id, envelope.version)
+}
+
+fn artifact_diagnostic(error: &ArtifactError) -> ArtifactDiagnostic {
+    let context = match error {
+        ArtifactError::InvalidReference { value, reason } => {
+            serde_json::json!({"reference": value, "reason": reason})
+        }
+        ArtifactError::UnsupportedType { type_id } => serde_json::json!({"type": type_id}),
+        ArtifactError::PackageNotFound {
+            type_id,
+            package_id,
+        } => serde_json::json!({"type": type_id, "id": package_id}),
+        ArtifactError::IncompatibleVersion {
+            type_id,
+            package_id,
+            requirements,
+            available,
+        } => serde_json::json!({
+            "type": type_id,
+            "id": package_id,
+            "constraints": requirements,
+            "available": available,
+        }),
+        ArtifactError::AmbiguousCandidate {
+            type_id,
+            package_id,
+            version,
+            sources,
+        } => serde_json::json!({
+            "type": type_id,
+            "id": package_id,
+            "version": version,
+            "sources": sources,
+        }),
+        ArtifactError::LockMissingPackage { key } => serde_json::json!({"package": key}),
+        ArtifactError::LockDrift {
+            key,
+            field,
+            expected,
+            actual,
+        } => serde_json::json!({
+            "package": key,
+            "field": field,
+            "expected": expected,
+            "actual": actual,
+        }),
+        ArtifactError::DependencyCycle { path } => serde_json::json!({"path": path}),
+        ArtifactError::AdapterEnvelope { type_id, reason }
+        | ArtifactError::AdapterPayload { type_id, reason } => {
+            serde_json::json!({"type": type_id, "reason": reason})
+        }
+        ArtifactError::PathEscape { path } | ArtifactError::PackageSymlinkRejected { path } => {
+            serde_json::json!({"path": path})
+        }
+        _ => serde_json::json!({}),
+    };
+    ArtifactDiagnostic {
+        code: error.code(),
+        message: error.to_string(),
+        context,
+    }
 }

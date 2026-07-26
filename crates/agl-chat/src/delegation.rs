@@ -28,6 +28,7 @@ pub(crate) struct DelegationHandler {
 #[derive(Clone)]
 struct DelegationContext {
     store_root: PathBuf,
+    runtime_paths: agl_runtime::AgentLibrePaths,
     workspace_root: PathBuf,
     artifact_root: PathBuf,
     trust_store_path: PathBuf,
@@ -60,6 +61,7 @@ impl DelegationHandler {
         Some(Self {
             context: Some(DelegationContext {
                 store_root: session.store_root().to_path_buf(),
+                runtime_paths: session.runtime_paths().clone(),
                 workspace_root: session.workspace_root().to_path_buf(),
                 artifact_root: session.artifact_root().to_path_buf(),
                 trust_store_path: session.trust_store_path().to_path_buf(),
@@ -116,6 +118,7 @@ impl DelegationHandler {
         let effective = crate::session::resolve_subagent_effective_capabilities(
             spec,
             &context.authority_ceiling,
+            &context.runtime_paths,
             &context.workspace_root,
             &context.trust_store_path,
         )?;

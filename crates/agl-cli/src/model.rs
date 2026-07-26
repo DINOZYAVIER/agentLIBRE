@@ -780,10 +780,11 @@ fn protected_model_ids(runtime: &AgentLibreRuntimeConfig) -> Result<BTreeSet<Mod
     let mut protected = BTreeSet::new();
     if let Ok(workspace) = runtime.resolve_workspace_root(None)
         && let Some(reference) = agl_repo::read_workspace_default_function(&workspace)?
-        && let Ok(function) = agl_function::resolve_runtime_function(
-            &reference,
+        && let Ok(function) = agl_runtime::resolve_composed_runtime_function(
+            &runtime.paths,
             &workspace,
-            &runtime.paths.config_dir,
+            &reference.to_string(),
+            true,
         )
         && let Some(toml) = function.inference_config_toml
     {

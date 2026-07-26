@@ -1,8 +1,10 @@
+mod artifacts;
 mod config;
 mod features;
 mod paths;
 mod tracing_setup;
 
+pub use artifacts::*;
 pub use config::{
     AgentLibreExecutionConfig, AgentLibreExecutionEnvironmentConfig, AgentLibreHistoryConfig,
     AgentLibreInferenceConfig, AgentLibreInferenceResidencyConfig, AgentLibreLogFormat,

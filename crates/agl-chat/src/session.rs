@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use agl_artifact::{ArtifactPackageRef, ArtifactSourceTier};
 use agl_capabilities::{
     CapabilityGrant, CapabilityGrantProvenance, CapabilityId, CapabilityPolicyInput,
     EffectiveCapabilitySet, FunctionToolPolicy, HookEvent, HookId, OperationKind, SensitiveInput,
@@ -18,7 +19,7 @@ use agl_config::{
 use agl_content::Content;
 use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
-    RuntimeSubagentSpec, resolve_runtime_function, resolve_runtime_function_allow_missing_profile,
+    RuntimeSubagentSpec,
 };
 use agl_ids::{AttemptId, RequestId, RunId, SessionId};
 use agl_inference::evidence::InferenceArtifactRoot;
@@ -33,14 +34,15 @@ use agl_model::{
 };
 use agl_oven::render_model_request;
 use agl_runtime::{
-    AgentLibreRuntimeConfig, RenderedRuntimeFeatureContext, RuntimeFeatureRenderOptions,
-    render_runtime_feature_context,
+    AgentLibrePaths, AgentLibreRuntimeConfig, RenderedRuntimeFeatureContext,
+    RuntimeFeatureRenderOptions, render_runtime_feature_context,
 };
 use agl_skill::{
-    SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
-    SkillFolderPrepareReport, SkillToolRouting, SkillToolRoutingView,
-    build_verified_context_bundle, prepare_workspace_skill_artifact_write,
-    prepare_workspace_skill_folders, trusted_workspace_registry,
+    RegisteredSkill, SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
+    SkillFolderPrepareReport, SkillHarness, SkillRegistry, SkillSource, SkillToolRouting,
+    SkillToolRoutingView, SkillTrustState, build_verified_context_bundle,
+    prepare_workspace_skill_artifact_write, prepare_workspace_skill_folders,
+    trusted_workspace_registry,
 };
 use agl_store::{AglStore, PermissionGrantRecord};
 use agl_tools::ToolCatalog;
@@ -82,6 +84,7 @@ pub struct InferenceSession {
     tool_mode: ToolAccessMode,
     store_root: PathBuf,
     config_dir: PathBuf,
+    runtime_paths: AgentLibrePaths,
     workspace_root: PathBuf,
     trust_store_path: PathBuf,
     config_skills: Vec<String>,
@@ -155,8 +158,8 @@ impl InferenceSession {
             options.config.is_none() && env::var_os(CONFIG_ENV).is_none();
         let runtime_function = resolve_session_function(
             options.function_ref.as_deref(),
+            &runtime.paths,
             &workspace_root,
-            &runtime.paths.config_dir,
             function_profile_required,
         )?;
         let function_config_path = runtime_function
@@ -330,6 +333,7 @@ impl InferenceSession {
             run_id: None,
             session_id: Some(&session_id),
             workspace_root: &workspace_root,
+            runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
             authority_ceiling: None,
@@ -360,6 +364,7 @@ impl InferenceSession {
             function_skills: &function_skills,
             option_skills: &options.skills,
             workspace_root: &workspace_root,
+            runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
             artifact_root: &artifact_root,
             run_id: None,
@@ -392,6 +397,7 @@ impl InferenceSession {
             tool_mode,
             store_root,
             config_dir,
+            runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
             config_skills,
@@ -446,6 +452,7 @@ impl InferenceSession {
             run_id: None,
             session_id: None,
             workspace_root: &workspace_root,
+            runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
             store_root: &store_root,
             authority_ceiling: Some(&authority_ceiling),
@@ -462,6 +469,7 @@ impl InferenceSession {
             function_skills: &function_skills,
             option_skills: &option_skills,
             workspace_root: &workspace_root,
+            runtime_paths: &runtime.paths,
             trust_store_path: &trust_store_path,
             artifact_root: &artifact_root,
             run_id: None,
@@ -505,6 +513,7 @@ impl InferenceSession {
             tool_mode,
             store_root,
             config_dir,
+            runtime_paths: runtime.paths.clone(),
             workspace_root,
             trust_store_path,
             config_skills,
@@ -657,6 +666,10 @@ impl InferenceSession {
 
     pub(crate) fn workspace_root(&self) -> &std::path::Path {
         &self.workspace_root
+    }
+
+    pub(crate) fn runtime_paths(&self) -> &AgentLibrePaths {
+        &self.runtime_paths
     }
 
     pub(crate) fn prepare_artifact_write_for_tool(
@@ -851,8 +864,8 @@ impl InferenceSession {
         if let Some(reference) = &self.function_ref {
             let function = resolve_session_function(
                 Some(reference),
+                &self.runtime_paths,
                 &self.workspace_root,
-                &self.config_dir,
                 self.function_profile_required,
             )?
             .expect("function ref is set");
@@ -878,6 +891,7 @@ impl InferenceSession {
             run_id,
             session_id: self.scope_session_id.as_ref(),
             workspace_root: &self.workspace_root,
+            runtime_paths: &self.runtime_paths,
             trust_store_path: &self.trust_store_path,
             store_root: &self.store_root,
             authority_ceiling: self.authority_ceiling.as_ref(),
@@ -919,6 +933,7 @@ impl InferenceSession {
             function_skills: &self.function_skills,
             option_skills: &self.option_skills,
             workspace_root: &self.workspace_root,
+            runtime_paths: &self.runtime_paths,
             trust_store_path: &self.trust_store_path,
             artifact_root: &self.artifact_root,
             run_id,
@@ -1019,21 +1034,18 @@ fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &RunId) -> P
 
 fn resolve_session_function(
     reference: Option<&str>,
+    paths: &AgentLibrePaths,
     workspace_root: &Path,
-    config_dir: &Path,
     require_profile: bool,
 ) -> Result<Option<RuntimeFunction>> {
     reference
         .map(|reference| {
-            if require_profile {
-                resolve_runtime_function(reference, workspace_root, config_dir)
-            } else {
-                resolve_runtime_function_allow_missing_profile(
-                    reference,
-                    workspace_root,
-                    config_dir,
-                )
-            }
+            agl_runtime::resolve_composed_runtime_function(
+                paths,
+                workspace_root,
+                reference,
+                require_profile,
+            )
             .with_context(|| format!("failed to resolve function `{reference}`"))
         })
         .transpose()
@@ -1425,6 +1437,7 @@ struct MemoryContextRequest<'a> {
     function_skills: &'a [String],
     option_skills: &'a [String],
     workspace_root: &'a std::path::Path,
+    runtime_paths: &'a AgentLibrePaths,
     trust_store_path: &'a std::path::Path,
     artifact_root: &'a std::path::Path,
     run_id: Option<&'a RunId>,
@@ -1441,6 +1454,7 @@ struct SkillContextRequest<'a> {
     run_id: Option<&'a RunId>,
     session_id: Option<&'a SessionId>,
     workspace_root: &'a std::path::Path,
+    runtime_paths: &'a AgentLibrePaths,
     trust_store_path: &'a std::path::Path,
     store_root: &'a std::path::Path,
     authority_ceiling: Option<&'a BTreeSet<CapabilityId>>,
@@ -1457,6 +1471,7 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.function_skills,
         request.option_skills,
         request.workspace_root,
+        request.runtime_paths,
         request.trust_store_path,
     )?;
     let store = AglStore::open_at(request.store_root).context("failed to open memory store")?;
@@ -1480,14 +1495,20 @@ fn ensure_memory_context_allowed_for_skills(
     function_skills: &[String],
     option_skills: &[String],
     workspace_root: &std::path::Path,
+    runtime_paths: &AgentLibrePaths,
     trust_store_path: &std::path::Path,
 ) -> Result<()> {
     let selected_skills = selected_skill_ids(config_skills, function_skills, option_skills)?;
     if selected_skills.is_empty() {
         return Ok(());
     }
-    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
-        .context("failed to load skill registry for memory context")?;
+    let skill_registry = composed_skill_registry(
+        runtime_paths,
+        workspace_root,
+        trust_store_path,
+        &selected_skills,
+    )
+    .context("failed to load skill registry for memory context")?;
     for skill_id in selected_skills {
         let skill = skill_registry.resolve_for_context_injection(&skill_id)?;
         if skill.harness.source.is_external_skill_source() {
@@ -1504,6 +1525,51 @@ fn ensure_memory_context_allowed_for_skills(
         }
     }
     Ok(())
+}
+
+fn composed_skill_registry(
+    runtime_paths: &AgentLibrePaths,
+    workspace_root: &Path,
+    trust_store_path: &Path,
+    selected_skills: &[SkillId],
+) -> Result<SkillRegistry> {
+    let composition = agl_runtime::compose_artifacts(runtime_paths, workspace_root)?;
+    let trusted_workspace = trusted_workspace_registry(workspace_root, trust_store_path)
+        .context("failed to load workspace Skill trust")?;
+    let mut registry = SkillRegistry::new();
+    for skill_id in selected_skills {
+        let reference = ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
+        let graph = composition.resolve(&reference)?;
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved Skill graph has no root candidate")?;
+        let payload = composition
+            .registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let mut harness = *payload
+            .downcast::<SkillHarness>()
+            .map_err(|_| anyhow::anyhow!("Skill adapter returned an unexpected payload"))?;
+        harness.source = match node.candidate.tier {
+            ArtifactSourceTier::Builtin => SkillSource::Core,
+            ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
+            ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+        };
+        let trust = if node.candidate.tier == ArtifactSourceTier::Builtin {
+            SkillTrustState::TrustedByBinary
+        } else if trusted_workspace.get(&harness.id).is_some_and(|trusted| {
+            trusted.harness.artifact == harness.artifact
+                && trusted.harness.tree_sha256 == harness.tree_sha256
+                && trusted.trust == SkillTrustState::TrustedLocal
+        }) {
+            SkillTrustState::TrustedLocal
+        } else {
+            SkillTrustState::Unknown
+        };
+        registry.register(RegisteredSkill { harness, trust })?;
+    }
+    Ok(registry)
 }
 
 fn render_memory_context(entries: &[MemoryEntry]) -> String {
@@ -1533,9 +1599,13 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         request.function_skills,
         request.option_skills,
     )?;
-    let skill_registry =
-        trusted_workspace_registry(request.workspace_root, request.trust_store_path)
-            .context("failed to load skill registry")?;
+    let skill_registry = composed_skill_registry(
+        request.runtime_paths,
+        request.workspace_root,
+        request.trust_store_path,
+        &selected_skills,
+    )
+    .context("failed to load skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
     let hook_batches = if selected_skills.is_empty() {
         Vec::new()
@@ -1716,12 +1786,18 @@ fn subagent_tool_policy(spec: &RuntimeSubagentSpec) -> Result<FunctionToolPolicy
 pub(crate) fn resolve_subagent_effective_capabilities(
     spec: &RuntimeSubagentSpec,
     authority_ceiling: &BTreeSet<CapabilityId>,
+    runtime_paths: &AgentLibrePaths,
     workspace_root: &Path,
     trust_store_path: &Path,
 ) -> Result<EffectiveCapabilitySet> {
     let selected_skills = selected_skill_ids(&[], &spec.skills, &[])?;
-    let skill_registry = trusted_workspace_registry(workspace_root, trust_store_path)
-        .context("failed to load subagent skill registry")?;
+    let skill_registry = composed_skill_registry(
+        runtime_paths,
+        workspace_root,
+        trust_store_path,
+        &selected_skills,
+    )
+    .context("failed to load subagent skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
     resolve_effective_capabilities(
         &skill_registry,
