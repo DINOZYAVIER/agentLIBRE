@@ -495,8 +495,17 @@ mod tests {
         std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-schema: agentfunction/v1
-id: setup-smoke
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: setup-smoke
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - model:gemma4-e4b@^1.0
 title: Setup smoke
 model:
   config: inference.toml
@@ -518,7 +527,7 @@ doctor:
             function_root.join("inference.toml"),
             r#"[backend]
 kind = "llama_cpp"
-model_id = "setup-smoke-model"
+model_id = "gemma4-e4b"
 
 [runtime]
 mode = "fixed"
@@ -542,7 +551,7 @@ tool_call_format = "gemma_function_call"
             &agl_config::ModelBindings {
                 version: 1,
                 models: std::collections::BTreeMap::from([(
-                    agl_config::ModelId::new("setup-smoke-model").unwrap(),
+                    agl_config::ModelId::new("gemma4-e4b").unwrap(),
                     agl_config::ModelBinding { path: model },
                 )]),
             },

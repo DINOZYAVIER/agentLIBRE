@@ -2934,6 +2934,12 @@ enum PublicCompletionCommands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Resolve and inspect generic artifact packages.
+    #[command(long_about = help::ARTIFACT)]
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
     /// Inspect and export the local agentLIBRE store.
     Store {
         #[command(subcommand)]

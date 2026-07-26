@@ -2856,8 +2856,16 @@ tool_call_format = "gemma_function_call"
         std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-schema: agentfunction/v1
-id: daemon-test
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: daemon-test
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Daemon test
 runtime:
   tool_mode: read-only
@@ -2971,12 +2979,8 @@ subagents:
         std::fs::create_dir_all(root.join(".agl")).unwrap();
         std::fs::write(
             root.join(".agl/workspace.toml"),
-            r#"
-version = 1
-profile = "repo-workflow"
-
-[functions]
-default = "coding"
+            r#"version = 2
+default_function = "function:coding@^1.0"
 "#,
         )
         .unwrap();
@@ -3041,8 +3045,16 @@ default = "coding"
         std::fs::write(
             function_root.join("FUNCTION.md"),
             r#"---
-schema: agentfunction/v1
-id: coding
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: Coding
 runtime:
   tool_mode: write
