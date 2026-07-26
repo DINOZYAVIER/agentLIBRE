@@ -244,6 +244,10 @@ pub struct TrustedSkillRecord {
     pub skill_name: String,
     pub source: String,
     pub workspace_root: PathBuf,
+    #[serde(default)]
+    pub artifact_identity: String,
+    #[serde(default)]
+    pub package_digest: String,
     pub remote: String,
     #[serde(rename = "ref")]
     pub ref_name: String,
@@ -268,7 +272,7 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
     let workspace_root = status.workspace_root.clone();
     let lock_path = workspace_root.join(agl_repo::ARTIFACT_LOCK_PATH);
     let component = status.components.into_iter().next();
-    let warnings = status.warnings;
+    let mut warnings = status.warnings;
     let mut errors = status.errors;
 
     if component.is_none() {
@@ -285,6 +289,14 @@ pub fn workspace_skill_report(start: impl AsRef<Path>) -> Result<WorkspaceSkillR
     } else {
         Vec::new()
     };
+
+    append_artifact_lock_diagnostics(
+        &lock_path,
+        component.as_ref(),
+        !skills.is_empty(),
+        &mut warnings,
+        &mut errors,
+    );
 
     mark_duplicate_skills(&mut skills);
     mark_builtin_shadows(&mut skills)?;
@@ -328,7 +340,11 @@ pub fn workspace_skill_report_with_trust(
     trust_store_path: impl AsRef<Path>,
 ) -> Result<WorkspaceSkillReport> {
     let mut report = workspace_skill_report(start)?;
-    let store = read_trust_store(trust_store_path.as_ref())?;
+    let trust_store_path = trust_store_path.as_ref();
+    let mut store = read_trust_store(trust_store_path)?;
+    if migrate_legacy_trust_records(&report, &mut store)? {
+        write_trust_store(trust_store_path, &store)?;
+    }
     apply_trust_store(&mut report, &store);
     refresh_workspace_skill_report_derived(&mut report);
     Ok(report)
@@ -1223,6 +1239,117 @@ fn classify_trust_state(
     }
 }
 
+fn migrate_legacy_trust_records(
+    report: &WorkspaceSkillReport,
+    store: &mut SkillTrustStore,
+) -> Result<bool> {
+    if !locked_source_matches_report(report)? {
+        return Ok(false);
+    }
+    let Some(component) = report.component.as_ref() else {
+        return Ok(false);
+    };
+    let mut migrated = false;
+    for record in &mut store.records {
+        if !record.artifact_identity.is_empty() || !record.package_digest.is_empty() {
+            continue;
+        }
+        let Some(skill) = report
+            .skills
+            .iter()
+            .find(|skill| skill.name.as_deref() == Some(record.skill_name.as_str()))
+        else {
+            continue;
+        };
+        if record.source != skill.source.as_deref().unwrap_or_default()
+            || record.workspace_root != report.workspace_root
+            || record.remote != component.actual_url.clone().unwrap_or_default()
+            || record.ref_name
+                != component
+                    .expected_rev
+                    .clone()
+                    .unwrap_or_else(|| "HEAD".to_string())
+            || record.commit != component.actual_commit.clone().unwrap_or_default()
+            || record.tree != component.actual_tree.clone().unwrap_or_default()
+        {
+            continue;
+        }
+        let identity = build_trust_record(report, skill, &record.agentlibre_version)?;
+        record.artifact_identity = identity.artifact_identity;
+        record.package_digest = identity.package_digest;
+        migrated = true;
+    }
+    Ok(migrated)
+}
+
+fn locked_source_matches_report(report: &WorkspaceSkillReport) -> Result<bool> {
+    let Some(component) = report.component.as_ref() else {
+        return Ok(false);
+    };
+    let lock = match agl_repo::read_artifact_lock_v2(
+        report.workspace_root.join(agl_repo::ARTIFACT_LOCK_PATH),
+    ) {
+        Ok(lock) => lock,
+        Err(_) => return Ok(false),
+    };
+    let Some(locked) = lock.components.get(SKILLS_COMPONENT) else {
+        return Ok(false);
+    };
+    Ok(locked.kind == Some(component.kind)
+        && locked.path.as_ref() == Some(&component.path)
+        && locked.url.as_deref() == component.actual_url.as_deref()
+        && locked.rev == component.expected_rev
+        && locked.commit.as_deref() == component.actual_commit.as_deref()
+        && locked.tree.as_deref() == component.actual_tree.as_deref())
+}
+
+fn append_artifact_lock_diagnostics(
+    lock_path: &Path,
+    component: Option<&ComponentStatus>,
+    has_skills: bool,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) {
+    let Some(component) = component else {
+        return;
+    };
+    let lock = match agl_repo::read_artifact_lock_v2(lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.root_cause().is::<std::io::Error>() => {
+            warnings.push("artifact_lock_missing".to_string());
+            return;
+        }
+        Err(error) => {
+            errors.push(format!("artifact_lock_invalid: {error:#}"));
+            return;
+        }
+    };
+    let Some(locked) = lock.components.get(SKILLS_COMPONENT) else {
+        if has_skills {
+            errors.push("artifact_lock_entry_missing".to_string());
+        }
+        return;
+    };
+    if locked.kind != Some(component.kind) {
+        errors.push("artifact_lock_kind_mismatch".to_string());
+    }
+    if locked.path.as_ref() != Some(&component.path) {
+        errors.push("artifact_lock_path_mismatch".to_string());
+    }
+    if locked.url.as_deref() != component.actual_url.as_deref() {
+        errors.push("artifact_lock_remote_mismatch".to_string());
+    }
+    if locked.rev != component.expected_rev {
+        errors.push("artifact_lock_ref_mismatch".to_string());
+    }
+    if locked.commit.as_deref() != component.actual_commit.as_deref() {
+        errors.push("artifact_lock_commit_mismatch".to_string());
+    }
+    if locked.tree.as_deref() != component.actual_tree.as_deref() {
+        errors.push("artifact_lock_tree_mismatch".to_string());
+    }
+}
+
 fn find_trust_target<'a>(
     report: &'a WorkspaceSkillReport,
     name: &str,
@@ -1266,6 +1393,33 @@ fn build_trust_record(
         skill_name: name,
         source,
         workspace_root: report.workspace_root.clone(),
+        artifact_identity: format!(
+            "{}:{}@{}",
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .type_id,
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .id,
+            skill
+                .harness
+                .as_ref()
+                .context("skill harness is missing")?
+                .artifact
+                .version,
+        ),
+        package_digest: skill
+            .harness
+            .as_ref()
+            .context("skill harness is missing")?
+            .tree_sha256
+            .clone(),
         remote: component
             .actual_url
             .clone()
@@ -1354,8 +1508,8 @@ fn upsert_trust_record(store: &mut SkillTrustStore, record: TrustedSkillRecord) 
             left.workspace_root
                 .cmp(&right.workspace_root)
                 .then_with(|| left.skill_name.cmp(&right.skill_name))
-                .then_with(|| left.commit.cmp(&right.commit))
-                .then_with(|| left.tree.cmp(&right.tree))
+                .then_with(|| left.artifact_identity.cmp(&right.artifact_identity))
+                .then_with(|| left.package_digest.cmp(&right.package_digest))
         });
     }
 }
@@ -1377,7 +1531,13 @@ fn revoke_trust_record(
 }
 
 fn trust_identity_matches(left: &TrustedSkillRecord, right: &TrustedSkillRecord) -> bool {
-    left.skill_name == right.skill_name
+    !left.artifact_identity.is_empty()
+        && !right.artifact_identity.is_empty()
+        && !left.package_digest.is_empty()
+        && !right.package_digest.is_empty()
+        && left.artifact_identity == right.artifact_identity
+        && left.package_digest == right.package_digest
+        && left.skill_name == right.skill_name
         && left.source == right.source
         && left.workspace_root == right.workspace_root
         && left.remote == right.remote

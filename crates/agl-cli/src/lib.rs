@@ -2433,6 +2433,8 @@ fn print_skill_trust_update_report(report: &SkillTrustUpdateReport) {
         println!("trust.skill_name={}", record.skill_name);
         println!("trust.source={}", record.source);
         println!("trust.workspace_root={}", record.workspace_root.display());
+        println!("trust.artifact_identity={}", record.artifact_identity);
+        println!("trust.package_digest={}", record.package_digest);
         println!("trust.remote={}", record.remote);
         println!("trust.ref={}", record.ref_name);
         println!("trust.commit={}", record.commit);
