@@ -2039,3 +2039,6 @@ fn skill_folder_create_situation_key(situation: SkillFolderCreateSituation) -> &
         SkillFolderCreateSituation::ArtifactWrite => "artifact_write",
     }
 }
+
+#[cfg(test)]
+mod tests;
