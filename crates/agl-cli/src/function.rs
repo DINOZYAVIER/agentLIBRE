@@ -418,8 +418,16 @@ fn function_template(id: &str, model_profile: Option<&str>) -> String {
     let model_profile = model_profile.unwrap_or("local");
     format!(
         r#"---
-schema: agentfunction/v1
-id: {id}
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: {id}
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 title: {title}
 model:
   profile: {model_profile}

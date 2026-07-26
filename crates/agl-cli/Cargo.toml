@@ -11,6 +11,9 @@ name = "agl"
 path = "src/main.rs"
 
 [dependencies]
+agl-app.workspace = true
+agl-artifact.workspace = true
+agl-assets.workspace = true
 agl-chat.workspace = true
 agl-capabilities.workspace = true
 agl-client.workspace = true

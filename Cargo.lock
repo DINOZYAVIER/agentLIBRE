@@ -53,11 +53,18 @@ dependencies = [
 name = "agl-app"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
+ "agl-assets",
  "agl-capabilities",
  "agl-chat",
  "agl-content",
+ "agl-function",
  "agl-ids",
+ "agl-model",
  "agl-process",
+ "agl-runtime",
+ "agl-skill",
+ "anyhow",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -135,6 +142,9 @@ dependencies = [
 name = "agl-cli"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-app",
+ "agl-artifact",
+ "agl-assets",
  "agl-capabilities",
  "agl-chat",
  "agl-client",

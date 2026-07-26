@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use agl_artifact::{
     AglCompatibility, ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactAdapterRegistry,
-    ArtifactCandidate, ArtifactDataClass, ArtifactEnvelope, ArtifactError, ArtifactLock,
-    ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
+    ArtifactCandidate, ArtifactConfigLayer, ArtifactDataClass, ArtifactEnvelope, ArtifactError,
+    ArtifactLock, ArtifactPackageId, ArtifactPackageRef, ArtifactPackageView, ArtifactPathRouter,
     ArtifactPathScope, ArtifactRelativePath, ArtifactResolver, ArtifactSource,
     ArtifactSourceDeclaration, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier,
     ArtifactTypeId, ArtifactVersion, ArtifactVersionReq, DirectoryArtifactSource,
@@ -349,6 +349,84 @@ fn adapter_lifecycle_returns_checked_payload_and_directory_candidates() {
 }
 
 #[test]
+fn fixture_extension_resolves_from_a_function_requirement() {
+    let extension: ArtifactEnvelope = serde_json::from_value(serde_json::json!({
+        "schema": "agentlibre.artifact/v1",
+        "type": "extension",
+        "id": "core.workspace",
+        "version": "1.0.0",
+        "payload_schema": "agentlibre.extension/v1",
+        "agl": {
+            "compatible": ">=1.0.0",
+            "tested": ["1.0.0"]
+        },
+        "requires": []
+    }))
+    .unwrap();
+    let function: ArtifactEnvelope = serde_json::from_value(serde_json::json!({
+        "schema": "agentlibre.artifact/v1",
+        "type": "function",
+        "id": "fixture",
+        "version": "1.0.0",
+        "payload_schema": "agentlibre.function/v2",
+        "agl": {
+            "compatible": ">=1.0.0",
+            "tested": ["1.0.0"]
+        },
+        "requires": ["extension:core.workspace@^1.0"]
+    }))
+    .unwrap();
+    let extension_adapter = LifecycleAdapter {
+        descriptor: descriptor(ArtifactTypeId::extension(), EXTENSION_ROOT, "artifact.json"),
+    };
+    let function_adapter = LifecycleAdapter {
+        descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "artifact.json"),
+    };
+    let registry =
+        Arc::new(ArtifactAdapterRegistry::new([extension_adapter, function_adapter]).unwrap());
+    let source_id: ArtifactSourceId = "workspace".parse().unwrap();
+    let package = |type_id: ArtifactTypeId, id: &str, envelope: &ArtifactEnvelope| {
+        ArtifactCandidate::new(
+            type_id,
+            id.parse().unwrap(),
+            version("1.0.0"),
+            source_id.clone(),
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceKind::Directory,
+            Arc::new(
+                InMemoryPackageView::new(vec![
+                    (
+                        "artifact.json".parse().unwrap(),
+                        serde_json::to_vec(envelope).unwrap(),
+                    ),
+                    ("payload.txt".parse().unwrap(), b"fixture".to_vec()),
+                ])
+                .unwrap(),
+            ),
+        )
+    };
+    let source = Arc::new(
+        StaticArtifactSource::new(
+            source_id.clone(),
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceKind::Directory,
+            vec![
+                package(ArtifactTypeId::extension(), "core.workspace", &extension),
+                package(ArtifactTypeId::function(), "fixture", &function),
+            ],
+        )
+        .unwrap(),
+    );
+    let resolver = ArtifactResolver::new(registry, vec![source]);
+    let graph = resolver
+        .resolve(&"function:fixture@^1.0".parse().unwrap())
+        .unwrap();
+    assert!(graph.nodes.contains_key("function:fixture@1.0.0"));
+    assert!(graph.nodes.contains_key("extension:core.workspace@1.0.0"));
+    assert_eq!(graph.lock().unwrap().packages.len(), 2);
+}
+
+#[test]
 fn path_router_derives_separate_scopes_without_touching_filesystem() {
     let adapter = LifecycleAdapter {
         descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
@@ -381,6 +459,37 @@ fn path_router_derives_separate_scopes_without_touching_filesystem() {
             .unwrap(),
         PathBuf::from("/xdg/cache/functions")
     );
+}
+
+#[test]
+fn config_layers_are_ordered_and_identify_override_presence() {
+    let root = temp_dir("config-layers");
+    fs::create_dir_all(root.join(".agl/config/functions/example")).unwrap();
+    fs::write(
+        root.join(".agl/config/functions/example/config.toml"),
+        b"enabled = true",
+    )
+    .unwrap();
+    let adapter = LifecycleAdapter {
+        descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+    };
+    let registry = Arc::new(ArtifactAdapterRegistry::new([adapter]).unwrap());
+    let router = ArtifactPathRouter::new(
+        &root,
+        root.join("data"),
+        root.join("config"),
+        root.join("state"),
+        root.join("cache"),
+        registry,
+    );
+    let layers = router
+        .config_layers(&ArtifactTypeId::function(), &"example".parse().unwrap())
+        .unwrap();
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0].layer, ArtifactConfigLayer::PackageDefaults);
+    assert!(!layers[1].present);
+    assert!(layers[2].present);
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
