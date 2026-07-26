@@ -56,7 +56,7 @@ fn builtin_catalog_has_complete_valid_schemas_and_expected_coverage() {
         .flat_map(|provider| provider.actions.iter())
         .collect::<Vec<_>>();
 
-    assert_eq!(actions.len(), 61);
+    assert_eq!(actions.len(), 60);
     for provider in catalog.providers() {
         provider.validate().unwrap();
         for action in &provider.actions {
@@ -220,11 +220,6 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
         (SKILL_STATUS_TOOL_ID, OperationKind::Read, &[]),
         (SKILL_VERIFY_TOOL_ID, OperationKind::Read, &[]),
         (
-            SKILL_LOCK_TOOL_ID,
-            OperationKind::Admin,
-            &[StateEffect::RepoWorkspace],
-        ),
-        (
             SKILL_TRUST_TOOL_ID,
             OperationKind::Approve,
             &[StateEffect::SkillTrust],
@@ -293,7 +288,7 @@ fn builtin_actions_declare_operation_kinds_and_state_effects() {
         ),
     ];
 
-    assert_eq!(expected.len(), 61);
+    assert_eq!(expected.len(), 60);
     for (id, operation_kind, effects) in expected {
         assert_action_metadata(&catalog, id, operation_kind, effects);
     }

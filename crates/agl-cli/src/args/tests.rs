@@ -738,13 +738,6 @@ fn parse_skill_commands() {
         })),
     );
     assert_command(
-        ["agl", "skill", "lock", "--dry-run"],
-        CliCommand::Skill(SkillCommand::Lock(SkillLockOptions {
-            json: false,
-            dry_run: true,
-        })),
-    );
-    assert_command(
         ["agl", "skill", "trust", "repo-change", "--yes"],
         CliCommand::Skill(SkillCommand::Trust(SkillTrustOptions {
             name: "repo-change".to_string(),

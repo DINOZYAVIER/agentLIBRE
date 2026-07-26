@@ -24,7 +24,7 @@ fn agl_help_lists_public_commands() {
         &stdout,
         ".agl/workspace.toml lists the repo's agentLIBRE folders",
     );
-    assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
+    assert_contains(&stdout, "Workspace skills need .agl/artifact-lock.toml");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "--resume");
@@ -978,9 +978,12 @@ fn skill_help_explains_workspace_skill_use() {
     assert_contains(&stdout, "SKILL.md lists the skill name");
     assert_contains(
         &stdout,
-        ".agl/skills.lock records the current workspace skill git commit",
+        ".agl/artifact-lock.toml records the exact workspace package identity and digest",
     );
-    assert_contains(&stdout, "state/skill-trust.toml approves that exact commit");
+    assert_contains(
+        &stdout,
+        "state/skill-trust.toml approves that exact identity and digest",
+    );
 }
 
 #[test]

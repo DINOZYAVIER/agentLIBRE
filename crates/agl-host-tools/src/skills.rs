@@ -4,13 +4,13 @@ use agl_capabilities::{
     ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult, CapabilityId,
 };
 use agl_skill::{
-    SkillHarness, SkillLockOptions, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
-    lock_workspace_skills, revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
+    SkillHarness, SkillTrustOptions, WorkspaceSkillStatus, builtin_registry,
+    revoke_workspace_skill, trust_workspace_skill, workspace_skill_report,
     workspace_skill_report_with_trust,
 };
 use agl_tools::skills::{
-    SkillInspectArgs, SkillListArgs, SkillListSource, SkillLockArgs, SkillRevokeArgs,
-    SkillStatusArgs, SkillTrustArgs, SkillVerifyArgs,
+    SkillInspectArgs, SkillListArgs, SkillListSource, SkillRevokeArgs, SkillStatusArgs,
+    SkillTrustArgs, SkillVerifyArgs,
 };
 use anyhow::{Context, Result, ensure};
 use serde::de::DeserializeOwned;
@@ -47,7 +47,6 @@ impl SkillTools {
             }
             agl_tools::SKILL_STATUS_TOOL_ID => self.status(parse_args(id.as_str(), arguments)?)?,
             agl_tools::SKILL_VERIFY_TOOL_ID => self.verify(parse_args(id.as_str(), arguments)?)?,
-            agl_tools::SKILL_LOCK_TOOL_ID => self.lock(parse_args(id.as_str(), arguments)?)?,
             agl_tools::SKILL_TRUST_TOOL_ID => self.trust(parse_args(id.as_str(), arguments)?)?,
             agl_tools::SKILL_REVOKE_TOOL_ID => self.revoke(parse_args(id.as_str(), arguments)?)?,
             _ => anyhow::bail!("unknown skill capability `{id}`"),
@@ -170,19 +169,6 @@ impl SkillTools {
     fn verify(&self, _args: SkillVerifyArgs) -> Result<Value> {
         let report = workspace_skill_report(&self.workspace_root)?;
         report_value(agl_tools::SKILL_VERIFY_TOOL_ID, &report)
-    }
-
-    fn lock(&self, args: SkillLockArgs) -> Result<Value> {
-        let report = lock_workspace_skills(
-            &self.workspace_root,
-            &SkillLockOptions {
-                dry_run: args.dry_run,
-            },
-        )?;
-        Ok(json!({
-            "capability_id": agl_tools::SKILL_LOCK_TOOL_ID,
-            "report": report,
-        }))
     }
 
     fn trust(&self, args: SkillTrustArgs) -> Result<Value> {
@@ -376,8 +362,8 @@ mod tests {
     }
 
     #[test]
-    fn skill_tools_status_and_lock_return_structured_reports() {
-        let root = temp_root("status-lock");
+    fn skill_tools_status_return_structured_report() {
+        let root = temp_root("status");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::create_dir_all(root.join(".agl/skills")).unwrap();
@@ -389,17 +375,8 @@ mod tests {
                 json!({}),
             )
             .unwrap();
-        let lock = tools
-            .dispatch_action(
-                &CapabilityId::new(agl_tools::SKILL_LOCK_TOOL_ID).unwrap(),
-                json!({"dry_run": true}),
-            )
-            .unwrap();
-
         assert!(status.data["report"]["diagnostics"].is_array());
         assert!(status.data["report"]["errors"].is_array());
-        assert_eq!(lock.data["report"]["dry_run"], true);
-        assert!(lock.data["report"]["errors"].is_array());
 
         let _ = std::fs::remove_dir_all(root);
     }

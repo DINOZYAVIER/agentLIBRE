@@ -106,7 +106,6 @@ mod help {
     pub(super) const SKILL_INIT: &str = cli_help!("skill/init");
     pub(super) const SKILL_INSPECT: &str = cli_help!("skill/inspect");
     pub(super) const SKILL_LIST: &str = cli_help!("skill/list");
-    pub(super) const SKILL_LOCK: &str = cli_help!("skill/lock");
     pub(super) const SKILL_REVOKE: &str = cli_help!("skill/revoke");
     pub(super) const SKILL_STATUS: &str = cli_help!("skill/status");
     pub(super) const SKILL_SYNC_FOLDERS: &str = cli_help!("skill/sync-folders");
@@ -522,9 +521,6 @@ enum SkillCommands {
     /// Create missing writable folders declared by workspace skills.
     #[command(long_about = help::SKILL_SYNC_FOLDERS)]
     SyncFolders(SkillFolderSyncArgs),
-    /// Write or preview .agl/skills.lock.
-    #[command(long_about = help::SKILL_LOCK)]
-    Lock(SkillLockArgs),
     /// Locally approve a locked workspace skill identity.
     #[command(long_about = help::SKILL_TRUST)]
     Trust(SkillTrustArgs),
@@ -1534,17 +1530,6 @@ struct SkillFolderSyncArgs {
 }
 
 #[derive(Debug, Args)]
-struct SkillLockArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-
-    /// Print planned lock changes without writing files.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Args)]
 struct SkillTrustArgs {
     /// Workspace skill name to trust.
     #[arg(value_name = "NAME")]
@@ -2491,10 +2476,6 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
             json: args.json,
             dry_run: args.dry_run,
             when: args.when,
-        }),
-        SkillCommands::Lock(args) => SkillCommand::Lock(SkillLockOptions {
-            json: args.json,
-            dry_run: args.dry_run,
         }),
         SkillCommands::Trust(args) => SkillCommand::Trust(SkillTrustOptions {
             name: args.name,

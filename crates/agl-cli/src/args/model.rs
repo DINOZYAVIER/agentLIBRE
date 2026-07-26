@@ -209,7 +209,6 @@ pub(crate) enum SkillCommand {
     Status(SkillStatusOptions),
     Verify(SkillVerifyOptions),
     SyncFolders(SkillFolderSyncOptions),
-    Lock(SkillLockOptions),
     Trust(SkillTrustOptions),
     Revoke(SkillRevokeOptions),
 }
@@ -561,12 +560,6 @@ pub(crate) enum SkillFolderSyncSituationArg {
     SkillSync,
     RuntimePrepare,
     ArtifactWrite,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SkillLockOptions {
-    pub(crate) json: bool,
-    pub(crate) dry_run: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

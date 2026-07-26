@@ -7,7 +7,7 @@ Basics:
 - FUNCTION.md and SYSTEM.md files bind system prompt, profile, skills, tools,
   memory, and subagents.
 - Core skills are trusted by the binary.
-- Workspace skills need .agl/skills.lock and local approval before --skill can use them.
+- Workspace skills need .agl/artifact-lock.toml and local approval before --skill can use them.
 
 Common commands:
   agl

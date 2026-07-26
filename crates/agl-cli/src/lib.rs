@@ -37,12 +37,11 @@ use agl_runtime::{
 };
 use agl_skill::{
     SkillFolderCreateSituation, SkillFolderSyncActionKind,
-    SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport,
-    SkillLockOptions as AglSkillLockOptions, SkillLockReport, SkillPermissions,
+    SkillFolderSyncOptions as AglSkillFolderSyncOptions, SkillFolderSyncReport, SkillPermissions,
     SkillTrustOptions as AglSkillTrustOptions, SkillTrustUpdateReport, WorkspaceSkillDiagnostic,
     WorkspaceSkillDiagnosticScope, WorkspaceSkillDiagnosticSeverity, WorkspaceSkillReport,
-    WorkspaceSkillStatus, builtin_registry, lock_workspace_skills, revoke_workspace_skill,
-    sync_workspace_skill_folders, trust_workspace_skill, workspace_skill_report_with_trust,
+    WorkspaceSkillStatus, builtin_registry, revoke_workspace_skill, sync_workspace_skill_folders,
+    trust_workspace_skill, workspace_skill_report_with_trust,
 };
 use agl_store::{AglStore, IdempotencyOutcome, MatrixNotificationOutboxDraft};
 use anyhow::{Context, Result, anyhow, bail};
@@ -68,8 +67,8 @@ use args::{
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, InferenceCommand,
     ProcessCommand, RunOptions, ServeOptions, SkillCommand, SkillFolderSyncOptions,
     SkillFolderSyncSituationArg, SkillInitOptions, SkillInspectOptions, SkillListOptions,
-    SkillListSourceArg, SkillLockOptions, SkillRevokeOptions, SkillStatusOptions,
-    SkillTrustOptions, SkillVerifyOptions, parse_cli, print_completion, print_usage,
+    SkillListSourceArg, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
+    SkillVerifyOptions, parse_cli, print_completion, print_usage,
 };
 use config::run_config;
 use function::run_function;
@@ -865,7 +864,6 @@ fn run_skill(command: SkillCommand, runtime: &AgentLibreRuntimeConfig) -> Result
         SkillCommand::Status(options) => run_skill_status(options, runtime),
         SkillCommand::Verify(options) => run_skill_verify(options, runtime),
         SkillCommand::SyncFolders(options) => run_skill_sync_folders(options),
-        SkillCommand::Lock(options) => run_skill_lock(options),
         SkillCommand::Trust(options) => run_skill_trust(options, runtime),
         SkillCommand::Revoke(options) => run_skill_revoke(options, runtime),
     }
@@ -1184,23 +1182,6 @@ fn run_skill_sync_folders(options: SkillFolderSyncOptions) -> Result<()> {
 
     if report.has_errors() {
         bail!("workspace skill folder sync failed");
-    }
-    Ok(())
-}
-
-fn run_skill_lock(options: SkillLockOptions) -> Result<()> {
-    tracing::info!(target: "agentlibre::app", command = "skill lock", "starting command");
-    let report = lock_workspace_skills(
-        std::env::current_dir().context("failed to resolve current directory")?,
-        &AglSkillLockOptions {
-            dry_run: options.dry_run,
-        },
-    )?;
-
-    crate::print_json_or(options.json, &report, || print_skill_lock_report(&report))?;
-
-    if report.has_errors() {
-        bail!("workspace skill lock failed");
     }
     Ok(())
 }
@@ -2234,7 +2215,7 @@ fn print_workspace_skill_status(skill: &WorkspaceSkillStatus) {
     if let Some(pack) = &skill.pack {
         println!("skill.{name}.pack={pack}");
     }
-    if let Some(version) = skill.version {
+    if let Some(version) = &skill.version {
         println!("skill.{name}.version={version}");
     }
     if let Some(description) = &skill.description {
@@ -2434,45 +2415,6 @@ fn print_cron_run(run: &CronRun) {
     }
     if let Some(supervisor_run_id) = &run.supervisor_run_id {
         println!("cron_run.{}.supervisor_run_id={supervisor_run_id}", run.id);
-    }
-}
-
-fn print_skill_lock_report(report: &SkillLockReport) {
-    println!(
-        "state={}",
-        if report.has_errors() { "invalid" } else { "ok" }
-    );
-    println!("workspace_root={}", report.workspace_root.display());
-    println!("lock_path={}", report.lock_path.display());
-    println!("dry_run={}", report.dry_run);
-    println!("wrote={}", report.wrote);
-    if let Some(lock) = &report.lock {
-        println!("lock.version={}", lock.version);
-        println!("lock.locked_at={}", lock.locked_at);
-        if let Some(component) = lock.components.get("skills") {
-            println!("lock.component.skills.path={}", component.path.display());
-            println!("lock.component.skills.kind={:?}", component.kind);
-            println!("lock.component.skills.remote={}", component.remote);
-            println!("lock.component.skills.ref={}", component.ref_name);
-            println!("lock.component.skills.commit={}", component.commit);
-            println!("lock.component.skills.tree={}", component.tree);
-        }
-        for skill in &lock.skills {
-            println!(
-                "lock.skill name={} path={} source={} component={} locked_at={}",
-                skill.name,
-                skill.path.display(),
-                skill.source,
-                skill.component,
-                skill.locked_at
-            );
-        }
-    }
-    for warning in &report.warnings {
-        println!("warning={warning}");
-    }
-    for error in &report.errors {
-        println!("error={error}");
     }
 }
 

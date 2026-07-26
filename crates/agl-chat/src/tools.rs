@@ -261,7 +261,6 @@ const SKILL_TOOL_IDS: &[&str] = &[
     agl_tools::SKILL_INSPECT_TOOL_ID,
     agl_tools::SKILL_STATUS_TOOL_ID,
     agl_tools::SKILL_VERIFY_TOOL_ID,
-    agl_tools::SKILL_LOCK_TOOL_ID,
     agl_tools::SKILL_TRUST_TOOL_ID,
     agl_tools::SKILL_REVOKE_TOOL_ID,
 ];
