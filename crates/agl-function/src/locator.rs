@@ -270,6 +270,9 @@ pub(crate) fn collect_function_entries(
 
 pub(crate) fn collect_builtin_entries(entries: &mut Vec<FunctionListEntry>) {
     for function in agl_assets::BUILTIN_ARTIFACT_PACKAGES {
+        if function.type_id != "function" {
+            continue;
+        }
         let path = builtin_package_path(function.id);
         let locator = FunctionPackageLocation {
             reference: function.id.to_string(),

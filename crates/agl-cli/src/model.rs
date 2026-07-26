@@ -8,7 +8,7 @@ use agl_config::{
     load_model_bindings_or_empty, model_bindings_path,
 };
 use agl_daemon::default_socket_path;
-use agl_models::{
+use agl_model::{
     ArtifactDownloadSpec, ArtifactFileDownloadSpec, HfSource, HfSourceKind, HubFileCandidate,
     InstallSource, ModelArtifactRole, ModelBindingPatch, ModelDownloadRequest, ModelDownloadWorker,
     ModelInspector, ModelInstallRecord, ModelInstallStore, ModelLifecyclePlan,
@@ -140,7 +140,7 @@ fn run_unload(options: ModelUnloadOptions, runtime: &AgentLibreRuntimeConfig) ->
 }
 
 fn run_pull(mut options: ModelPullOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
-    options.offline |= agl_models::hugging_face_offline();
+    options.offline |= agl_model::hugging_face_offline();
     let worker = ModelDownloadWorker::spawn().context("failed to start model download worker")?;
     let handle = worker.handle();
     let main_source = HfSource::parse(&options.source).context("invalid Hugging Face model URL")?;
@@ -453,7 +453,7 @@ fn pull_plan(
 }
 
 fn choose_candidate(
-    inspection: &agl_models::HubInspection,
+    inspection: &agl_model::HubInspection,
     source_kind: HfSourceKind,
     non_interactive: bool,
     label: &str,
@@ -586,7 +586,7 @@ fn preflight_pull(
             "model id `{id}` already has an install record for different content; pass --id to keep both or --replace to update it"
         );
         if existing_record.as_ref().is_none_or(|record| {
-            !same_install || record.state != agl_models::InstallRecordState::Active
+            !same_install || record.state != agl_model::InstallRecordState::Active
         }) {
             report.install_record_changes.push(id.clone());
         }
@@ -613,7 +613,7 @@ fn preflight_pull(
 }
 
 fn preflight_import_records(
-    imported: &[agl_models::ImportedModel],
+    imported: &[agl_model::ImportedModel],
     store: &ModelInstallStore,
     replace: bool,
 ) -> Result<()> {
@@ -642,8 +642,7 @@ fn ensure_download_disk_space(plan: &ModelPullPlan) -> Result<()> {
     if plan.bytes_to_download == 0 {
         return Ok(());
     }
-    let host =
-        agl_models::HostResources::inspect(agl_models::hugging_face_cache_dir(), Vec::new())?;
+    let host = agl_model::HostResources::inspect(agl_model::hugging_face_cache_dir(), Vec::new())?;
     ensure!(
         host.disk.available_bytes >= plan.bytes_to_download,
         "model download needs {} but only {} is free on {}",
@@ -914,7 +913,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use agl_models::{InstallRecordState, ModelInstallRecord};
+    use agl_model::{InstallRecordState, ModelInstallRecord};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 

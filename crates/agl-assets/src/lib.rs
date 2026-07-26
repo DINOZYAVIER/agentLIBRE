@@ -1,8 +1,8 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinAssetKind {
     SystemPrompt,
-    ModelCatalog,
-    ModelBenchmarkEvidence,
+    ModelDescriptor,
+    ModelEvidence,
     Skill,
     SkillReference,
     SkillAsset,
@@ -51,7 +51,7 @@ pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
 pub fn builtin_artifact_package(id: &str) -> Option<&'static BuiltinArtifactPackage> {
     BUILTIN_ARTIFACT_PACKAGES
         .iter()
-        .find(|package| package.id == id)
+        .find(|package| package.type_id == "function" && package.id == id)
 }
 
 pub fn default_system_prompt() -> &'static BuiltinAsset {
@@ -62,20 +62,6 @@ pub fn default_system_prompt_text() -> &'static str {
     default_system_prompt()
         .text()
         .expect("builtin:default prompt must be valid UTF-8")
-}
-
-pub fn model_catalog() -> &'static BuiltinAsset {
-    builtin_asset("builtin:model-catalog").expect("builtin:model-catalog must be embedded")
-}
-
-pub fn model_catalog_text() -> &'static str {
-    model_catalog()
-        .text()
-        .expect("builtin:model-catalog must be valid UTF-8")
-}
-
-pub fn model_benchmark_evidence(id: &str) -> Option<&'static BuiltinAsset> {
-    builtin_asset(id).filter(|asset| asset.kind == BuiltinAssetKind::ModelBenchmarkEvidence)
 }
 
 #[cfg(test)]
@@ -92,25 +78,6 @@ mod tests {
         assert_eq!(prompt.kind, BuiltinAssetKind::SystemPrompt);
         assert_eq!(prompt.source_path, "assets/prompts/system/default.md");
         assert!(prompt.text().unwrap().contains("{{AGL_VERSION}}"));
-    }
-
-    #[test]
-    fn model_catalog_is_embedded() {
-        let catalog = model_catalog();
-        assert_eq!(catalog.kind, BuiltinAssetKind::ModelCatalog);
-        assert_eq!(catalog.source_path, "assets/models/catalog.toml");
-        assert!(model_catalog_text().contains("gemma4-e4b"));
-    }
-
-    #[test]
-    fn model_benchmark_evidence_is_embedded() {
-        let evidence = model_benchmark_evidence("model-benchmark:20260715-gemma4-qat-cpu")
-            .expect("CPU benchmark evidence must be embedded");
-        assert_eq!(evidence.kind, BuiltinAssetKind::ModelBenchmarkEvidence);
-        assert!(evidence.text().unwrap().contains("MemorySwapMax=0"));
-        let vulkan = model_benchmark_evidence("model-benchmark:20260715-gemma4-qat-vulkan")
-            .expect("Vulkan benchmark evidence must be embedded");
-        assert!(vulkan.text().unwrap().contains("Exact GPU layers"));
     }
 
     #[test]

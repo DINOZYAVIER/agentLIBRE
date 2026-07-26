@@ -8,7 +8,8 @@ artifact:
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
-  requires: []
+  requires:
+    - model:gemma4-e2b@^1.0
 title: Gemma 4 E2B
 description: Local Gemma 4 E2B official QAT function with native tool calls.
 model:

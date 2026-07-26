@@ -10,7 +10,7 @@ mod validation;
 
 pub use adapter::{
     FunctionArtifactAdapter, builtin_source, directory_function_source, function_adapter_registry,
-    parse_function_envelope,
+    parse_function_envelope, validate_function_model_contract,
 };
 pub use loader::{LoadedFunction, LoadedSubagent, MarkdownSection, load_function};
 pub use locator::{

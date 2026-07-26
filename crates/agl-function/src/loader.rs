@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
+use crate::adapter::validate_function_model_contract;
 use crate::locator::{FunctionPackageLocation, FunctionPackageSource};
 use crate::manifest::{
     AgentFunctionFrontMatter, FUNCTION_FILE_NAME, FUNCTION_SYSTEM_PROMPT_FILE_NAME,
@@ -79,6 +80,7 @@ pub fn load_function(locator: FunctionPackageLocation) -> Result<LoadedFunction>
     let system_prompt_sections = markdown_sections(&system_prompt);
     let (inference_config_path, inference_config_toml) =
         load_function_inference_config(&locator.root_dir, &front_matter, builtin)?;
+    validate_function_model_contract(&front_matter, inference_config_toml.as_deref(), &locator)?;
     Ok(LoadedFunction {
         locator,
         front_matter,

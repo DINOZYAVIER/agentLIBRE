@@ -304,7 +304,7 @@ mod tests {
 
     fn workspace() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "agl-models-checkpoint-{}-{}",
+            "agl-model-checkpoint-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));

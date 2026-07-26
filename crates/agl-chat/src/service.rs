@@ -14,7 +14,7 @@ use agl_loop::{
     TurnAdvance, TurnAdvanceState, TurnCheckpoint, TurnEffect, TurnEffectResult, TurnExecutor,
     TurnInput, TurnOutput, TurnTerminal,
 };
-use agl_models::RuntimePlanSet;
+use agl_model::RuntimePlanSet;
 use agl_runtime::{AgentLibreRuntimeConfig, logged_message_fields};
 use agl_session::{ChatSessionEvent, ChatSessionReplay, ChatSessionStore};
 use agl_turn::{StopDetail, StopReason, TurnHookBatch, TurnMessage, VisibleTool};

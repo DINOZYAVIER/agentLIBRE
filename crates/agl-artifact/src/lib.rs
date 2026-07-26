@@ -1473,6 +1473,16 @@ impl ArtifactAdapterRegistry {
         Self::new(adapters)
     }
 
+    pub fn from_dyn(
+        adapters: impl IntoIterator<Item = Arc<dyn ArtifactAdapter>>,
+    ) -> Result<Self, ArtifactError> {
+        let mut registry = Self::default();
+        for adapter in adapters {
+            registry.insert(adapter)?;
+        }
+        Ok(registry)
+    }
+
     pub fn lookup(&self, type_id: &ArtifactTypeId) -> Result<&dyn ArtifactAdapter, ArtifactError> {
         self.adapters
             .get(type_id)

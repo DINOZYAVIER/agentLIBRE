@@ -112,6 +112,63 @@ fn lists_builtin_functions() {
 }
 
 #[test]
+fn builtin_function_rejects_missing_model_dependency() {
+    let function = agl_assets::builtin_artifact_package("gemma4-e4b").unwrap();
+    let manifest = function
+        .files
+        .iter()
+        .find(|file| file.path == FUNCTION_FILE_NAME)
+        .unwrap();
+    let (mut front_matter, _) =
+        parse_function_document(std::str::from_utf8(manifest.bytes).unwrap()).unwrap();
+    front_matter.artifact.requires =
+        vec![agl_artifact::ArtifactRequirement::parse("model:missing@^1.0").unwrap()];
+    let inference = function
+        .files
+        .iter()
+        .find(|file| file.path == "inference.toml")
+        .map(|file| std::str::from_utf8(file.bytes).unwrap())
+        .unwrap();
+    let locator = FunctionPackageLocation {
+        reference: "gemma4-e4b".to_owned(),
+        source: FunctionPackageSource::Builtin,
+        path: "builtin:function/gemma4-e4b/FUNCTION.md".into(),
+        root_dir: "builtin:function/gemma4-e4b".into(),
+    };
+    let error =
+        validate_function_model_contract(&front_matter, Some(inference), &locator).unwrap_err();
+    assert!(error.to_string().contains("missing"));
+}
+
+#[test]
+fn builtin_function_rejects_mismatched_model_weight_id() {
+    let function = agl_assets::builtin_artifact_package("gemma4-e4b").unwrap();
+    let manifest = function
+        .files
+        .iter()
+        .find(|file| file.path == FUNCTION_FILE_NAME)
+        .unwrap();
+    let (front_matter, _) =
+        parse_function_document(std::str::from_utf8(manifest.bytes).unwrap()).unwrap();
+    let inference = function
+        .files
+        .iter()
+        .find(|file| file.path == "inference.toml")
+        .map(|file| std::str::from_utf8(file.bytes).unwrap())
+        .unwrap()
+        .replace("model_id = \"gemma4-e4b\"", "model_id = \"gemma4-e2b\"");
+    let locator = FunctionPackageLocation {
+        reference: "gemma4-e4b".to_owned(),
+        source: FunctionPackageSource::Builtin,
+        path: "builtin:function/gemma4-e4b/FUNCTION.md".into(),
+        root_dir: "builtin:function/gemma4-e4b".into(),
+    };
+    let error =
+        validate_function_model_contract(&front_matter, Some(&inference), &locator).unwrap_err();
+    assert!(error.to_string().contains("missing Model weight"));
+}
+
+#[test]
 fn rejects_function_body_in_manifest() {
     let root = std::env::temp_dir().join(format!("agl-function-body-{}", std::process::id()));
     let function_root = root.join("coding");

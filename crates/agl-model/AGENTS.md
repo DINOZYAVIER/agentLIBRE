@@ -1,4 +1,4 @@
-# agl-models
+# agl-model
 
 This crate owns model catalog, acquisition, install records, host-resource
 planning, and safe model lifecycle operations. It must not load llama.cpp,

@@ -119,7 +119,7 @@ impl InferencePresetRuntimeConfig {
         match self {
             Self::Fixed(runtime) => Ok(runtime.into_resolved(draft_model)),
             Self::Auto(_) => {
-                bail!("automatic inference presets require host-aware resolution by agl-models")
+                bail!("automatic inference presets require host-aware resolution by agl-model")
             }
         }
     }
