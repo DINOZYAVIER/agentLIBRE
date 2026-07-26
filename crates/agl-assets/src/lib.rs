@@ -27,16 +27,6 @@ impl BuiltinAsset {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BuiltinSkill {
-    pub id: &'static str,
-    pub pack: &'static str,
-    pub skill_md: &'static BuiltinAsset,
-    pub references: &'static [&'static BuiltinAsset],
-    pub assets: &'static [&'static BuiltinAsset],
-    pub tree_sha256: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinArtifactFile {
     pub path: &'static str,
     pub bytes: &'static [u8],
@@ -58,20 +48,10 @@ pub fn builtin_asset(id: &str) -> Option<&'static BuiltinAsset> {
     BUILTIN_ASSETS.iter().copied().find(|asset| asset.id == id)
 }
 
-pub fn builtin_skill(id: &str) -> Option<&'static BuiltinSkill> {
-    BUILTIN_SKILLS.iter().find(|skill| skill.id == id)
-}
-
 pub fn builtin_artifact_package(id: &str) -> Option<&'static BuiltinArtifactPackage> {
     BUILTIN_ARTIFACT_PACKAGES
         .iter()
         .find(|package| package.id == id)
-}
-
-pub fn builtin_skills_by_pack(pack: &str) -> impl Iterator<Item = &'static BuiltinSkill> + '_ {
-    BUILTIN_SKILLS
-        .iter()
-        .filter(move |skill| skill.pack == pack)
 }
 
 pub fn default_system_prompt() -> &'static BuiltinAsset {
@@ -150,11 +130,14 @@ mod tests {
     }
 
     #[test]
-    fn skill_tree_hashes_are_present() {
-        for skill in BUILTIN_SKILLS {
-            assert_eq!(skill.tree_sha256.len(), 64);
-            assert_eq!(skill.skill_md.kind, BuiltinAssetKind::Skill);
-            assert_eq!(skill.skill_md.id, skill.id);
+    fn skill_package_digests_are_present() {
+        for skill in BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .filter(|package| package.type_id == "skill")
+        {
+            assert_eq!(skill.digest.len(), "sha256:".len() + 64);
+            assert_eq!(skill.entrypoint, "SKILL.md");
+            assert!(skill.files.iter().any(|file| file.path == "SKILL.md"));
         }
     }
 
@@ -162,6 +145,7 @@ mod tests {
     fn builtin_functions_are_embedded_from_assets() {
         let functions = BUILTIN_ARTIFACT_PACKAGES
             .iter()
+            .filter(|package| package.type_id == "function")
             .map(|function| function.id)
             .collect::<Vec<_>>();
 
@@ -175,11 +159,14 @@ mod tests {
                 "gemma4-e4b"
             ]
         );
-        for function in BUILTIN_ARTIFACT_PACKAGES {
+        for function in BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .filter(|package| package.type_id == "function")
+        {
             assert_eq!(function.type_id, "function");
             assert_eq!(function.version, "1.0.0");
             assert_eq!(function.entrypoint, "FUNCTION.md");
-            assert_eq!(function.digest.len(), 64);
+            assert_eq!(function.digest.len(), "sha256:".len() + 64);
             assert!(function.files.iter().any(|file| file.path == "SYSTEM.md"));
             assert!(
                 function
@@ -192,7 +179,10 @@ mod tests {
 
     #[test]
     fn builtin_function_presets_use_model_ids_only() {
-        for function in BUILTIN_ARTIFACT_PACKAGES {
+        for function in BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .filter(|package| package.type_id == "function")
+        {
             let text = function
                 .files
                 .iter()
@@ -274,21 +264,21 @@ tool_call_format = "gemma_function_call"
 
     #[test]
     fn builtin_skills_are_embedded_from_core_repo_checkout() {
-        let skills = BUILTIN_SKILLS
+        let skills = BUILTIN_ARTIFACT_PACKAGES
             .iter()
+            .filter(|package| package.type_id == "skill")
             .map(|skill| skill.id)
             .collect::<Vec<_>>();
 
         assert_eq!(skills, vec!["process", "repo-status", "skill"]);
-        for skill in BUILTIN_SKILLS {
+        for skill in BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .filter(|package| package.type_id == "skill")
+        {
             assert!(
-                skill
-                    .skill_md
-                    .source_path
-                    .starts_with("assets/core-skills/"),
-                "{} must be embedded from assets/core-skills, got {}",
-                skill.id,
-                skill.skill_md.source_path
+                skill.files.iter().any(|file| file.path == "SKILL.md"),
+                "{} must include SKILL.md",
+                skill.id
             );
         }
     }
@@ -296,9 +286,14 @@ tool_call_format = "gemma_function_call"
     #[test]
     fn lookup_helpers_return_none_for_missing_ids() {
         assert!(builtin_asset("missing:asset").is_none());
-        assert!(builtin_skill("missing").is_none());
         assert!(builtin_artifact_package("missing").is_none());
-        assert_eq!(builtin_skills_by_pack("missing").count(), 0);
+        assert_eq!(
+            BUILTIN_ARTIFACT_PACKAGES
+                .iter()
+                .filter(|package| package.type_id == "skill" && package.id == "missing")
+                .count(),
+            0
+        );
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {

@@ -11,7 +11,6 @@ pub const SKILL_LIST_TOOL_ID: &str = "skill.list";
 pub const SKILL_INSPECT_TOOL_ID: &str = "skill.inspect";
 pub const SKILL_STATUS_TOOL_ID: &str = "skill.status";
 pub const SKILL_VERIFY_TOOL_ID: &str = "skill.verify";
-pub const SKILL_LOCK_TOOL_ID: &str = "skill.lock";
 pub const SKILL_TRUST_TOOL_ID: &str = "skill.trust";
 pub const SKILL_REVOKE_TOOL_ID: &str = "skill.revoke";
 
@@ -74,13 +73,6 @@ pub struct SkillVerifyArgs {}
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SkillLockArgs {
-    #[serde(default)]
-    pub dry_run: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SkillTrustArgs {
     #[schemars(length(min = 1))]
     pub name: String,
@@ -130,12 +122,6 @@ pub fn declaration() -> ProviderDeclaration {
         OperationKind::Read,
         [],
     ))
-    .with_action(action::<SkillLockArgs>(
-        SKILL_LOCK_TOOL_ID,
-        "Write or preview .agl/skills.lock for workspace skills.",
-        OperationKind::Admin,
-        [StateEffect::RepoWorkspace],
-    ))
     .with_action(action::<SkillTrustArgs>(
         SKILL_TRUST_TOOL_ID,
         "Approve local trust for one exact locked workspace skill identity.",
@@ -179,7 +165,7 @@ mod tests {
     fn all_skill_action_schemas_compile_and_reject_unknown_fields() {
         let declaration = declaration();
         declaration.validate().unwrap();
-        assert_eq!(declaration.actions.len(), 7);
+        assert_eq!(declaration.actions.len(), 6);
         for action in &declaration.actions {
             action.compile_schema().unwrap();
             assert_eq!(action.input_schema["additionalProperties"], false);
@@ -206,10 +192,6 @@ mod tests {
                 .state_effects
                 .clone()
         };
-        assert_eq!(
-            effects(SKILL_LOCK_TOOL_ID),
-            [StateEffect::RepoWorkspace].into_iter().collect()
-        );
         assert_eq!(
             effects(SKILL_TRUST_TOOL_ID),
             [StateEffect::SkillTrust].into_iter().collect()

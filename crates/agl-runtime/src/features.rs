@@ -108,12 +108,11 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
             title: "Skills",
             summary: "git-verified skills with local trust/revoke",
             read_only_actions: &["list", "inspect", "status", "verify"],
-            write_actions: &["lock", "trust", "revoke"],
+            write_actions: &["trust", "revoke"],
             commands: &[
                 "agl skill list",
                 "agl skill inspect",
                 "agl skill verify",
-                "agl skill lock",
                 "agl skill trust",
                 "agl skill revoke",
             ],

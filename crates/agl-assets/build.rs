@@ -44,21 +44,13 @@ struct Asset {
     sha256: String,
 }
 
-struct Skill {
+struct ArtifactPackage {
+    type_id: String,
     id: String,
-    pack: String,
-    skill_asset_index: usize,
-    reference_asset_indices: Vec<usize>,
-    asset_indices: Vec<usize>,
-    tree_sha256: String,
-}
-
-struct Function {
-    id: String,
-    function_asset_index: usize,
-    system_prompt_asset_index: usize,
-    inference_config_asset_index: usize,
-    tree_sha256: String,
+    version: String,
+    entrypoint: String,
+    files: Vec<(String, usize)>,
+    digest: String,
 }
 
 fn main() {
@@ -73,25 +65,23 @@ fn main() {
     let builtin_skills_root = assets_root.join(BUILTIN_CORE_SKILLS_DIR);
     let builtin_functions_root = assets_root.join("functions");
     let mut assets = Vec::new();
-    let mut skills = Vec::new();
-    let mut functions = Vec::new();
+    let mut packages = Vec::new();
 
     println!("cargo:rerun-if-changed={}", assets_root.display());
 
     add_system_prompt(&mut assets, repo_root, &assets_root);
     add_model_catalog(&mut assets, repo_root, &assets_root);
     add_model_benchmark_evidence(&mut assets, repo_root, &assets_root);
-    add_skills(&mut assets, &mut skills, repo_root, &builtin_skills_root);
+    add_skills(&mut assets, &mut packages, repo_root, &builtin_skills_root);
     add_functions(
         &mut assets,
-        &mut functions,
+        &mut packages,
         repo_root,
         &builtin_functions_root,
     );
     validate_unique_asset_ids(&assets);
-    validate_unique_skill_ids(&skills);
-    validate_unique_function_ids(&functions);
-    write_registry(&assets, &skills, &functions);
+    validate_unique_package_ids(&packages);
+    write_registry(&assets, &packages);
 }
 
 fn add_system_prompt(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Path) {
@@ -158,10 +148,11 @@ fn add_model_benchmark_evidence(assets: &mut Vec<Asset>, repo_root: &Path, asset
 
 fn add_skills(
     assets: &mut Vec<Asset>,
-    skills: &mut Vec<Skill>,
+    packages: &mut Vec<ArtifactPackage>,
     repo_root: &Path,
     skills_root: &Path,
 ) {
+    let package_count_before = packages.len();
     if !skills_root.is_dir() {
         panic!(
             "missing builtin core skills checkout {}; run `git submodule update --init assets/core-skills`",
@@ -229,23 +220,25 @@ fn add_skills(
                 );
             }
 
-            let tree_sha256 = skill_tree_hash(
+            let mut files = vec![("SKILL.md".to_string(), skill_asset_index)];
+            files.extend(package_resource_files(
                 assets,
-                skill_asset_index,
+                &skill_dir,
                 &reference_asset_indices,
-                &asset_indices,
-            );
-            skills.push(Skill {
+            ));
+            files.extend(package_resource_files(assets, &skill_dir, &asset_indices));
+            let digest = package_tree_hash(assets, &files);
+            packages.push(ArtifactPackage {
+                type_id: "skill".to_string(),
                 id,
-                pack: pack.to_string(),
-                skill_asset_index,
-                reference_asset_indices,
-                asset_indices,
-                tree_sha256,
+                version: "1.0.0".to_string(),
+                entrypoint: "SKILL.md".to_string(),
+                files,
+                digest,
             });
         }
     }
-    if skills.is_empty() {
+    if packages.len() == package_count_before {
         panic!(
             "builtin core skills checkout {} contains no skills",
             skills_root.display()
@@ -255,7 +248,7 @@ fn add_skills(
 
 fn add_functions(
     assets: &mut Vec<Asset>,
-    functions: &mut Vec<Function>,
+    packages: &mut Vec<ArtifactPackage>,
     repo_root: &Path,
     functions_root: &Path,
 ) {
@@ -327,18 +320,19 @@ fn add_functions(
             &inference_config,
         ));
 
-        let tree_sha256 = function_tree_hash(
-            assets,
-            function_asset_index,
-            system_prompt_asset_index,
-            inference_config_asset_index,
-        );
-        functions.push(Function {
+        let files = vec![
+            ("FUNCTION.md".to_string(), function_asset_index),
+            ("SYSTEM.md".to_string(), system_prompt_asset_index),
+            ("inference.toml".to_string(), inference_config_asset_index),
+        ];
+        let digest = package_tree_hash(assets, &files);
+        packages.push(ArtifactPackage {
+            type_id: "function".to_string(),
             id: id.to_string(),
-            function_asset_index,
-            system_prompt_asset_index,
-            inference_config_asset_index,
-            tree_sha256,
+            version: "1.0.0".to_string(),
+            entrypoint: "FUNCTION.md".to_string(),
+            files,
+            digest,
         });
     }
 }
@@ -389,42 +383,35 @@ fn asset(id: &str, kind: AssetKind, repo_root: &Path, path: &Path) -> Asset {
     }
 }
 
-fn skill_tree_hash(
+fn package_resource_files(
     assets: &[Asset],
-    skill_asset_index: usize,
-    reference_asset_indices: &[usize],
-    asset_indices: &[usize],
-) -> String {
-    let mut hasher = Sha256::new();
-    for index in std::iter::once(&skill_asset_index)
-        .chain(reference_asset_indices.iter())
-        .chain(asset_indices.iter())
-    {
-        let asset = &assets[*index];
-        hasher.update(asset.source_path.as_bytes());
-        hasher.update([0]);
-        hasher.update(asset.sha256.as_bytes());
-        hasher.update([0]);
-    }
-    hex(&hasher.finalize())
+    package_root: &Path,
+    indices: &[usize],
+) -> Vec<(String, usize)> {
+    indices
+        .iter()
+        .map(|index| {
+            let path = assets[*index]
+                .absolute_path
+                .strip_prefix(package_root)
+                .expect("package asset must be under package root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            (path, *index)
+        })
+        .collect()
 }
 
-fn function_tree_hash(
-    assets: &[Asset],
-    function_asset_index: usize,
-    system_prompt_asset_index: usize,
-    inference_config_asset_index: usize,
-) -> String {
+fn package_tree_hash(assets: &[Asset], files: &[(String, usize)]) -> String {
     let mut hasher = Sha256::new();
-    for index in [
-        function_asset_index,
-        system_prompt_asset_index,
-        inference_config_asset_index,
-    ] {
-        let asset = &assets[index];
-        hasher.update(asset.source_path.as_bytes());
+    for (path, index) in files {
+        let asset = &assets[*index];
+        hasher.update(path.as_bytes());
         hasher.update([0]);
-        hasher.update(asset.sha256.as_bytes());
+        let bytes = fs::read(&asset.absolute_path).unwrap_or_else(|err| {
+            panic!("failed to read {}: {err}", asset.absolute_path.display())
+        });
+        hasher.update(bytes);
         hasher.update([0]);
     }
     hex(&hasher.finalize())
@@ -508,25 +495,19 @@ fn validate_unique_asset_ids(assets: &[Asset]) {
     }
 }
 
-fn validate_unique_skill_ids(skills: &[Skill]) {
+fn validate_unique_package_ids(packages: &[ArtifactPackage]) {
     let mut ids = std::collections::BTreeSet::new();
-    for skill in skills {
-        if !ids.insert(skill.id.as_str()) {
-            panic!("duplicate builtin skill id {}", skill.id);
+    for package in packages {
+        if !ids.insert((package.type_id.as_str(), package.id.as_str())) {
+            panic!(
+                "duplicate builtin artifact package {}:{}",
+                package.type_id, package.id
+            );
         }
     }
 }
 
-fn validate_unique_function_ids(functions: &[Function]) {
-    let mut ids = std::collections::BTreeSet::new();
-    for function in functions {
-        if !ids.insert(function.id.as_str()) {
-            panic!("duplicate builtin function id {}", function.id);
-        }
-    }
-}
-
-fn write_registry(assets: &[Asset], skills: &[Skill], functions: &[Function]) {
+fn write_registry(assets: &[Asset], packages: &[ArtifactPackage]) {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set by Cargo"));
     let destination = out_dir.join("builtin_assets.rs");
     let mut output = String::new();
@@ -543,76 +524,41 @@ fn write_registry(assets: &[Asset], skills: &[Skill], functions: &[Function]) {
         ));
     }
 
-    for (index, skill) in skills.iter().enumerate() {
-        output.push_str(&format!(
-            "static SKILL_{index}_REFERENCES: &[&BuiltinAsset] = &[{}];\n",
-            asset_refs(&skill.reference_asset_indices)
-        ));
-        output.push_str(&format!(
-            "static SKILL_{index}_ASSETS: &[&BuiltinAsset] = &[{}];\n",
-            asset_refs(&skill.asset_indices)
-        ));
-    }
-
     output.push_str("pub static BUILTIN_ASSETS: &[&BuiltinAsset] = &[\n");
     for index in 0..assets.len() {
         output.push_str(&format!("    &ASSET_{index},\n"));
     }
     output.push_str("];\n");
 
-    output.push_str("pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[\n");
-    for (index, skill) in skills.iter().enumerate() {
+    for (index, package) in packages.iter().enumerate() {
         output.push_str(&format!(
-            "    BuiltinSkill {{ id: {}, pack: {}, skill_md: &ASSET_{}, references: SKILL_{}_REFERENCES, assets: SKILL_{}_ASSETS, tree_sha256: {} }},\n",
-            rust_string(&skill.id),
-            rust_string(&skill.pack),
-            skill.skill_asset_index,
-            index,
-            index,
-            rust_string(&skill.tree_sha256),
+            "static PACKAGE_{index}_FILES: &[BuiltinArtifactFile] = &[\n"
         ));
-    }
-    output.push_str("];\n");
-
-    for (index, function) in functions.iter().enumerate() {
-        output.push_str(&format!(
-            "static FUNCTION_{index}_FILES: &[BuiltinArtifactFile] = &[\n"
-        ));
-        output.push_str(&format!(
-            "    BuiltinArtifactFile {{ path: \"FUNCTION.md\", bytes: ASSET_{}.bytes }},\n",
-            function.function_asset_index
-        ));
-        output.push_str(&format!(
-            "    BuiltinArtifactFile {{ path: \"SYSTEM.md\", bytes: ASSET_{}.bytes }},\n",
-            function.system_prompt_asset_index
-        ));
-        output.push_str(&format!(
-            "    BuiltinArtifactFile {{ path: \"inference.toml\", bytes: ASSET_{}.bytes }},\n",
-            function.inference_config_asset_index
-        ));
+        for (path, asset_index) in &package.files {
+            output.push_str(&format!(
+                "    BuiltinArtifactFile {{ path: {}, bytes: ASSET_{}.bytes }},\n",
+                rust_string(path),
+                asset_index
+            ));
+        }
         output.push_str("];\n");
     }
 
     output.push_str("pub static BUILTIN_ARTIFACT_PACKAGES: &[BuiltinArtifactPackage] = &[\n");
-    for (index, function) in functions.iter().enumerate() {
+    for (index, package) in packages.iter().enumerate() {
         output.push_str(&format!(
-            "    BuiltinArtifactPackage {{ type_id: \"function\", id: {}, version: \"1.0.0\", entrypoint: \"FUNCTION.md\", files: FUNCTION_{index}_FILES, digest: \"sha256:{}\" }},\n",
-            rust_string(&function.id),
-            function.tree_sha256,
+            "    BuiltinArtifactPackage {{ type_id: {}, id: {}, version: {}, entrypoint: {}, files: PACKAGE_{index}_FILES, digest: \"sha256:{}\" }},\n",
+            rust_string(&package.type_id),
+            rust_string(&package.id),
+            rust_string(&package.version),
+            rust_string(&package.entrypoint),
+            package.digest,
         ));
     }
     output.push_str("];\n");
 
     fs::write(&destination, output)
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", destination.display()));
-}
-
-fn asset_refs(indices: &[usize]) -> String {
-    indices
-        .iter()
-        .map(|index| format!("&ASSET_{index}"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn rust_string(value: &str) -> String {

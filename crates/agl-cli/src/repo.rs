@@ -393,23 +393,33 @@ fn print_artifact_lock_report(report: &ArtifactLockReport) {
     println!("dry_run={}", report.dry_run);
     println!("lock.wrote={}", report.wrote);
     println!("lock.version={}", report.lock.version);
-    println!("lock.locked_at_unix_ms={}", report.lock.locked_at_unix_ms);
-    for artifact in report.lock.artifacts.values() {
+    for (name, component) in &report.lock.components {
         println!(
-            "lock.artifact id={} storage={:?} path={} kind={:?} access={:?} definition_hash={}",
-            artifact.id,
-            artifact.storage,
-            artifact.path.display(),
-            artifact.kind,
-            artifact.access,
-            artifact.definition_hash
+            "lock.component name={} kind={:?} path={} definition_digest={:?}",
+            name,
+            component.kind,
+            component
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            component.definition_digest
         );
-        if let Some(commit) = &artifact.commit {
-            println!("lock.artifact.commit id={} value={commit}", artifact.id);
+        if let Some(commit) = &component.commit {
+            println!("lock.component.commit name={} value={commit}", name);
         }
-        if let Some(tree) = &artifact.tree {
-            println!("lock.artifact.tree id={} value={tree}", artifact.id);
+        if let Some(tree) = &component.tree {
+            println!("lock.component.tree name={} value={tree}", name);
         }
+    }
+    for package in report.lock.packages.values() {
+        println!(
+            "lock.package key={} digest={} source={}:{:?}",
+            package.key(),
+            package.package_digest,
+            package.source_id,
+            package.source_tier
+        );
     }
     for warning in &report.warnings {
         println!("warning={warning}");
@@ -467,9 +477,9 @@ fn print_repo_export_profile_report(report: &RepoExportProfileReport) {
         "profile.policy.trust.import_local_trust={}",
         report.profile.policy.trust.import_local_trust
     );
-    for (name, artifact) in &report.profile.artifacts {
-        println!("profile.artifact.name={name}");
-        println!("profile.artifact.path={}", artifact.path.display());
+    for (name, component) in &report.profile.components {
+        println!("profile.component.name={name}");
+        println!("profile.component.path={}", component.path.display());
     }
 }
 

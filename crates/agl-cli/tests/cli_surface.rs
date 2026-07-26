@@ -24,7 +24,7 @@ fn agl_help_lists_public_commands() {
         &stdout,
         ".agl/workspace.toml lists the repo's agentLIBRE folders",
     );
-    assert_contains(&stdout, "Workspace skills need .agl/skills.lock");
+    assert_contains(&stdout, "Workspace skills need .agl/artifact-lock.toml");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
     assert_contains(&stdout, "--resume");
@@ -119,7 +119,6 @@ fn command_help_exits_successfully_for_public_commands() {
         &["skill", "status", "--help"][..],
         &["skill", "verify", "--help"][..],
         &["skill", "sync-folders", "--help"][..],
-        &["skill", "lock", "--help"][..],
         &["skill", "trust", "--help"][..],
         &["skill", "revoke", "--help"][..],
         &["cron", "--help"][..],
@@ -975,12 +974,15 @@ fn skill_help_explains_workspace_skill_use() {
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "Skill use:");
-    assert_contains(&stdout, "SKILL.md lists the skill name");
+    assert_contains(&stdout, "SKILL.md embeds the common package identity");
     assert_contains(
         &stdout,
-        ".agl/skills.lock records the current workspace skill git commit",
+        ".agl/artifact-lock.toml records the exact workspace package identity and digest",
     );
-    assert_contains(&stdout, "state/skill-trust.toml approves that exact commit");
+    assert_contains(
+        &stdout,
+        "state/skill-trust.toml approves that exact identity and digest",
+    );
 }
 
 #[test]
@@ -1191,7 +1193,7 @@ name = "portable-repo-workflow"
 [components.skills]
 kind = "git"
 path = ".agl/skills"
-url = "ssh://git@example.invalid/agentlibre/agl-skills.git"
+url = "ssh://git@example.invalid/agentlibre/agl-skill.git"
 rev = "v0.2.0"
 required = true
 access = "read"
@@ -1407,31 +1409,22 @@ fn skill_verify_is_neutral_when_workspace_skills_are_not_configured() {
 }
 
 #[test]
-fn skill_lock_refuses_plain_workspace_skills_directory() {
-    let repo = TempRepo::new("skill-lock-plain-dir");
-    let init = run_agl_in(repo.path(), &["repo", "init"]);
-    assert_success(&init);
-    write_workspace_skill(repo.path(), "repo-change");
-
-    let output = run_agl_in(repo.path(), &["skill", "lock"]);
-
-    assert_failure(&output);
-    let stdout = stdout(&output);
-    assert_contains(&stdout, "state=invalid");
-    assert_contains(&stdout, "error=skills_component_not_usable");
-    assert_contains(&stderr(&output), "workspace skill lock failed");
-}
-
-#[test]
 fn skill_verify_reports_trusted_workspace_skill_as_usable() {
     let (repo, _source, home) = submodule_workspace_with_skill(
         "skill-verify-trust",
         "repo-change",
         r#"---
-name: repo-change
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-change
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1446,7 +1439,10 @@ Body.
 "#,
     );
     let home_arg = home.path_string();
-    let lock = run_agl_in(repo.path(), &["--home", &home_arg, "skill", "lock"]);
+    let lock = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "repo", "component", "lock"],
+    );
     assert_success(&lock);
     let trust = run_agl_in(
         repo.path(),
@@ -1476,10 +1472,17 @@ fn skill_status_groups_invalid_duplicate_folder_create_diagnostic() {
         "skill-status-duplicate-create",
         "bad-dupe",
         r#"---
-name: bad-dupe
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-dupe
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad duplicate folder create rule.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -1525,10 +1528,17 @@ fn skill_status_json_groups_invalid_artifact_path_diagnostic() {
         "skill-status-invalid-path",
         "bad-path",
         r#"---
-name: bad-path
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: bad-path
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Bad folder path.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate
@@ -2387,10 +2397,17 @@ access = "read"
         skill_dir.join("SKILL.md"),
         format!(
             r#"---
-name: {name}
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: {name}
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Review repository changes.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate

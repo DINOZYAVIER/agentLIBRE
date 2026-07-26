@@ -1727,7 +1727,7 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
     let skill_id = SkillId::new("unknown-tool").unwrap();
     let mut registry = test_skill_registry();
     registry
-        .register(agl_skills::RegisteredSkill::trusted_builtin(test_skill(
+        .register(agl_skill::RegisteredSkill::trusted_builtin(test_skill(
             skill_id.as_str(),
             &["core:repo_path.validate"],
             &["unknown.capability"],
@@ -1826,8 +1826,8 @@ fn full_tool_catalog() -> ToolCatalog {
     catalog
 }
 
-fn test_skill_registry() -> agl_skills::SkillRegistry {
-    let mut registry = agl_skills::builtin_registry().unwrap();
+fn test_skill_registry() -> agl_skill::SkillRegistry {
+    let mut registry = agl_skill::builtin_registry().unwrap();
     for skill in [
         test_skill(
             "task-spec",
@@ -1865,7 +1865,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
             ],
             &["cron.add", "matrix.outbox.enqueue"],
             &["matrix.outbox.deliver"],
-            vec![agl_skills::SkillPermissionRequestTemplate {
+            vec![agl_skill::SkillPermissionRequestTemplate {
                 id: "schedule-matrix-cron".to_string(),
                 tools: tool_ids(&["cron.add", "matrix.outbox.enqueue"]),
                 max_operation_kind: Some(OperationKind::Write),
@@ -1876,7 +1876,7 @@ fn test_skill_registry() -> agl_skills::SkillRegistry {
         ),
     ] {
         registry
-            .register(agl_skills::RegisteredSkill::trusted_builtin(skill))
+            .register(agl_skill::RegisteredSkill::trusted_builtin(skill))
             .unwrap();
     }
     registry
@@ -1888,23 +1888,24 @@ fn test_skill(
     allowed_tools: &[&str],
     requestable_tools: &[&str],
     denied_tools: &[&str],
-    permission_request_templates: Vec<agl_skills::SkillPermissionRequestTemplate>,
-) -> agl_skills::SkillHarness {
-    agl_skills::SkillHarness {
+    permission_request_templates: Vec<agl_skill::SkillPermissionRequestTemplate>,
+) -> agl_skill::SkillHarness {
+    agl_skill::SkillHarness {
+        artifact: test_skill_artifact(id),
         id: SkillId::new(id).unwrap(),
         name: id.to_string(),
         description: format!("Test-only {id} skill."),
-        version: 1,
-        source: agl_skills::SkillSource::Core,
+        version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+        source: agl_skill::SkillSource::Core,
         pack: "test".to_string(),
         required_hooks: hook_ids(required_hooks),
         allowed_tools: tool_ids(allowed_tools),
         requestable_tools: tool_ids(requestable_tools),
         denied_tools: tool_ids(denied_tools),
         permission_request_templates,
-        permissions: agl_skills::SkillPermissions::default(),
+        permissions: agl_skill::SkillPermissions::default(),
         context_budget_tokens: 512,
-        reference_policy: agl_skills::SkillReferencePolicy {
+        reference_policy: agl_skill::SkillReferencePolicy {
             include: Vec::new(),
         },
         references: Vec::new(),
@@ -1915,6 +1916,22 @@ fn test_skill(
         manifest_sha256: "0".repeat(64),
         tree_sha256: "1".repeat(64),
     }
+}
+
+fn test_skill_artifact(id: &str) -> agl_artifact::ArtifactEnvelope {
+    agl_artifact::ArtifactEnvelope::new(
+        agl_artifact::ArtifactTypeId::skill(),
+        agl_artifact::ArtifactPackageId::new(id).unwrap(),
+        agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+        agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+        agl_artifact::AglCompatibility::new(
+            agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+            [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 fn hook_ids(values: &[&str]) -> Vec<HookId> {

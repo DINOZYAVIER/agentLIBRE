@@ -1,8 +1,15 @@
 ---
-name: repo-change
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: repo-change
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
 description: Synthetic workspace skill used to validate repo workflow pack parsing.
-version: 1
-source: local
 pack: agl
 required_hooks:
   - core:repo_path.validate

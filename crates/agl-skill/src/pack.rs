@@ -1,10 +1,16 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use agl_artifact::{
+    ArtifactAdapter, ArtifactCandidate, ArtifactPackageRef, ArtifactResolver, ArtifactSourceId,
+    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
+    StaticArtifactSource,
+};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::SkillHarness;
+use crate::{SkillArtifactAdapter, SkillHarness, SkillSource, skill_adapter_registry};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,7 +52,11 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
     validate_manifest_shape(&manifest)?;
 
     let mut seen = BTreeSet::new();
-    let mut skills = Vec::with_capacity(manifest.skills.len());
+    let mut entries = Vec::with_capacity(manifest.skills.len());
+    let adapter = SkillArtifactAdapter::default();
+    let adapter_registry = skill_adapter_registry()?;
+    let source_id: ArtifactSourceId = "skill-pack".parse()?;
+    let skill_type: ArtifactTypeId = "skill".parse()?;
     for entry in &manifest.skills {
         validate_relative_path(&entry.path)
             .with_context(|| format!("invalid skill path for {}", entry.name))?;
@@ -54,23 +64,60 @@ pub fn validate_skill_pack(root: impl AsRef<Path>) -> Result<ValidatedSkillPack>
             bail!("duplicate skill in pack manifest: {}", entry.name);
         }
 
-        let harness =
-            SkillHarness::parse_workspace_dir(root.join(&entry.path), root, "pack-source")
-                .with_context(|| format!("failed to parse pack skill {}", entry.name))?;
-        if harness.name != entry.name {
+        let view = DirectoryPackageView::new(root.join(&entry.path))
+            .with_context(|| format!("failed to open pack skill {}", entry.name))?;
+        let envelope = adapter
+            .extract_envelope(&view)
+            .with_context(|| format!("failed to parse pack skill {}", entry.name))?;
+        if envelope.id.as_str() != entry.name {
             bail!(
                 "pack skill name mismatch at {}: manifest={}, skill={}",
                 entry.path.display(),
                 entry.name,
-                harness.name
+                envelope.id
             );
         }
-        if !harness.source.is_external_skill_source() {
-            bail!(
-                "pack skill must use source=core, source=community, or source=local: {}",
-                entry.name
-            );
-        }
+        entries.push((entry, envelope, view));
+    }
+
+    let candidates = entries
+        .iter()
+        .map(|(_, envelope, view)| {
+            ArtifactCandidate::new(
+                skill_type.clone(),
+                envelope.id.clone(),
+                envelope.version.clone(),
+                source_id.clone(),
+                ArtifactSourceTier::Explicit,
+                ArtifactSourceKind::Directory,
+                Arc::new(view.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let source = StaticArtifactSource::new(
+        source_id,
+        ArtifactSourceTier::Explicit,
+        ArtifactSourceKind::Directory,
+        candidates,
+    )?;
+    let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![Arc::new(source)]);
+    let mut skills = Vec::with_capacity(entries.len());
+    for (entry, envelope, _) in entries {
+        let root_ref = ArtifactPackageRef::parse(&format!("skill:{}@*", envelope.id))?;
+        let graph = resolver.resolve_and_validate(&root_ref, None)?;
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved pack skill root is missing")?;
+        let payload = adapter_registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        let mut harness = *payload
+            .downcast::<SkillHarness>()
+            .map_err(|_| anyhow::anyhow!("skill adapter returned an invalid payload"))?;
+        harness.source = SkillSource::Local;
+        harness.tree_sha256 = node.package_digest.to_string();
+        harness.source_path = entry.path.join("SKILL.md").display().to_string();
         skills.push(harness);
     }
 
