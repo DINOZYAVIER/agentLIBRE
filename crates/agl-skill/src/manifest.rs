@@ -6,7 +6,6 @@ use std::str;
 use agl_artifact::{
     ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
 };
-use agl_assets::BuiltinArtifactPackage;
 use agl_capabilities::{CapabilityId, HookId, OperationKind, SkillId, StateEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,42 +123,6 @@ pub enum SkillArtifactAccess {
 }
 
 impl SkillHarness {
-    pub fn parse_builtin(
-        skill: &'static BuiltinArtifactPackage,
-    ) -> Result<Self, SkillManifestError> {
-        let manifest = skill
-            .files
-            .iter()
-            .find(|file| file.path == skill.entrypoint)
-            .ok_or_else(|| SkillManifestError::MissingReference {
-                path: skill.entrypoint.to_string(),
-            })?;
-        let text = str::from_utf8(manifest.bytes).map_err(|_| SkillManifestError::InvalidUtf8 {
-            source_path: format!("builtin:{}/{}", skill.id, skill.entrypoint),
-        })?;
-        let references = skill
-            .files
-            .iter()
-            .filter(|file| file.path.starts_with("references/"))
-            .collect::<Vec<_>>();
-        parse_skill_text(
-            skill.id,
-            Some("agl"),
-            &format!("builtin:{}/{}", skill.id, skill.entrypoint),
-            manifest.bytes,
-            &references
-                .iter()
-                .map(|file| SkillPackageFile {
-                    path: file.path,
-                    bytes: file.bytes,
-                })
-                .collect::<Vec<_>>(),
-            skill.digest,
-            SkillSource::Core,
-            text,
-        )
-    }
-
     pub fn parse_package_view(
         package: &dyn ArtifactPackageView,
         package_id: &str,
@@ -1053,98 +1016,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    fn builtin_skill_package(id: &str) -> Option<&'static agl_assets::BuiltinArtifactPackage> {
-        agl_assets::BUILTIN_ARTIFACT_PACKAGES
-            .iter()
-            .find(|package| package.type_id == "skill" && package.id == id)
-    }
-
     use super::*;
-
-    #[test]
-    fn parses_builtin_repo_status_skill() {
-        let skill =
-            SkillHarness::parse_builtin(builtin_skill_package("repo-status").unwrap()).unwrap();
-
-        assert_eq!(skill.id.as_str(), "repo-status");
-        assert_eq!(skill.source, SkillSource::Core);
-        assert_eq!(skill.pack, "agl");
-        assert_eq!(
-            skill
-                .required_hooks
-                .iter()
-                .map(|hook| hook.as_str())
-                .collect::<Vec<_>>(),
-            vec!["core:repo_path.validate", "core:verification.validate"]
-        );
-        assert_eq!(
-            skill
-                .allowed_tools
-                .iter()
-                .map(|tool| tool.as_str())
-                .collect::<Vec<_>>(),
-            vec!["fs.list", "fs.read", "fs.search", "repo.status"]
-        );
-        assert!(skill.requestable_tools.is_empty());
-        assert!(skill.denied_tools.is_empty());
-        assert!(skill.permission_request_templates.is_empty());
-        assert!(skill.references.is_empty());
-        assert_eq!(skill.tree_sha256.len(), "sha256:".len() + 64);
-        assert!(skill.body.contains("repository state picture"));
-    }
-
-    #[test]
-    fn parses_builtin_skill_authoring_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill_package("skill").unwrap()).unwrap();
-
-        assert_eq!(skill.id.as_str(), "skill");
-        assert_eq!(skill.source, SkillSource::Core);
-        assert_eq!(skill.pack, "agl");
-        assert_eq!(
-            skill
-                .required_hooks
-                .iter()
-                .map(|hook| hook.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "core:repo_path.validate",
-                "core:secret_scan.validate",
-                "core:skill_manifest.validate"
-            ]
-        );
-        assert_eq!(
-            skill
-                .allowed_tools
-                .iter()
-                .map(|tool| tool.as_str())
-                .collect::<Vec<_>>(),
-            vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
-        );
-        assert!(skill.references.is_empty());
-        assert!(skill.body.contains("runtime skills"));
-    }
-
-    #[test]
-    fn parses_builtin_process_skill_without_required_hooks() {
-        let skill = SkillHarness::parse_builtin(builtin_skill_package("process").unwrap()).unwrap();
-
-        assert_eq!(skill.id.as_str(), "process");
-        assert!(skill.required_hooks.is_empty());
-        assert!(
-            skill
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == "process.exec")
-        );
-    }
-
-    #[test]
-    fn non_core_skills_are_not_embedded() {
-        assert!(builtin_skill_package("task-spec").is_none());
-        assert!(builtin_skill_package("tool-smoke").is_none());
-        assert!(builtin_skill_package("repo-review").is_none());
-        assert!(builtin_skill_package("change").is_none());
-    }
 
     #[test]
     fn frontmatter_rejects_unknown_fields() {

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use agl_artifact::{ArtifactPackageRef, ArtifactResolver};
+use agl_artifact::{ArtifactPackageRef, ArtifactResolver, ArtifactTypeId};
 use agl_capabilities::{CapabilityId, HookId, SkillId};
 use agl_tools::{ToolCatalog, ToolCatalogError};
 
@@ -84,12 +84,13 @@ impl SkillRegistry {
             .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
         let source = builtin_source()
             .map_err(|error| SkillRegistryError::ArtifactMessage(error.to_string()))?;
+        let skill_type: ArtifactTypeId = "skill".parse().map_err(SkillRegistryError::Artifact)?;
+        let candidates = source
+            .candidates(&skill_type)
+            .map_err(SkillRegistryError::Artifact)?;
         let resolver = ArtifactResolver::new(adapter_registry.clone(), vec![source]);
-        for skill in agl_assets::BUILTIN_ARTIFACT_PACKAGES
-            .iter()
-            .filter(|package| package.type_id == "skill")
-        {
-            let root = ArtifactPackageRef::parse(&format!("skill:{}@*", skill.id))
+        for candidate in candidates {
+            let root = ArtifactPackageRef::parse(&format!("skill:{}@*", candidate.package_id))
                 .map_err(SkillRegistryError::Artifact)?;
             let graph = resolver
                 .resolve_and_validate(&root, None)
