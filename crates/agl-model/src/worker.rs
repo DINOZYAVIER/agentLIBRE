@@ -2214,8 +2214,11 @@ mod tests {
 
     #[test]
     fn package_request_contains_all_required_artifacts() {
-        let catalog = crate::ModelCatalog::builtin().unwrap();
-        let request = ModelDownloadRequest::for_package(catalog.default_package(), true);
+        let catalog = crate::ModelCatalog::from_builtin_resolved().unwrap();
+        let package = catalog
+            .package(&crate::ModelPackageId::new("gemma4-e4b").unwrap())
+            .unwrap();
+        let request = ModelDownloadRequest::for_package(package, true);
         assert_eq!(request.artifacts.len(), 2);
         assert!(request.offline);
     }

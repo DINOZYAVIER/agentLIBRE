@@ -1,57 +1,12 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::path::{Component, Path};
-use std::str::FromStr;
 
-use agl_config::{InferencePresetRuntimeConfig, ModelId};
+use agl_artifact::ArtifactPackageId;
+use agl_config::ModelId;
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
-#[serde(transparent)]
-pub struct ModelPackageId(String);
-
-impl ModelPackageId {
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        ensure!(!value.is_empty(), "model package id cannot be empty");
-        ensure!(
-            value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
-            "model package id `{value}` must use lowercase ASCII, digits, or hyphens"
-        );
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ModelPackageId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl FromStr for ModelPackageId {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Self::new(value)
-    }
-}
-
-impl<'de> Deserialize<'de> for ModelPackageId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+pub type ModelPackageId = ArtifactPackageId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -112,8 +67,6 @@ pub struct CatalogRuntimeProfile {
 pub struct ModelPackage {
     pub id: ModelPackageId,
     pub display_name: String,
-    pub function_id: String,
-    pub default: bool,
     pub capabilities: Vec<CatalogCapability>,
     pub license: String,
     pub license_url: String,
@@ -145,51 +98,27 @@ impl ModelPackage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCatalog {
-    pub version: u32,
     pub packages: Vec<ModelPackage>,
 }
 
 impl ModelCatalog {
-    pub fn builtin() -> Result<Self> {
-        Self::from_toml(agl_assets::model_catalog_text())
-            .context("embedded model catalog is invalid")
-    }
-
-    pub fn from_toml(text: &str) -> Result<Self> {
-        let catalog: Self = toml::from_str(text).context("failed to parse model catalog")?;
+    pub fn from_builtin_resolved() -> Result<Self> {
+        let packages = crate::adapter::resolved_builtin_model_packages()?;
+        let catalog = Self { packages };
         catalog.validate()?;
         Ok(catalog)
     }
 
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            self.version == 1,
-            "unsupported model catalog version {}",
-            self.version
-        );
         ensure!(!self.packages.is_empty(), "model catalog has no packages");
-        ensure!(
-            self.packages
-                .iter()
-                .filter(|package| package.default)
-                .count()
-                == 1,
-            "model catalog must contain exactly one default package"
-        );
 
         let mut package_ids = BTreeSet::new();
-        let mut function_ids = BTreeSet::new();
         let mut model_ids = BTreeSet::new();
         for package in &self.packages {
             ensure!(
                 package_ids.insert(package.id.clone()),
                 "duplicate model package id `{}`",
                 package.id
-            );
-            ensure!(
-                function_ids.insert(package.function_id.as_str()),
-                "duplicate model package function id `{}`",
-                package.function_id
             );
             validate_package(package)?;
             for artifact in &package.artifacts {
@@ -201,13 +130,6 @@ impl ModelCatalog {
             }
         }
         Ok(())
-    }
-
-    pub fn default_package(&self) -> &ModelPackage {
-        self.packages
-            .iter()
-            .find(|package| package.default)
-            .expect("validated model catalog has a default")
     }
 
     pub fn package(&self, id: &ModelPackageId) -> Option<&ModelPackage> {
@@ -225,11 +147,6 @@ fn validate_package(package: &ModelPackage) -> Result<()> {
     ensure!(
         !package.display_name.trim().is_empty(),
         "package `{}` display_name cannot be empty",
-        package.id
-    );
-    ensure!(
-        package.function_id == package.id.as_str(),
-        "package `{}` must map to matching function id",
         package.id
     );
     let Some((owner, repo)) = package.repository.split_once('/') else {
@@ -346,8 +263,7 @@ fn validate_package(package: &ModelPackage) -> Result<()> {
             artifact.filename
         );
     }
-    validate_profiles(package)?;
-    validate_function_contract(package)
+    validate_profiles(package)
 }
 
 fn validate_profiles(package: &ModelPackage) -> Result<()> {
@@ -377,13 +293,6 @@ fn validate_profiles(package: &ModelPackage) -> Result<()> {
             "package `{}` profile `{}` has no benchmark evidence",
             package.id,
             profile.id
-        );
-        ensure!(
-            agl_assets::model_benchmark_evidence(&profile.benchmark_evidence).is_some(),
-            "package `{}` profile `{}` references missing embedded benchmark evidence `{}`",
-            package.id,
-            profile.id,
-            profile.benchmark_evidence
         );
         ensure!(
             profile.required_total_ram_bytes > 0
@@ -460,77 +369,16 @@ fn is_canonical_pci_id(value: &str) -> bool {
         })
 }
 
-fn validate_function_contract(package: &ModelPackage) -> Result<()> {
-    let function =
-        agl_assets::builtin_artifact_package(&package.function_id).with_context(|| {
-            format!(
-                "package `{}` references missing builtin function `{}`",
-                package.id, package.function_id
-            )
-        })?;
-    let inference = function
-        .files
-        .iter()
-        .find(|file| file.path == "inference.toml")
-        .context("builtin function inference config is missing")?;
-    let inference = std::str::from_utf8(inference.bytes)
-        .context("builtin function inference config is not UTF-8")?;
-    let preset = agl_config::load_inference_preset_from_str(&package.function_id, inference)
-        .with_context(|| {
-            format!(
-                "package `{}` function inference preset is invalid",
-                package.id
-            )
-        })?;
-    ensure!(
-        matches!(preset.runtime, InferencePresetRuntimeConfig::Auto(_)),
-        "package `{}` function must use automatic runtime planning",
-        package.id
-    );
-    let policy = preset
-        .runtime
-        .auto_policy()
-        .expect("automatic runtime was checked above");
-    for profile in &package.profiles {
-        ensure!(
-            profile.context_tokens <= policy.max_context_tokens,
-            "package `{}` profile `{}` context {} exceeds function ceiling {}",
-            package.id,
-            profile.id,
-            profile.context_tokens,
-            policy.max_context_tokens
-        );
-    }
-    let main = package
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.role == ModelArtifactRole::Main)
-        .expect("package main artifact was validated above");
-    ensure!(
-        preset.backend.model_id == main.model_id,
-        "package `{}` main model id does not match its builtin function",
-        package.id
-    );
-    let projector = package
-        .required_artifacts()
-        .find(|artifact| artifact.role == ModelArtifactRole::Projector)
-        .map(|artifact| &artifact.model_id);
-    ensure!(
-        preset.backend.multimodal_projector_id.as_ref() == projector,
-        "package `{}` projector id does not match its builtin function",
-        package.id
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn embedded_catalog_contains_pinned_default_and_required_projector() {
-        let catalog = ModelCatalog::builtin().unwrap();
-        let package = catalog.default_package();
+        let catalog = ModelCatalog::from_builtin_resolved().unwrap();
+        let package = catalog
+            .package(&ModelPackageId::new("gemma4-e4b").unwrap())
+            .unwrap();
         assert_eq!(package.id.as_str(), "gemma4-e4b");
         assert_eq!(package.revision.len(), 40);
         assert_eq!(package.required_artifacts().count(), 2);
@@ -549,40 +397,36 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejects_function_model_mismatch_and_missing_profiles() {
-        let mut catalog = ModelCatalog::builtin().unwrap();
-        catalog.packages[0].artifacts[0].model_id = ModelId::new("wrong-model").unwrap();
-        assert!(catalog.validate().is_err());
-
-        let mut catalog = ModelCatalog::builtin().unwrap();
+    fn catalog_rejects_missing_profiles() {
+        let mut catalog = ModelCatalog::from_builtin_resolved().unwrap();
         catalog.packages[0].profiles.clear();
         assert!(catalog.validate().is_err());
     }
 
     #[test]
     fn catalog_rejects_automatic_profiles_below_32k() {
-        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut catalog = ModelCatalog::from_builtin_resolved().unwrap();
         catalog.packages[0].profiles[0].context_tokens = agl_config::MIN_AUTO_CONTEXT_TOKENS - 1;
         let error = catalog.validate().unwrap_err();
         assert!(format!("{error:#}").contains("below the supported automatic floor 32768"));
     }
 
     #[test]
-    fn catalog_rejects_profiles_above_the_function_ceiling() {
-        let mut catalog = ModelCatalog::builtin().unwrap();
+    fn catalog_rejects_profiles_below_the_runtime_floor() {
+        let mut catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let e2b = catalog
             .packages
             .iter_mut()
             .find(|package| package.id.as_str() == "gemma4-e2b")
             .unwrap();
-        e2b.profiles[0].context_tokens = 65_536;
+        e2b.profiles[0].context_tokens = agl_config::MIN_AUTO_CONTEXT_TOKENS - 1;
         let error = catalog.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("exceeds function ceiling 32768"));
+        assert!(format!("{error:#}").contains("below the supported automatic floor 32768"));
     }
 
     #[test]
     fn catalog_rejects_gpu_profiles_without_exact_pci_identity() {
-        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let gpu = catalog.packages[0]
             .profiles
             .iter_mut()
@@ -595,8 +439,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_catalog_contains_five_canonical_function_owners() {
-        let catalog = ModelCatalog::builtin().unwrap();
+    fn builtin_catalog_contains_five_independent_packages() {
+        let catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let package_ids = catalog
             .packages
             .iter()
@@ -613,27 +457,17 @@ mod tests {
             ])
         );
         assert_eq!(catalog.packages.len(), 5);
-        assert_eq!(
-            catalog
-                .packages
-                .iter()
-                .filter(|package| package.default)
-                .map(|package| package.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["gemma4-e4b"]
-        );
         assert!(catalog.packages.iter().all(|package| {
-            package.id.as_str() == package.function_id
-                && package
-                    .artifacts
-                    .iter()
-                    .any(|artifact| artifact.model_id.as_str() == package.id.as_str())
+            package
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.model_id.as_str() == package.id.as_str())
         }));
     }
 
     #[test]
     fn official_e2b_and_31b_artifact_pins_are_exact() {
-        let catalog = ModelCatalog::builtin().unwrap();
+        let catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let expected = [
             (
                 "gemma4-e2b",
@@ -676,7 +510,7 @@ mod tests {
 
     #[test]
     fn official_e2b_and_31b_cannot_be_cross_bound() {
-        let mut catalog = ModelCatalog::builtin().unwrap();
+        let mut catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let e2b_index = catalog
             .packages
             .iter()
@@ -688,19 +522,15 @@ mod tests {
             .position(|package| package.id.as_str() == "gemma4-31b")
             .unwrap();
         let e2b_model = catalog.packages[e2b_index].artifacts[0].model_id.clone();
-        let thirty_one_model = catalog.packages[thirty_one_index].artifacts[0]
-            .model_id
-            .clone();
-        catalog.packages[e2b_index].artifacts[0].model_id = thirty_one_model;
         catalog.packages[thirty_one_index].artifacts[0].model_id = e2b_model;
 
         let error = catalog.validate().unwrap_err();
-        assert!(format!("{error:#}").contains("main model id does not match"));
+        assert!(format!("{error:#}").contains("duplicate logical model id"));
     }
 
     #[test]
     fn builtin_profiles_match_five_function_cpu_and_gpu_matrix() {
-        let catalog = ModelCatalog::builtin().unwrap();
+        let catalog = ModelCatalog::from_builtin_resolved().unwrap();
         let expected = [
             (
                 "gemma4-e2b",
@@ -770,7 +600,7 @@ mod tests {
             assert_eq!(gpu.threads, 8);
             assert_eq!(
                 gpu.benchmark_evidence,
-                "model-benchmark:20260723-five-gemma4-rx7900xtx"
+                "evidence/20260723-five-gemma4-rx7900xtx.md"
             );
         }
     }

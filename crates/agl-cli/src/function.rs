@@ -222,7 +222,7 @@ fn doctor_timeout(
             agl_config::load_inference_preset_from_str("function doctor inference.toml", toml).ok()
         })
         .and_then(|preset| {
-            agl_model::ModelCatalog::builtin()
+            agl_model::ModelCatalog::from_builtin_resolved()
                 .ok()?
                 .package_for_model(&preset.backend.model_id)
                 .and_then(|package| {

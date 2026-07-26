@@ -223,7 +223,7 @@ impl InferenceSession {
             })?;
             match &bound.runtime {
                 agl_config::InferencePresetRuntimeConfig::Auto(_) => {
-                    let catalog = ModelCatalog::builtin()?;
+                    let catalog = ModelCatalog::from_builtin_resolved()?;
                     let package = catalog
                         .package_for_model(&bound.backend.model_id)
                         .with_context(|| {

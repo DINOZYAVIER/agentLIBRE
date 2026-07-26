@@ -10,8 +10,6 @@ const BUILTIN_CORE_SKILLS_DIR: &str = "core-skills";
 #[derive(Clone, Copy)]
 enum AssetKind {
     SystemPrompt,
-    ModelCatalog,
-    ModelBenchmarkEvidence,
     ModelDescriptor,
     ModelEvidence,
     Skill,
@@ -26,8 +24,6 @@ impl AssetKind {
     fn rust_variant(self) -> &'static str {
         match self {
             Self::SystemPrompt => "BuiltinAssetKind::SystemPrompt",
-            Self::ModelCatalog => "BuiltinAssetKind::ModelCatalog",
-            Self::ModelBenchmarkEvidence => "BuiltinAssetKind::ModelBenchmarkEvidence",
             Self::ModelDescriptor => "BuiltinAssetKind::ModelDescriptor",
             Self::ModelEvidence => "BuiltinAssetKind::ModelEvidence",
             Self::Skill => "BuiltinAssetKind::Skill",
@@ -74,8 +70,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", assets_root.display());
 
     add_system_prompt(&mut assets, repo_root, &assets_root);
-    add_model_catalog(&mut assets, repo_root, &assets_root);
-    add_model_benchmark_evidence(&mut assets, repo_root, &assets_root);
     add_models(
         &mut assets,
         &mut packages,
@@ -180,55 +174,6 @@ fn add_system_prompt(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Pa
         repo_root,
         &path,
     ));
-}
-
-fn add_model_catalog(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Path) {
-    let path = assets_root.join("models/catalog.toml");
-    if !path.is_file() {
-        panic!("missing builtin model catalog {}", path.display());
-    }
-    assets.push(asset(
-        "builtin:model-catalog",
-        AssetKind::ModelCatalog,
-        repo_root,
-        &path,
-    ));
-}
-
-fn add_model_benchmark_evidence(assets: &mut Vec<Asset>, repo_root: &Path, assets_root: &Path) {
-    let root = assets_root.join("models/evidence");
-    if !root.is_dir() {
-        panic!(
-            "missing model benchmark evidence directory {}",
-            root.display()
-        );
-    }
-    let paths = read_dir_sorted(&root);
-    if paths.is_empty() {
-        panic!(
-            "model benchmark evidence directory is empty: {}",
-            root.display()
-        );
-    }
-    for path in paths {
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("md") {
-            panic!(
-                "unsupported model benchmark evidence asset {}",
-                path.display()
-            );
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .expect("model benchmark evidence filename must be UTF-8");
-        validate_name(stem, "model benchmark evidence filename");
-        assets.push(asset(
-            &format!("model-benchmark:{stem}"),
-            AssetKind::ModelBenchmarkEvidence,
-            repo_root,
-            &path,
-        ));
-    }
 }
 
 fn add_skills(

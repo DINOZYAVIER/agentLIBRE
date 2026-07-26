@@ -154,11 +154,16 @@ fn run_init_inner(
     let workspace_root = workspace_probe.workspace_root;
     let checkpoint_store = SetupCheckpointStore::new(runtime.paths.setup_state_root());
     let previous_checkpoint = checkpoint_store.load(&workspace_root)?;
-    let catalog = ModelCatalog::builtin()?;
+    let catalog = ModelCatalog::from_builtin_resolved()?;
+    let workspace_default = read_workspace_default_function(&workspace_root)?;
+    let recommended_function = workspace_default
+        .as_deref()
+        .unwrap_or(agl_repo::DEFAULT_FUNCTION);
     let requested_package_id = select_package_id(
         options.model.as_deref(),
         previous_checkpoint.as_ref(),
         &catalog,
+        recommended_function,
     )?;
     let package = catalog
         .package(&requested_package_id)
@@ -201,7 +206,7 @@ fn run_init_inner(
             PackageChoiceReport {
                 package_id: candidate.id.clone(),
                 display_name: candidate.display_name.clone(),
-                default: candidate.default,
+                default: candidate.id.as_str() == recommended_function,
                 total_bytes: candidate.total_required_bytes(),
                 bytes_to_download,
                 cache: cache.to_vec(),
@@ -257,8 +262,8 @@ fn run_init_inner(
             })
         })
         .collect::<Vec<_>>();
-    let current_default = read_workspace_default_function(&workspace_root)?;
-    let default_function_change = current_default.as_deref() != Some(&package.function_id);
+    let current_default = workspace_default;
+    let default_function_change = current_default.as_deref() != Some(package.id.as_str());
     let same_checkpoint = previous_checkpoint.as_ref().is_some_and(|checkpoint| {
         checkpoint.package_id == package.id && checkpoint.plan_hash == plan_hash
     });
@@ -274,7 +279,7 @@ fn run_init_inner(
         staged_bindings_path: staged_bindings_path.clone(),
         published_bindings_path,
         binding_changes,
-        target_default_function: package.function_id.clone(),
+        target_default_function: package.id.as_str().to_owned(),
         default_function_change,
         smoke_required: true,
         offline: options.offline,
@@ -413,7 +418,7 @@ fn run_init_inner(
         &records,
         &plan.published_bindings_path,
         &staged_bindings_path,
-        &package.function_id,
+        package.id.as_str(),
     )?;
     advance_checkpoint(&checkpoint_store, &mut checkpoint, SetupPhase::Committed)?;
     let completed_phases = checkpoint.completed_phases.clone();
@@ -436,6 +441,7 @@ fn select_package_id(
     explicit: Option<&str>,
     checkpoint: Option<&SetupCheckpoint>,
     catalog: &ModelCatalog,
+    recommended_function: &str,
 ) -> Result<ModelPackageId> {
     if let Some(explicit) = explicit {
         let id = ModelPackageId::new(explicit)?;
@@ -453,7 +459,10 @@ fn select_package_id(
     }
     Ok(checkpoint
         .map(|checkpoint| checkpoint.package_id.clone())
-        .unwrap_or_else(|| catalog.default_package().id.clone()))
+        .unwrap_or_else(|| {
+            ModelPackageId::new(recommended_function)
+                .expect("workspace default function must be a valid package id")
+        }))
 }
 
 fn cache_for_package<'a>(
@@ -516,7 +525,7 @@ fn package_auto_policy(
     runtime: &AgentLibreRuntimeConfig,
 ) -> Result<agl_config::AutoRuntimePolicy> {
     let function = agl_function::resolve_runtime_function(
-        &package.function_id,
+        package.id.as_str(),
         workspace_root,
         &runtime.paths.config_dir,
     )?;
@@ -527,7 +536,7 @@ fn package_auto_policy(
     let InferencePresetRuntimeConfig::Auto(policy) = preset.runtime else {
         bail!(
             "catalog function `{}` must use runtime mode = \"auto\"",
-            package.function_id
+            package.id
         );
     };
     ensure!(
@@ -646,7 +655,7 @@ fn run_setup_smoke(
     options: &SetupInitOptions,
 ) -> Result<FunctionSmokeReport> {
     let request = |runtime_plan: RuntimePlan| FunctionSmokeRequest {
-        reference: package.function_id.clone(),
+        reference: package.id.as_str().to_owned(),
         workspace_root: plan.workspace_root.clone(),
         bindings_path: Some(staged_bindings_path.to_path_buf()),
         timeout: Duration::from_secs(runtime_plan.smoke_timeout_seconds),

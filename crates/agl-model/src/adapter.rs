@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use agl_artifact::{
     ArtifactAdapter, ArtifactAdapterDescriptor, ArtifactCandidate, ArtifactEntrypoint,
-    ArtifactEnvelope, ArtifactError, ArtifactPackageView, ArtifactSource, ArtifactSourceId,
-    ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, ErasedArtifactPayload,
-    InMemoryPackageView, StaticArtifactSource,
+    ArtifactEnvelope, ArtifactError, ArtifactPackageRef, ArtifactPackageView, ArtifactResolver,
+    ArtifactSource, ArtifactSourceId, ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId,
+    ErasedArtifactPayload, InMemoryPackageView, StaticArtifactSource,
 };
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -173,8 +173,6 @@ pub fn parse_model_package(
     Ok(ModelPackage {
         id: ModelPackageId::new(envelope.id.as_str())?,
         display_name: document.display_name,
-        function_id: envelope.id.as_str().to_string(),
-        default: false,
         capabilities: document.capabilities,
         license: document.license,
         license_url: document.license_url,
@@ -183,6 +181,35 @@ pub fn parse_model_package(
         artifacts: document.weights,
         profiles: document.profiles,
     })
+}
+
+pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
+    let registry = model_adapter_registry()?;
+    let source = builtin_model_source()?;
+    let candidates = source.candidates(&ArtifactTypeId::new("model")?)?;
+    let resolver = ArtifactResolver::new(registry.clone(), vec![source]);
+    let mut packages = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let reference = ArtifactPackageRef::parse(&format!(
+            "model:{}@{}",
+            candidate.package_id, candidate.version
+        ))?;
+        let graph = resolver.resolve_and_validate(&reference, None)?;
+        let node = graph
+            .nodes
+            .get(&graph.root)
+            .context("resolved model graph is missing its root")?;
+        let payload = registry
+            .lookup(&node.candidate.type_id)?
+            .validate_payload(node.candidate.view(), &node.envelope)?;
+        packages.push(
+            *payload.downcast::<ModelPackage>().map_err(|_| {
+                anyhow::anyhow!("model adapter returned an unexpected payload type")
+            })?,
+        );
+    }
+    packages.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(packages)
 }
 
 #[cfg(test)]

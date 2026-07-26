@@ -294,11 +294,7 @@ impl RuntimePlanner {
 
         if let Some((profile, device)) = select_gpu_profile(package, host, allow_low_memory) {
             return ModelFit {
-                kind: if package.default {
-                    ModelFitKind::Recommended
-                } else {
-                    ModelFitKind::Fits
-                },
+                kind: ModelFitKind::Fits,
                 reason: if allow_low_memory
                     && (host.detected_total_memory_bytes < profile.required_total_ram_bytes
                         || host.available_memory_bytes < profile.required_available_ram_bytes)
@@ -317,9 +313,7 @@ impl RuntimePlanner {
         }
 
         if let Some(profile) = select_cpu_profile(package, host, allow_low_memory) {
-            let kind = if package.default {
-                ModelFitKind::Recommended
-            } else if profile.expected_speed == "slow" {
+            let kind = if profile.expected_speed == "slow" {
                 ModelFitKind::Slow
             } else {
                 ModelFitKind::Fits
@@ -598,8 +592,6 @@ mod tests {
         ModelPackage {
             id: ModelPackageId::new("gemma4-e4b").unwrap(),
             display_name: "Gemma 4 E4B".to_string(),
-            function_id: "gemma4-e4b".to_string(),
-            default: true,
             capabilities: vec![CatalogCapability::Text],
             license: "apache-2.0".to_string(),
             license_url: "https://example.com/license".to_string(),
@@ -699,7 +691,7 @@ mod tests {
             RuntimePlanner
                 .fit(&package(), &host, 5_000_000_000, false)
                 .kind,
-            ModelFitKind::Recommended
+            ModelFitKind::Slow
         );
     }
 
@@ -725,7 +717,7 @@ mod tests {
     fn low_memory_override_bypasses_total_and_availability_ram_gates_only() {
         let constrained = host(6_200_000_000, 2_000_000_000, 20_000_000_000);
         let fit = RuntimePlanner.fit(&package(), &constrained, 0, true);
-        assert_eq!(fit.kind, ModelFitKind::Recommended);
+        assert_eq!(fit.kind, ModelFitKind::Slow);
         assert!(fit.reason.contains("best-effort low-memory override"));
 
         let policy = agl_config::AutoRuntimePolicy {
