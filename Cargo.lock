@@ -525,6 +525,7 @@ dependencies = [
 name = "agl-skill"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-capabilities",
  "agl-repo",

@@ -108,7 +108,7 @@ pub struct WorkspaceSkillStatus {
     pub path: PathBuf,
     pub source_path: Option<String>,
     pub description: Option<String>,
-    pub version: Option<u64>,
+    pub version: Option<String>,
     pub source: Option<String>,
     pub pack: Option<String>,
     pub allowed_tools: Vec<String>,
@@ -1061,7 +1061,7 @@ fn status_from_harness(
         path,
         source_path: Some(harness.source_path.clone()),
         description: Some(harness.description.clone()),
-        version: Some(harness.version),
+        version: Some(harness.version.to_string()),
         source: Some(harness.source.as_str().to_string()),
         pack: Some(harness.pack.clone()),
         allowed_tools: harness

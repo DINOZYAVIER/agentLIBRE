@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str;
 
-use agl_assets::{BuiltinAsset, BuiltinSkill};
+use agl_artifact::{ArtifactEnvelope, ArtifactVersion, SKILL_TYPE};
+use agl_assets::{BuiltinArtifactFile, BuiltinArtifactPackage};
 use agl_capabilities::{CapabilityId, HookId, OperationKind, SkillId, StateEffect};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,10 +45,11 @@ pub struct SkillReferencePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillHarness {
+    pub artifact: ArtifactEnvelope,
     pub id: SkillId,
     pub name: String,
     pub description: String,
-    pub version: u64,
+    pub version: ArtifactVersion,
     pub source: SkillSource,
     pub pack: String,
     pub required_hooks: Vec<HookId>,
@@ -115,19 +117,31 @@ pub enum SkillArtifactAccess {
 }
 
 impl SkillHarness {
-    pub fn parse_builtin(skill: &'static BuiltinSkill) -> Result<Self, SkillManifestError> {
-        let text = skill
-            .skill_md
-            .text()
-            .map_err(|_| SkillManifestError::InvalidUtf8 {
-                source_path: skill.skill_md.source_path.to_string(),
+    pub fn parse_builtin(
+        skill: &'static BuiltinArtifactPackage,
+    ) -> Result<Self, SkillManifestError> {
+        let manifest = skill
+            .files
+            .iter()
+            .find(|file| file.path == skill.entrypoint)
+            .ok_or_else(|| SkillManifestError::MissingReference {
+                path: skill.entrypoint.to_string(),
             })?;
+        let text = str::from_utf8(manifest.bytes).map_err(|_| SkillManifestError::InvalidUtf8 {
+            source_path: format!("builtin:{}/{}", skill.id, skill.entrypoint),
+        })?;
+        let references = skill
+            .files
+            .iter()
+            .filter(|file| file.path.starts_with("references/"))
+            .collect::<Vec<_>>();
         parse_skill_text(
             skill.id,
-            skill.pack,
-            skill.skill_md,
-            skill.references,
-            skill.tree_sha256,
+            "agl",
+            &format!("builtin:{}/{}", skill.id, skill.entrypoint),
+            manifest.bytes,
+            &references,
+            skill.digest,
             text,
         )
     }
@@ -230,10 +244,8 @@ pub struct SkillNotesPermissions {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSkillManifest {
-    name: String,
+    artifact: ArtifactEnvelope,
     description: String,
-    version: u64,
-    source: RawSkillSource,
     pack: String,
     required_hooks: Vec<HookId>,
     allowed_tools: Vec<CapabilityId>,
@@ -250,24 +262,6 @@ struct RawSkillManifest {
     #[serde(default)]
     artifacts: Vec<SkillArtifactDeclaration>,
     guarantees: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RawSkillSource {
-    Core,
-    Community,
-    Local,
-}
-
-impl RawSkillSource {
-    fn canonical(self) -> Option<SkillSource> {
-        match self {
-            Self::Core => Some(SkillSource::Core),
-            Self::Community => Some(SkillSource::Community),
-            Self::Local => Some(SkillSource::Local),
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -430,13 +424,14 @@ impl std::error::Error for SkillManifestError {}
 fn parse_skill_text(
     expected_id: &str,
     expected_pack: &str,
-    manifest_asset: &BuiltinAsset,
-    reference_assets: &[&'static BuiltinAsset],
+    source_path: &str,
+    manifest_bytes: &[u8],
+    reference_assets: &[&BuiltinArtifactFile],
     tree_sha256: &str,
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
-    let (mut raw, body) = parse_manifest_text(manifest_asset.source_path, text)?;
-    let actual_id = raw.name.clone();
+    let (mut raw, body) = parse_manifest_text(source_path, text)?;
+    let actual_id = raw.artifact.id.as_str().to_owned();
     if expected_id != actual_id {
         return Err(SkillManifestError::BuiltinIdentityMismatch {
             expected: expected_id.to_string(),
@@ -449,28 +444,22 @@ fn parse_skill_text(
             actual: raw.pack.clone(),
         });
     }
-    if !matches!(raw.source, RawSkillSource::Core) {
-        return Err(SkillManifestError::BuiltinSourceMismatch);
-    }
+    validate_skill_artifact(&raw.artifact, source_path)?;
     let source = SkillSource::Core;
 
     let reference_policy = normalize_references(&raw.references)?;
-    let references = resolve_references(
-        expected_pack,
-        &raw.name,
-        reference_assets,
-        &reference_policy.include,
-    )?;
+    let references = resolve_references(reference_assets, &reference_policy.include)?;
     normalize_raw_manifest(&mut raw, body)?;
     let id = SkillId::new(expected_id).map_err(|err| SkillManifestError::InvalidYaml {
-        source_path: manifest_asset.source_path.to_string(),
+        source_path: source_path.to_string(),
         message: err.to_string(),
     })?;
     Ok(SkillHarness {
+        artifact: raw.artifact.clone(),
         id,
-        name: raw.name,
+        name: actual_id,
         description: raw.description,
-        version: raw.version,
+        version: raw.artifact.version.clone(),
         source,
         pack: expected_pack.to_string(),
         required_hooks: raw.required_hooks,
@@ -485,8 +474,8 @@ fn parse_skill_text(
         artifacts: raw.artifacts,
         guarantees: raw.guarantees,
         body: body.to_string(),
-        source_path: manifest_asset.source_path.to_string(),
-        manifest_sha256: manifest_asset.sha256.to_string(),
+        source_path: source_path.to_string(),
+        manifest_sha256: sha256_hex(manifest_bytes),
         tree_sha256: tree_sha256.to_string(),
     })
 }
@@ -500,23 +489,23 @@ fn parse_workspace_text(
     text: &str,
 ) -> Result<SkillHarness, SkillManifestError> {
     let (mut raw, body) = parse_manifest_text(source_path, text)?;
-    let Some(source) = raw.source.canonical() else {
-        return Err(SkillManifestError::ExternalSourceMismatch);
-    };
+    validate_skill_artifact(&raw.artifact, source_path)?;
 
     let reference_policy = normalize_references(&raw.references)?;
     let references = resolve_workspace_references(skill_dir, component_root, &reference_policy)?;
     normalize_raw_manifest(&mut raw, body)?;
-    let id = SkillId::new(raw.name.clone()).map_err(|err| SkillManifestError::InvalidYaml {
-        source_path: source_path.to_string(),
-        message: err.to_string(),
-    })?;
+    let id =
+        SkillId::new(raw.artifact.id.as_str()).map_err(|err| SkillManifestError::InvalidYaml {
+            source_path: source_path.to_string(),
+            message: err.to_string(),
+        })?;
     Ok(SkillHarness {
+        artifact: raw.artifact.clone(),
         id,
-        name: raw.name,
+        name: raw.artifact.id.as_str().to_owned(),
         description: raw.description,
-        version: raw.version,
-        source,
+        version: raw.artifact.version.clone(),
+        source: SkillSource::Local,
         pack: raw.pack,
         required_hooks: raw.required_hooks,
         allowed_tools: raw.allowed_tools,
@@ -611,7 +600,6 @@ fn split_frontmatter<'a>(
 }
 
 fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestError> {
-    ensure_non_blank("name", &raw.name)?;
     ensure_non_blank("description", &raw.description)?;
     ensure_non_blank("pack", &raw.pack)?;
     if raw.context_budget_tokens == 0 {
@@ -626,6 +614,36 @@ fn validate_raw_manifest(raw: &RawSkillManifest) -> Result<(), SkillManifestErro
         ensure_non_blank("guarantees", guarantee)?;
     }
     Ok(())
+}
+
+fn validate_skill_artifact(
+    artifact: &ArtifactEnvelope,
+    source_path: &str,
+) -> Result<(), SkillManifestError> {
+    if artifact.type_id.as_str() != SKILL_TYPE {
+        return Err(SkillManifestError::InvalidYaml {
+            source_path: source_path.to_owned(),
+            message: format!(
+                "skill artifact has type `{}`; expected `{SKILL_TYPE}`",
+                artifact.type_id
+            ),
+        });
+    }
+    if artifact.payload_schema.as_str() != "agentlibre.skill/v2" {
+        return Err(SkillManifestError::InvalidYaml {
+            source_path: source_path.to_owned(),
+            message: format!(
+                "unsupported skill payload schema `{}`; expected `agentlibre.skill/v2`",
+                artifact.payload_schema
+            ),
+        });
+    }
+    artifact
+        .validate()
+        .map_err(|error| SkillManifestError::InvalidYaml {
+            source_path: source_path.to_owned(),
+            message: error.to_string(),
+        })
 }
 
 fn validate_tool_routing(
@@ -799,15 +817,12 @@ fn validate_artifact_path(path: &Path) -> Result<(), SkillManifestError> {
 }
 
 fn resolve_references(
-    pack: &str,
-    name: &str,
-    reference_assets: &[&'static BuiltinAsset],
+    reference_assets: &[&BuiltinArtifactFile],
     includes: &[String],
 ) -> Result<Vec<SkillReference>, SkillManifestError> {
     let mut references_by_path = BTreeMap::new();
     for asset in reference_assets {
-        let relative_path = builtin_skill_relative_asset_path(asset.source_path, pack, name);
-        references_by_path.insert(relative_path.to_string(), *asset);
+        references_by_path.insert(asset.path.to_string(), *asset);
     }
     let mut resolved = Vec::with_capacity(includes.len());
     for include in includes {
@@ -816,28 +831,18 @@ fn resolve_references(
                 path: include.clone(),
             }
         })?;
-        let content = asset
-            .text()
+        let content = str::from_utf8(asset.bytes)
             .map_err(|_| SkillManifestError::InvalidReferenceUtf8 {
                 path: include.clone(),
             })?
             .to_string();
         resolved.push(SkillReference {
             path: include.clone(),
-            sha256: asset.sha256.to_string(),
+            sha256: sha256_hex(asset.bytes),
             content,
         });
     }
     Ok(resolved)
-}
-
-fn builtin_skill_relative_asset_path<'a>(source_path: &'a str, pack: &str, name: &str) -> &'a str {
-    for prefix in [format!("assets/core-skills/{pack}/{name}/")] {
-        if let Some(relative) = source_path.strip_prefix(&prefix) {
-            return relative;
-        }
-    }
-    source_path
 }
 
 fn resolve_workspace_references(
@@ -957,13 +962,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use agl_assets::builtin_skill;
+    fn builtin_skill_package(id: &str) -> Option<&'static agl_assets::BuiltinArtifactPackage> {
+        agl_assets::BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .find(|package| package.type_id == "skill" && package.id == id)
+    }
 
     use super::*;
 
     #[test]
     fn parses_builtin_repo_status_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("repo-status").unwrap()).unwrap();
+        let skill =
+            SkillHarness::parse_builtin(builtin_skill_package("repo-status").unwrap()).unwrap();
 
         assert_eq!(skill.id.as_str(), "repo-status");
         assert_eq!(skill.source, SkillSource::Core);
@@ -988,13 +998,13 @@ mod tests {
         assert!(skill.denied_tools.is_empty());
         assert!(skill.permission_request_templates.is_empty());
         assert!(skill.references.is_empty());
-        assert_eq!(skill.tree_sha256.len(), 64);
+        assert_eq!(skill.tree_sha256.len(), "sha256:".len() + 64);
         assert!(skill.body.contains("repository state picture"));
     }
 
     #[test]
     fn parses_builtin_skill_authoring_skill() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("skill").unwrap()).unwrap();
+        let skill = SkillHarness::parse_builtin(builtin_skill_package("skill").unwrap()).unwrap();
 
         assert_eq!(skill.id.as_str(), "skill");
         assert_eq!(skill.source, SkillSource::Core);
@@ -1025,7 +1035,7 @@ mod tests {
 
     #[test]
     fn parses_builtin_process_skill_without_required_hooks() {
-        let skill = SkillHarness::parse_builtin(builtin_skill("process").unwrap()).unwrap();
+        let skill = SkillHarness::parse_builtin(builtin_skill_package("process").unwrap()).unwrap();
 
         assert_eq!(skill.id.as_str(), "process");
         assert!(skill.required_hooks.is_empty());
@@ -1039,10 +1049,10 @@ mod tests {
 
     #[test]
     fn non_core_skills_are_not_embedded() {
-        assert!(builtin_skill("task-spec").is_none());
-        assert!(builtin_skill("tool-smoke").is_none());
-        assert!(builtin_skill("repo-review").is_none());
-        assert!(builtin_skill("change").is_none());
+        assert!(builtin_skill_package("task-spec").is_none());
+        assert!(builtin_skill_package("tool-smoke").is_none());
+        assert!(builtin_skill_package("repo-review").is_none());
+        assert!(builtin_skill_package("change").is_none());
     }
 
     #[test]
@@ -1449,17 +1459,11 @@ Body.
     }
 
     fn parse_fixture(text: &str) -> Result<SkillHarness, SkillManifestError> {
-        let manifest_asset = BuiltinAsset {
-            id: "task-spec",
-            kind: agl_assets::BuiltinAssetKind::Skill,
-            source_path: "assets/core-skills/agl/task-spec/SKILL.md",
-            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            bytes: b"",
-        };
         parse_skill_text(
             "task-spec",
             "agl",
-            &manifest_asset,
+            "assets/core-skills/agl/task-spec/SKILL.md",
+            b"",
             &[],
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             text,

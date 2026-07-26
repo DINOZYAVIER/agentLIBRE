@@ -1891,10 +1891,11 @@ fn test_skill(
     permission_request_templates: Vec<agl_skill::SkillPermissionRequestTemplate>,
 ) -> agl_skill::SkillHarness {
     agl_skill::SkillHarness {
+        artifact: test_skill_artifact(id),
         id: SkillId::new(id).unwrap(),
         name: id.to_string(),
         description: format!("Test-only {id} skill."),
-        version: 1,
+        version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
         source: agl_skill::SkillSource::Core,
         pack: "test".to_string(),
         required_hooks: hook_ids(required_hooks),
@@ -1915,6 +1916,22 @@ fn test_skill(
         manifest_sha256: "0".repeat(64),
         tree_sha256: "1".repeat(64),
     }
+}
+
+fn test_skill_artifact(id: &str) -> agl_artifact::ArtifactEnvelope {
+    agl_artifact::ArtifactEnvelope::new(
+        agl_artifact::ArtifactTypeId::skill(),
+        agl_artifact::ArtifactPackageId::new(id).unwrap(),
+        agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+        agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+        agl_artifact::AglCompatibility::new(
+            agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+            [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 fn hook_ids(values: &[&str]) -> Vec<HookId> {

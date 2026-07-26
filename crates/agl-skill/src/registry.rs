@@ -78,7 +78,10 @@ impl SkillRegistry {
 
     pub fn from_builtin_assets() -> Result<Self, SkillRegistryError> {
         let mut registry = Self::new();
-        for skill in agl_assets::BUILTIN_SKILLS {
+        for skill in agl_assets::BUILTIN_ARTIFACT_PACKAGES
+            .iter()
+            .filter(|package| package.type_id == "skill")
+        {
             let harness =
                 SkillHarness::parse_builtin(skill).map_err(SkillRegistryError::Manifest)?;
             registry.register(RegisteredSkill::trusted_builtin(harness))?;

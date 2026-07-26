@@ -623,10 +623,11 @@ mod tests {
         let mut registry = SkillRegistry::new();
         registry
             .register(RegisteredSkill::trusted_builtin(SkillHarness {
+                artifact: test_artifact("requestable-test"),
                 id: SkillId::new("requestable-test").unwrap(),
                 name: "requestable-test".to_string(),
                 description: "Test-only requestable tool routing skill.".to_string(),
-                version: 1,
+                version: agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
                 source: SkillSource::Core,
                 pack: "test".to_string(),
                 required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
@@ -662,6 +663,22 @@ mod tests {
             }))
             .unwrap();
         registry
+    }
+
+    fn test_artifact(id: &str) -> agl_artifact::ArtifactEnvelope {
+        agl_artifact::ArtifactEnvelope::new(
+            agl_artifact::ArtifactTypeId::skill(),
+            agl_artifact::ArtifactPackageId::new(id).unwrap(),
+            agl_artifact::ArtifactVersion::new("1.0.0").unwrap(),
+            agl_artifact::ArtifactSchemaId::new("agentlibre.skill/v2").unwrap(),
+            agl_artifact::AglCompatibility::new(
+                agl_artifact::ArtifactVersionReq::new(">=1.0.0-alpha.12").unwrap(),
+                [agl_artifact::ArtifactVersion::new("1.0.0-alpha.12").unwrap()],
+            )
+            .unwrap(),
+            Vec::new(),
+        )
+        .unwrap()
     }
 
     fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<CapabilityId> {
