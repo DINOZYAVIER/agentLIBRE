@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-use agl_artifact::ArtifactPackageId;
+use agl_artifact::{
+    ArtifactPackageId, ArtifactPackageRef, ArtifactSourceId, ArtifactSourceKind,
+    ArtifactSourceTier, PackageTreeDigest,
+};
 use agl_config::ModelId;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -66,6 +69,8 @@ pub struct CatalogRuntimeProfile {
 #[serde(deny_unknown_fields)]
 pub struct ModelPackage {
     pub id: ModelPackageId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ModelPackageProvenance>,
     pub display_name: String,
     pub capabilities: Vec<CatalogCapability>,
     pub license: String,
@@ -75,6 +80,16 @@ pub struct ModelPackage {
     pub artifacts: Vec<ModelArtifact>,
     #[serde(default)]
     pub profiles: Vec<CatalogRuntimeProfile>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPackageProvenance {
+    pub reference: ArtifactPackageRef,
+    pub source_id: ArtifactSourceId,
+    pub source_tier: ArtifactSourceTier,
+    pub source_kind: ArtifactSourceKind,
+    pub package_digest: PackageTreeDigest,
 }
 
 impl ModelPackage {
@@ -379,6 +394,13 @@ mod tests {
         let package = catalog
             .package(&ModelPackageId::new("gemma4-e4b").unwrap())
             .unwrap();
+        let provenance = package
+            .provenance
+            .as_ref()
+            .expect("resolved catalog package carries common provenance");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-e4b@^1.0.0");
+        assert_eq!(provenance.source_id.as_str(), "builtin");
+        assert!(provenance.package_digest.as_str().starts_with("sha256:"));
         assert_eq!(package.id.as_str(), "gemma4-e4b");
         assert_eq!(package.revision.len(), 40);
         assert_eq!(package.required_artifacts().count(), 2);

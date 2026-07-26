@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::{
     CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelPackage, ModelPackageId,
+    ModelPackageProvenance,
 };
 
 pub const MODEL_FILE_NAME: &str = "MODEL.toml";
@@ -172,6 +173,7 @@ pub fn parse_model_package(
     }
     Ok(ModelPackage {
         id: ModelPackageId::new(envelope.id.as_str())?,
+        provenance: None,
         display_name: document.display_name,
         capabilities: document.capabilities,
         license: document.license,
@@ -202,11 +204,17 @@ pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
         let payload = registry
             .lookup(&node.candidate.type_id)?
             .validate_payload(node.candidate.view(), &node.envelope)?;
-        packages.push(
-            *payload.downcast::<ModelPackage>().map_err(|_| {
-                anyhow::anyhow!("model adapter returned an unexpected payload type")
-            })?,
-        );
+        let mut package = *payload
+            .downcast::<ModelPackage>()
+            .map_err(|_| anyhow::anyhow!("model adapter returned an unexpected payload type"))?;
+        package.provenance = Some(ModelPackageProvenance {
+            reference: reference.clone(),
+            source_id: node.candidate.source_id.clone(),
+            source_tier: node.candidate.tier,
+            source_kind: node.candidate.kind,
+            package_digest: node.package_digest.clone(),
+        });
+        packages.push(package);
     }
     packages.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(packages)

@@ -14,7 +14,7 @@ pub use adapter::{
 };
 pub use catalog::{
     CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactRole, ModelCatalog,
-    ModelPackage, ModelPackageId, ProfileDevice,
+    ModelPackage, ModelPackageId, ModelPackageProvenance, ProfileDevice,
 };
 pub use checkpoint::{
     PlannedArtifactRole, SetupCheckpoint, SetupCheckpointStore, SetupPhase,

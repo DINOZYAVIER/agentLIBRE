@@ -591,6 +591,7 @@ mod tests {
     fn package() -> ModelPackage {
         ModelPackage {
             id: ModelPackageId::new("gemma4-e4b").unwrap(),
+            provenance: None,
             display_name: "Gemma 4 E4B".to_string(),
             capabilities: vec![CatalogCapability::Text],
             license: "apache-2.0".to_string(),
