@@ -296,13 +296,22 @@ fn run_source(command: ArtifactSourceCommand, runtime: &AgentLibreRuntimeConfig)
             };
             declaration.validate()?;
             let source_kind = declaration.kind;
+            let materialized_root = if source_kind == ArtifactSourceKind::Git {
+                Some(agl_repo::materialize_artifact_source(
+                    &workspace_root,
+                    &name,
+                    &declaration,
+                )?)
+            } else {
+                None
+            };
             manifest.sources.insert(name.clone(), declaration);
             agl_repo::write_workspace_manifest_v2(&path, &manifest)?;
             let result = ArtifactSourceProjection {
                 id: name,
                 tier: ArtifactSourceTier::Workspace,
                 kind: source_kind,
-                root: None,
+                root: materialized_root,
             };
             if json {
                 crate::print_json(&result)
