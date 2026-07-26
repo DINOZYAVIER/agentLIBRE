@@ -2455,9 +2455,9 @@ fn print_skill_trust_update_report(report: &SkillTrustUpdateReport) {
 }
 
 fn cpu_fallback_for_failed_turn<'a>(
-    plans: Option<&'a agl_models::RuntimePlanSet>,
+    plans: Option<&'a agl_model::RuntimePlanSet>,
     message: &str,
-) -> Option<&'a agl_models::RuntimePlan> {
+) -> Option<&'a agl_model::RuntimePlan> {
     let plans = plans?;
     (plans.selected.runtime.gpu_layers > 0 && is_gpu_load_failure_message(message))
         .then_some(plans.cpu_fallback.as_ref())

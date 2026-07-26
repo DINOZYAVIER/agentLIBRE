@@ -1,11 +1,12 @@
 [package]
-name = "agl-models"
+name = "agl-model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+agl-artifact.workspace = true
 agl-assets.workspace = true
 agl-config.workspace = true
 anyhow.workspace = true

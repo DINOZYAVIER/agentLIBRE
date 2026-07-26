@@ -1,3 +1,4 @@
+mod adapter;
 mod catalog;
 mod checkpoint;
 mod install;
@@ -7,9 +8,13 @@ mod source;
 mod status;
 mod worker;
 
+pub use adapter::{
+    MODEL_FILE_NAME, MODEL_PAYLOAD_SCHEMA, ModelArtifactAdapter, builtin_model_source,
+    model_adapter_registry, parse_model_package,
+};
 pub use catalog::{
     CatalogCapability, CatalogRuntimeProfile, ModelArtifact, ModelArtifactRole, ModelCatalog,
-    ModelPackage, ModelPackageId, ProfileDevice,
+    ModelPackage, ModelPackageId, ModelPackageProvenance, ProfileDevice,
 };
 pub use checkpoint::{
     PlannedArtifactRole, SetupCheckpoint, SetupCheckpointStore, SetupPhase,

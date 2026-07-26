@@ -8,7 +8,8 @@ artifact:
   agl:
     compatible: ">=1.0.0-alpha.12"
     tested: [1.0.0-alpha.12]
-  requires: []
+  requires:
+    - model:gemma4-31b@^1.0
 title: Gemma4 31B
 description: Local Gemma4 31B QAT agent function with native Gemma tool-call formatting.
 model:

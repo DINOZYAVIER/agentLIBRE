@@ -1,0 +1,56 @@
+artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "gemma4-12b", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+
+display_name = "Gemma 4 12B QAT Q4"
+capabilities = ["text", "tools", "vision"]
+license = "apache-2.0"
+license_url = "https://ai.google.dev/gemma/docs/gemma_4_license"
+repository = "unsloth/gemma-4-12B-it-qat-GGUF"
+upstream_revision = "f18012b8f690e563b7f872cb764b4cb3de90b14a"
+
+[[weights]]
+role = "main"
+model_id = "gemma4-12b"
+filename = "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+byte_size = 6716355328
+sha256 = "cc9ff072e0a8203429ed854e6662c17a6c2bc1e5dca5b475dd4736caaacbc165"
+required = true
+
+[[weights]]
+role = "projector"
+model_id = "gemma4-12b-mmproj"
+filename = "mmproj-F16.gguf"
+byte_size = 175115840
+sha256 = "ecc4e93128da8363b7dbf2193eab98cf1142353f52ceaa0c95c0872997aaadd3"
+required = true
+
+[[profiles]]
+id = "cpu-16gb-65536"
+device = "cpu"
+benchmark_evidence = "evidence/20260723-five-gemma4-rx7900xtx.md"
+required_total_ram_bytes = 17179869184
+required_available_ram_bytes = 14000000000
+required_vram_bytes = 0
+gpu_layers = 0
+context_tokens = 65536
+batch_size = 128
+ubatch_size = 64
+threads = 8
+smoke_timeout_seconds = 300
+expected_speed = "slow"
+
+[[profiles]]
+id = "gpu-rx7900xtx-65536"
+device = "gpu"
+pci_device_id = "1002:744c"
+pci_subsystem_id = "1da2:471e"
+benchmark_evidence = "evidence/20260723-five-gemma4-rx7900xtx.md"
+required_total_ram_bytes = 17179869184
+required_available_ram_bytes = 14000000000
+required_vram_bytes = 9982443520
+gpu_layers = 999
+context_tokens = 65536
+batch_size = 512
+ubatch_size = 256
+threads = 8
+smoke_timeout_seconds = 300
+expected_speed = "fast"

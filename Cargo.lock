@@ -83,6 +83,7 @@ dependencies = [
  "agl-artifact",
  "agl-config",
  "sha2 0.11.0",
+ "toml",
 ]
 
 [[package]]
@@ -113,7 +114,7 @@ dependencies = [
  "agl-inference",
  "agl-loop",
  "agl-memory",
- "agl-models",
+ "agl-model",
  "agl-oven",
  "agl-process",
  "agl-runtime",
@@ -145,7 +146,7 @@ dependencies = [
  "agl-ids",
  "agl-inference",
  "agl-memory",
- "agl-models",
+ "agl-model",
  "agl-notes",
  "agl-process",
  "agl-protocol",
@@ -228,7 +229,7 @@ dependencies = [
  "agl-function",
  "agl-ids",
  "agl-inference",
- "agl-models",
+ "agl-model",
  "agl-process",
  "agl-protocol",
  "agl-runtime",
@@ -266,6 +267,7 @@ dependencies = [
  "agl-assets",
  "agl-capabilities",
  "agl-config",
+ "agl-model",
  "anyhow",
  "serde",
  "serde_yaml",
@@ -407,9 +409,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "agl-models"
+name = "agl-model"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-artifact",
  "agl-assets",
  "agl-config",
  "anyhow",

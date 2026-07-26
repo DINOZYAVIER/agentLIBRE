@@ -23,7 +23,7 @@ pub struct InferenceOptions {
     #[serde(skip)]
     pub model_bindings_override: Option<agl_config::ModelBindings>,
     #[serde(skip)]
-    pub runtime_plan_override: Option<agl_models::RuntimePlan>,
+    pub runtime_plan_override: Option<agl_model::RuntimePlan>,
 }
 
 impl Default for InferenceOptions {
@@ -58,7 +58,7 @@ impl InferenceOptions {
     }
 
     #[doc(hidden)]
-    pub fn with_runtime_plan_override(mut self, plan: agl_models::RuntimePlan) -> Self {
+    pub fn with_runtime_plan_override(mut self, plan: agl_model::RuntimePlan) -> Self {
         self.runtime_plan_override = Some(plan);
         self
     }

@@ -18,7 +18,7 @@ members = [
     "crates/agl-llama-cpp-sys",
     "crates/agl-loop",
     "crates/agl-memory",
-    "crates/agl-models",
+    "crates/agl-model",
     "crates/agl-notes",
     "crates/agl-oven",
     "crates/agl-process",
@@ -68,7 +68,7 @@ agl-inference = { path = "crates/agl-inference" }
 agl-llama-cpp-sys = { path = "crates/agl-llama-cpp-sys" }
 agl-loop = { path = "crates/agl-loop" }
 agl-memory = { path = "crates/agl-memory" }
-agl-models = { path = "crates/agl-models" }
+agl-model = { path = "crates/agl-model" }
 agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-process = { path = "crates/agl-process" }

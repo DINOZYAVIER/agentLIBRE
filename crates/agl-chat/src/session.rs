@@ -27,7 +27,7 @@ use agl_inference::{
     InferenceRequest, InferenceResponse,
 };
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
-use agl_models::{
+use agl_model::{
     HostResources, LlamaDeviceInfo, LlamaDeviceKind, ModelCatalog, RuntimePlanSet, RuntimePlanner,
     hugging_face_cache_dir,
 };
@@ -223,7 +223,7 @@ impl InferenceSession {
             })?;
             match &bound.runtime {
                 agl_config::InferencePresetRuntimeConfig::Auto(_) => {
-                    let catalog = ModelCatalog::builtin()?;
+                    let catalog = ModelCatalog::from_builtin_resolved()?;
                     let package = catalog
                         .package_for_model(&bound.backend.model_id)
                         .with_context(|| {
