@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use agl_artifact as artifact_contract;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 mod artifacts;
@@ -21,6 +21,72 @@ pub use v2::{
     read_artifact_lock_v2, read_workspace_manifest_v2, write_artifact_lock_v2,
     write_workspace_manifest_v2,
 };
+
+pub fn materialize_artifact_source(
+    start: impl AsRef<Path>,
+    name: &str,
+    source: &artifact_contract::ArtifactSourceDeclaration,
+) -> Result<PathBuf> {
+    let workspace_root = resolve_repo_root(start)?;
+    let source_id = artifact_contract::ArtifactSourceId::new(name.to_owned())?;
+    let target = workspace_root.join(".agl/sources").join(source_id.as_str());
+    match source.kind {
+        artifact_contract::ArtifactSourceKind::Directory => {
+            let relative = source
+                .path
+                .as_ref()
+                .context("local artifact source is missing its path")?;
+            let absolute = workspace_root.join(relative);
+            let canonical = absolute
+                .canonicalize()
+                .with_context(|| format!("failed to resolve local artifact source {name}"))?;
+            ensure!(
+                canonical.starts_with(&workspace_root),
+                "local artifact source {name} escapes the workspace"
+            );
+            Ok(canonical)
+        }
+        artifact_contract::ArtifactSourceKind::Git => {
+            let url = source
+                .url
+                .as_deref()
+                .context("Git artifact source is missing its URL")?;
+            let rev = source
+                .rev
+                .as_deref()
+                .context("Git artifact source is missing its revision")?;
+            if let Ok(metadata) = fs::symlink_metadata(&target) {
+                ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "artifact source path is a symlink"
+                );
+                ensure!(metadata.is_dir(), "artifact source path is not a directory");
+                git_run_with_file_protocol(&target, &["fetch", "--tags", "--quiet"])
+                    .with_context(|| format!("failed to fetch artifact source {name}"))?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                git_run_with_file_protocol(
+                    &workspace_root,
+                    &[
+                        "clone",
+                        "--quiet",
+                        url,
+                        &slash_path(&PathBuf::from(".agl/sources").join(name)),
+                    ],
+                )
+                .with_context(|| format!("failed to clone artifact source {name}"))?;
+            }
+            git_run(&target, &["checkout", "--quiet", rev])
+                .with_context(|| format!("failed to checkout artifact source {name} at {rev}"))?;
+            Ok(target)
+        }
+        artifact_contract::ArtifactSourceKind::Embedded => {
+            bail!("embedded artifact sources cannot be materialized")
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) use hooks::hook_content;

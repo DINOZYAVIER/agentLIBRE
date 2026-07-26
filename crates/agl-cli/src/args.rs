@@ -25,6 +25,16 @@ mod help {
     pub(super) const AGL: &str = cli_help!("agl");
     pub(super) const COMPLETION: &str = cli_help!("completion");
     pub(super) const CONFIG: &str = cli_help!("config");
+    pub(super) const ARTIFACT: &str = cli_help!("artifact");
+    pub(super) const ARTIFACT_LIST: &str = cli_help!("artifact/list");
+    pub(super) const ARTIFACT_INSPECT: &str = cli_help!("artifact/inspect");
+    pub(super) const ARTIFACT_RESOLVE: &str = cli_help!("artifact/resolve");
+    pub(super) const ARTIFACT_GRAPH: &str = cli_help!("artifact/graph");
+    pub(super) const ARTIFACT_LOCK: &str = cli_help!("artifact/lock");
+    pub(super) const ARTIFACT_SOURCE: &str = cli_help!("artifact/source");
+    pub(super) const ARTIFACT_SOURCE_LIST: &str = cli_help!("artifact/source/list");
+    pub(super) const ARTIFACT_SOURCE_ADD: &str = cli_help!("artifact/source/add");
+    pub(super) const ARTIFACT_SOURCE_REMOVE: &str = cli_help!("artifact/source/remove");
     pub(super) const CONFIG_INIT: &str = cli_help!("config/init");
     pub(super) const CONFIG_PATHS: &str = cli_help!("config/paths");
     pub(super) const CONFIG_STATUS: &str = cli_help!("config/status");
@@ -190,6 +200,12 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Resolve and inspect generic artifact packages.
+    #[command(long_about = help::ARTIFACT)]
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
     },
     /// Inspect and export the local agentLIBRE store.
     #[command(long_about = help::STORE)]
@@ -424,6 +440,94 @@ enum RepoCommands {
     /// Export a portable workspace profile manifest.
     #[command(long_about = help::REPO_EXPORT_PROFILE)]
     ExportProfile(RepoExportProfileArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ArtifactCommands {
+    /// List candidates from the composed artifact sources.
+    #[command(long_about = help::ARTIFACT_LIST)]
+    List(ArtifactListArgs),
+    /// Inspect one resolved artifact package.
+    #[command(long_about = help::ARTIFACT_INSPECT)]
+    Inspect(ArtifactReferenceArgs),
+    /// Resolve one artifact package and its dependencies.
+    #[command(long_about = help::ARTIFACT_RESOLVE)]
+    Resolve(ArtifactReferenceArgs),
+    /// Print one artifact dependency graph.
+    #[command(long_about = help::ARTIFACT_GRAPH)]
+    Graph(ArtifactReferenceArgs),
+    /// Create or refresh the workspace artifact lock.
+    #[command(long_about = help::ARTIFACT_LOCK)]
+    Lock(ArtifactLockCommandArgs),
+    /// Manage declared workspace artifact sources.
+    #[command(long_about = help::ARTIFACT_SOURCE)]
+    Source {
+        #[command(subcommand)]
+        command: ArtifactSourceCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ArtifactSourceCommands {
+    /// List configured workspace sources.
+    #[command(long_about = help::ARTIFACT_SOURCE_LIST)]
+    List(ArtifactSourceListArgs),
+    /// Add one Git or local workspace source.
+    #[command(long_about = help::ARTIFACT_SOURCE_ADD)]
+    Add(ArtifactSourceAddArgs),
+    /// Remove one configured workspace source.
+    #[command(long_about = help::ARTIFACT_SOURCE_REMOVE)]
+    Remove(ArtifactSourceRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+struct ArtifactListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactReferenceArgs {
+    #[arg(value_name = "TYPE:ID@CONSTRAINT")]
+    reference: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactLockCommandArgs {
+    #[arg(long)]
+    refresh: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactSourceListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactSourceAddArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(long, conflicts_with_all = ["local", "rev"], requires = "rev", group = "source")]
+    git: Option<String>,
+    #[arg(long, conflicts_with = "git", group = "source")]
+    local: Option<PathBuf>,
+    #[arg(long, requires = "git")]
+    rev: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ArtifactSourceRemoveArgs {
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1819,6 +1923,7 @@ impl Cli {
                 }),
                 ConfigCommands::Init { force } => ConfigCommand::Init { force },
             }),
+            Some(Commands::Artifact { command }) => CliCommand::Artifact(artifact_command(command)),
             Some(Commands::Store { command }) => CliCommand::Store(store_command(command)),
             Some(Commands::Function { command }) => {
                 CliCommand::Function(function_command(command)?)
@@ -2081,6 +2186,44 @@ fn component_command(command: ComponentCommands) -> ComponentCommand {
             json: args.json,
             dry_run: args.dry_run,
             strict: args.strict,
+        }),
+    }
+}
+
+fn artifact_command(command: ArtifactCommands) -> ArtifactCommand {
+    match command {
+        ArtifactCommands::List(args) => {
+            ArtifactCommand::List(ArtifactListOptions { json: args.json })
+        }
+        ArtifactCommands::Inspect(args) => ArtifactCommand::Inspect(ArtifactReferenceOptions {
+            reference: args.reference,
+            json: args.json,
+        }),
+        ArtifactCommands::Resolve(args) => ArtifactCommand::Resolve(ArtifactReferenceOptions {
+            reference: args.reference,
+            json: args.json,
+        }),
+        ArtifactCommands::Graph(args) => ArtifactCommand::Graph(ArtifactReferenceOptions {
+            reference: args.reference,
+            json: args.json,
+        }),
+        ArtifactCommands::Lock(args) => ArtifactCommand::Lock(ArtifactLockCommandOptions {
+            refresh: args.refresh,
+            json: args.json,
+        }),
+        ArtifactCommands::Source { command } => ArtifactCommand::Source(match command {
+            ArtifactSourceCommands::List(args) => ArtifactSourceCommand::List { json: args.json },
+            ArtifactSourceCommands::Add(args) => ArtifactSourceCommand::Add {
+                name: args.name,
+                git: args.git,
+                local: args.local,
+                rev: args.rev,
+                json: args.json,
+            },
+            ArtifactSourceCommands::Remove(args) => ArtifactSourceCommand::Remove {
+                name: args.name,
+                json: args.json,
+            },
         }),
     }
 }
@@ -2790,6 +2933,12 @@ enum PublicCompletionCommands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Resolve and inspect generic artifact packages.
+    #[command(long_about = help::ARTIFACT)]
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
     },
     /// Inspect and export the local agentLIBRE store.
     Store {

@@ -553,26 +553,6 @@ fn parse_repo_verify_tasks_hidden_command() {
 #[test]
 fn parse_repo_artifact_commands() {
     assert_command(
-        [
-            "agl",
-            "repo",
-            "artifact",
-            "status",
-            "--json",
-            "--artifact",
-            "tasks",
-            "--strict",
-        ],
-        CliCommand::Repo(RepoCommand::Component(ComponentCommand::Status(
-            ArtifactStatusOptions {
-                json: true,
-                artifact: Some("tasks".to_string()),
-                strict: true,
-            },
-        ))),
-    );
-
-    assert_command(
         ["agl", "repo", "component", "sync", "--dry-run", "--json"],
         CliCommand::Repo(RepoCommand::Component(ComponentCommand::Sync(
             ArtifactSyncOptions {

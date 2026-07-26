@@ -33,6 +33,7 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
+    assert_contains(&stdout, "artifact");
     assert_contains(&stdout, "model");
     assert_contains(&stdout, "inference");
     assert_contains(&stdout, "skill");
@@ -82,6 +83,16 @@ fn command_help_exits_successfully_for_public_commands() {
         &["config", "--help"][..],
         &["config", "paths", "--help"][..],
         &["config", "init", "--help"][..],
+        &["artifact", "--help"][..],
+        &["artifact", "list", "--help"][..],
+        &["artifact", "inspect", "--help"][..],
+        &["artifact", "resolve", "--help"][..],
+        &["artifact", "graph", "--help"][..],
+        &["artifact", "lock", "--help"][..],
+        &["artifact", "source", "--help"][..],
+        &["artifact", "source", "list", "--help"][..],
+        &["artifact", "source", "add", "--help"][..],
+        &["artifact", "source", "remove", "--help"][..],
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
@@ -161,6 +172,161 @@ fn command_help_exits_successfully_for_public_commands() {
         assert_contains(&stdout, "Usage: agl");
         assert_no_noncanonical_product_spelling(&stdout);
     }
+}
+
+#[test]
+fn artifact_commands_project_graph_lock_and_workspace_sources() {
+    let repo = TempRepo::new("artifact-commands");
+    let home = TempHome::new("artifact-commands");
+    fs::create_dir_all(repo.path().join(".agl/local-source")).unwrap();
+    fs::write(
+        repo.path().join(".agl/workspace.toml"),
+        r#"version = 2
+default_function = "function:gemma4-e4b@^1.0"
+"#,
+    )
+    .unwrap();
+    let home_arg = home.path_string();
+
+    let list = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "artifact", "list", "--json"],
+    );
+    assert_success_no_stderr(&list);
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&list)).unwrap();
+    assert!(listed.as_array().unwrap().iter().any(|package| {
+        package["exact_reference"] == "function:gemma4-e4b@1.0.0"
+            && package["source_tier"] == "builtin"
+            && package["package_digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+    }));
+
+    let inspect = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "inspect",
+            "function:gemma4-e4b@^1.0",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&inspect);
+    let inspected: serde_json::Value = serde_json::from_str(&stdout(&inspect)).unwrap();
+    assert_eq!(inspected["type_id"], "function");
+    assert_eq!(inspected["package_id"], "gemma4-e4b");
+    assert_eq!(inspected["lock_state"], "unlocked");
+
+    let resolve = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "resolve",
+            "function:gemma4-e4b@^1.0",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&resolve);
+    let resolved: serde_json::Value = serde_json::from_str(&stdout(&resolve)).unwrap();
+    assert_eq!(resolved["root"], "function:gemma4-e4b@1.0.0");
+    assert!(resolved["nodes"].as_array().unwrap().len() >= 2);
+
+    let lock = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "lock",
+            "--refresh",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&lock);
+    let lock_projection: serde_json::Value = serde_json::from_str(&stdout(&lock)).unwrap();
+    assert_eq!(lock_projection["refreshed"], true);
+    assert_eq!(lock_projection["lock_present"], true);
+    assert!(repo.path().join(".agl/artifact-lock.toml").is_file());
+
+    let graph = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "graph",
+            "function:gemma4-e4b@^1.0",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&graph);
+    let graph_projection: serde_json::Value = serde_json::from_str(&stdout(&graph)).unwrap();
+    assert!(
+        graph_projection["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["lock_state"] == "locked")
+    );
+
+    let add = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "source",
+            "add",
+            "local-fixture",
+            "--local",
+            ".agl/local-source",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&add);
+    assert!(
+        fs::read_to_string(repo.path().join(".agl/workspace.toml"))
+            .unwrap()
+            .contains("local-fixture")
+    );
+
+    let sources = run_agl_in(
+        repo.path(),
+        &["--home", &home_arg, "artifact", "source", "list", "--json"],
+    );
+    assert_success_no_stderr(&sources);
+    let sources: serde_json::Value = serde_json::from_str(&stdout(&sources)).unwrap();
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["id"] == "local-fixture")
+    );
+
+    let remove = run_agl_in(
+        repo.path(),
+        &[
+            "--home",
+            &home_arg,
+            "artifact",
+            "source",
+            "remove",
+            "local-fixture",
+            "--json",
+        ],
+    );
+    assert_success_no_stderr(&remove);
+    assert!(
+        !fs::read_to_string(repo.path().join(".agl/workspace.toml"))
+            .unwrap()
+            .contains("local-fixture")
+    );
 }
 
 #[test]
@@ -1961,11 +2127,11 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&list_stdout, "function id=gemma4-e4b source=builtin");
     assert_contains(
         &list_stdout,
-        "function id=gemma4-e2b source=builtin path=assets/functions/gemma4-e2b/FUNCTION.md valid=true",
+        "function id=gemma4-e2b source=builtin path=builtin:function/gemma4-e2b/FUNCTION.md valid=true",
     );
     assert_contains(
         &list_stdout,
-        "function id=gemma4-12b source=builtin path=assets/functions/gemma4-12b/FUNCTION.md valid=true",
+        "function id=gemma4-12b source=builtin path=builtin:function/gemma4-12b/FUNCTION.md valid=true",
     );
     assert_contains(&list_stdout, "function id=gemma4-26b source=builtin");
     assert_contains(&list_stdout, "function id=gemma4-31b source=builtin");
@@ -1977,7 +2143,7 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&status_stdout, "function.source=builtin");
     assert_contains(
         &status_stdout,
-        "function.model.config_path=assets/functions/gemma4-12b/inference.toml",
+        "function.model.config_path=builtin:function/gemma4-12b/inference.toml",
     );
     assert_contains(&status_stdout, "function.model.config_embedded=true");
     assert_contains(&status_stdout, "function.model.id=gemma4-12b");

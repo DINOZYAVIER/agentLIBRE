@@ -203,7 +203,6 @@ pub fn validate_function_model_contract(
                     .root_dir
                     .parent()
                     .and_then(std::path::Path::parent)
-                    .and_then(std::path::Path::parent)
                     .context("workspace function path has no workspace root")?
                     .to_path_buf(),
             ),
@@ -213,6 +212,7 @@ pub fn validate_function_model_contract(
                 locator
                     .root_dir
                     .parent()
+                    .and_then(std::path::Path::parent)
                     .context("global function path has no config root")?
                     .to_path_buf(),
             ),

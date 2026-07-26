@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use agl_artifact::{ArtifactLock, WorkspaceManifest};
@@ -22,8 +23,22 @@ pub fn write_workspace_manifest_v2(
     let content = manifest
         .to_toml()
         .map_err(|error| anyhow::anyhow!("failed to render workspace manifest: {error}"))?;
-    fs::write(path, content)
-        .with_context(|| format!("failed to write workspace manifest {}", path.display()))
+    let temporary = path.with_extension("toml.tmp");
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(anyhow::anyhow!(
+            "failed to write workspace manifest {}: {error}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Read the combined v2 lock with distinct component and semantic package maps.
