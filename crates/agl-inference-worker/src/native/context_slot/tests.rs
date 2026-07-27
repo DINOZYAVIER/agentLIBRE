@@ -459,6 +459,112 @@ fn tool_schema_bridge_keeps_nested_schema_bytes_exact() {
 }
 
 #[test]
+fn tool_schema_bridge_inlines_local_definitions_for_the_model_boundary() {
+    let schema = json!({
+        "$defs": {
+            "Operation": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "op": {"const": "create"},
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "expected_absent": {"type": "boolean"}
+                        },
+                        "required": ["op", "path", "content", "expected_absent"],
+                        "additionalProperties": false
+                    }
+                ]
+            }
+        },
+        "type": "object",
+        "properties": {
+            "operations": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/Operation"}
+            }
+        },
+        "required": ["operations"],
+        "additionalProperties": false
+    });
+    let prepared = PreparedTools::new(&[RenderedTool {
+        name: "core.workspace:fs.apply_patch".to_string(),
+        description: "Apply a patch".to_string(),
+        input_schema: schema,
+    }])
+    .unwrap();
+    let parameters = unsafe { CStr::from_ptr(prepared.tools[0].parameters) }
+        .to_str()
+        .unwrap();
+    let projected = serde_json::from_str::<serde_json::Value>(parameters).unwrap();
+
+    assert!(projected.get("$defs").is_none());
+    assert!(
+        projected["properties"]["operations"]["items"]
+            .get("$ref")
+            .is_none()
+    );
+    assert_eq!(
+        projected["properties"]["operations"]["items"]["oneOf"][0]["required"],
+        json!(["op", "path", "content", "expected_absent"])
+    );
+}
+
+#[test]
+fn tool_schema_bridge_rejects_cyclic_local_references() {
+    let error = match PreparedTools::new(&[RenderedTool {
+        name: "bad".to_string(),
+        description: "bad schema".to_string(),
+        input_schema: json!({
+            "$defs": {
+                "Loop": {"$ref": "#/$defs/Loop"}
+            },
+            "type": "object",
+            "properties": {
+                "loop": {"$ref": "#/$defs/Loop"}
+            },
+            "additionalProperties": false
+        }),
+    }]) {
+        Ok(_) => panic!("cyclic Tool schema was admitted"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("cyclic local schema reference"));
+}
+
+#[test]
+fn tool_schema_bridge_bounds_projected_schema_nodes() {
+    let error = project_tool_schema(&json!({
+        "type": "object",
+        "enum": vec![true; MAX_PROJECTED_TOOL_SCHEMA_NODES]
+    }))
+    .unwrap_err();
+
+    assert!(error.contains("projected Tool schema exceeds"));
+    assert!(error.contains("nodes"));
+}
+
+#[test]
+fn tool_schema_bridge_bounds_projected_schema_bytes() {
+    let error = match PreparedTools::new(&[RenderedTool {
+        name: "bad".to_string(),
+        description: "oversized schema".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "description": "x".repeat(MAX_PROJECTED_TOOL_SCHEMA_BYTES)
+        }),
+    }]) {
+        Ok(_) => panic!("oversized Tool schema was admitted"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("projected Tool schema exceeds"));
+    assert!(error.to_string().contains("bytes"));
+}
+
+#[test]
 fn tool_schema_bridge_rejects_non_object_schema_roots() {
     let error = match PreparedTools::new(&[RenderedTool {
         name: "bad".to_string(),

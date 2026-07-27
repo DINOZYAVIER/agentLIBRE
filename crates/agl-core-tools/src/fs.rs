@@ -697,16 +697,15 @@ impl ToolHandler for CoreTools {
         Box::pin(async move {
             let invocation = context.into_invocation();
             let run_id = invocation.scope.run_id().as_str().to_string();
-            let is_patch = invocation.capability_id.as_str() == FS_APPLY_PATCH_TOOL_ID;
+            let tool_id = invocation.capability_id.as_str().to_string();
+            let is_patch = tool_id == FS_APPLY_PATCH_TOOL_ID;
             let data = if is_patch {
                 self.apply_patch(invocation.arguments)
                     .map_err(PatchError::into_tool_error)?
             } else {
-                self.dispatch_for_run(
-                    &run_id,
-                    invocation.capability_id.as_str(),
-                    invocation.arguments,
-                )?
+                let arguments = invocation.arguments;
+                self.dispatch_for_run(&run_id, &tool_id, arguments.clone())
+                    .map_err(|error| classify_read_only_error(&tool_id, &arguments, error))?
             };
             let observed = if is_patch {
                 data["changes"]
@@ -738,6 +737,34 @@ impl ToolHandler for CoreTools {
     }
 }
 
+fn classify_read_only_error(
+    tool_id: &str,
+    arguments: &Value,
+    error: anyhow::Error,
+) -> ToolHandlerError {
+    let is_not_found = error.chain().any(|source| {
+        source
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+    });
+    if is_not_found && let Some(path) = requested_read_only_path(tool_id, arguments) {
+        return ToolHandlerError::new(
+            "not_found",
+            format!("repository path was not found: {path}"),
+            json!({"path": path}),
+        );
+    }
+    error.into()
+}
+
+fn requested_read_only_path<'a>(tool_id: &str, arguments: &'a Value) -> Option<&'a str> {
+    match tool_id {
+        FS_READ_TOOL_ID | FS_LIST_TOOL_ID => arguments.get("path")?.as_str(),
+        FS_SEARCH_TOOL_ID => arguments.get("path").and_then(Value::as_str).or(Some(".")),
+        _ => None,
+    }
+}
+
 pub fn declaration() -> ExtensionDescriptor {
     let descriptor = ExtensionDescriptor::builtin(
         ExtensionId::new(PROVIDER_ID).expect("core tool provider id is valid"),
@@ -745,25 +772,22 @@ pub fn declaration() -> ExtensionDescriptor {
         env!("CARGO_PKG_VERSION"),
     )
     .expect("core tool declaration is valid")
-    .with_tool(action::<ReadArgs, ReadOutput>(
+    .with_tool(read_only_action::<ReadArgs, ReadOutput>(
         FS_READ_TOOL_ID,
         "Read a UTF-8 file from the repository with line bounds.",
-        OperationKind::Read,
     ))
-    .with_tool(action::<ListArgs, ListOutput>(
+    .with_tool(read_only_action::<ListArgs, ListOutput>(
         FS_LIST_TOOL_ID,
         "List repository directory entries.",
-        OperationKind::Read,
     ))
-    .with_tool(action::<SearchArgs, SearchOutput>(
+    .with_tool(read_only_action::<SearchArgs, SearchOutput>(
         FS_SEARCH_TOOL_ID,
         "Search repository text files for a literal pattern.",
-        OperationKind::Read,
     ))
     .with_tool(
         action::<ApplyPatchArgs, ApplyPatchOutput>(
             FS_APPLY_PATCH_TOOL_ID,
-            "Atomically create, update, delete, or move repository files with required preconditions.",
+            "Atomically mutate repository files. Operation objects use `op` as the discriminator; create requires `expected_absent=true`, while update/delete/move require an expected digest.",
             OperationKind::Write,
         )
         .with_errors([
@@ -801,6 +825,17 @@ fn action<I: JsonSchema, O: JsonSchema>(
     .expect("core tool declaration input schema is valid")
     .with_output_schema::<O>()
     .expect("core tool declaration output schema is valid")
+}
+
+fn read_only_action<I: JsonSchema, O: JsonSchema>(id: &str, description: &str) -> ToolDeclaration {
+    action::<I, O>(id, description, OperationKind::Read)
+        .with_errors([
+            agl_extension::ToolErrorDeclaration::recoverable("not_found")
+                .with_data_schema::<PathNotFoundErrorData>(),
+            agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+                .with_data_schema::<EmptyToolErrorData>(),
+        ])
+        .expect("read-only filesystem Tool error declarations are valid")
 }
 
 fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
@@ -984,31 +1019,39 @@ struct SearchArgs {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
+    /// Atomic create, update, delete, and move operations. Each object uses
+    /// `op` as its discriminator and includes its required precondition.
     #[schemars(length(min = 1, max = 64))]
     operations: Vec<PatchOperation>,
 }
 
+/// One filesystem mutation with an explicit concurrency precondition.
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum PatchOperation {
     Create {
         path: String,
         content: String,
+        /// Must be explicitly true so create conflicts with an existing path.
         expected_absent: bool,
     },
     Update {
         path: String,
+        /// SHA-256 content digest returned by `fs.read`.
         expected_digest: String,
         content: String,
     },
     Delete {
         path: String,
+        /// SHA-256 content digest returned by `fs.read`.
         expected_digest: String,
     },
     Move {
         from: String,
         to: String,
+        /// SHA-256 content digest of the existing source file.
         expected_digest: String,
+        /// Must be explicitly true so move conflicts with an existing target.
         expected_destination_absent: bool,
     },
 }
@@ -1208,6 +1251,11 @@ impl std::error::Error for PatchError {}
 
 #[cfg(test)]
 mod tests {
+    use agl_extension::{
+        ExtensionRegistration, ToolBinding, ToolDispatchControl, ToolErrorClass, ToolInvocation,
+    };
+    use agl_ids::{ExecutionScope, RunId, StepId};
+    use agl_kernel::{ToolAccessMode, ToolOutcomeStatus, ToolPolicyInput};
     use serde_json::json;
 
     use crate::test_support::temp_root;
@@ -1248,6 +1296,119 @@ mod tests {
             declaration
                 .tool(&ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap())
                 .is_some()
+        );
+        for id in [FS_READ_TOOL_ID, FS_LIST_TOOL_ID, FS_SEARCH_TOOL_ID] {
+            let tool = declaration.tool(&ToolId::new(id).unwrap()).unwrap();
+            assert_eq!(
+                tool.declared_error("not_found").unwrap().class,
+                ToolErrorClass::Recoverable
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_missing_paths_are_recoverable_tool_outcomes() {
+        let root = temp_root("read-only-not-found");
+        let tools = CoreTools::new(&root).unwrap();
+        let descriptor = declaration();
+        let bindings = descriptor
+            .tools
+            .iter()
+            .map(|tool| ToolBinding::new(tool.id.clone(), tools.clone()))
+            .collect::<Vec<_>>();
+        let mut runtime = agl_kernel::ToolRuntime::new();
+        runtime
+            .register_extension(ExtensionRegistration::new(descriptor.clone(), bindings))
+            .unwrap();
+        let cases = [
+            (
+                FS_READ_TOOL_ID,
+                json!({"path": "missing.txt"}),
+                "missing.txt",
+            ),
+            (
+                FS_LIST_TOOL_ID,
+                json!({"path": "missing-directory"}),
+                "missing-directory",
+            ),
+            (
+                FS_SEARCH_TOOL_ID,
+                json!({"path": "missing-directory", "pattern": "needle"}),
+                "missing-directory",
+            ),
+        ];
+        let effective = ToolPolicyInput::new(
+            [descriptor.clone()],
+            cases.iter().map(|(id, _, _)| ToolId::new(*id).unwrap()),
+            ToolAccessMode::ReadOnly,
+        )
+        .resolve()
+        .unwrap();
+
+        for (id, arguments, expected_path) in cases {
+            let tool_id = ToolId::new(id).unwrap();
+            let declaration = descriptor.tool(&tool_id).unwrap();
+            let invocation = ToolInvocation::new(
+                ExecutionScope::builder(RunId::generate())
+                    .step_id(StepId::generate())
+                    .build()
+                    .unwrap(),
+                tool_id,
+                descriptor.id.clone(),
+                declaration.digest(),
+                effective.policy_hash().clone(),
+                arguments,
+            );
+
+            let outcome = runtime
+                .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
+                .unwrap();
+
+            assert_eq!(outcome.status, ToolOutcomeStatus::RecoverableError);
+            assert_eq!(outcome.outcome_code, "not_found");
+            assert_eq!(outcome.error.unwrap().data, json!({"path": expected_path}));
+        }
+    }
+
+    #[test]
+    fn apply_patch_schema_explains_the_live_create_shape() {
+        let declaration = declaration();
+        let patch = declaration
+            .tool(&ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap())
+            .unwrap();
+        assert!(patch.description.contains("use `op` as the discriminator"));
+        assert!(patch.description.contains("`expected_absent=true`"));
+        let encoded_schema = patch.input_schema.to_string();
+        assert!(encoded_schema.contains("explicit concurrency precondition"));
+        assert!(encoded_schema.contains("Must be explicitly true"));
+
+        let schema = patch.compile_schema().unwrap();
+        let error = schema
+            .validate(&json!({
+                "operations": [{
+                    "action": "create",
+                    "content": "",
+                    "path": "test.file"
+                }]
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'action' was unexpected"));
+        assert!(error.contains("\"op\" is a required property"));
+        assert!(error.contains("\"expected_absent\" is a required property"));
+        assert!(!error.contains("not valid under any of the schemas"));
+
+        assert!(
+            schema
+                .validate(&json!({
+                    "operations": [{
+                        "op": "create",
+                        "path": "test.file",
+                        "content": "",
+                        "expected_absent": true
+                    }]
+                }))
+                .is_ok()
         );
     }
 
