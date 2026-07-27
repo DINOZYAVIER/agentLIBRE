@@ -123,6 +123,10 @@ pub enum TurnTransition {
         name: String,
         message: String,
     },
+    AppendInvalidToolArgsObservation {
+        name: String,
+        result: ToolResult,
+    },
     StartToolCall {
         name: String,
         arguments: Value,
@@ -178,6 +182,9 @@ impl TurnTransition {
             TurnTransition::RejectToolLimit { .. } => "reject_tool_limit",
             TurnTransition::RejectHiddenTool { .. } => "reject_hidden_tool",
             TurnTransition::RejectToolArgs { .. } => "reject_tool_args",
+            TurnTransition::AppendInvalidToolArgsObservation { .. } => {
+                "append_invalid_tool_args_observation"
+            }
             TurnTransition::StartToolCall { .. } => "start_tool_call",
             TurnTransition::FinishToolCall { .. } => "finish_tool_call",
             TurnTransition::AppendObservation { .. } => "append_observation",
@@ -485,6 +492,7 @@ fn base_next_phase(from: TurnPhase, transition: &TurnTransition) -> Option<TurnP
         (ActionParsed, RejectToolLimit { .. }) => Some(ActionParsed),
         (ActionParsed, RejectHiddenTool { .. }) => Some(ActionParsed),
         (ActionParsed, RejectToolArgs { .. }) => Some(ActionParsed),
+        (ActionParsed, AppendInvalidToolArgsObservation { .. }) => Some(ObservationAppended),
         (ToolReady, StartToolCall { .. }) => Some(ToolRunning),
         (ToolRunning, FinishToolCall { .. }) => Some(ToolRunning),
         (

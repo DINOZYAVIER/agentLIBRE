@@ -1,17 +1,46 @@
 use crate::{StopDetail, StopReason, ToolDispatchRequest, TurnState};
 use agl_actions::ToolCall;
+use agl_extension::ToolResult;
+use serde_json::json;
+
+pub const TOOL_ARGUMENT_OBSERVATION_SCHEMA: &str = "agentlibre.tool-argument-observation.v1alpha";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolCallDecision {
     Dispatch(ToolDispatchRequest),
+    ObserveInvalidArguments(InvalidToolArguments),
     Stop(ToolCallStop),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidToolArguments {
+    pub name: String,
+    pub message: String,
+}
+
+impl InvalidToolArguments {
+    pub fn observation_result(&self) -> ToolResult {
+        ToolResult::new(json!({
+            "schema": TOOL_ARGUMENT_OBSERVATION_SCHEMA,
+            "status": "recoverable_error",
+            "outcome_code": "invalid_arguments",
+            "error": {
+                "code": "invalid_arguments",
+                "message": self.message,
+                "data": {
+                    "tool_id": self.name,
+                },
+            },
+        }))
+        .with_outcome_code("invalid_arguments")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolCallStop {
     ToolLimitReached { limit: usize },
     HiddenTool { name: String },
-    InvalidArguments { name: String, message: String },
+    InvalidSchema { name: String, message: String },
 }
 
 impl ToolCallStop {
@@ -19,7 +48,7 @@ impl ToolCallStop {
         match self {
             ToolCallStop::ToolLimitReached { .. } => StopReason::ToolLimitReached,
             ToolCallStop::HiddenTool { .. } => StopReason::HiddenTool,
-            ToolCallStop::InvalidArguments { .. } => StopReason::InvalidToolArguments,
+            ToolCallStop::InvalidSchema { .. } => StopReason::InvalidToolArguments,
         }
     }
 
@@ -29,7 +58,7 @@ impl ToolCallStop {
                 StopDetail::ToolLimitReached { limit: *limit }
             }
             ToolCallStop::HiddenTool { name } => StopDetail::HiddenTool { name: name.clone() },
-            ToolCallStop::InvalidArguments { name, message } => StopDetail::InvalidToolArguments {
+            ToolCallStop::InvalidSchema { name, message } => StopDetail::InvalidToolArguments {
                 name: name.clone(),
                 message: message.clone(),
             },
@@ -55,10 +84,19 @@ pub fn decide_tool_call(state: &TurnState, tool_call: &ToolCall) -> ToolCallDeci
         });
     };
 
-    if let Err(message) = validate_tool_arguments(visible_tool, &tool_call.arguments) {
-        return ToolCallDecision::Stop(ToolCallStop::InvalidArguments {
+    let schema = match visible_tool.compile_schema() {
+        Ok(schema) => schema,
+        Err(error) => {
+            return ToolCallDecision::Stop(ToolCallStop::InvalidSchema {
+                name: tool_call.name.clone(),
+                message: error.to_string(),
+            });
+        }
+    };
+    if let Err(error) = schema.validate(&tool_call.arguments) {
+        return ToolCallDecision::ObserveInvalidArguments(InvalidToolArguments {
             name: tool_call.name.clone(),
-            message,
+            message: error.to_string(),
         });
     }
 
@@ -68,14 +106,4 @@ pub fn decide_tool_call(state: &TurnState, tool_call: &ToolCall) -> ToolCallDeci
         capability_id: visible_tool.id.clone(),
         arguments: tool_call.arguments.clone(),
     })
-}
-
-fn validate_tool_arguments(
-    tool: &crate::VisibleTool,
-    arguments: &serde_json::Value,
-) -> std::result::Result<(), String> {
-    tool.compile_schema()
-        .map_err(|error| error.to_string())?
-        .validate(arguments)
-        .map_err(|error| error.to_string())
 }

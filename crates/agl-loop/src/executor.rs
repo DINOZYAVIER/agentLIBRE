@@ -6,7 +6,7 @@ use agl_events::{EventDraft, EventScope, RuntimeEvent};
 use agl_extension::{HookBatchRequest, HookBatchResult, HookEvent};
 use agl_ids::MessageId;
 use agl_kernel::{DispatchDenialCode, ToolOutcome};
-use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
+use agl_turn::policy::{InvalidToolArguments, ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, IncompleteOutputReason, ModelRequest, ModelResponseOutcome,
     StopReason, ToolDispatchRequest, TurnFailureOperation, TurnHookBatch, TurnInput, TurnMessage,
@@ -1020,6 +1020,27 @@ impl TurnExecutor {
         )?;
         let dispatch = match decide_tool_call(&self.checkpoint.state, &tool_call) {
             ToolCallDecision::Dispatch(dispatch) => dispatch,
+            ToolCallDecision::ObserveInvalidArguments(invalid) => {
+                self.emit_invalid_argument_denial(&invalid, events)?;
+                self.apply(
+                    TurnTransition::RejectToolArgs {
+                        name: invalid.name.clone(),
+                        message: invalid.message.clone(),
+                    },
+                    events,
+                )?;
+                let result = invalid.observation_result();
+                self.apply(
+                    TurnTransition::AppendInvalidToolArgsObservation {
+                        name: invalid.name,
+                        result: result.clone(),
+                    },
+                    events,
+                )?;
+                self.checkpoint.state.append_tool_result(tool_call, result);
+                self.checkpoint.phase = ExecutorPhase::StartModelRequest;
+                return Ok(());
+            }
             ToolCallDecision::Stop(stop) => {
                 self.emit_capability_denial(&stop, events)?;
                 self.apply_tool_stop(&stop, events)?;
@@ -1358,7 +1379,7 @@ impl TurnExecutor {
             ToolCallStop::HiddenTool { name } => {
                 TurnTransition::RejectHiddenTool { name: name.clone() }
             }
-            ToolCallStop::InvalidArguments { name, message } => TurnTransition::RejectToolArgs {
+            ToolCallStop::InvalidSchema { name, message } => TurnTransition::RejectToolArgs {
                 name: name.clone(),
                 message: message.clone(),
             },
@@ -1381,7 +1402,7 @@ impl TurnExecutor {
                     .map(|id| id.as_str().to_string()),
                 DispatchDenialCode::CapabilityNotEffective,
             ),
-            ToolCallStop::InvalidArguments { name, .. } => (
+            ToolCallStop::InvalidSchema { name, .. } => (
                 agl_extension::ToolId::new(name.clone())
                     .ok()
                     .map(|id| id.as_str().to_string()),
@@ -1399,6 +1420,32 @@ impl TurnExecutor {
                 policy_hash: policy_hash.clone(),
                 capability_id,
                 reason_code: code.as_str().to_string(),
+            },
+        ));
+        Ok(())
+    }
+
+    fn emit_invalid_argument_denial(
+        &self,
+        invalid: &InvalidToolArguments,
+        events: &mut Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<(), TurnExecutorError> {
+        let Some(policy_hash) = &self.checkpoint.state.input.capability_policy_hash else {
+            return Ok(());
+        };
+        let capability_id = agl_extension::ToolId::new(invalid.name.clone())
+            .ok()
+            .map(|id| id.as_str().to_string());
+        let scope = EventScope::builder(self.checkpoint.state.input.run_id.clone())
+            .turn_id(self.checkpoint.state.input.turn_id.clone())
+            .build()
+            .map_err(|error| TurnExecutorError::Transition(error.to_string()))?;
+        events.push(EventDraft::new(
+            scope,
+            RuntimeEvent::CapabilityCallDenied {
+                policy_hash: policy_hash.clone(),
+                capability_id,
+                reason_code: DispatchDenialCode::InvalidArguments.as_str().to_string(),
             },
         ));
         Ok(())

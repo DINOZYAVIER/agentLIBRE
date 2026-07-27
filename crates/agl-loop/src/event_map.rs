@@ -114,6 +114,12 @@ pub(crate) fn event_for_record(record: &TurnTransitionRecord) -> RuntimeEvent {
             name: name.clone(),
             message: message.clone(),
         },
+        TurnTransition::AppendInvalidToolArgsObservation { name, result } => {
+            RuntimeEvent::ObservationAppended {
+                name: name.clone(),
+                data: result.data.clone(),
+            }
+        }
         TurnTransition::StartToolCall { name, arguments } => RuntimeEvent::ToolCallStarted {
             name: name.clone(),
             arguments: arguments.clone(),
