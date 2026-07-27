@@ -157,7 +157,7 @@ fn render_assistant_tool_call(
     }
 }
 
-fn tool_observation_content(result: &agl_capabilities::ActionResult) -> Result<Content> {
+fn tool_observation_content(result: &agl_extension::ToolResult) -> Result<Content> {
     let mut parts = vec![ContentPart::text(result.render_observation())?];
     if let Some(content) = &result.content {
         parts.extend(content.parts.iter().cloned());

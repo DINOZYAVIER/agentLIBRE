@@ -196,7 +196,7 @@ fn renders_tool_observation_with_tool_name() {
         request_index: 1,
         messages: vec![TurnMessage::ToolObservation {
             name: "read_file".to_string(),
-            result: agl_capabilities::ActionResult::new(json!({"text": "agentLIBRE readme"})),
+            result: agl_extension::ToolResult::new(json!({"text": "agentLIBRE readme"})),
         }],
         visible_tools: Vec::new(),
     };
@@ -290,7 +290,7 @@ fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
         turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
-            name: "fs.read".to_string(),
+            name: "core.workspace:fs.read".to_string(),
             arguments: json!({"path": "README.MD"}),
         }],
         visible_tools: Vec::new(),
@@ -304,7 +304,7 @@ fn renders_gemma_function_call_transcript_with_dotted_tool_name() {
 
     assert_eq!(
         rendered_text(&rendered.messages[0]),
-        r#"<|tool_call>call:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#
+        r#"<|tool_call>call:core.workspace:fs.read{path:<|"|>README.MD<|"|>}<tool_call|>"#
     );
 }
 
@@ -315,7 +315,7 @@ fn renders_nested_gemma_function_call_arguments() {
         turn_id: turn_id(),
         request_index: 1,
         messages: vec![TurnMessage::AssistantToolCall {
-            name: "process.exec".to_string(),
+            name: "core.process:process.exec".to_string(),
             arguments: json!({
                 "program": "/usr/bin/printf",
                 "args": ["PTY_LIVE_OK"],
@@ -337,7 +337,7 @@ fn renders_nested_gemma_function_call_arguments() {
 
     assert_eq!(
         rendered_text(&rendered.messages[0]),
-        r#"<|tool_call>call:process.exec{args:[<|"|>PTY_LIVE_OK<|"|>],options:{env:{MODE:<|"|>live<|"|>},stdin:null},program:<|"|>/usr/bin/printf<|"|>,terminal_size:[120,40]}<tool_call|>"#
+        r#"<|tool_call>call:core.process:process.exec{args:[<|"|>PTY_LIVE_OK<|"|>],options:{env:{MODE:<|"|>live<|"|>},stdin:null},program:<|"|>/usr/bin/printf<|"|>,terminal_size:[120,40]}<tool_call|>"#
     );
 }
 

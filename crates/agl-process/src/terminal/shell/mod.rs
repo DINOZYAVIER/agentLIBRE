@@ -351,6 +351,7 @@ mod tests {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Shell,
             program: shell.snapshot.program.clone(),
+            argv0: shell.snapshot.program.display().to_string(),
             program_digest: Some(shell.snapshot.executable_digest.clone()),
             args: Vec::new(),
             workspace_root: workspace.to_path_buf(),

@@ -507,6 +507,7 @@ impl TerminalRegistry {
             creating_step_id: request.creating_step_id.clone(),
             kind: ExecutionKind::Shell,
             program: request.shell.snapshot.program.clone(),
+            argv0: request.shell.snapshot.program.display().to_string(),
             program_digest: Some(request.shell.snapshot.executable_digest.clone()),
             args: Vec::new(),
             workspace_root: request.context.workspace_root.clone(),
@@ -2631,7 +2632,8 @@ fn validate_ensure_request(request: &TerminalEnsureRequest) -> Result<()> {
     let sources_user_rc = matches!(request.host_startup, HostStartupPolicy::SourceUserRc { .. });
     match request.profile {
         ExecutionProfile::Workspace => {
-            if request.authorization != ExecutionAuthorization::default()
+            if request.authorization.host_process_execution
+                || request.authorization.shell_login_startup
                 || request.grant_lease.is_some()
                 || sources_user_rc
             {
@@ -4279,7 +4281,7 @@ mod tests {
         request.profile = ExecutionProfile::Host;
         request.authorization.host_process_execution = true;
         request.grant_lease = Some(crate::ExecutionGrantLease {
-            origin: crate::ExecutionLeaseOrigin::CapabilityGrant,
+            origin: crate::ExecutionLeaseOrigin::ToolGrant,
             grant_id: "model-capability-grant".to_owned(),
             duration: "session".to_owned(),
             scope_digest: "sha256:model-capability".to_owned(),

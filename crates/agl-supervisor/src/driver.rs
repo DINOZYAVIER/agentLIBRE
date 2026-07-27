@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agl_capabilities::CancellationSignal;
 use agl_events::SafeRuntimeEventEnvelope;
+use agl_extension::CancellationSignal;
 use agl_ids::{RunId, StepId};
 use agl_store::{DurableRunRecord, EffectDeliveryClass, RunState, RunUsage};
 use serde::{Deserialize, Serialize};

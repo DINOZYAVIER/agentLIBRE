@@ -874,7 +874,7 @@ mod tests {
         let turn_id = TurnId::generate();
         let attempt_id = AttemptId::generate();
         let step_id = StepId::generate();
-        let capability_id = agl_capabilities::CapabilityId::new("fs.list").unwrap();
+        let capability_id = agl_extension::ToolId::new("core.workspace:fs.list").unwrap();
         let (_, tool_events) = application_events(TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
             run_id: run_id.clone(),
@@ -929,7 +929,7 @@ mod tests {
         assert_eq!(
             policy_node.detail,
             ActivityDetailView::Capability(CapabilityActivityDetail::PolicyCheck {
-                capability_id: "fs.list".to_owned(),
+                capability_id: "core.workspace:fs.list".to_owned(),
                 outcome: ActivityPolicyOutcome::Denied,
             })
         );

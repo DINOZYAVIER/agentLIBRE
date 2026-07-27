@@ -120,7 +120,7 @@ daemon_output="$(env -u VK_DRIVER_FILES -u VK_ICD_FILENAMES PATH="$tmp_dir/bin:$
   --socket "$tmp_dir/state/daemon/agl.sock" \
   --workspace-root "$tmp_dir/workspace" \
   --max-output-tokens 512 \
-  --tool-mode write \
+  --tool-mode execute \
   --log-filter "agentlibre=debug")"
 
 require_output_contains "$daemon_output" "service unit: agl-test.service"
@@ -142,7 +142,7 @@ require_output_contains "$daemon_output" \
   "UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"
 require_output_contains "$daemon_output" "UMask=0077"
 require_output_contains "$daemon_output" "Requires=agl-test.socket"
-require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode write"
+require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode execute"
 require_output_contains "$daemon_output" "ListenStream=$tmp_dir/state/daemon/agl.sock"
 require_output_contains "$daemon_output" "FileDescriptorName=agentlibre"
 require_output_contains "$daemon_output" "SocketMode=0600"

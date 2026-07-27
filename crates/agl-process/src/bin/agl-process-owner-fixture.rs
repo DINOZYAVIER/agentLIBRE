@@ -80,6 +80,7 @@ mod linux {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
             program: helper.clone(),
+            argv0: helper.display().to_string(),
             program_digest: None,
             args: vec!["fork-tree".to_owned(), evidence.display().to_string()],
             workspace_root: workspace.clone(),

@@ -8,9 +8,10 @@ repository.workspace = true
 [dependencies]
 agl-artifact.workspace = true
 agl-assets.workspace = true
-agl-capabilities.workspace = true
+agl-extension.workspace = true
 agl-chat.workspace = true
 agl-function.workspace = true
+agl-kernel.workspace = true
 agl-model.workspace = true
 agl-runtime.workspace = true
 agl-skill.workspace = true

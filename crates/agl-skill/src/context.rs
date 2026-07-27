@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use agl_capabilities::{CapabilityExclusionReason, CapabilityId, HookId, SkillId, StateEffect};
-use agl_tools::ToolCatalog;
+use agl_extension::{EffectId, HookId, SkillId, ToolId};
+use agl_kernel::ToolCatalog;
+use agl_kernel::ToolExclusionReason;
 use serde::Serialize;
 
 use crate::{SkillRegistry, SkillRegistryError};
@@ -52,16 +53,16 @@ impl SkillToolRoutingView {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct SkillToolRouting {
-    callable_tools: BTreeSet<CapabilityId>,
-    requestable_tools: BTreeSet<CapabilityId>,
-    unavailable_tools: BTreeMap<CapabilityId, CapabilityExclusionReason>,
+    callable_tools: BTreeSet<ToolId>,
+    requestable_tools: BTreeSet<ToolId>,
+    unavailable_tools: BTreeMap<ToolId, ToolExclusionReason>,
 }
 
 impl SkillToolRouting {
     pub fn new(
-        callable_tools: impl IntoIterator<Item = CapabilityId>,
-        requestable_tools: impl IntoIterator<Item = CapabilityId>,
-        unavailable_tools: impl IntoIterator<Item = (CapabilityId, CapabilityExclusionReason)>,
+        callable_tools: impl IntoIterator<Item = ToolId>,
+        requestable_tools: impl IntoIterator<Item = ToolId>,
+        unavailable_tools: impl IntoIterator<Item = (ToolId, ToolExclusionReason)>,
     ) -> Self {
         Self {
             callable_tools: callable_tools.into_iter().collect(),
@@ -70,19 +71,19 @@ impl SkillToolRouting {
         }
     }
 
-    pub fn callable_tools(&self) -> &BTreeSet<CapabilityId> {
+    pub fn callable_tools(&self) -> &BTreeSet<ToolId> {
         &self.callable_tools
     }
 
-    pub fn requestable_tools(&self) -> &BTreeSet<CapabilityId> {
+    pub fn requestable_tools(&self) -> &BTreeSet<ToolId> {
         &self.requestable_tools
     }
 
-    pub fn unavailable_tools(&self) -> &BTreeMap<CapabilityId, CapabilityExclusionReason> {
+    pub fn unavailable_tools(&self) -> &BTreeMap<ToolId, ToolExclusionReason> {
         &self.unavailable_tools
     }
 
-    pub fn declared_tools(&self) -> BTreeSet<CapabilityId> {
+    pub fn declared_tools(&self) -> BTreeSet<ToolId> {
         self.callable_tools
             .iter()
             .chain(&self.requestable_tools)
@@ -291,31 +292,31 @@ fn build_context_block(
         manifest_allowed_tools: harness
             .allowed_tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         manifest_requestable_tools: harness
             .requestable_tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         manifest_denied_tools: harness
             .denied_tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         callable_tools: routing
             .callable_tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         requestable_tools: routing
             .requestable_tools
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .map(ToOwned::to_owned)
             .collect(),
         unavailable_tools: routing
@@ -333,7 +334,7 @@ fn build_context_block(
                 tools: template
                     .tools
                     .iter()
-                    .map(CapabilityId::as_str)
+                    .map(ToolId::as_str)
                     .map(ToOwned::to_owned)
                     .collect(),
                 max_operation_kind: template
@@ -342,7 +343,8 @@ fn build_context_block(
                 state_effects: template
                     .state_effects
                     .iter()
-                    .map(|effect| state_effect_as_str(*effect).to_string())
+                    .map(EffectId::as_str)
+                    .map(ToOwned::to_owned)
                     .collect(),
                 default_duration: template.default_duration.clone(),
                 reason_template: template.reason_template.clone(),
@@ -445,11 +447,8 @@ fn validate_routing(
     Ok(())
 }
 
-fn render_tools<'a>(tools: impl IntoIterator<Item = &'a CapabilityId>) -> String {
-    let tools = tools
-        .into_iter()
-        .map(CapabilityId::as_str)
-        .collect::<Vec<_>>();
+fn render_tools<'a>(tools: impl IntoIterator<Item = &'a ToolId>) -> String {
+    let tools = tools.into_iter().map(ToolId::as_str).collect::<Vec<_>>();
     if tools.is_empty() {
         "[]".to_string()
     } else {
@@ -457,7 +456,7 @@ fn render_tools<'a>(tools: impl IntoIterator<Item = &'a CapabilityId>) -> String
     }
 }
 
-fn render_unavailable_tools(tools: &BTreeMap<CapabilityId, CapabilityExclusionReason>) -> String {
+fn render_unavailable_tools(tools: &BTreeMap<ToolId, ToolExclusionReason>) -> String {
     if tools.is_empty() {
         "[]".to_string()
     } else {
@@ -467,10 +466,6 @@ fn render_unavailable_tools(tools: &BTreeMap<CapabilityId, CapabilityExclusionRe
             .collect::<Vec<_>>()
             .join(", ")
     }
-}
-
-fn state_effect_as_str(effect: StateEffect) -> &'static str {
-    effect.as_str()
 }
 
 fn previous_char_boundary(value: &str, mut index: usize) -> usize {
@@ -483,8 +478,8 @@ fn previous_char_boundary(value: &str, mut index: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use agl_capabilities::OperationKind;
-    use agl_tools::ToolCatalog;
+    use agl_extension::OperationKind;
+    use agl_kernel::ToolCatalog;
 
     use super::*;
     use crate::{
@@ -496,15 +491,20 @@ mod tests {
     fn verified_context_bundle_records_hashes_for_minimal_builtin_skill() {
         let registry = SkillRegistry::from_builtin_assets().unwrap();
         let mut tool_catalog = ToolCatalog::new();
-        agl_tools::guards::register(&mut tool_catalog).unwrap();
-        agl_tools::fs::register(&mut tool_catalog).unwrap();
-        agl_tools::repo::register(&mut tool_catalog).unwrap();
+        agl_core_tools::guards::register(&mut tool_catalog).unwrap();
+        agl_core_tools::fs::register(&mut tool_catalog).unwrap();
+        agl_core_tools::repo::register(&mut tool_catalog).unwrap();
 
         let skill_id = SkillId::new("repo-status").unwrap();
         let routing = SkillToolRoutingView::new([(
             skill_id.clone(),
             SkillToolRouting::new(
-                tool_ids(["fs.list", "fs.read", "fs.search", "repo.status"]),
+                tool_ids([
+                    "core.workspace:fs.list",
+                    "core.workspace:fs.read",
+                    "core.workspace:fs.search",
+                    "repo.status",
+                ]),
                 [],
                 [],
             ),
@@ -524,12 +524,17 @@ mod tests {
         );
         assert_eq!(
             bundle.evidence[0].callable_tools,
-            vec!["fs.list", "fs.read", "fs.search", "repo.status"]
+            vec![
+                "core.workspace:fs.list",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
+                "repo.status"
+            ]
         );
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: fs.list, fs.read, fs.search, repo.status")
+                .contains("directly_callable_tools: core.workspace:fs.list, core.workspace:fs.read, core.workspace:fs.search, repo.status")
         );
         assert!(bundle.content.contains("requestable_tools: []"));
         assert!(
@@ -548,11 +553,11 @@ mod tests {
     fn context_distinguishes_callable_from_requestable_tools() {
         let registry = registry_with_requestable_fixture();
         let mut tool_catalog = ToolCatalog::new();
-        agl_tools::guards::register(&mut tool_catalog).unwrap();
-        agl_tools::cron::register(&mut tool_catalog).unwrap();
-        agl_tools::fs::register(&mut tool_catalog).unwrap();
-        agl_tools::matrix::register(&mut tool_catalog).unwrap();
-        agl_tools::permissions::register(&mut tool_catalog).unwrap();
+        agl_core_tools::guards::register(&mut tool_catalog).unwrap();
+        agl_core_tools::cron::register(&mut tool_catalog).unwrap();
+        agl_core_tools::fs::register(&mut tool_catalog).unwrap();
+        agl_core_tools::matrix::register(&mut tool_catalog).unwrap();
+        agl_core_tools::permissions::register(&mut tool_catalog).unwrap();
 
         let skill_id = SkillId::new("requestable-test").unwrap();
         let routing = SkillToolRoutingView::new([(
@@ -560,15 +565,15 @@ mod tests {
             SkillToolRouting::new(
                 tool_ids([
                     "cron.preflight",
-                    "fs.read",
-                    "fs.search",
+                    "core.workspace:fs.read",
+                    "core.workspace:fs.search",
                     "permissions.request",
                     "permissions.status",
                 ]),
                 tool_ids(["cron.add", "matrix.outbox.enqueue"]),
                 [(
-                    CapabilityId::new("matrix.outbox.deliver").unwrap(),
-                    CapabilityExclusionReason::SkillDenied,
+                    ToolId::new("matrix.outbox.deliver").unwrap(),
+                    ToolExclusionReason::SkillDenied,
                 )],
             ),
         )])
@@ -579,7 +584,7 @@ mod tests {
         assert!(
             bundle
                 .content
-                .contains("directly_callable_tools: cron.preflight, fs.read, fs.search, permissions.request, permissions.status")
+                .contains("directly_callable_tools: core.workspace:fs.read, core.workspace:fs.search, cron.preflight, permissions.request, permissions.status")
         );
         assert!(
             bundle
@@ -595,9 +600,9 @@ mod tests {
         assert_eq!(
             bundle.evidence[0].callable_tools,
             vec![
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
                 "cron.preflight",
-                "fs.read",
-                "fs.search",
                 "permissions.request",
                 "permissions.status"
             ]
@@ -633,8 +638,8 @@ mod tests {
                 required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
                 allowed_tools: tool_ids([
                     "cron.preflight",
-                    "fs.read",
-                    "fs.search",
+                    "core.workspace:fs.read",
+                    "core.workspace:fs.search",
                     "permissions.request",
                     "permissions.status",
                 ]),
@@ -644,7 +649,7 @@ mod tests {
                     id: "schedule-matrix-cron".to_string(),
                     tools: tool_ids(["cron.add", "matrix.outbox.enqueue"]),
                     max_operation_kind: Some(OperationKind::Write),
-                    state_effects: vec![StateEffect::StoreCron, StateEffect::MatrixOutbox],
+                    state_effects: vec![EffectId::store_cron(), EffectId::matrix_outbox()],
                     default_duration: "one_turn".to_string(),
                     reason_template: "Schedule a Matrix notification cron job.".to_string(),
                 }],
@@ -681,10 +686,10 @@ mod tests {
         .unwrap()
     }
 
-    fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<CapabilityId> {
+    fn tool_ids<const N: usize>(values: [&str; N]) -> Vec<ToolId> {
         values
             .into_iter()
-            .map(|value| CapabilityId::new(value).unwrap())
+            .map(|value| ToolId::new(value).unwrap())
             .collect()
     }
 }

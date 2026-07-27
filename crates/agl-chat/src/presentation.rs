@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use agl_capabilities::CapabilityId;
 use agl_content::Content;
+use agl_extension::ToolId;
 use agl_ids::{AttemptId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{
     InferenceOutputEvent, InferenceOutputSink, InferenceStageEvent, OutputDelivery,
@@ -143,7 +143,7 @@ pub enum TurnPresentationEvent {
         attempt_id: Option<AttemptId>,
         provisional_message_id: Option<MessageId>,
         step_id: StepId,
-        capability_id: CapabilityId,
+        capability_id: ToolId,
     },
     ToolActionFinished {
         session_id: SessionId,
@@ -152,7 +152,7 @@ pub enum TurnPresentationEvent {
         attempt_id: Option<AttemptId>,
         provisional_message_id: Option<MessageId>,
         step_id: StepId,
-        capability_id: CapabilityId,
+        capability_id: ToolId,
         outcome: ToolActionOutcome,
         detail: Option<CapabilityPresentationDetail>,
     },
@@ -162,7 +162,7 @@ pub enum TurnPresentationEvent {
         turn_id: TurnId,
         attempt_id: Option<AttemptId>,
         step_id: StepId,
-        capability_id: CapabilityId,
+        capability_id: ToolId,
         outcome: PolicyPresentationOutcome,
     },
     TurnFinished {

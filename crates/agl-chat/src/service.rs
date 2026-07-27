@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use agl_capabilities::CapabilityId;
 use agl_content::{Content, ContentPart};
 use agl_events::{RuntimeEvent, SafeRuntimeEventEnvelope};
+use agl_extension::ToolId;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::{InferenceCancellation, ModelManagerError};
@@ -152,7 +152,7 @@ pub(crate) struct DurableTurnResume {
     pub checkpoint: TurnCheckpoint,
     pub event_sequence: u64,
     pub attempt_ids: Vec<AttemptId>,
-    pub delegation_authority_ceiling: BTreeSet<CapabilityId>,
+    pub delegation_authority_ceiling: BTreeSet<ToolId>,
     pub continuation_index: u16,
     pub internal_continuation: bool,
     pub continuation_source_message_id: Option<MessageId>,
@@ -386,7 +386,7 @@ impl ChatService {
 
     pub(crate) fn capability_delivery_class(
         &self,
-        capability_id: &agl_capabilities::CapabilityId,
+        capability_id: &agl_extension::ToolId,
     ) -> Result<agl_store::EffectDeliveryClass> {
         self.turn_runtime.capability_delivery_class(capability_id)
     }
@@ -404,7 +404,7 @@ impl ChatService {
             .to_string()
     }
 
-    pub(crate) fn delegation_authority_ceiling(&self) -> &BTreeSet<CapabilityId> {
+    pub(crate) fn delegation_authority_ceiling(&self) -> &BTreeSet<ToolId> {
         self.turn_runtime.session().delegation_authority_ceiling()
     }
 
@@ -1057,7 +1057,10 @@ impl ChatService {
                         false,
                     )),
                 };
-                TurnEffectResult::CapabilityDispatch { key, outcome }
+                TurnEffectResult::CapabilityDispatch {
+                    key,
+                    outcome: Box::new(outcome),
+                }
             }
             TurnEffect::TranscriptAppend {
                 key,
@@ -1334,7 +1337,7 @@ fn cancelled_effect_result(effect: TurnEffect) -> TurnEffectResult {
         },
         TurnEffect::CapabilityDispatch { key, .. } => TurnEffectResult::CapabilityDispatch {
             key,
-            outcome: EffectOutcome::Cancelled,
+            outcome: Box::new(EffectOutcome::Cancelled),
         },
         TurnEffect::TranscriptAppend { key, .. } => TurnEffectResult::TranscriptAppend {
             key,
@@ -1645,7 +1648,7 @@ pub fn replay_turn_messages(replay: &ChatSessionReplay) -> Vec<TurnMessage> {
                 RuntimeEvent::ToolMessage { name, data, .. } => {
                     messages.push(TurnMessage::ToolObservation {
                         name: name.clone(),
-                        result: agl_capabilities::ActionResult::new(data.clone()),
+                        result: agl_extension::ToolResult::new(data.clone()),
                     });
                 }
                 _ => {}
@@ -1688,7 +1691,7 @@ fn log_action_result_metadata(
     role: &str,
     session_id: &SessionId,
     message_id: &MessageId,
-    result: &agl_capabilities::ActionResult,
+    result: &agl_extension::ToolResult,
     runtime: &AgentLibreRuntimeConfig,
 ) {
     let data_bytes = serde_json::to_vec(&result.data)
@@ -1712,7 +1715,6 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use agl_capabilities::DispatchDenialCode;
     use agl_config::ResolvedInferenceConfig;
     use agl_events::{
         EVENT_SCHEMA, EventDraft, EventEnvelope, EventScope, SafeRuntimeEvent, TurnFinishStatus,
@@ -1721,6 +1723,7 @@ mod tests {
     use agl_inference::{
         InferenceFinishReason, InferenceResponse, InferenceResponseMetadata, ModelManagerStatus,
     };
+    use agl_kernel::DispatchDenialCode;
 
     use crate::{ChatInferenceJob, InferenceClient};
 
@@ -1754,8 +1757,8 @@ mod tests {
 
     fn visible_tool(id: &str) -> VisibleTool {
         let catalog = crate::tools::chat_extension_catalog().unwrap();
-        let id = agl_capabilities::CapabilityId::new(id).unwrap();
-        VisibleTool::from_declaration(catalog.action(&id).unwrap())
+        let id = agl_extension::ToolId::new(id).unwrap();
+        VisibleTool::from_declaration(catalog.tool(&id).unwrap())
     }
 
     fn message_id(last_hex: char) -> MessageId {
@@ -1872,6 +1875,7 @@ tool_call_format = "hermes_json"
             ),
         )
         .unwrap();
+        write_service_test_function(&root);
         let runtime = AgentLibreRuntimeConfig {
             paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
             logging: agl_runtime::AgentLibreLoggingConfig::default(),
@@ -1883,6 +1887,7 @@ tool_call_format = "hermes_json"
         let options = ChatOptions {
             inference: crate::InferenceOptions {
                 config: Some(config_path),
+                function_ref: Some("service-test".to_owned()),
                 artifact_root: Some(root.join("artifacts")),
                 workspace_root: Some(root.clone()),
                 max_output_tokens: 1,
@@ -1895,6 +1900,21 @@ tool_call_format = "hermes_json"
         };
         let service = ChatService::open(options, &runtime, inference_client).unwrap();
         TestChatService { service, root }
+    }
+
+    fn write_service_test_function(workspace_root: &std::path::Path) {
+        let function_root = workspace_root.join(".agl/functions/service-test");
+        std::fs::create_dir_all(&function_root).unwrap();
+        std::fs::write(
+            function_root.join(agl_function::FUNCTION_FILE_NAME),
+            "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: service-test\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Service test\nruntime:\n  tool_mode: read-only\n  max_output_tokens: 1\nskills:\n  use: []\nsubagents:\n  use: []\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            function_root.join(agl_function::FUNCTION_SYSTEM_PROMPT_FILE_NAME),
+            "Service test function.\n",
+        )
+        .unwrap();
     }
 
     #[derive(Default)]
@@ -2422,7 +2442,7 @@ tool_call_format = "hermes_json"
             "stepping-tool",
             false,
             scripted_inference_client(&[
-                r#"<tool_call>{"name":"fs.read","arguments":{"path":"inference.toml"}}</tool_call>"#,
+                r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"inference.toml"}}</tool_call>"#,
                 "tool complete",
             ]),
         );
@@ -2434,10 +2454,14 @@ tool_call_format = "hermes_json"
             .service
             .run_user_turn("read config; PRIVATE_PROMPT_SENTINEL")
             .unwrap();
-        assert!(matches!(
-            tool_output.status,
-            ChatTurnStatus::Answered { ref answer } if answer == "tool complete"
-        ));
+        assert!(
+            matches!(
+                tool_output.status,
+                ChatTurnStatus::Answered { ref answer } if answer == "tool complete"
+            ),
+            "{:?}",
+            tool_output.status
+        );
         assert!(tool_output.runtime_events.iter().any(|event| matches!(
             event.payload,
             SafeRuntimeEvent::ToolCallFinished { .. }
@@ -2450,7 +2474,7 @@ tool_call_format = "hermes_json"
                 capability_id,
                 outcome: crate::PolicyPresentationOutcome::Allowed,
                 ..
-            } if capability_id.as_str() == agl_tools::FS_READ_TOOL_ID
+            } if capability_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
         )));
         assert!(presentation_events.iter().any(|event| matches!(
             event,
@@ -2461,7 +2485,7 @@ tool_call_format = "hermes_json"
                     bytes,
                 }),
                 ..
-            } if capability_id.as_str() == agl_tools::FS_READ_TOOL_ID
+            } if capability_id.as_str() == agl_core_tools::FS_READ_TOOL_ID
                 && path == "inference.toml"
                 && *bytes > 0
         )));
@@ -2660,6 +2684,7 @@ tool_call_format = "hermes_json"
         let previous = chat.service.execution_context().clone();
         let next_root = chat.root.join("next-workspace");
         std::fs::create_dir_all(&next_root).unwrap();
+        write_service_test_function(&next_root);
         let next_root = next_root.canonicalize().unwrap();
         let session_id = chat.service.session_id().clone();
 
@@ -2948,7 +2973,7 @@ tool_call_format = "hermes_json"
                 },
                 TurnMessage::ToolObservation {
                     name: "read_file".to_string(),
-                    result: agl_capabilities::ActionResult::new(
+                    result: agl_extension::ToolResult::new(
                         serde_json::json!({"content": "content"})
                     )
                 }
@@ -3007,7 +3032,7 @@ tool_call_format = "hermes_json"
                 .with_required_hook(agl_loop::HookId::new("core:task_spec.validate").unwrap()),
         ];
 
-        let visible_tools = vec![visible_tool("fs.read")];
+        let visible_tools = vec![visible_tool("core.workspace:fs.read")];
         let user_input = text("new");
 
         let input = build_turn_input(TurnInputSpec {
@@ -3095,9 +3120,9 @@ tool_call_format = "hermes_json"
     #[test]
     fn stopped_turn_context_message_explains_no_tool_execution() {
         let visible_tools = vec![
-            visible_tool("fs.list"),
-            visible_tool("fs.read"),
-            visible_tool("fs.search"),
+            visible_tool("core.workspace:fs.list"),
+            visible_tool("core.workspace:fs.read"),
+            visible_tool("core.workspace:fs.search"),
         ];
         for reason in [
             StopReason::ToolJsonUnrepairable,
@@ -3108,16 +3133,18 @@ tool_call_format = "hermes_json"
 
             assert!(message.contains("previous turn stopped"));
             assert!(message.contains("No tool was executed."));
-            assert!(message.contains("`fs.list`, `fs.read`, `fs.search`"));
+            assert!(message.contains(
+                "`core.workspace:fs.list`, `core.workspace:fs.read`, `core.workspace:fs.search`"
+            ));
         }
     }
 
     #[test]
     fn hidden_tool_stop_message_names_rejected_tool_and_recovery() {
         let visible_tools = vec![
-            visible_tool("fs.list"),
-            visible_tool("fs.read"),
-            visible_tool("fs.search"),
+            visible_tool("core.workspace:fs.list"),
+            visible_tool("core.workspace:fs.read"),
+            visible_tool("core.workspace:fs.search"),
         ];
         let message = stopped_turn_context_message(
             StopReason::HiddenTool,
@@ -3129,7 +3156,9 @@ tool_call_format = "hermes_json"
 
         assert!(message.contains("unavailable tool `matrix`"));
         assert!(message.contains("No tool was executed."));
-        assert!(message.contains("`fs.list`, `fs.read`, `fs.search`"));
+        assert!(message.contains(
+            "`core.workspace:fs.list`, `core.workspace:fs.read`, `core.workspace:fs.search`"
+        ));
         assert!(message.contains("do not call `matrix` again"));
         assert!(message.contains("CLI/daemon path"));
     }
@@ -3137,7 +3166,7 @@ tool_call_format = "hermes_json"
     #[test]
     fn hidden_tool_stop_message_mentions_permission_request_when_visible() {
         let visible_tools = vec![
-            visible_tool("fs.list"),
+            visible_tool("core.workspace:fs.list"),
             visible_tool("permissions.request"),
             visible_tool("permissions.status"),
         ];

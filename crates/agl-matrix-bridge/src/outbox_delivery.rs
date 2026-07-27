@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use agl_capabilities::{
-    ActionDispatchContext, ActionHandler, ActionHandlerError, ActionResult, CapabilityId,
-};
+use agl_core_tools::matrix_delivery::MatrixOutboxDeliverArgs;
+use agl_extension::{ToolDispatchContext, ToolHandler, ToolId, ToolResult};
 use agl_store::{AglStore, MatrixNotificationOutboxItem};
-use agl_tools::matrix_delivery::MatrixOutboxDeliverArgs;
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 
@@ -32,19 +30,19 @@ impl<T> MatrixOutboxDeliveryTools<T> {
 }
 
 impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
-    fn dispatch_action(&self, id: &CapabilityId, arguments: Value) -> Result<ActionResult> {
+    fn dispatch_action(&self, id: &ToolId, arguments: Value) -> Result<ToolResult> {
         ensure!(
-            id.as_str() == agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            id.as_str() == agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
             "unknown Matrix outbox delivery capability `{id}`"
         );
         let args =
             serde_json::from_value::<MatrixOutboxDeliverArgs>(arguments).with_context(|| {
                 format!(
                     "{} arguments are invalid",
-                    agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID
+                    agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID
                 )
             })?;
-        Ok(ActionResult::new(self.deliver(args)?))
+        Ok(ToolResult::new(self.deliver(args)?))
     }
 
     fn deliver(&self, args: MatrixOutboxDeliverArgs) -> Result<Value> {
@@ -101,7 +99,7 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
             }
         }
         Ok(json!({
-            "capability_id": agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
+            "capability_id": agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID,
             "dry_run": args.dry_run,
             "limit": limit,
             "queued": queued_count,
@@ -113,11 +111,13 @@ impl<T: MatrixOutboxTransport> MatrixOutboxDeliveryTools<T> {
     }
 }
 
-impl<T: MatrixOutboxTransport> ActionHandler for MatrixOutboxDeliveryTools<T> {
-    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
-        let invocation = context.into_invocation();
-        self.dispatch_action(&invocation.capability_id, invocation.arguments)
-            .map_err(Into::into)
+impl<T: MatrixOutboxTransport> ToolHandler for MatrixOutboxDeliveryTools<T> {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+        Box::pin(async move {
+            let invocation = context.into_invocation();
+            self.dispatch_action(&invocation.capability_id, invocation.arguments)
+                .map_err(Into::into)
+        })
     }
 }
 
@@ -176,7 +176,7 @@ mod tests {
 
         let output = tools
             .dispatch_action(
-                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
+                &ToolId::new(agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
                 json!({"limit": 10}),
             )
             .unwrap();
@@ -207,7 +207,7 @@ mod tests {
 
         let output = tools
             .dispatch_action(
-                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
+                &ToolId::new(agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
                 json!({"dry_run": true}),
             )
             .unwrap();
@@ -227,7 +227,7 @@ mod tests {
         let tools = MatrixOutboxDeliveryTools::new(&root, TestTransport);
         let error = tools
             .dispatch_action(
-                &CapabilityId::new(agl_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
+                &ToolId::new(agl_core_tools::MATRIX_OUTBOX_DELIVER_TOOL_ID).unwrap(),
                 json!({"unknown": true}),
             )
             .unwrap_err();

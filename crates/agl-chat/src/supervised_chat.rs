@@ -651,7 +651,7 @@ tool_call_format = "hermes_json"
                 capability_id,
                 outcome: crate::ToolActionOutcome::Waiting,
                 ..
-            } if capability_id.as_str() == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+            } if capability_id.as_str() == agl_extension::AGENT_DELEGATE_TOOL_ID
         )));
         assert!(presentation_events.iter().any(|event| matches!(
             event,
@@ -684,9 +684,7 @@ tool_call_format = "hermes_json"
         else {
             panic!("durable child has root input");
         };
-        assert!(
-            !authority_ceiling.contains(&agl_capabilities::CapabilityId::new("cron.add").unwrap())
-        );
+        assert!(!authority_ceiling.contains(&agl_extension::ToolId::new("cron.add").unwrap()));
 
         let jobs = state.jobs.lock().unwrap().clone();
         assert_eq!(jobs.len(), 3);

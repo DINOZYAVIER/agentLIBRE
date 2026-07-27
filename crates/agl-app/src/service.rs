@@ -199,7 +199,7 @@ impl PromptAdmissionState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ApplicationActionResult {
+pub enum ApplicationToolResult {
     SessionOpened {
         opened: Box<SessionOpened>,
     },
@@ -284,7 +284,7 @@ pub trait ApplicationBackend: Send + Sync + 'static {
         &self,
         context: ApplicationCallContext,
         request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError>;
+    ) -> Result<ApplicationToolResult, ApplicationError>;
     fn submit_prompt(
         &self,
         context: ApplicationCallContext,
@@ -451,7 +451,7 @@ impl ApplicationService {
     pub async fn invoke(
         &self,
         request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         request.validate()?;
         let session_id = request.session_id.clone();
         let backend = Arc::clone(&self.backend);
@@ -459,7 +459,7 @@ impl ApplicationService {
             .blocking(move |context| backend.invoke(context, request))
             .await?;
         if let Some(session_id) = session_id {
-            if matches!(&result, ApplicationActionResult::SessionExited { .. }) {
+            if matches!(&result, ApplicationToolResult::SessionExited { .. }) {
                 self.finish_session_projection(&session_id).await?;
             } else {
                 self.refresh(&session_id).await?;

@@ -252,7 +252,11 @@ pub(super) fn prepare_pid_namespace(request: &LauncherRequest) -> Result<Option<
         }
     }
 
-    bind_mount(&request.request.workspace_root, &root, false)?;
+    bind_mount(
+        &request.request.workspace_root,
+        &root,
+        !request.request.authorization.workspace_write,
+    )?;
 
     let dev = root.join("dev");
     ensure_directory(&dev, 0o755)?;
@@ -580,11 +584,11 @@ fn apply_landlock(request: &LauncherRequest) -> Result<()> {
     }
     let ruleset = unsafe { OwnedFd::from_raw_fd(ruleset) };
     add_landlock_path(ruleset.as_raw_fd(), Path::new("/"), LANDLOCK_READ_ACCESS)?;
-    for path in [
-        request.request.workspace_root.as_path(),
-        Path::new(SANDBOX_HOME),
-        Path::new(SANDBOX_TMP),
-    ] {
+    let mut writable_paths = vec![Path::new(SANDBOX_HOME), Path::new(SANDBOX_TMP)];
+    if request.request.authorization.workspace_write {
+        writable_paths.push(request.request.workspace_root.as_path());
+    }
+    for path in writable_paths {
         add_landlock_path(ruleset.as_raw_fd(), path, LANDLOCK_WRITE_ACCESS)?;
     }
     for path in PRIVATE_DEVICE_PATHS {
@@ -1025,6 +1029,7 @@ mod tests {
                 creating_run_id: RunId::generate(),
                 creating_step_id: StepId::generate(),
                 kind: ExecutionKind::Argv,
+                argv0: program.display().to_string(),
                 program,
                 program_digest: None,
                 args: Vec::new(),

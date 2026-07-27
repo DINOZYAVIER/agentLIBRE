@@ -6,13 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-capabilities.workspace = true
+agl-extension.workspace = true
 agl-client.workspace = true
 agl-content.workspace = true
 agl-ids.workspace = true
 agl-protocol.workspace = true
 agl-store.workspace = true
-agl-tools.workspace = true
+agl-core-tools.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 clap.workspace = true

@@ -347,7 +347,7 @@ mod tests {
             _after_sequence: u64,
             _through_sequence: u64,
             _maximum_bytes: usize,
-        ) -> Result<Vec<ExecutionOutputChunk>> {
+        ) -> Result<crate::OutputSpoolRead> {
             panic!("unsupported backend touched the output spool")
         }
 

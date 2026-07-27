@@ -7,8 +7,8 @@ use agl_ids::ExecutionId;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CommittedOutputFrame, ExecutionChannel, ExecutionOutputChunk, OutputSpool, ProcessBytes,
-    ProcessError, ProcessErrorCode, Result,
+    CommittedOutputFrame, ExecutionChannel, ExecutionOutputChunk, OutputSpool, OutputSpoolRead,
+    ProcessBytes, ProcessError, ProcessErrorCode, Result,
 };
 
 const HEADER: &[u8] = b"AGLSPOOL\x01";
@@ -155,12 +155,13 @@ impl OutputSpool for FileOutputSpool {
         after_sequence: u64,
         through_sequence: u64,
         maximum_bytes: usize,
-    ) -> Result<Vec<ExecutionOutputChunk>> {
+    ) -> Result<OutputSpoolRead> {
         let _guard = self.lock()?;
         let mut file = self.open(execution_id, false)?;
         validate_header(&mut file)?;
         let mut chunks = Vec::new();
         let mut returned_bytes = 0usize;
+        let mut complete = true;
         while let Some(frame) = read_frame(&mut file)? {
             if frame.sequence <= after_sequence || frame.sequence > through_sequence {
                 continue;
@@ -168,6 +169,7 @@ impl OutputSpool for FileOutputSpool {
             if returned_bytes != 0
                 && returned_bytes.saturating_add(frame.payload.len()) > maximum_bytes
             {
+                complete = false;
                 break;
             }
             if frame.payload.len() > maximum_bytes {
@@ -183,7 +185,7 @@ impl OutputSpool for FileOutputSpool {
                 bytes: ProcessBytes::from_bytes(&frame.payload),
             });
         }
-        Ok(chunks)
+        Ok(OutputSpoolRead { chunks, complete })
     }
 
     fn recover(
@@ -491,17 +493,26 @@ mod tests {
             .recover(&id, std::slice::from_ref(&first_committed))
             .unwrap();
 
-        assert_eq!(spool.read(&id, 0, 3, 64).unwrap(), vec![first.clone()]);
+        assert_eq!(
+            spool.read(&id, 0, 3, 64).unwrap().chunks,
+            vec![first.clone()]
+        );
+        let terminal_gap = spool.read(&id, 0, 4, 64).unwrap();
+        assert_eq!(terminal_gap.chunks.as_slice(), std::slice::from_ref(&first));
+        assert!(terminal_gap.complete);
 
         spool.append(&id, &orphan).unwrap();
         spool.sync(&id).unwrap();
+        let bounded = spool.read(&id, 0, 4, 5).unwrap();
+        assert_eq!(bounded.chunks.as_slice(), std::slice::from_ref(&first));
+        assert!(!bounded.complete);
         let path = spool.spool_path(&id);
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(file.metadata().unwrap().len() - 1).unwrap();
         spool
             .recover(&id, std::slice::from_ref(&first_committed))
             .unwrap();
-        assert_eq!(spool.read(&id, 0, 3, 64).unwrap(), vec![first]);
+        assert_eq!(spool.read(&id, 0, 3, 64).unwrap().chunks, vec![first]);
 
         let committed = ExecutionId::generate();
         spool.prepare(&committed).unwrap();

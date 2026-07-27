@@ -736,7 +736,7 @@ fn continue_incomplete(
             },
         })
         .unwrap();
-    let agl_app::ApplicationActionResult::IncompleteTurnContinued { admission } = result else {
+    let agl_app::ApplicationToolResult::IncompleteTurnContinued { admission } = result else {
         panic!("unexpected continuation result: {result:?}");
     };
     admission
@@ -1732,7 +1732,7 @@ fn confirmed_session_exit_cancels_active_and_queued_roots_before_finish() {
         .unwrap();
     assert!(matches!(
         exited,
-        agl_app::ApplicationActionResult::SessionExited {
+        agl_app::ApplicationToolResult::SessionExited {
             ref session_id,
             cancelled_runs: 2,
             terminated_terminals: 0,
@@ -1811,7 +1811,7 @@ fn session_exit_does_not_count_an_already_terminal_root_as_cancelled() {
         .unwrap();
     assert!(matches!(
         exited,
-        agl_app::ApplicationActionResult::SessionExited {
+        agl_app::ApplicationToolResult::SessionExited {
             cancelled_runs: 0,
             terminated_terminals: 0,
             terminated_executions: 0,
@@ -2921,6 +2921,7 @@ fn application_execution_actions_reject_cross_session_ids() {
         creating_run_id: root_run_id,
         creating_step_id: agl_ids::StepId::generate(),
         kind: agl_process::ExecutionKind::Argv,
+        argv0: program.display().to_string(),
         program,
         program_digest: None,
         args: Vec::new(),
@@ -3401,7 +3402,7 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
         .await
         .unwrap();
     let continued = match continued.result {
-        agl_protocol::ApplicationActionResult::IncompleteTurnContinued { admission } => admission,
+        agl_protocol::ApplicationToolResult::IncompleteTurnContinued { admission } => admission,
         other => panic!("unexpected Continue result: {other:?}"),
     };
     let continuation_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -3690,7 +3691,7 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
         .unwrap();
     assert!(matches!(
         exited.result,
-        agl_protocol::ApplicationActionResult::SessionExited {
+        agl_protocol::ApplicationToolResult::SessionExited {
             ref session_id,
             terminated_terminals: 1,
             ..

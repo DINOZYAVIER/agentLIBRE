@@ -1,5 +1,5 @@
-use agl_capabilities::{ActionDeclaration, ActionSchema, CapabilityId, SchemaValidationError};
 use agl_content::Content;
+use agl_extension::{SchemaValidationError, ToolDeclaration, ToolId, ToolSchema};
 use agl_ids::{RunId, TurnId};
 use serde::{Deserialize, Serialize};
 
@@ -90,13 +90,13 @@ impl TurnInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisibleTool {
-    pub id: CapabilityId,
+    pub id: ToolId,
     pub description: String,
     pub input_schema: serde_json::Value,
 }
 
 impl VisibleTool {
-    pub fn from_declaration(declaration: &ActionDeclaration) -> Self {
+    pub fn from_declaration(declaration: &ToolDeclaration) -> Self {
         Self {
             id: declaration.id.clone(),
             description: declaration.description.clone(),
@@ -104,7 +104,7 @@ impl VisibleTool {
         }
     }
 
-    pub fn compile_schema(&self) -> Result<ActionSchema, SchemaValidationError> {
-        ActionSchema::compile(&self.input_schema)
+    pub fn compile_schema(&self) -> Result<ToolSchema, SchemaValidationError> {
+        ToolSchema::compile(&self.input_schema)
     }
 }

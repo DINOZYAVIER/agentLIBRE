@@ -102,6 +102,7 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
             creating_run_id: run_id,
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
+            argv0: helper.display().to_string(),
             program: helper.canonicalize().unwrap(),
             program_digest: None,
             args: vec!["interactive-lines".to_owned()],

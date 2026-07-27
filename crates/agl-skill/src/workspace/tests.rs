@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use agl_artifact::{ArtifactLock, LockedWorkspaceComponent};
-use agl_capabilities::{CapabilityId, HookId, SkillId};
+use agl_extension::{HookId, SkillId, ToolId};
 
 use super::*;
 use crate::SkillReferencePolicy;
@@ -111,7 +111,7 @@ fn harness() -> SkillHarness {
         source: SkillSource::Local,
         pack: "agl".to_string(),
         required_hooks: vec![HookId::new("core:repo_path.validate").unwrap()],
-        allowed_tools: vec![CapabilityId::new("fs.read").unwrap()],
+        allowed_tools: vec![ToolId::new("core.workspace:fs.read").unwrap()],
         requestable_tools: Vec::new(),
         denied_tools: Vec::new(),
         permission_request_templates: Vec::new(),

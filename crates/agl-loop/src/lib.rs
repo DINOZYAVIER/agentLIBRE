@@ -2,7 +2,7 @@ mod effect;
 mod event_map;
 mod executor;
 
-pub use agl_capabilities::{
+pub use agl_extension::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookMessage, HookResult, HookStatus,
 };
 pub use agl_turn::{

@@ -185,6 +185,12 @@ pub trait ExecutionRepository: Send + Sync {
 
 /// Private bounded byte storage. Implementations append and sync before the
 /// repository publishes matching metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutputSpoolRead {
+    pub chunks: Vec<ExecutionOutputChunk>,
+    pub complete: bool,
+}
+
 pub trait OutputSpool: Send + Sync {
     fn prepare(&self, execution_id: &ExecutionId) -> Result<()>;
     fn append(&self, execution_id: &ExecutionId, chunk: &ExecutionOutputChunk) -> Result<u64>;
@@ -195,7 +201,7 @@ pub trait OutputSpool: Send + Sync {
         after_sequence: u64,
         through_sequence: u64,
         maximum_bytes: usize,
-    ) -> Result<Vec<ExecutionOutputChunk>>;
+    ) -> Result<OutputSpoolRead>;
     fn recover(&self, execution_id: &ExecutionId, committed: &[CommittedOutputFrame])
     -> Result<()>;
     fn remove(&self, execution_id: &ExecutionId) -> Result<()>;

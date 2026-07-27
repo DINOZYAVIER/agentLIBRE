@@ -1,0 +1,1834 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+mod list;
+
+use list::{ListArgs, ListQueryRegistry};
+
+use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
+use agl_extension::{
+    EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
+    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolResult,
+};
+use agl_repo::{ArtifactAccess, ComponentPathHandleRequest};
+use anyhow::{Context, Result, bail, ensure};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+pub const PROVIDER_ID: &str = "core.workspace";
+pub const FS_READ_TOOL_ID: &str = "core.workspace:fs.read";
+pub const FS_LIST_TOOL_ID: &str = "core.workspace:fs.list";
+pub const FS_SEARCH_TOOL_ID: &str = "core.workspace:fs.search";
+pub const FS_APPLY_PATCH_TOOL_ID: &str = "core.workspace:fs.apply_patch";
+
+const DEFAULT_READ_LINES: usize = 200;
+const MAX_READ_LINES: usize = 500;
+const DEFAULT_SEARCH_MATCHES: usize = 50;
+const MAX_SEARCH_MATCHES: usize = 200;
+const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_PATCH_OPERATIONS: usize = 64;
+const MAX_PATCH_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct CoreTools {
+    root: PathBuf,
+    list_queries: Arc<Mutex<ListQueryRegistry>>,
+    mutation_lock: Arc<Mutex<()>>,
+    commit_fail_after: Arc<Mutex<Option<usize>>>,
+}
+
+impl CoreTools {
+    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref().canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize tool root {}",
+                root.as_ref().display()
+            )
+        })?;
+        ensure!(
+            root.is_dir(),
+            "tool root is not a directory: {}",
+            root.display()
+        );
+        let mutation_lock = workspace_mutation_lock(&root);
+        Ok(Self {
+            root,
+            list_queries: Arc::new(Mutex::new(ListQueryRegistry::default())),
+            mutation_lock,
+            commit_fail_after: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
+        self.dispatch_for_run("direct", name, arguments)
+    }
+
+    pub(crate) fn apply_patch_for_tool(
+        &self,
+        arguments: Value,
+    ) -> std::result::Result<Value, ToolHandlerError> {
+        self.apply_patch(arguments)
+            .map_err(PatchError::into_tool_error)
+    }
+
+    fn dispatch_for_run(&self, run_id: &str, name: &str, arguments: Value) -> Result<Value> {
+        match name {
+            FS_READ_TOOL_ID => self.read(arguments),
+            FS_LIST_TOOL_ID => self.list(run_id, arguments),
+            FS_SEARCH_TOOL_ID => self.search(arguments),
+            FS_APPLY_PATCH_TOOL_ID => self
+                .apply_patch(arguments)
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            _ => bail!("unknown core tool `{name}`"),
+        }
+    }
+
+    fn read(&self, arguments: Value) -> Result<Value> {
+        let args = parse_args::<ReadArgs>(FS_READ_TOOL_ID, arguments)?;
+        let path = self.resolve_existing_path(&args.path, PathKind::File, false)?;
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read UTF-8 file {}", path.display()))?;
+        let total_lines = content.lines().count();
+        let digest = content_digest(content.as_bytes());
+        let start_line = args.offset_line.unwrap_or(1).max(1);
+        let limit = args
+            .limit_lines
+            .unwrap_or(DEFAULT_READ_LINES)
+            .min(MAX_READ_LINES);
+        let mut lines = Vec::new();
+        for (index, line) in content.lines().enumerate().skip(start_line - 1).take(limit) {
+            lines.push(json!({
+                "line": index + 1,
+                "text": line,
+            }));
+        }
+        let end_line = start_line.saturating_add(lines.len()).saturating_sub(1);
+        let truncated = end_line < total_lines;
+
+        Ok(json!({
+            "tool": FS_READ_TOOL_ID,
+            "status": "ok",
+            "path": self.display_path(&path),
+            "start_line": start_line,
+            "end_line": end_line,
+            "total_lines": total_lines,
+            "truncated": truncated,
+            "digest": digest,
+            "lines": lines,
+        }))
+    }
+
+    fn list(&self, run_id: &str, arguments: Value) -> Result<Value> {
+        let args = parse_args::<ListArgs>(FS_LIST_TOOL_ID, arguments)?;
+        list::list_page(self, run_id, args)
+    }
+
+    fn search(&self, arguments: Value) -> Result<Value> {
+        let args = parse_args::<SearchArgs>(FS_SEARCH_TOOL_ID, arguments)?;
+        ensure!(
+            !args.pattern.trim().is_empty(),
+            "core.workspace:fs.search pattern cannot be blank"
+        );
+        let search_path = args.path.unwrap_or_else(|| ".".to_string());
+        let path = self.resolve_existing_path(&search_path, PathKind::Directory, true)?;
+        let max_matches = args
+            .max_matches
+            .unwrap_or(DEFAULT_SEARCH_MATCHES)
+            .min(MAX_SEARCH_MATCHES);
+        let case_sensitive = args.case_sensitive.unwrap_or(true);
+        let needle = if case_sensitive {
+            args.pattern.clone()
+        } else {
+            args.pattern.to_ascii_lowercase()
+        };
+        let mut matches = Vec::new();
+        self.collect_matches(&path, &needle, case_sensitive, max_matches, &mut matches)?;
+        let truncated = matches.len() >= max_matches;
+
+        Ok(json!({
+            "tool": FS_SEARCH_TOOL_ID,
+            "status": "ok",
+            "path": self.display_path(&path),
+            "pattern": args.pattern,
+            "match_count": matches.len(),
+            "truncated": truncated,
+            "matches": matches,
+        }))
+    }
+
+    fn apply_patch(&self, arguments: Value) -> std::result::Result<Value, PatchError> {
+        let args = serde_json::from_value::<ApplyPatchArgs>(arguments)
+            .map_err(|error| PatchError::invalid(format!("invalid patch arguments: {error}")))?;
+        if args.operations.is_empty() || args.operations.len() > MAX_PATCH_OPERATIONS {
+            return Err(PatchError::invalid(format!(
+                "operations must contain between 1 and {MAX_PATCH_OPERATIONS} items"
+            )));
+        }
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|error| PatchError::terminal(format!("mutation lock is poisoned: {error}")))?;
+        let plan = self.plan_patch(args)?;
+        self.commit_patch(plan)
+    }
+
+    fn plan_patch(&self, args: ApplyPatchArgs) -> std::result::Result<PatchPlan, PatchError> {
+        let mut changes = Vec::new();
+        let mut receipts = Vec::new();
+        let mut touched = std::collections::BTreeSet::new();
+        let mut content_bytes = 0usize;
+
+        for operation in args.operations {
+            match operation {
+                PatchOperation::Create {
+                    path,
+                    content,
+                    expected_absent,
+                } => {
+                    if !expected_absent {
+                        return Err(PatchError::invalid("create requires expected_absent=true"));
+                    }
+                    let relative = self.resolve_absent_target(&path)?;
+                    ensure_unique_path(&mut touched, &relative)?;
+                    content_bytes = checked_patch_bytes(content_bytes, content.len())?;
+                    changes.push(PlannedFileChange {
+                        relative: relative.clone(),
+                        before: None,
+                        after: Some(content.into_bytes()),
+                    });
+                    receipts.push(PatchReceipt {
+                        operation: "create",
+                        path: Some(display_relative(&relative)),
+                        from: None,
+                        to: None,
+                        before_digest: None,
+                        after_digest: changes
+                            .last()
+                            .and_then(|change| change.after.as_deref())
+                            .map(content_digest),
+                    });
+                }
+                PatchOperation::Update {
+                    path,
+                    expected_digest,
+                    content,
+                } => {
+                    let (relative, before) =
+                        self.read_preconditioned_file(&path, &expected_digest)?;
+                    ensure_unique_path(&mut touched, &relative)?;
+                    content_bytes = checked_patch_bytes(content_bytes, content.len())?;
+                    let after = content.into_bytes();
+                    receipts.push(PatchReceipt {
+                        operation: "update",
+                        path: Some(display_relative(&relative)),
+                        from: None,
+                        to: None,
+                        before_digest: Some(content_digest(&before)),
+                        after_digest: Some(content_digest(&after)),
+                    });
+                    changes.push(PlannedFileChange {
+                        relative,
+                        before: Some(before),
+                        after: Some(after),
+                    });
+                }
+                PatchOperation::Delete {
+                    path,
+                    expected_digest,
+                } => {
+                    let (relative, before) =
+                        self.read_preconditioned_file(&path, &expected_digest)?;
+                    ensure_unique_path(&mut touched, &relative)?;
+                    receipts.push(PatchReceipt {
+                        operation: "delete",
+                        path: Some(display_relative(&relative)),
+                        from: None,
+                        to: None,
+                        before_digest: Some(content_digest(&before)),
+                        after_digest: None,
+                    });
+                    changes.push(PlannedFileChange {
+                        relative,
+                        before: Some(before),
+                        after: None,
+                    });
+                }
+                PatchOperation::Move {
+                    from,
+                    to,
+                    expected_digest,
+                    expected_destination_absent,
+                } => {
+                    if !expected_destination_absent {
+                        return Err(PatchError::invalid(
+                            "move requires expected_destination_absent=true",
+                        ));
+                    }
+                    let (source, before) =
+                        self.read_preconditioned_file(&from, &expected_digest)?;
+                    let destination = self.resolve_absent_target(&to)?;
+                    ensure_unique_path(&mut touched, &source)?;
+                    ensure_unique_path(&mut touched, &destination)?;
+                    content_bytes = checked_patch_bytes(content_bytes, before.len())?;
+                    receipts.push(PatchReceipt {
+                        operation: "move",
+                        path: None,
+                        from: Some(display_relative(&source)),
+                        to: Some(display_relative(&destination)),
+                        before_digest: Some(content_digest(&before)),
+                        after_digest: Some(content_digest(&before)),
+                    });
+                    changes.push(PlannedFileChange {
+                        relative: source,
+                        before: Some(before.clone()),
+                        after: None,
+                    });
+                    changes.push(PlannedFileChange {
+                        relative: destination,
+                        before: None,
+                        after: Some(before),
+                    });
+                }
+            }
+        }
+
+        Ok(PatchPlan { changes, receipts })
+    }
+
+    fn read_preconditioned_file(
+        &self,
+        raw: &str,
+        expected_digest: &str,
+    ) -> std::result::Result<(PathBuf, Vec<u8>), PatchError> {
+        let relative = normalize_repo_path(raw, false)
+            .map_err(|error| PatchError::invalid(error.to_string()))?;
+        self.enforce_artifact_write_access(&relative)
+            .map_err(|error| PatchError::invalid(format!("{error:#}")))?;
+        let path = self
+            .resolve_existing_path(raw, PathKind::File, false)
+            .map_err(|error| {
+                if self.root.join(&relative).exists() {
+                    PatchError::invalid(error.to_string())
+                } else {
+                    PatchError::not_found(raw)
+                }
+            })?;
+        let content = fs::read(&path)
+            .map_err(|error| PatchError::terminal(format!("failed to read `{raw}`: {error}")))?;
+        let actual = content_digest(&content);
+        if actual != expected_digest {
+            return Err(PatchError::conflict(raw, expected_digest, &actual));
+        }
+        Ok((relative, content))
+    }
+
+    fn resolve_absent_target(&self, raw: &str) -> std::result::Result<PathBuf, PatchError> {
+        let relative = normalize_repo_path(raw, false)
+            .map_err(|error| PatchError::invalid(error.to_string()))?;
+        self.enforce_artifact_write_access(&relative)
+            .map_err(|error| PatchError::invalid(format!("{error:#}")))?;
+        let target = self.root.join(&relative);
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Err(PatchError::conflict_absence(raw)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(PatchError::terminal(format!(
+                    "failed to inspect `{raw}`: {error}"
+                )));
+            }
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| PatchError::invalid(format!("path has no parent: {raw}")))?;
+        self.validate_destination_parent(parent, raw)?;
+        Ok(relative)
+    }
+
+    fn validate_destination_parent(
+        &self,
+        parent: &Path,
+        raw: &str,
+    ) -> std::result::Result<(), PatchError> {
+        let relative = parent
+            .strip_prefix(&self.root)
+            .map_err(|_| PatchError::invalid(format!("path escapes workspace: {raw}")))?;
+        let mut cursor = self.root.clone();
+        let mut missing = false;
+        for component in relative.components() {
+            if let Component::Normal(segment) = component {
+                cursor.push(segment);
+                if missing {
+                    continue;
+                }
+                match fs::symlink_metadata(&cursor) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(PatchError::invalid(format!(
+                            "repository path cannot traverse symlink: {raw}"
+                        )));
+                    }
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return Err(PatchError::invalid(format!(
+                            "destination parent is not a directory: {raw}"
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => missing = true,
+                    Err(error) => {
+                        return Err(PatchError::terminal(format!(
+                            "failed to inspect destination parent for `{raw}`: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_patch(&self, plan: PatchPlan) -> std::result::Result<Value, PatchError> {
+        let transaction_root = self.transaction_root()?;
+        let staged_root = transaction_root.join("staged");
+        let backup_root = transaction_root.join("backup");
+        fs::create_dir(&transaction_root)
+            .and_then(|()| fs::create_dir(&staged_root))
+            .and_then(|()| fs::create_dir(&backup_root))
+            .map_err(|error| {
+                PatchError::terminal(format!("failed to prepare patch transaction: {error}"))
+            })?;
+
+        let result = (|| {
+            for (index, change) in plan.changes.iter().enumerate() {
+                if let Some(after) = &change.after {
+                    fs::write(staged_root.join(index.to_string()), after).map_err(|error| {
+                        PatchError::terminal(format!(
+                            "failed to stage `{}`: {error}",
+                            display_relative(&change.relative)
+                        ))
+                    })?;
+                }
+            }
+
+            let mut applied = Vec::new();
+            let mut created_directories = Vec::new();
+            for (index, change) in plan.changes.iter().enumerate() {
+                let target = self.root.join(&change.relative);
+                let backup = backup_root.join(index.to_string());
+                if change.after.is_some()
+                    && let Err(error) = create_missing_parent_directories(
+                        &self.root,
+                        target
+                            .parent()
+                            .expect("planned repository file always has a parent"),
+                        &mut created_directories,
+                    )
+                {
+                    rollback_changes(
+                        &self.root,
+                        &backup_root,
+                        &applied,
+                        &created_directories,
+                    )
+                    .map_err(|rollback_error| {
+                        PatchError::outcome_unknown(format!(
+                            "failed to create parent for `{}`: {error}; rollback failed: {rollback_error}",
+                            display_relative(&change.relative)
+                        ))
+                    })?;
+                    return Err(PatchError::terminal(format!(
+                        "failed to create parent for `{}`: {error}",
+                        display_relative(&change.relative)
+                    )));
+                }
+                if change.before.is_some()
+                    && let Err(error) = fs::rename(&target, &backup)
+                {
+                    rollback_changes(
+                        &self.root,
+                        &backup_root,
+                        &applied,
+                        &created_directories,
+                    )
+                    .map_err(|rollback_error| {
+                        PatchError::outcome_unknown(format!(
+                            "failed to prepare `{}` for commit: {error}; rollback failed: {rollback_error}",
+                            display_relative(&change.relative)
+                        ))
+                    })?;
+                    return Err(PatchError::terminal(format!(
+                        "failed to prepare `{}` for commit: {error}",
+                        display_relative(&change.relative)
+                    )));
+                }
+                if change.after.is_some()
+                    && let Err(error) = fs::rename(staged_root.join(index.to_string()), &target)
+                {
+                    let rollback =
+                        rollback_changes(&self.root, &backup_root, &applied, &created_directories);
+                    if let Some(rollback_error) = rollback.err() {
+                        return Err(PatchError::outcome_unknown(format!(
+                            "commit failed for `{}`: {error}; rollback failed: {rollback_error}",
+                            display_relative(&change.relative)
+                        )));
+                    }
+                    if change.before.is_some() {
+                        fs::rename(&backup, &target).map_err(|rollback_error| {
+                            PatchError::outcome_unknown(format!(
+                                "commit failed for `{}`: {error}; current rollback failed: {rollback_error}",
+                                display_relative(&change.relative)
+                            ))
+                        })?;
+                    }
+                    return Err(PatchError::terminal(format!(
+                        "patch commit failed for `{}`: {error}",
+                        display_relative(&change.relative)
+                    )));
+                }
+                applied.push((index, change));
+                if self.inject_commit_failure(applied.len()) {
+                    rollback_changes(&self.root, &backup_root, &applied, &created_directories)
+                        .map_err(|error| {
+                            PatchError::outcome_unknown(format!(
+                                "injected commit failure rollback failed: {error}"
+                            ))
+                        })?;
+                    return Err(PatchError::terminal("injected patch commit failure"));
+                }
+            }
+            Ok(())
+        })();
+
+        let cleanup = fs::remove_dir_all(&transaction_root);
+        result?;
+        cleanup.map_err(|error| {
+            PatchError::outcome_unknown(format!(
+                "patch committed but transaction cleanup failed: {error}"
+            ))
+        })?;
+
+        Ok(json!({
+            "tool": FS_APPLY_PATCH_TOOL_ID,
+            "status": "committed",
+            "change_count": plan.receipts.len(),
+            "changes": plan.receipts,
+        }))
+    }
+
+    fn transaction_root(&self) -> std::result::Result<PathBuf, PatchError> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| PatchError::terminal(format!("system clock error: {error}")))?
+            .as_nanos();
+        Ok(self.root.join(format!(
+            ".agl-fs-transaction-{}-{nonce}",
+            std::process::id()
+        )))
+    }
+
+    fn inject_commit_failure(&self, applied: usize) -> bool {
+        self.commit_fail_after
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some_and(|limit| applied >= limit)
+    }
+
+    #[cfg(test)]
+    fn fail_commit_after(&self, changes: Option<usize>) {
+        *self.commit_fail_after.lock().unwrap() = changes;
+    }
+
+    fn resolve_existing_path(
+        &self,
+        raw: &str,
+        kind: PathKind,
+        allow_root: bool,
+    ) -> Result<PathBuf> {
+        let relative = normalize_repo_path(raw, allow_root)?;
+        let joined = self.root.join(relative);
+        self.reject_symlink_components(&joined, raw)?;
+        let canonical = joined
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize repository path `{raw}`"))?;
+        ensure!(
+            canonical.starts_with(&self.root),
+            "repository path escapes tool root: {raw}"
+        );
+        match kind {
+            PathKind::File => ensure!(canonical.is_file(), "repository path is not a file: {raw}"),
+            PathKind::Directory => {
+                ensure!(
+                    canonical.is_dir(),
+                    "repository path is not a directory: {raw}"
+                )
+            }
+        }
+        Ok(canonical)
+    }
+
+    fn reject_symlink_components(&self, path: &Path, raw: &str) -> Result<()> {
+        let relative = path.strip_prefix(&self.root).with_context(|| {
+            format!("repository path is outside tool root before canonicalization: {raw}")
+        })?;
+        let mut cursor = self.root.clone();
+        for component in relative.components() {
+            if let Component::Normal(segment) = component {
+                cursor.push(segment);
+                let metadata = fs::symlink_metadata(&cursor)
+                    .with_context(|| format!("failed to inspect repository path `{raw}`"))?;
+                ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "repository path cannot traverse symlink: {raw}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_matches(
+        &self,
+        path: &Path,
+        needle: &str,
+        case_sensitive: bool,
+        max_matches: usize,
+        matches: &mut Vec<Value>,
+    ) -> Result<()> {
+        if matches.len() >= max_matches {
+            return Ok(());
+        }
+        for entry in sorted_dir_entries(path)? {
+            if matches.len() >= max_matches {
+                break;
+            }
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
+            if file_type.is_symlink() || entry.file_name() == ".git" {
+                continue;
+            }
+            if file_type.is_dir() {
+                self.collect_matches(&entry.path(), needle, case_sensitive, max_matches, matches)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to read metadata {}", entry.path().display()))?;
+            if metadata.len() > MAX_SEARCH_FILE_BYTES {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            for (line_index, line) in content.lines().enumerate() {
+                let haystack = if case_sensitive {
+                    line.to_string()
+                } else {
+                    line.to_ascii_lowercase()
+                };
+                if haystack.contains(needle) {
+                    matches.push(json!({
+                        "path": self.display_path(&entry.path()),
+                        "line": line_index + 1,
+                        "text": line,
+                    }));
+                    if matches.len() >= max_matches {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn display_path(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .ok()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    }
+
+    fn enforce_artifact_write_access(&self, relative: &Path) -> Result<()> {
+        if !is_agl_path(relative) {
+            return Ok(());
+        }
+
+        agl_repo::resolve_component_path_handle(
+            &self.root,
+            &ComponentPathHandleRequest {
+                path: relative.to_path_buf(),
+                access: ArtifactAccess::Write,
+            },
+        )
+        .context("failed to resolve artifact write handle")?;
+
+        Ok(())
+    }
+}
+
+fn workspace_mutation_lock(root: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<std::collections::BTreeMap<PathBuf, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()));
+    let mut locks = locks
+        .lock()
+        .expect("workspace mutation lock registry is not poisoned");
+    if let Some(lock) = locks.get(root).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(root.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+impl ToolHandler for CoreTools {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+        Box::pin(async move {
+            let invocation = context.into_invocation();
+            let run_id = invocation.scope.run_id().as_str().to_string();
+            let is_patch = invocation.capability_id.as_str() == FS_APPLY_PATCH_TOOL_ID;
+            let data = if is_patch {
+                self.apply_patch(invocation.arguments)
+                    .map_err(PatchError::into_tool_error)?
+            } else {
+                self.dispatch_for_run(
+                    &run_id,
+                    invocation.capability_id.as_str(),
+                    invocation.arguments,
+                )?
+            };
+            let observed = if is_patch {
+                data["changes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|change| {
+                        ["path", "from", "to"]
+                            .into_iter()
+                            .filter_map(|field| change[field].as_str())
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(|path| {
+                        ObservedEffect::new(
+                            EffectId::repo_files(),
+                            [
+                                ("transaction".to_owned(), "atomic".to_owned()),
+                                ("path".to_owned(), path.to_owned()),
+                            ],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            Ok(ToolResult::new(data).with_observed_effects(observed))
+        })
+    }
+}
+
+pub fn declaration() -> ExtensionDescriptor {
+    let descriptor = ExtensionDescriptor::builtin(
+        ExtensionId::new(PROVIDER_ID).expect("core tool provider id is valid"),
+        "Core Tools",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("core tool declaration is valid")
+    .with_tool(action::<ReadArgs, ReadOutput>(
+        FS_READ_TOOL_ID,
+        "Read a UTF-8 file from the repository with line bounds.",
+        OperationKind::Read,
+    ))
+    .with_tool(action::<ListArgs, ListOutput>(
+        FS_LIST_TOOL_ID,
+        "List repository directory entries.",
+        OperationKind::Read,
+    ))
+    .with_tool(action::<SearchArgs, SearchOutput>(
+        FS_SEARCH_TOOL_ID,
+        "Search repository text files for a literal pattern.",
+        OperationKind::Read,
+    ))
+    .with_tool(
+        action::<ApplyPatchArgs, ApplyPatchOutput>(
+            FS_APPLY_PATCH_TOOL_ID,
+            "Atomically create, update, delete, or move repository files with required preconditions.",
+            OperationKind::Write,
+        )
+        .with_errors([
+            agl_extension::ToolErrorDeclaration::recoverable("invalid_patch")
+                .with_data_schema::<EmptyToolErrorData>(),
+            agl_extension::ToolErrorDeclaration::recoverable("not_found")
+                .with_data_schema::<PathNotFoundErrorData>(),
+            agl_extension::ToolErrorDeclaration::recoverable("conflict")
+                .with_data_schema::<PatchConflictErrorData>(),
+            agl_extension::ToolErrorDeclaration::terminal("execution_failed")
+                .with_data_schema::<EmptyToolErrorData>(),
+            agl_extension::ToolErrorDeclaration::terminal("outcome_unknown")
+                .with_data_schema::<EmptyToolErrorData>(),
+        ])
+        .expect("filesystem patch error declarations are valid")
+        .with_state_effects([EffectId::repo_files()]),
+    );
+    crate::with_observation_workflow(descriptor)
+}
+
+pub fn register(catalog: &mut ToolCatalog) -> Result<(), ToolCatalogError> {
+    catalog.register(declaration())
+}
+
+fn action<I: JsonSchema, O: JsonSchema>(
+    id: &str,
+    description: &str,
+    operation_kind: OperationKind,
+) -> ToolDeclaration {
+    ToolDeclaration::from_schema::<I>(
+        ToolId::new(id).expect("core tool id is valid"),
+        description,
+        operation_kind,
+    )
+    .expect("core tool declaration input schema is valid")
+    .with_output_schema::<O>()
+    .expect("core tool declaration output schema is valid")
+}
+
+fn sorted_dir_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(path)
+        .with_context(|| format!("failed to read directory {}", path.display()))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn ensure_unique_path(
+    touched: &mut std::collections::BTreeSet<PathBuf>,
+    path: &Path,
+) -> std::result::Result<(), PatchError> {
+    if touched.insert(path.to_path_buf()) {
+        Ok(())
+    } else {
+        Err(PatchError::invalid(format!(
+            "patch touches `{}` more than once",
+            display_relative(path)
+        )))
+    }
+}
+
+fn checked_patch_bytes(
+    current: usize,
+    additional: usize,
+) -> std::result::Result<usize, PatchError> {
+    let total = current
+        .checked_add(additional)
+        .ok_or_else(|| PatchError::invalid("patch content byte count overflowed"))?;
+    if total > MAX_PATCH_CONTENT_BYTES {
+        return Err(PatchError::invalid(format!(
+            "patch content exceeds {MAX_PATCH_CONTENT_BYTES} bytes"
+        )));
+    }
+    Ok(total)
+}
+
+fn content_digest(content: &[u8]) -> String {
+    let digest = Sha256::digest(content);
+    let mut encoded = String::with_capacity(7 + digest.len() * 2);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn display_relative(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn rollback_changes(
+    root: &Path,
+    backup_root: &Path,
+    applied: &[(usize, &PlannedFileChange)],
+    created_directories: &[PathBuf],
+) -> io::Result<()> {
+    for (index, change) in applied.iter().rev() {
+        let target = root.join(&change.relative);
+        if change.after.is_some() {
+            match fs::remove_file(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if change.before.is_some() {
+            fs::rename(backup_root.join(index.to_string()), target)?;
+        }
+    }
+    for directory in created_directories.iter().rev() {
+        match fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn create_missing_parent_directories(
+    root: &Path,
+    parent: &Path,
+    created: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let relative = parent
+        .strip_prefix(root)
+        .map_err(|_| io::Error::other("destination parent escaped workspace"))?;
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        if let Component::Normal(segment) = component {
+            cursor.push(segment);
+            match fs::create_dir(&cursor) {
+                Ok(()) => created.push(cursor.clone()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if !fs::symlink_metadata(&cursor)?.is_dir() {
+                        return Err(io::Error::other(
+                            "destination parent component is not a directory",
+                        ));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_repo_path(raw: &str, allow_root: bool) -> Result<PathBuf> {
+    ensure!(!raw.trim().is_empty(), "repository path cannot be blank");
+    ensure!(!raw.contains('\0'), "repository path contains NUL");
+    ensure!(
+        !raw.contains('\\'),
+        "repository path must use forward slashes"
+    );
+
+    let path = Path::new(raw);
+    ensure!(!path.is_absolute(), "repository path cannot be absolute");
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => {
+                ensure!(segment != ".git", "repository path cannot enter .git");
+                ensure!(
+                    !segment
+                        .to_string_lossy()
+                        .starts_with(".agl-fs-transaction-"),
+                    "repository path cannot enter the Tool transaction namespace"
+                );
+                normalized.push(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => bail!("repository path cannot contain parent traversal"),
+            Component::RootDir | Component::Prefix(_) => {
+                bail!("repository path cannot be absolute")
+            }
+        }
+    }
+    ensure!(
+        allow_root || !normalized.as_os_str().is_empty(),
+        "repository path must name a file or subdirectory"
+    );
+    Ok(normalized)
+}
+
+fn is_agl_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Normal(component)) if component == ".agl"
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PathKind {
+    File,
+    Directory,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    path: String,
+    offset_line: Option<usize>,
+    limit_lines: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    pattern: String,
+    path: Option<String>,
+    max_matches: Option<usize>,
+    case_sensitive: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ApplyPatchArgs {
+    #[schemars(length(min = 1, max = 64))]
+    operations: Vec<PatchOperation>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum PatchOperation {
+    Create {
+        path: String,
+        content: String,
+        expected_absent: bool,
+    },
+    Update {
+        path: String,
+        expected_digest: String,
+        content: String,
+    },
+    Delete {
+        path: String,
+        expected_digest: String,
+    },
+    Move {
+        from: String,
+        to: String,
+        expected_digest: String,
+        expected_destination_absent: bool,
+    },
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ReadLine {
+    line: usize,
+    text: String,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ReadOutput {
+    tool: String,
+    status: String,
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    total_lines: usize,
+    truncated: bool,
+    digest: String,
+    lines: Vec<ReadLine>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ListEntryOutput {
+    path: String,
+    kind: String,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ListOutcome {
+    state: String,
+    reason: Option<String>,
+    next_cursor: Option<String>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ListOutput {
+    tool: String,
+    status: String,
+    path: String,
+    entry_count: usize,
+    entries: Vec<ListEntryOutput>,
+    outcome: ListOutcome,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SearchMatchOutput {
+    path: String,
+    line: usize,
+    text: String,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SearchOutput {
+    tool: String,
+    status: String,
+    path: String,
+    pattern: String,
+    match_count: usize,
+    truncated: bool,
+    matches: Vec<SearchMatchOutput>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ApplyPatchOutput {
+    tool: String,
+    status: String,
+    change_count: usize,
+    changes: Vec<PatchReceipt>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct EmptyToolErrorData {}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PathNotFoundErrorData {
+    path: String,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PatchConflictErrorData {
+    path: String,
+    expected_digest: Option<String>,
+    actual_digest: Option<String>,
+    expected_absent: Option<bool>,
+}
+
+struct PatchPlan {
+    changes: Vec<PlannedFileChange>,
+    receipts: Vec<PatchReceipt>,
+}
+
+struct PlannedFileChange {
+    relative: PathBuf,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PatchReceipt {
+    operation: &'static str,
+    path: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    before_digest: Option<String>,
+    after_digest: Option<String>,
+}
+
+#[derive(Debug)]
+struct PatchError {
+    code: &'static str,
+    message: String,
+    data: Value,
+}
+
+impl PatchError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self::new("invalid_patch", message, json!({}))
+    }
+
+    fn not_found(path: &str) -> Self {
+        Self::new(
+            "not_found",
+            format!("repository file or parent was not found: {path}"),
+            json!({"path": path}),
+        )
+    }
+
+    fn conflict(path: &str, expected: &str, actual: &str) -> Self {
+        Self::new(
+            "conflict",
+            format!("content digest changed for `{path}`"),
+            json!({"path": path, "expected_digest": expected, "actual_digest": actual}),
+        )
+    }
+
+    fn conflict_absence(path: &str) -> Self {
+        Self::new(
+            "conflict",
+            format!("expected destination to be absent: {path}"),
+            json!({"path": path, "expected_absent": true}),
+        )
+    }
+
+    fn terminal(message: impl Into<String>) -> Self {
+        Self::new("execution_failed", message, json!({}))
+    }
+
+    fn outcome_unknown(message: impl Into<String>) -> Self {
+        Self::new("outcome_unknown", message, json!({}))
+    }
+
+    fn new(code: &'static str, message: impl Into<String>, data: Value) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+        }
+    }
+
+    fn into_tool_error(self) -> ToolHandlerError {
+        ToolHandlerError::new(self.code, self.message, self.data)
+    }
+}
+
+impl std::fmt::Display for PatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for PatchError {}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::test_support::temp_root;
+
+    use super::*;
+
+    fn declare_artifact(root: &Path, id: &str, path: &str, access: &str) {
+        let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
+        let mut manifest = fs::read_to_string(&manifest_path).unwrap();
+        manifest.push_str(&format!(
+            "\n[components.{id}]\nkind = \"local\"\npath = {path:?}\nrequired = true\naccess = {access:?}\n"
+        ));
+        fs::write(manifest_path, manifest).unwrap();
+    }
+
+    #[test]
+    fn declaration_registers_core_filesystem_tools() {
+        let declaration = declaration();
+        declaration.validate().unwrap();
+        let read = declaration
+            .tool(&ToolId::new(FS_READ_TOOL_ID).unwrap())
+            .unwrap();
+        assert_eq!(
+            read.description,
+            "Read a UTF-8 file from the repository with line bounds."
+        );
+        assert_eq!(read.input_schema["additionalProperties"], json!(false));
+        let schema = read.compile_schema().unwrap();
+        assert!(schema.validate(&json!({"path": "README.MD"})).is_ok());
+        assert!(schema.validate(&json!({})).is_err());
+        assert!(
+            schema
+                .validate(&json!({"path": "README.MD", "extra": true}))
+                .is_err()
+        );
+        assert!(schema.validate(&json!({"path": 42})).is_err());
+        assert!(
+            declaration
+                .tool(&ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn read_rejects_parent_traversal() {
+        let root = temp_root("read-parent");
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(FS_READ_TOOL_ID, json!({"path": "../secret.txt"}))
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("parent traversal"));
+    }
+
+    #[test]
+    fn list_skips_git_directory() {
+        let root = temp_root("list");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "secret").unwrap();
+        fs::write(root.join("README.MD"), "hello").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "."}))
+            .unwrap();
+
+        assert_eq!(output["tool"], FS_LIST_TOOL_ID);
+        assert_eq!(output["entry_count"], 1);
+        assert_eq!(output["entries"][0]["path"], "README.MD");
+        assert_eq!(output["entries"][0]["kind"], "file");
+        assert_eq!(output["outcome"]["state"], "complete");
+        assert!(output.get("truncated").is_none());
+    }
+
+    #[test]
+    fn list_uses_deterministic_consumable_pagination() {
+        let root = temp_root("list-pages");
+        for name in ["e.txt", "c.txt", "a.txt", "d.txt", "b.txt"] {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let tools = CoreTools::new(&root).unwrap();
+
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 2}))
+            .unwrap();
+        assert_eq!(first["entries"][0]["path"], "a.txt");
+        assert_eq!(first["entries"][1]["path"], "b.txt");
+        assert_eq!(first["outcome"]["state"], "truncated");
+        assert_eq!(first["outcome"]["reason"], "page_boundary");
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+
+        let second = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 2, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(second["entries"][0]["path"], "c.txt");
+        assert_eq!(second["entries"][1]["path"], "d.txt");
+        assert_eq!(second["outcome"]["state"], "truncated");
+        let next_cursor = second["outcome"]["next_cursor"].as_str().unwrap();
+        assert!(
+            tools
+                .dispatch(
+                    FS_LIST_TOOL_ID,
+                    json!({"path": ".", "page_size": 2, "cursor": cursor}),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cursor_stale")
+        );
+
+        let third = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 2, "cursor": next_cursor}),
+            )
+            .unwrap();
+        assert_eq!(third["entries"][0]["path"], "e.txt");
+        assert_eq!(third["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_filters_kind_glob_target_and_ascii_case_without_pruning_traversal() {
+        let root = temp_root("list-filter");
+        fs::create_dir_all(root.join("src/deep")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("src/deep/MOD.RS"), "").unwrap();
+        fs::write(root.join("src/deep/readme.md"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({
+                    "path": ".",
+                    "recursive": true,
+                    "page_size": 10,
+                    "kind": "file",
+                    "name_glob": "src/**/*.rs",
+                    "match_on": "relative_path",
+                    "case": "ascii_insensitive"
+                }),
+            )
+            .unwrap();
+        let paths = output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["src/deep/MOD.RS"]);
+        assert_eq!(output["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_cursor_binds_every_query_field_and_directory_identity() {
+        let root = temp_root("list-stale");
+        fs::write(root.join("a"), "").unwrap();
+        fs::write(root.join("b"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mismatch = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({
+                    "path": ".",
+                    "page_size": 1,
+                    "cursor": cursor,
+                    "kind": "file"
+                }),
+            )
+            .unwrap_err();
+        assert!(format!("{mismatch:#}").contains("cursor_query_mismatch"));
+        let continued = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(continued["entries"][0]["path"], "b");
+        assert_eq!(continued["outcome"]["state"], "complete");
+
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+        fs::write(root.join("c"), "").unwrap();
+        let stale = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{stale:#}").contains("cursor_stale"));
+    }
+
+    #[test]
+    fn list_wrong_run_cannot_consume_a_cursor_and_file_content_changes_are_allowed() {
+        let root = temp_root("list-run-binding");
+        fs::write(root.join("a"), "before").unwrap();
+        fs::write(root.join("b"), "before").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch_for_run(
+                "run-a",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1}),
+            )
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+
+        let wrong_run = tools
+            .dispatch_for_run(
+                "run-b",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{wrong_run:#}").contains("cursor_stale"));
+
+        fs::write(
+            root.join("a"),
+            "content changed without changing the listing",
+        )
+        .unwrap();
+        let continued = tools
+            .dispatch_for_run(
+                "run-a",
+                FS_LIST_TOOL_ID,
+                json!({"path": ".", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap();
+        assert_eq!(continued["entries"][0]["path"], "b");
+        assert_eq!(continued["outcome"]["state"], "complete");
+    }
+
+    #[test]
+    fn list_deleted_query_root_reports_cursor_stale() {
+        let root = temp_root("list-deleted-root");
+        fs::create_dir_all(root.join("listed")).unwrap();
+        fs::write(root.join("listed/a"), "").unwrap();
+        fs::write(root.join("listed/b"), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let first = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "listed", "page_size": 1}))
+            .unwrap();
+        let cursor = first["outcome"]["next_cursor"].as_str().unwrap();
+        fs::remove_dir_all(root.join("listed")).unwrap();
+
+        let error = tools
+            .dispatch(
+                FS_LIST_TOOL_ID,
+                json!({"path": "listed", "page_size": 1, "cursor": cursor}),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cursor_stale"));
+    }
+
+    #[test]
+    fn list_rejects_obsolete_shape_and_a_fifth_active_query() {
+        let root = temp_root("list-capacity");
+        let tools = CoreTools::new(&root).unwrap();
+        assert!(
+            tools
+                .dispatch(FS_LIST_TOOL_ID, json!({"path": ".", "max_entries": 20}),)
+                .is_err()
+        );
+        for index in 0..5 {
+            let directory = root.join(format!("d{index}"));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("a"), "").unwrap();
+            fs::write(directory.join("b"), "").unwrap();
+        }
+        for index in 0..4 {
+            let output = tools
+                .dispatch(
+                    FS_LIST_TOOL_ID,
+                    json!({"path": format!("d{index}"), "page_size": 1}),
+                )
+                .unwrap();
+            assert_eq!(output["outcome"]["state"], "truncated");
+        }
+        let error = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "d4", "page_size": 1}))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cursor_capacity"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_non_utf8_name_cannot_produce_a_complete_claim() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let root = temp_root("list-non-utf8");
+        let name = std::ffi::OsString::from_vec(vec![b'f', 0xff]);
+        fs::write(root.join(name), "").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let error = tools
+            .dispatch(FS_LIST_TOOL_ID, json!({"path": "."}))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("non_utf8_path"));
+    }
+
+    #[test]
+    fn search_returns_bounded_literal_matches() {
+        let root = temp_root("search");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "alpha\nbeta\nalpha\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_SEARCH_TOOL_ID,
+                json!({"path": ".", "pattern": "alpha", "max_matches": 1}),
+            )
+            .unwrap();
+
+        assert_eq!(output["match_count"], 1);
+        assert_eq!(output["truncated"], true);
+        assert_eq!(output["matches"][0]["path"], "src/lib.rs");
+        assert_eq!(output["matches"][0]["line"], 1);
+        assert_eq!(output["matches"][0]["text"], "alpha");
+    }
+
+    #[test]
+    fn apply_patch_updates_with_digest_precondition() {
+        let root = temp_root("apply-patch-update");
+        let path = root.join("README.MD");
+        fs::write(&path, "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": "README.MD",
+                    "expected_digest": content_digest(b"hello old\n"),
+                    "content": "hello new\n"
+                }]}),
+            )
+            .unwrap();
+
+        assert_eq!(output["status"], "committed");
+        assert_eq!(output["changes"][0]["path"], "README.MD");
+        assert_eq!(fs::read_to_string(path).unwrap(), "hello new\n");
+    }
+
+    #[test]
+    fn apply_patch_atomically_creates_missing_parent_directories() {
+        let root = temp_root("apply-patch-new-parents");
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "create",
+                    "path": "new/nested/file.txt",
+                    "content": "created\n",
+                    "expected_absent": true
+                }]}),
+            )
+            .unwrap();
+
+        assert_eq!(output["status"], "committed");
+        assert_eq!(
+            fs::read_to_string(root.join("new/nested/file.txt")).unwrap(),
+            "created\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rejects_stale_digest_without_changes() {
+        let root = temp_root("apply-patch-conflict");
+        fs::write(root.join("README.MD"), "same\nsame\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": "README.MD",
+                    "expected_digest": content_digest(b"stale\n"),
+                    "content": "changed\n"
+                }]}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("conflict"));
+        assert_eq!(
+            fs::read_to_string(root.join("README.MD")).unwrap(),
+            "same\nsame\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_commits_create_delete_and_move_together() {
+        let root = temp_root("apply-patch-mixed");
+        fs::write(root.join("delete.txt"), "delete me\n").unwrap();
+        fs::write(root.join("move.txt"), "move me\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let output = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [
+                    {
+                        "op": "create",
+                        "path": "created.txt",
+                        "content": "created\n",
+                        "expected_absent": true
+                    },
+                    {
+                        "op": "delete",
+                        "path": "delete.txt",
+                        "expected_digest": content_digest(b"delete me\n")
+                    },
+                    {
+                        "op": "move",
+                        "from": "move.txt",
+                        "to": "moved.txt",
+                        "expected_digest": content_digest(b"move me\n"),
+                        "expected_destination_absent": true
+                    }
+                ]}),
+            )
+            .unwrap();
+
+        assert_eq!(output["change_count"], 3);
+        assert_eq!(
+            fs::read_to_string(root.join("created.txt")).unwrap(),
+            "created\n"
+        );
+        assert!(!root.join("delete.txt").exists());
+        assert!(!root.join("move.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("moved.txt")).unwrap(),
+            "move me\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rolls_back_an_injected_mid_commit_failure() {
+        let root = temp_root("apply-patch-rollback");
+        fs::write(root.join("first.txt"), "first old\n").unwrap();
+        fs::write(root.join("second.txt"), "second old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        tools.fail_commit_after(Some(1));
+
+        let error = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [
+                    {
+                        "op": "update",
+                        "path": "first.txt",
+                        "expected_digest": content_digest(b"first old\n"),
+                        "content": "first new\n"
+                    },
+                    {
+                        "op": "update",
+                        "path": "second.txt",
+                        "expected_digest": content_digest(b"second old\n"),
+                        "content": "second new\n"
+                    }
+                ]}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected patch commit failure"));
+        assert_eq!(
+            fs::read_to_string(root.join("first.txt")).unwrap(),
+            "first old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("second.txt")).unwrap(),
+            "second old\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_allows_writable_artifact_paths() {
+        let root = temp_root("apply-patch-artifact-writable");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
+        fs::create_dir_all(root.join(".agl/tasks")).unwrap();
+        fs::write(
+            root.join(".agl/tasks/task.md"),
+            "# Problem\n\nold problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n",
+        )
+        .unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let before = fs::read(root.join(".agl/tasks/task.md")).unwrap();
+        let after = String::from_utf8(before.clone())
+            .unwrap()
+            .replace("old problem.", "new problem.");
+
+        let output = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": ".agl/tasks/task.md",
+                    "expected_digest": content_digest(&before),
+                    "content": after
+                }]}),
+            )
+            .unwrap();
+
+        assert_eq!(output["status"], "committed");
+        assert_eq!(
+            fs::read_to_string(root.join(".agl/tasks/task.md")).unwrap(),
+            "# Problem\n\nnew problem.\n\n# Goal\n\nGoal.\n\n# Scope\n\nScope.\n\n# Non-goals\n\nNone.\n\n# Implementation\n\nSteps.\n\n# Acceptance Criteria\n\nDone.\n\n# Verification\n\nTests.\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rejects_read_only_artifact_paths() {
+        let root = temp_root("apply-patch-artifact-read-only");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "skills", ".agl/skills", "read");
+        fs::create_dir_all(root.join(".agl/skills")).unwrap();
+        fs::write(root.join(".agl/skills/SKILL.md"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": ".agl/skills/SKILL.md",
+                    "expected_digest": content_digest(b"hello old\n"),
+                    "content": "hello new\n"
+                }]}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("does not permit"));
+    }
+
+    #[test]
+    fn apply_patch_rejects_undeclared_artifact_paths() {
+        let root = temp_root("apply-patch-artifact-undeclared");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
+        fs::create_dir_all(root.join(".agl/unknown")).unwrap();
+        fs::write(root.join(".agl/unknown/file.md"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": ".agl/unknown/file.md",
+                    "expected_digest": content_digest(b"hello old\n"),
+                    "content": "hello new\n"
+                }]}),
+            )
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("not declared"));
+    }
+
+    #[test]
+    fn apply_patch_rejects_artifact_root_that_is_not_directory() {
+        let root = temp_root("apply-patch-artifact-not-directory");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        agl_repo::init_repo_workspace(&root, &agl_repo::RepoInitOptions::default()).unwrap();
+        declare_artifact(&root, "tasks", ".agl/tasks", "read_write");
+        let _ = fs::remove_dir_all(root.join(".agl/tasks"));
+        fs::create_dir_all(root.join(".agl")).unwrap();
+        fs::write(root.join(".agl/tasks"), "hello old\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": ".agl/tasks",
+                    "expected_digest": content_digest(b"hello old\n"),
+                    "content": "hello new\n"
+                }]}),
+            )
+            .unwrap_err();
+
+        let error = format!("{err:#}");
+        assert!(error.contains("not_directory"));
+        assert_eq!(
+            fs::read_to_string(root.join(".agl/tasks")).unwrap(),
+            "hello old\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_rejects_symlink_paths() {
+        let root = temp_root("read-symlink");
+        fs::write(root.join("README.MD"), "hello\n").unwrap();
+        std::os::unix::fs::symlink(root.join("README.MD"), root.join("linked.md")).unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let err = tools
+            .dispatch(FS_READ_TOOL_ID, json!({"path": "linked.md"}))
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("symlink"));
+    }
+}

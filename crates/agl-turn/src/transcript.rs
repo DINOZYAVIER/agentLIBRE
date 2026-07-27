@@ -1,5 +1,5 @@
-use agl_capabilities::ActionResult;
 use agl_content::Content;
+use agl_extension::ToolResult;
 use agl_ids::{RunId, TurnId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +13,7 @@ pub enum TurnMessage {
     User { content: Content },
     Assistant { content: Content },
     AssistantToolCall { name: String, arguments: Value },
-    ToolObservation { name: String, result: ActionResult },
+    ToolObservation { name: String, result: ToolResult },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

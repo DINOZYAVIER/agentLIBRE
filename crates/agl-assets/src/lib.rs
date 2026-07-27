@@ -9,6 +9,7 @@ pub enum BuiltinAssetKind {
     FunctionManifest,
     FunctionSystemPrompt,
     FunctionInferenceConfig,
+    ExtensionManifest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

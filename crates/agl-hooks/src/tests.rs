@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agl_capabilities::{HookBatchRequest, HookStatus};
+use agl_extension::{HookBatchRequest, HookStatus};
 use serde_json::json;
 
 use super::*;

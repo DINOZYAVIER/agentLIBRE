@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use agl_artifact::{
-    ArtifactEnvelope, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
+    ArtifactEnvelope, EXTENSION_TYPE, FUNCTION_TYPE, FUNCTION_TYPE as SUBFUNCTION_TYPE, SKILL_TYPE,
 };
-use agl_capabilities::CapabilityId;
-pub use agl_capabilities::FunctionToolPolicy;
+use agl_extension::{ExtensionId, ToolId};
+pub use agl_kernel::FunctionToolPolicy;
 use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +97,16 @@ impl AgentFunctionFrontMatter {
         if let Some(runtime) = &self.runtime {
             runtime.validate()?;
         }
+        for requirement in self
+            .artifact
+            .requires
+            .iter()
+            .filter(|requirement| requirement.type_id().as_str() == EXTENSION_TYPE)
+        {
+            ExtensionId::new(requirement.package_id().as_str()).with_context(|| {
+                format!("invalid function Extension requirement `{}`", requirement)
+            })?;
+        }
         if let Some(skills) = &self.skills {
             skills.validate("skills.use")?;
             for skill in &skills.use_ {
@@ -111,6 +121,22 @@ impl AgentFunctionFrontMatter {
         }
         if let Some(tools) = &self.tools {
             tools.validate()?;
+            let selected_extensions = self
+                .required_extensions()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            for tool_id in tools.allow.iter().chain(&tools.deny) {
+                let Some((extension_id, _)) = tool_id.split_once(':') else {
+                    continue;
+                };
+                let extension_id = ExtensionId::new(extension_id).with_context(|| {
+                    format!("invalid Extension namespace in function Tool `{tool_id}`")
+                })?;
+                ensure!(
+                    selected_extensions.contains(&extension_id),
+                    "function Tool `{tool_id}` requires explicit artifact requirement `extension:{extension_id}@<version>`"
+                );
+            }
         }
         if let Some(subagents) = &self.subagents {
             subagents.validate("subagents.use")?;
@@ -178,6 +204,18 @@ impl AgentFunctionFrontMatter {
             .as_ref()
             .map(|skills| skills.use_.as_slice())
             .unwrap_or_default()
+    }
+
+    pub fn required_extensions(&self) -> Vec<ExtensionId> {
+        self.artifact
+            .requires
+            .iter()
+            .filter(|requirement| requirement.type_id().as_str() == EXTENSION_TYPE)
+            .map(|requirement| {
+                ExtensionId::new(requirement.package_id().as_str())
+                    .expect("validated Extension artifact package ID must be a valid Extension ID")
+            })
+            .collect()
     }
 
     pub fn selected_subagents(&self) -> &[String] {
@@ -327,7 +365,7 @@ impl FunctionTools {
         validate_unique_non_empty("tools.allow", &self.allow)?;
         validate_unique_non_empty("tools.deny", &self.deny)?;
         for id in self.allow.iter().chain(&self.deny) {
-            CapabilityId::new(id.clone())
+            ToolId::new(id.clone())
                 .with_context(|| format!("invalid function tool capability ID `{id}`"))?;
         }
         Ok(())
@@ -336,11 +374,11 @@ impl FunctionTools {
     fn to_runtime_policy(&self) -> FunctionToolPolicy {
         FunctionToolPolicy::new(
             self.allow.iter().map(|id| {
-                CapabilityId::new(id.clone())
+                ToolId::new(id.clone())
                     .expect("validated function allow capability ID must remain valid")
             }),
             self.deny.iter().map(|id| {
-                CapabilityId::new(id.clone())
+                ToolId::new(id.clone())
                     .expect("validated function deny capability ID must remain valid")
             }),
         )

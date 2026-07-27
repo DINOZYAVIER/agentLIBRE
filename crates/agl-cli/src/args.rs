@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use agl_capabilities::SkillId;
+use agl_extension::SkillId;
 use agl_ids::{ExecutionId, RunId, SessionId};
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
@@ -126,6 +126,9 @@ mod help {
     pub(super) const STORE_EXPORT: &str = cli_help!("store/export");
     pub(super) const STORE_MIGRATE: &str = cli_help!("store/migrate");
     pub(super) const STORE_STATUS: &str = cli_help!("store/status");
+    pub(super) const TRACE: &str = cli_help!("trace");
+    pub(super) const TRACE_EXPORT: &str = cli_help!("trace/export");
+    pub(super) const TRACE_REPLAY: &str = cli_help!("trace/replay");
 }
 
 #[derive(Debug, Parser)]
@@ -261,6 +264,12 @@ enum Commands {
         #[command(subcommand)]
         command: ProcessCommands,
     },
+    /// Export and replay canonical semantic traces.
+    #[command(long_about = help::TRACE)]
+    Trace {
+        #[command(subcommand)]
+        command: TraceCommands,
+    },
     /// Run the local agent runtime daemon in the foreground.
     #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
@@ -288,6 +297,50 @@ enum Commands {
         #[command(subcommand)]
         command: DaemonCommands,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum TraceCommands {
+    /// Export a deterministic semantic trace from canonical runtime events.
+    #[command(long_about = help::TRACE_EXPORT)]
+    Export(TraceExportArgs),
+    /// Validate and replay a semantic trace without executing effects.
+    #[command(long_about = help::TRACE_REPLAY)]
+    Replay(TraceReplayArgs),
+}
+
+#[derive(Debug, Args)]
+struct TraceExportArgs {
+    /// Canonical redacted runtime event JSONL.
+    #[arg(long, value_name = "PATH")]
+    events: PathBuf,
+
+    /// Immutable SemanticTraceIdentity JSON.
+    #[arg(long, value_name = "PATH")]
+    identity: PathBuf,
+
+    /// Optional explicit local content-reference metadata JSON.
+    #[arg(long, value_name = "PATH")]
+    content_refs: Option<PathBuf>,
+
+    /// Destination semantic trace JSON.
+    #[arg(long, value_name = "PATH")]
+    out: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct TraceReplayArgs {
+    /// Semantic trace JSON.
+    #[arg(long, value_name = "PATH")]
+    trace: PathBuf,
+
+    /// Expected immutable SemanticTraceIdentity JSON.
+    #[arg(long, value_name = "PATH")]
+    identity: PathBuf,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1938,6 +1991,19 @@ impl Cli {
             Some(Commands::Init(args)) => CliCommand::Init(setup_init_options(args)),
             Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
             Some(Commands::Process { command }) => CliCommand::Process(process_command(command)?),
+            Some(Commands::Trace { command }) => CliCommand::Trace(match command {
+                TraceCommands::Export(args) => TraceCommand::Export(TraceExportOptions {
+                    events: args.events,
+                    identity: args.identity,
+                    content_refs: args.content_refs,
+                    out: args.out,
+                }),
+                TraceCommands::Replay(args) => TraceCommand::Replay(TraceReplayOptions {
+                    trace: args.trace,
+                    identity: args.identity,
+                    json: args.json,
+                }),
+            }),
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
             Some(Commands::Status(args)) => {
                 CliCommand::Repo(RepoCommand::Status(repo_status_options(args)))
@@ -2983,6 +3049,11 @@ enum PublicCompletionCommands {
     Process {
         #[command(subcommand)]
         command: ProcessCommands,
+    },
+    /// Export and replay canonical semantic traces.
+    Trace {
+        #[command(subcommand)]
+        command: TraceCommands,
     },
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),

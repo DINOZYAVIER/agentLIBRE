@@ -60,6 +60,7 @@ mod one_shot;
 mod process_command;
 mod repo;
 mod store;
+mod trace;
 mod tui;
 
 use args::{
@@ -82,6 +83,7 @@ use one_shot::OneShotSession;
 use process_command::run_process;
 use repo::run_repo;
 use store::run_store;
+use trace::run_trace;
 
 pub(crate) fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
@@ -298,6 +300,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
         | CliCommand::Process(_)
+        | CliCommand::Trace(_)
         | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
         CliCommand::Serve(_)
         | CliCommand::Inference(InferenceCommand::Serve(_))
@@ -328,6 +331,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Repo(command) => run_repo(command),
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Process(command) => run_process(command, runtime),
+        CliCommand::Trace(command) => run_trace(command),
         CliCommand::Serve(options) => run_serve(options, runtime),
         CliCommand::Inference(command) => run_inference(command, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),

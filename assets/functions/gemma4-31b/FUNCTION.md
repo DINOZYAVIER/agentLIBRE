@@ -10,6 +10,8 @@ artifact:
     tested: [1.0.0-alpha.12]
   requires:
     - model:gemma4-31b@^1.0
+    - extension:core.workspace@^1.0
+    - extension:core.process@^1.0
 title: Gemma4 31B
 description: Local Gemma4 31B QAT agent function with native Gemma tool-call formatting.
 model:
