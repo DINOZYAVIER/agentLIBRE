@@ -45,7 +45,7 @@ use crate::{
 };
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(2);
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const RECEIVE_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -3782,6 +3782,16 @@ mod tests {
             runtime_worker_failure_kind(&failure),
             WorkerFailureKind::Signaled
         );
+    }
+
+    #[test]
+    fn production_timeouts_cover_the_longest_admitted_model_operation() {
+        let options = WorkerRuntimeOptions::new("/tmp/agl-worker");
+
+        assert_eq!(options.handshake_timeout, Duration::from_secs(5));
+        assert_eq!(options.operation_timeout, Duration::from_secs(600));
+        assert_eq!(options.cancellation_grace, Duration::from_secs(2));
+        assert_eq!(options.shutdown_timeout, Duration::from_secs(2));
     }
 
     #[test]
