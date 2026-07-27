@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 
@@ -12,6 +13,9 @@ use sha2::{Digest, Sha256};
 use super::super::{ffi, model::LlamaCppModel};
 use super::LlamaCppContextSlot;
 use super::decode::tokenize;
+
+pub(super) const MAX_PROJECTED_TOOL_SCHEMA_NODES: usize = 16_384;
+pub(super) const MAX_PROJECTED_TOOL_SCHEMA_BYTES: usize = 1_048_576;
 
 pub(super) const DISABLED_THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
 pub(super) const QWEN_ASSISTANT_HEADER: &str = "<|im_start|>assistant\n";
@@ -548,12 +552,26 @@ impl PreparedTools {
                     reason: error.to_string(),
                 }
             })?);
-            let schema = serde_json::to_string(&tool.input_schema).map_err(|error| {
+            let projected_schema = project_tool_schema(&tool.input_schema).map_err(|reason| {
+                GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason,
+                }
+            })?;
+            let schema = serde_json::to_string(&projected_schema).map_err(|error| {
                 GenerationPlanError::InvalidToolSchema {
                     tool: tool.name.clone(),
                     reason: error.to_string(),
                 }
             })?;
+            if schema.len() > MAX_PROJECTED_TOOL_SCHEMA_BYTES {
+                return Err(GenerationPlanError::InvalidToolSchema {
+                    tool: tool.name.clone(),
+                    reason: format!(
+                        "projected Tool schema exceeds {MAX_PROJECTED_TOOL_SCHEMA_BYTES} bytes"
+                    ),
+                });
+            }
             parameters.push(CString::new(schema).map_err(|error| {
                 GenerationPlanError::InvalidToolSchema {
                     tool: tool.name.clone(),
@@ -575,6 +593,101 @@ impl PreparedTools {
             _parameters: parameters,
             tools: ffi_tools,
         })
+    }
+}
+
+pub(super) fn project_tool_schema(
+    schema: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, String> {
+    let mut remaining_nodes = MAX_PROJECTED_TOOL_SCHEMA_NODES;
+    expand_local_schema_refs(
+        schema,
+        schema,
+        &mut BTreeSet::new(),
+        &mut remaining_nodes,
+        0,
+    )
+}
+
+fn expand_local_schema_refs(
+    value: &serde_json::Value,
+    root: &serde_json::Value,
+    active_refs: &mut BTreeSet<String>,
+    remaining_nodes: &mut usize,
+    depth: usize,
+) -> std::result::Result<serde_json::Value, String> {
+    const MAX_SCHEMA_DEPTH: usize = 64;
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(format!(
+            "projected Tool schema depth exceeds {MAX_SCHEMA_DEPTH}"
+        ));
+    }
+    let Some(next_remaining) = remaining_nodes.checked_sub(1) else {
+        return Err(format!(
+            "projected Tool schema exceeds {MAX_PROJECTED_TOOL_SCHEMA_NODES} nodes"
+        ));
+    };
+    *remaining_nodes = next_remaining;
+    match value {
+        serde_json::Value::Array(values) => {
+            let mut expanded = Vec::with_capacity(values.len());
+            for value in values {
+                expanded.push(expand_local_schema_refs(
+                    value,
+                    root,
+                    active_refs,
+                    remaining_nodes,
+                    depth + 1,
+                )?);
+            }
+            Ok(serde_json::Value::Array(expanded))
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                if object.len() != 1 {
+                    return Err(format!(
+                        "local schema reference {reference:?} has unsupported sibling keywords"
+                    ));
+                }
+                let pointer = reference
+                    .strip_prefix('#')
+                    .filter(|pointer| pointer.starts_with('/'))
+                    .ok_or_else(|| {
+                        format!(
+                            "only local JSON Pointer schema references are supported: {reference}"
+                        )
+                    })?;
+                if !active_refs.insert(reference.to_owned()) {
+                    return Err(format!("cyclic local schema reference: {reference}"));
+                }
+                let target = root
+                    .pointer(pointer)
+                    .ok_or_else(|| format!("unresolved local schema reference: {reference}"))?;
+                let expanded =
+                    expand_local_schema_refs(target, root, active_refs, remaining_nodes, depth + 1);
+                active_refs.remove(reference);
+                expanded
+            } else {
+                let mut expanded = serde_json::Map::new();
+                for (key, child) in object {
+                    if key == "$defs" || key == "definitions" {
+                        continue;
+                    }
+                    expanded.insert(
+                        key.clone(),
+                        expand_local_schema_refs(
+                            child,
+                            root,
+                            active_refs,
+                            remaining_nodes,
+                            depth + 1,
+                        )?,
+                    );
+                }
+                Ok(serde_json::Value::Object(expanded))
+            }
+        }
+        _ => Ok(value.clone()),
     }
 }
 
