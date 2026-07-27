@@ -49,6 +49,14 @@ pkgs.mkShell {
     export CMAKE_PREFIX_PATH="${pkgs.spirv-headers}:${pkgs.spirv-tools}''${CMAKE_PREFIX_PATH:+:''${CMAKE_PREFIX_PATH}}"
     export LD_LIBRARY_PATH="${runtimeLibraryPath}''${LD_LIBRARY_PATH:+:''${LD_LIBRARY_PATH}}"
 
+    # mkShell adds its non-realised output directory to NIX_LDFLAGS. Keeping
+    # that entry would embed a RUNPATH which can never be pinned or loaded.
+    shell_rpath_prefix="-rpath $out/lib  "
+    if [[ "''${NIX_LDFLAGS:-}" == "$shell_rpath_prefix"* ]]; then
+      export NIX_LDFLAGS="''${NIX_LDFLAGS#"$shell_rpath_prefix"}"
+    fi
+    unset shell_rpath_prefix
+
     if [ -d /run/opengl-driver/share ]; then
       export XDG_DATA_DIRS="/run/opengl-driver/share''${XDG_DATA_DIRS:+:''${XDG_DATA_DIRS}}"
     fi
