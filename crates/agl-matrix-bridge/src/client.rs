@@ -1,4 +1,6 @@
 #[cfg(unix)]
+use std::future::Future;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -36,7 +38,7 @@ impl LazyDaemonClient {
     fn ensure_connected(&mut self) -> Result<()> {
         if self.inner.is_none() {
             let socket_path = self.socket_path.clone();
-            self.inner = Some(self.runtime().block_on(async move {
+            self.inner = Some(self.block_on(async move {
                 AgentLibreClient::connect(&socket_path)
                     .await
                     .with_context(|| {
@@ -56,6 +58,19 @@ impl LazyDaemonClient {
 
     fn runtime(&self) -> &tokio::runtime::Runtime {
         self.runtime.as_ref().expect("client runtime initialized")
+    }
+
+    fn block_on<F>(&self, future: F) -> F::Output
+    where
+        F: Future,
+    {
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            tokio::task::block_in_place(|| self.runtime().block_on(future))
+        } else {
+            self.runtime().block_on(future)
+        }
     }
 }
 
@@ -82,11 +97,9 @@ impl AgentClient for LazyDaemonClient {
     fn validate_session(&mut self, session_id: &SessionId) -> Result<()> {
         self.ensure_connected()?;
         let client = self.client().clone();
-        let status = self
-            .runtime()
-            .block_on(client.session_status(SessionStatusRequest {
-                session_id: session_id.clone(),
-            }))?;
+        let status = self.block_on(client.session_status(SessionStatusRequest {
+            session_id: session_id.clone(),
+        }))?;
         match status.status {
             SessionStatus::Open | SessionStatus::Busy => Ok(()),
             SessionStatus::Finished | SessionStatus::Failed => {
@@ -98,16 +111,14 @@ impl AgentClient for LazyDaemonClient {
     fn open_session(&mut self) -> Result<SessionId> {
         self.ensure_connected()?;
         let client = self.client().clone();
-        let opened = self
-            .runtime()
-            .block_on(client.open_session(SessionOpenRequest {
-                session_id: None,
-                new_session: true,
-                workspace_root: None,
-                function_ref: None,
-                skills: Vec::new(),
-                tool_mode: ProtocolToolMode::ReadOnly,
-            }))?;
+        let opened = self.block_on(client.open_session(SessionOpenRequest {
+            session_id: None,
+            new_session: true,
+            workspace_root: None,
+            function_ref: None,
+            skills: Vec::new(),
+            tool_mode: ProtocolToolMode::ReadOnly,
+        }))?;
         Ok(opened.session_id)
     }
 
@@ -122,7 +133,7 @@ impl AgentClient for LazyDaemonClient {
         let session_id = session_id.clone();
         let message = message.to_owned();
         let idempotency_key = idempotency_key.to_owned();
-        self.runtime().block_on(async move {
+        self.block_on(async move {
             let accepted = client
                 .submit_run(RunSubmitRequest {
                     session_id: session_id.clone(),
@@ -167,5 +178,67 @@ impl AgentClient for LazyDaemonClient {
                 })
                 .ok_or_else(|| anyhow::anyhow!("daemon turn produced no assistant message"))
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::Duration;
+
+    use agl_ids::{DaemonInstanceId, RequestId};
+    use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, HelloEvent, PROTOCOL_VERSION};
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+    use super::*;
+
+    #[test]
+    fn daemon_status_is_safe_inside_multithread_tokio_runtime() {
+        let outer = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        outer.block_on(async {
+            let socket_path = std::env::temp_dir().join(format!(
+                "agl-matrix-client-runtime-{}.sock",
+                RequestId::generate()
+            ));
+            let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let request: DaemonRequest =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let response = DaemonEvent::new(
+                    Some(request.request_id),
+                    DaemonEventKind::Hello(HelloEvent {
+                        protocol_version: PROTOCOL_VERSION.to_owned(),
+                        product_version: "runtime-boundary-test".to_owned(),
+                        daemon_instance_id: DaemonInstanceId::generate(),
+                        capabilities: Vec::new(),
+                    }),
+                );
+                writer
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            });
+
+            let mut client = LazyDaemonClient::new(socket_path.clone());
+            assert_eq!(
+                client.daemon_status().unwrap(),
+                format!(
+                    "state=running protocol_version={} product_version=runtime-boundary-test",
+                    PROTOCOL_VERSION
+                )
+            );
+            drop(client);
+            server.await.unwrap();
+            std::fs::remove_file(socket_path).unwrap();
+        });
     }
 }
