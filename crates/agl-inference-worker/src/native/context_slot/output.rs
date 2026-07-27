@@ -398,7 +398,7 @@ mod tests {
         let mut classifier = IncrementalResponseClassifier::new(attempt_id(), &sink);
 
         assert!(!classifier.push(b"<tool_"));
-        assert!(!classifier.push(b"call>{\"name\":\"fs.read\","));
+        assert!(!classifier.push(b"call>{\"name\":\"core.workspace:fs.read\","));
         assert!(classifier.push(b"\"arguments\":{}}</tool_call>"));
         let response = classifier.finish();
 

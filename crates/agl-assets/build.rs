@@ -18,6 +18,7 @@ enum AssetKind {
     FunctionManifest,
     FunctionSystemPrompt,
     FunctionInferenceConfig,
+    ExtensionManifest,
 }
 
 impl AssetKind {
@@ -32,6 +33,7 @@ impl AssetKind {
             Self::FunctionManifest => "BuiltinAssetKind::FunctionManifest",
             Self::FunctionSystemPrompt => "BuiltinAssetKind::FunctionSystemPrompt",
             Self::FunctionInferenceConfig => "BuiltinAssetKind::FunctionInferenceConfig",
+            Self::ExtensionManifest => "BuiltinAssetKind::ExtensionManifest",
         }
     }
 }
@@ -64,6 +66,7 @@ fn main() {
     let assets_root = repo_root.join("assets");
     let builtin_skills_root = assets_root.join(BUILTIN_CORE_SKILLS_DIR);
     let builtin_functions_root = assets_root.join("functions");
+    let builtin_extensions_root = assets_root.join("extensions");
     let mut assets = Vec::new();
     let mut packages = Vec::new();
 
@@ -83,9 +86,76 @@ fn main() {
         repo_root,
         &builtin_functions_root,
     );
+    add_extensions(
+        &mut assets,
+        &mut packages,
+        repo_root,
+        &builtin_extensions_root,
+    );
     validate_unique_asset_ids(&assets);
     validate_unique_package_ids(&packages);
     write_registry(&assets, &packages);
+}
+
+fn add_extensions(
+    assets: &mut Vec<Asset>,
+    packages: &mut Vec<ArtifactPackage>,
+    repo_root: &Path,
+    extensions_root: &Path,
+) {
+    if !extensions_root.is_dir() {
+        panic!(
+            "builtin extensions root is not a directory: {}",
+            extensions_root.display()
+        );
+    }
+    reject_symlink(extensions_root);
+    for extension_dir in read_dir_sorted(extensions_root)
+        .into_iter()
+        .filter(|path| path.is_dir())
+    {
+        reject_symlink(&extension_dir);
+        let id = extension_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("extension directory must have a UTF-8 name");
+        validate_extension_name(id);
+        let manifest_path = extension_dir.join("EXTENSION.json");
+        if !manifest_path.is_file() {
+            panic!("builtin extension {id} is missing EXTENSION.json");
+        }
+        let manifest_bytes = fs::read(&manifest_path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", manifest_path.display()));
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+            .unwrap_or_else(|error| panic!("failed to parse {}: {error}", manifest_path.display()));
+        let artifact_id = manifest
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("extension {id} has no artifact id"));
+        let version = manifest
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("extension {id} has no artifact version"));
+        if artifact_id != id {
+            panic!("extension directory {id} does not match artifact id {artifact_id}");
+        }
+        let asset_index = assets.len();
+        assets.push(asset(
+            &format!("extension:{id}/EXTENSION.json"),
+            AssetKind::ExtensionManifest,
+            repo_root,
+            &manifest_path,
+        ));
+        let files = vec![("EXTENSION.json".to_string(), asset_index)];
+        packages.push(ArtifactPackage {
+            type_id: "extension".to_string(),
+            id: id.to_string(),
+            version: version.to_string(),
+            entrypoint: "EXTENSION.json".to_string(),
+            digest: package_tree_hash(assets, &files),
+            files,
+        });
+    }
 }
 
 fn add_models(
@@ -513,6 +583,18 @@ fn validate_name(value: &str, field: &str) {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         panic!("{field} must be lowercase ASCII, digits, or hyphens: {value}");
+    }
+}
+
+fn validate_extension_name(value: &str) {
+    if value.is_empty()
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        panic!(
+            "builtin extension directory must be lowercase ASCII, digits, hyphens, underscores, or dots: {value}"
+        );
     }
 }
 

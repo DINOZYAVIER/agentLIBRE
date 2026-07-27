@@ -49,9 +49,9 @@ impl TestRenderedContent for Option<Content> {
     }
 }
 
-fn effective_capabilities(ids: &[&str]) -> EffectiveCapabilitySet {
+fn effective_capabilities(ids: &[&str]) -> EffectiveToolSet {
     let catalog = full_tool_catalog();
-    CapabilityPolicyInput::new(
+    ToolPolicyInput::new(
         catalog.providers().iter().cloned(),
         tool_ids(ids),
         ToolAccessMode::Admin,
@@ -195,7 +195,7 @@ fn build_request_rejects_skill_routing_parity_failure_before_inference() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
-    let effective = effective_capabilities(&["fs.read"]);
+    let effective = effective_capabilities(&["core.workspace:fs.read"]);
     let skill_id = SkillId::new("forged-routing").unwrap();
     let routing = SkillToolRoutingView::new([(
         skill_id,
@@ -203,8 +203,8 @@ fn build_request_rejects_skill_routing_parity_failure_before_inference() {
             [],
             [],
             [(
-                CapabilityId::new("fs.read").unwrap(),
-                agl_capabilities::CapabilityExclusionReason::NotRouted,
+                ToolId::new("core.workspace:fs.read").unwrap(),
+                agl_kernel::ToolExclusionReason::NotRouted,
             )],
         ),
     )])
@@ -287,13 +287,18 @@ fn build_request_injects_runtime_features_before_tools() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
-    let effective = effective_capabilities(&["fs.list", "fs.read", "fs.search"]);
+    let effective = effective_capabilities(&[
+        "core.workspace:fs.list",
+        "core.workspace:fs.read",
+        "core.workspace:fs.search",
+    ]);
     let visible_tools = visible_tools_from_effective(&effective);
     let runtime_context = build_runtime_feature_context(
         std::path::Path::new("/repo"),
         ToolAccessMode::ReadOnly,
         &visible_tools,
-    );
+    )
+    .unwrap();
 
     let request = build_inference_request(
         ModelRequest {
@@ -357,7 +362,7 @@ fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
         dialect: ModelDialect::Qwen3,
         tool_call_format: ToolCallFormat::HermesJson,
     };
-    let effective = effective_capabilities(&["fs.read"]);
+    let effective = effective_capabilities(&["core.workspace:fs.read"]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -390,7 +395,7 @@ fn build_request_keeps_hermes_tool_schema_out_of_system_messages() {
         request.rendered.messages[2].content,
         Some(text("read README"))
     );
-    assert_eq!(request.rendered.tools[0].name, "fs.read");
+    assert_eq!(request.rendered.tools[0].name, "core.workspace:fs.read");
 }
 
 #[test]
@@ -399,7 +404,7 @@ fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
         dialect: ModelDialect::Gemma4,
         tool_call_format: ToolCallFormat::GemmaFunctionCall,
     };
-    let effective = effective_capabilities(&["fs.read"]);
+    let effective = effective_capabilities(&["core.workspace:fs.read"]);
 
     let request = build_inference_request(
         ModelRequest {
@@ -427,14 +432,14 @@ fn build_request_keeps_gemma_tool_schema_out_of_system_messages() {
         request.rendered.messages[2].content,
         Some(text("read README"))
     );
-    assert_eq!(request.rendered.tools[0].name, "fs.read");
+    assert_eq!(request.rendered.tools[0].name, "core.workspace:fs.read");
 }
 
 #[test]
 fn rendered_tool_keeps_the_exact_input_schema() {
-    let effective = effective_capabilities(&["fs.read"]);
+    let effective = effective_capabilities(&["core.workspace:fs.read"]);
     let declaration = effective
-        .capability(&CapabilityId::new("fs.read").unwrap())
+        .capability(&ToolId::new("core.workspace:fs.read").unwrap())
         .unwrap()
         .declaration();
     let config = ModelConfig {
@@ -506,7 +511,7 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
 
     assert_eq!(
         artifact_write_preflight_path_for_tool(
-            agl_tools::FS_EDIT_TOOL_ID,
+            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
             &selected_skills,
             &agl_args
         )
@@ -519,12 +524,17 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
         None
     );
     assert_eq!(
-        artifact_write_preflight_path_for_tool(agl_tools::FS_EDIT_TOOL_ID, &[], &agl_args).unwrap(),
+        artifact_write_preflight_path_for_tool(
+            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
+            &[],
+            &agl_args
+        )
+        .unwrap(),
         None
     );
     assert_eq!(
         artifact_write_preflight_path_for_tool(
-            agl_tools::FS_EDIT_TOOL_ID,
+            agl_core_tools::FS_APPLY_PATCH_TOOL_ID,
             &selected_skills,
             &serde_json::json!({
                 "path": "README.md"
@@ -539,10 +549,10 @@ fn artifact_write_preflight_is_limited_to_fs_edit_selected_skills_and_agl_paths(
 fn selected_skill_hook_batches_use_declared_hook_events() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let batches = selected_skill_hook_batches(
         &skill_registry,
@@ -568,10 +578,10 @@ fn selected_skill_hook_batches_use_declared_hook_events() {
 fn selected_skill_visible_tools_use_declared_tool_metadata() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -586,24 +596,29 @@ fn selected_skill_visible_tools_use_declared_tool_metadata() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+        vec![
+            "core.workspace:fs.apply_patch",
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
     assert_eq!(
         tools[0].input_schema["required"],
-        serde_json::json!(["path", "old_text", "new_text"])
+        serde_json::json!(["operations"])
     );
     assert_eq!(tools[0].input_schema["additionalProperties"], false);
-    assert!(tools[0].description.contains("exact text"));
+    assert!(tools[0].description.contains("Atomically"));
 }
 
 #[test]
 fn no_skill_route_exposes_only_read_only_filesystem_tools() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -618,7 +633,11 @@ fn no_skill_route_exposes_only_read_only_filesystem_tools() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.list", "fs.read", "fs.search"]
+        vec![
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
 }
 
@@ -626,10 +645,10 @@ fn no_skill_route_exposes_only_read_only_filesystem_tools() {
 fn no_skill_route_adds_only_filesystem_edit_in_write_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -644,12 +663,17 @@ fn no_skill_route_adds_only_filesystem_edit_in_write_mode() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+        vec![
+            "core.workspace:fs.apply_patch",
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
 }
 
 #[test]
-fn process_skill_is_not_baseline_and_routes_only_mode_admitted_actions() {
+fn foreground_process_and_shell_are_baseline_and_skill_routes_the_lifecycle_surface() {
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
 
@@ -663,11 +687,16 @@ fn process_skill_is_not_baseline_and_routes_only_mode_admitted_actions() {
         RuntimeCapabilityBoundary::default(),
     )
     .unwrap();
-    assert!(
-        agl_tools::PROCESS_TOOL_IDS
-            .iter()
-            .all(|id| !baseline.contains(&CapabilityId::new((*id).to_string()).unwrap()))
-    );
+    assert!(baseline.contains(&ToolId::new(agl_core_tools::PROCESS_EXEC_TOOL_ID).unwrap()));
+    assert!(baseline.contains(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap()));
+    for id in agl_core_tools::PROCESS_TOOL_IDS {
+        if !matches!(
+            *id,
+            agl_core_tools::PROCESS_EXEC_TOOL_ID | agl_core_tools::SHELL_EXEC_TOOL_ID
+        ) {
+            assert!(!baseline.contains(&ToolId::new((*id).to_string()).unwrap()));
+        }
+    }
 
     let process_skill = [SkillId::new("process").unwrap()];
     let read_only = resolve_effective_capabilities(
@@ -685,7 +714,14 @@ fn process_skill_is_not_baseline_and_routes_only_mode_admitted_actions() {
             .capabilities()
             .map(|capability| capability.declaration().id.as_str())
             .collect::<Vec<_>>(),
-        vec!["process.pwd", "process.read", "process.status"]
+        vec![
+            "core.process:process.pwd",
+            "core.process:process.read",
+            "core.process:process.status",
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search",
+        ]
     );
 
     let execute = resolve_effective_capabilities(
@@ -700,22 +736,49 @@ fn process_skill_is_not_baseline_and_routes_only_mode_admitted_actions() {
     .unwrap();
     assert_eq!(
         execute.capabilities().len(),
-        agl_tools::PROCESS_TOOL_IDS.len()
+        agl_core_tools::PROCESS_TOOL_IDS.len() + 4
     );
     assert!(
         !execute
-            .capability(&CapabilityId::new(agl_tools::SHELL_EXEC_TOOL_ID).unwrap())
+            .capability(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
             .unwrap()
             .authorized_state_effects()
-            .contains(&StateEffect::HostProcessExecution)
+            .contains(&EffectId::host_process_execution())
     );
+}
+
+#[test]
+fn omitted_function_extension_does_not_activate_its_core_tools() {
+    let skill_registry = test_skill_registry();
+    let catalog = full_tool_catalog();
+    let selected_extensions = [ExtensionId::new(agl_core_tools::fs::PROVIDER_ID).unwrap()]
+        .into_iter()
+        .collect();
+    let effective = resolve_effective_capabilities(
+        &skill_registry,
+        &catalog,
+        &[],
+        ToolAccessMode::Admin,
+        &RuntimePermissionGrantSnapshot::default(),
+        None,
+        RuntimeCapabilityBoundary {
+            authority_ceiling: None,
+            delegation_enabled: false,
+            selected_extensions,
+        },
+    )
+    .unwrap();
+
+    assert!(effective.contains(&ToolId::new(agl_core_tools::FS_READ_TOOL_ID).unwrap()));
+    assert!(!effective.contains(&ToolId::new(agl_core_tools::PROCESS_EXEC_TOOL_ID).unwrap()));
+    assert!(!effective.contains(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap()));
 }
 
 #[test]
 fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let fs_read = CapabilityId::new("fs.read").unwrap();
+    let fs_read = ToolId::new("core.workspace:fs.read").unwrap();
 
     let inherited = resolve_effective_capabilities(
         &registry,
@@ -742,7 +805,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
     assert!(!empty_allow.contains(&fs_read));
     assert_eq!(
         empty_allow.exclusion(&fs_read).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+        agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
 
     let denied = resolve_effective_capabilities(
@@ -761,7 +824,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
     assert!(!denied.contains(&fs_read));
     assert_eq!(
         denied.exclusion(&fs_read).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::FunctionDenied
+        agl_kernel::ToolExclusionReason::FunctionDenied
     );
 }
 
@@ -769,7 +832,7 @@ fn function_policy_absence_empty_allow_and_deny_precedence_are_distinct() {
 fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let delegate = CapabilityId::new(agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID).unwrap();
+    let delegate = ToolId::new(agl_extension::AGENT_DELEGATE_TOOL_ID).unwrap();
 
     let disabled = resolve_effective_capabilities(
         &registry,
@@ -793,6 +856,7 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         RuntimeCapabilityBoundary {
             authority_ceiling: None,
             delegation_enabled: true,
+            ..RuntimeCapabilityBoundary::default()
         },
     )
     .unwrap();
@@ -808,13 +872,14 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         RuntimeCapabilityBoundary {
             authority_ceiling: None,
             delegation_enabled: true,
+            ..RuntimeCapabilityBoundary::default()
         },
     )
     .unwrap();
     assert!(!explicitly_empty.contains(&delegate));
     assert_eq!(
         explicitly_empty.exclusion(&delegate).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+        agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
 
     let ceiling = BTreeSet::new();
@@ -828,13 +893,14 @@ fn delegation_is_visible_only_for_declared_children_with_parent_authority() {
         RuntimeCapabilityBoundary {
             authority_ceiling: Some(&ceiling),
             delegation_enabled: true,
+            ..RuntimeCapabilityBoundary::default()
         },
     )
     .unwrap();
     assert!(!child_denied.contains(&delegate));
     assert_eq!(
         child_denied.exclusion(&delegate).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::ParentAuthorityDenied
+        agl_kernel::ToolExclusionReason::ParentAuthorityDenied
     );
 }
 
@@ -851,7 +917,11 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
         Case {
             id: "policy-absent",
             tools_yaml: "",
-            expected_ids: &["fs.list", "fs.read", "fs.search"],
+            expected_ids: &[
+                "core.workspace:fs.list",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
+            ],
             policy_present: false,
         },
         Case {
@@ -862,8 +932,8 @@ fn function_manifest_policy_controls_session_effective_visible_and_prompt_tools(
         },
         Case {
             id: "policy-allow-deny",
-            tools_yaml: "tools:\n  allow:\n    - fs.list\n    - fs.read\n  deny:\n    - fs.list\n",
-            expected_ids: &["fs.read"],
+            tools_yaml: "tools:\n  allow:\n    - core.workspace:fs.list\n    - core.workspace:fs.read\n  deny:\n    - core.workspace:fs.list\n",
+            expected_ids: &["core.workspace:fs.read"],
             policy_present: true,
         },
     ];
@@ -905,7 +975,7 @@ tool_call_format = "hermes_json"
     let catalog_ids = catalog
         .providers()
         .iter()
-        .flat_map(|provider| provider.actions.iter())
+        .flat_map(|provider| provider.tools.iter())
         .map(|action| action.id.as_str())
         .collect::<BTreeSet<_>>();
 
@@ -915,7 +985,7 @@ tool_call_format = "hermes_json"
         std::fs::write(
             function_root.join(agl_function::FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires: []\ntitle: Function policy test\n{}---\n",
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Function policy test\n{}---\n",
                 case.id, case.tools_yaml
             ),
         )
@@ -1096,13 +1166,13 @@ title: Locked Function
 fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
     let registry = test_skill_registry();
     let catalog = full_tool_catalog();
-    let cron_add = CapabilityId::new("cron.add").unwrap();
+    let cron_add = ToolId::new("cron.add").unwrap();
     let snapshot = RuntimePermissionGrantSnapshot {
         admitted: vec![AdmittedPermissionGrant {
             grant_id: "grant-1".to_string(),
             capability_id: cron_add.clone(),
             max_operation_kind: OperationKind::Write,
-            state_effects: BTreeSet::from([StateEffect::StoreCron]),
+            state_effects: BTreeSet::from([EffectId::store_cron()]),
             sensitive_inputs: BTreeSet::new(),
             run_id: run_id(),
             duration: "one_turn".to_string(),
@@ -1126,7 +1196,7 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
     assert!(!effective.contains(&cron_add));
     assert_eq!(
         effective.exclusion(&cron_add).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
+        agl_kernel::ToolExclusionReason::ToolModeDenied
     );
 }
 
@@ -1134,10 +1204,10 @@ fn dynamic_grant_cannot_exceed_the_run_tool_mode() {
 fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -1152,7 +1222,12 @@ fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.edit", "fs.list", "fs.read", "fs.search"]
+        vec![
+            "core.workspace:fs.apply_patch",
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
 }
 
@@ -1160,10 +1235,10 @@ fn no_skill_route_does_not_load_permission_tools_in_approve_mode() {
 fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -1178,7 +1253,11 @@ fn selected_skill_visible_tools_hide_write_tools_in_read_only_mode() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.list", "fs.read", "fs.search"]
+        vec![
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
 }
 
@@ -1238,7 +1317,7 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
     let grant = store
         .create_permission_grant(agl_store::PermissionGrantDraft {
             request_id: None,
-            tool_id: agl_tools::SHELL_EXEC_TOOL_ID.to_string(),
+            tool_id: agl_core_tools::SHELL_EXEC_TOOL_ID.to_string(),
             max_operation_kind: "execute".to_string(),
             state_effects: vec![
                 "spawn_process".to_string(),
@@ -1280,12 +1359,12 @@ fn session_host_grant_retains_scope_provenance_and_remains_active() {
     finalize_permission_grants(&root, &run_id, &effective, &mut snapshot).unwrap();
 
     let capability = effective
-        .capability(&CapabilityId::new(agl_tools::SHELL_EXEC_TOOL_ID).unwrap())
+        .capability(&ToolId::new(agl_core_tools::SHELL_EXEC_TOOL_ID).unwrap())
         .unwrap();
     assert!(
         capability
             .authorized_state_effects()
-            .contains(&StateEffect::HostProcessExecution)
+            .contains(&EffectId::host_process_execution())
     );
     let provenance = capability.grant_provenance().unwrap();
     assert_eq!(provenance.grant_id, grant.id);
@@ -1357,7 +1436,7 @@ fn screen_grant_requires_sensitive_input_and_host_effect_together() {
     .unwrap();
     assert_eq!(
         admitted.state_effects,
-        BTreeSet::from([StateEffect::HostScreenCapture])
+        BTreeSet::from([EffectId::host_screen_capture()])
     );
     assert_eq!(
         admitted.sensitive_inputs,
@@ -1489,7 +1568,11 @@ fn dynamic_grant_not_routed_by_selected_skill_is_ignored() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.read"]
+        vec![
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
     assert!(snapshot.granted_visible_tools().is_empty());
     assert!(
@@ -1527,12 +1610,12 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
         route
             .callable_tools()
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .collect::<Vec<_>>(),
         vec![
+            "core.workspace:fs.read",
+            "core.workspace:fs.search",
             "cron.preflight",
-            "fs.read",
-            "fs.search",
             "permissions.request",
             "permissions.status",
         ]
@@ -1541,7 +1624,7 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
         route
             .requestable_tools()
             .iter()
-            .map(CapabilityId::as_str)
+            .map(ToolId::as_str)
             .collect::<Vec<_>>(),
         vec!["cron.add", "matrix.outbox.enqueue"]
     );
@@ -1558,7 +1641,7 @@ fn selected_cron_planner_routes_grant_fixable_tools_as_requestable() {
     let bundle =
         build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
     assert!(bundle.content.contains(
-        "directly_callable_tools: cron.preflight, fs.read, fs.search, permissions.request, permissions.status"
+        "directly_callable_tools: core.workspace:fs.read, core.workspace:fs.search, cron.preflight, permissions.request, permissions.status"
     ));
     assert!(
         bundle
@@ -1588,12 +1671,12 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     let route = routing.route(&selected[0]).unwrap();
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
+        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        agl_kernel::ToolExclusionReason::ToolModeDenied
     );
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("matrix.outbox.enqueue").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::ToolModeDenied
+        route.unavailable_tools()[&ToolId::new("matrix.outbox.enqueue").unwrap()],
+        agl_kernel::ToolExclusionReason::ToolModeDenied
     );
     let bundle =
         build_verified_context_bundle(&skill_registry, &catalog, &selected, &routing).unwrap();
@@ -1615,12 +1698,12 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     assert!(route.callable_tools().is_empty());
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("permissions.request").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+        route.unavailable_tools()[&ToolId::new("permissions.request").unwrap()],
+        agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
     ensure_skill_tool_routing_parity(&routing, &function_denied).unwrap();
 
@@ -1634,8 +1717,8 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
             tool_ids(&[
                 "cron.add",
                 "cron.preflight",
-                "fs.read",
-                "fs.search",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
                 "matrix.outbox.enqueue",
                 "permissions.status",
             ]),
@@ -1649,12 +1732,12 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     let route = routing.route(&selected[0]).unwrap();
     assert!(route.requestable_tools().is_empty());
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("cron.add").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::NotRouted
+        route.unavailable_tools()[&ToolId::new("cron.add").unwrap()],
+        agl_kernel::ToolExclusionReason::NotRouted
     );
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("permissions.request").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::FunctionAllowDenied
+        route.unavailable_tools()[&ToolId::new("permissions.request").unwrap()],
+        agl_kernel::ToolExclusionReason::FunctionAllowDenied
     );
 
     let explicitly_denied = resolve_effective_capabilities(
@@ -1667,14 +1750,14 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
             tool_ids(&[
                 "cron.add",
                 "cron.preflight",
-                "fs.read",
-                "fs.search",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
                 "matrix.outbox.deliver",
                 "matrix.outbox.enqueue",
                 "permissions.request",
                 "permissions.status",
             ]),
-            tool_ids(&["fs.read"]),
+            tool_ids(&["core.workspace:fs.read"]),
         )),
         RuntimeCapabilityBoundary::default(),
     )
@@ -1685,11 +1768,11 @@ fn operation_mode_and_function_policy_make_skill_tools_unavailable_not_requestab
     assert!(
         !route
             .callable_tools()
-            .contains(&CapabilityId::new("fs.read").unwrap())
+            .contains(&ToolId::new("core.workspace:fs.read").unwrap())
     );
     assert_eq!(
-        route.unavailable_tools()[&CapabilityId::new("fs.read").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::FunctionDenied
+        route.unavailable_tools()[&ToolId::new("core.workspace:fs.read").unwrap()],
+        agl_kernel::ToolExclusionReason::FunctionDenied
     );
     ensure_skill_tool_routing_parity(&routing, &explicitly_denied).unwrap();
 }
@@ -1699,7 +1782,7 @@ fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
     let skill_registry = test_skill_registry();
     let catalog = full_tool_catalog();
     let selected = [SkillId::new("cron-planner").unwrap()];
-    let cron_add = CapabilityId::new("cron.add").unwrap();
+    let cron_add = ToolId::new("cron.add").unwrap();
     let invalid_grant = RuntimePermissionGrantSnapshot {
         admitted: vec![AdmittedPermissionGrant {
             grant_id: "grant-invalid".to_string(),
@@ -1726,7 +1809,7 @@ fn invalid_grant_remains_requestable_when_a_correct_grant_can_fix_it() {
     .unwrap();
     assert_eq!(
         effective.exclusion(&cron_add).unwrap().reason,
-        agl_capabilities::CapabilityExclusionReason::GrantOperationDenied
+        agl_kernel::ToolExclusionReason::GrantOperationDenied
     );
 
     let routing = derive_skill_tool_routing(&skill_registry, &selected, &effective).unwrap();
@@ -1740,23 +1823,23 @@ fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
     let skill_registry = test_skill_registry();
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(agl_capabilities::delegation_provider())
+        .register(agl_extension::delegation_provider())
         .unwrap();
-    agl_tools::guards::register(&mut catalog).unwrap();
+    agl_core_tools::guards::register(&mut catalog).unwrap();
     catalog
         .register(
-            agl_tools::cron::declaration().with_trust(agl_capabilities::ProviderTrust::Revoked),
+            agl_core_tools::cron::declaration().with_trust(agl_extension::ExtensionTrust::Revoked),
         )
         .unwrap();
-    agl_tools::fs::register(&mut catalog).unwrap();
-    agl_tools::matrix::register(&mut catalog).unwrap();
-    agl_tools::memory::register(&mut catalog).unwrap();
-    agl_tools::notes::register(&mut catalog).unwrap();
-    agl_tools::permissions::register(&mut catalog).unwrap();
-    agl_tools::process::register(&mut catalog).unwrap();
-    agl_tools::repo::register(&mut catalog).unwrap();
-    agl_tools::skills::register(&mut catalog).unwrap();
-    agl_tools::store::register(&mut catalog).unwrap();
+    agl_core_tools::fs::register(&mut catalog).unwrap();
+    agl_core_tools::matrix::register(&mut catalog).unwrap();
+    agl_core_tools::memory::register(&mut catalog).unwrap();
+    agl_core_tools::notes::register(&mut catalog).unwrap();
+    agl_core_tools::permissions::register(&mut catalog).unwrap();
+    agl_core_tools::process::register(&mut catalog).unwrap();
+    agl_core_tools::repo::register(&mut catalog).unwrap();
+    agl_core_tools::skills::register(&mut catalog).unwrap();
+    agl_core_tools::store::register(&mut catalog).unwrap();
     let selected = [SkillId::new("cron-planner").unwrap()];
     let effective = resolve_effective_capabilities(
         &skill_registry,
@@ -1772,14 +1855,14 @@ fn untrusted_provider_tools_are_unavailable_and_skill_instructions_remain() {
     let route = routing.route(&selected[0]).unwrap();
     for capability in ["cron.add", "cron.preflight"] {
         assert_eq!(
-            route.unavailable_tools()[&CapabilityId::new(capability).unwrap()],
-            agl_capabilities::CapabilityExclusionReason::ProviderUntrusted
+            route.unavailable_tools()[&ToolId::new(capability).unwrap()],
+            agl_kernel::ToolExclusionReason::ProviderUntrusted
         );
     }
     assert!(
         !route
             .requestable_tools()
-            .contains(&CapabilityId::new("cron.add").unwrap())
+            .contains(&ToolId::new("cron.add").unwrap())
     );
     ensure_skill_tool_routing_parity(&routing, &effective).unwrap();
 
@@ -1808,7 +1891,7 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
         )))
         .unwrap();
     let mut catalog = ToolCatalog::new();
-    agl_tools::guards::register(&mut catalog).unwrap();
+    agl_core_tools::guards::register(&mut catalog).unwrap();
     let selected = [skill_id.clone()];
     let effective = resolve_effective_capabilities(
         &registry,
@@ -1823,8 +1906,8 @@ fn unknown_skill_tool_is_unavailable_without_hiding_skill_instructions() {
     let routing = derive_skill_tool_routing(&registry, &selected, &effective).unwrap();
     assert_eq!(
         routing.route(&skill_id).unwrap().unavailable_tools()
-            [&CapabilityId::new("unknown.capability").unwrap()],
-        agl_capabilities::CapabilityExclusionReason::UnknownCapability
+            [&ToolId::new("unknown.capability").unwrap()],
+        agl_kernel::ToolExclusionReason::UnknownCapability
     );
 
     let bundle = build_verified_context_bundle(&registry, &catalog, &selected, &routing).unwrap();
@@ -1881,19 +1964,19 @@ fn selected_cron_planner_admits_requestable_tool_after_grant() {
 fn full_tool_catalog() -> ToolCatalog {
     let mut catalog = ToolCatalog::new();
     catalog
-        .register(agl_capabilities::delegation_provider())
+        .register(agl_extension::delegation_provider())
         .unwrap();
-    agl_tools::guards::register(&mut catalog).unwrap();
-    agl_tools::cron::register(&mut catalog).unwrap();
-    agl_tools::fs::register(&mut catalog).unwrap();
-    agl_tools::matrix::register(&mut catalog).unwrap();
-    agl_tools::memory::register(&mut catalog).unwrap();
-    agl_tools::notes::register(&mut catalog).unwrap();
-    agl_tools::permissions::register(&mut catalog).unwrap();
-    agl_tools::process::register(&mut catalog).unwrap();
-    agl_tools::repo::register(&mut catalog).unwrap();
-    agl_tools::skills::register(&mut catalog).unwrap();
-    agl_tools::store::register(&mut catalog).unwrap();
+    agl_core_tools::guards::register(&mut catalog).unwrap();
+    agl_core_tools::cron::register(&mut catalog).unwrap();
+    agl_core_tools::fs::register(&mut catalog).unwrap();
+    agl_core_tools::matrix::register(&mut catalog).unwrap();
+    agl_core_tools::memory::register(&mut catalog).unwrap();
+    agl_core_tools::notes::register(&mut catalog).unwrap();
+    agl_core_tools::permissions::register(&mut catalog).unwrap();
+    agl_core_tools::process::register(&mut catalog).unwrap();
+    agl_core_tools::repo::register(&mut catalog).unwrap();
+    agl_core_tools::skills::register(&mut catalog).unwrap();
+    agl_core_tools::store::register(&mut catalog).unwrap();
     catalog
 }
 
@@ -1903,7 +1986,12 @@ fn test_skill_registry() -> agl_skill::SkillRegistry {
         test_skill(
             "task-spec",
             &["core:repo_path.validate", "core:task_spec.validate"],
-            &["fs.edit", "fs.list", "fs.read", "fs.search"],
+            &[
+                "core.workspace:fs.apply_patch",
+                "core.workspace:fs.list",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
+            ],
             &[],
             &[],
             Vec::new(),
@@ -1911,7 +1999,7 @@ fn test_skill_registry() -> agl_skill::SkillRegistry {
         test_skill(
             "tool-smoke",
             &["core:repo_path.validate"],
-            &["fs.read"],
+            &["core.workspace:fs.read"],
             &[],
             &[],
             Vec::new(),
@@ -1929,8 +2017,8 @@ fn test_skill_registry() -> agl_skill::SkillRegistry {
             &["core:repo_path.validate"],
             &[
                 "cron.preflight",
-                "fs.read",
-                "fs.search",
+                "core.workspace:fs.read",
+                "core.workspace:fs.search",
                 "permissions.request",
                 "permissions.status",
             ],
@@ -1940,7 +2028,7 @@ fn test_skill_registry() -> agl_skill::SkillRegistry {
                 id: "schedule-matrix-cron".to_string(),
                 tools: tool_ids(&["cron.add", "matrix.outbox.enqueue"]),
                 max_operation_kind: Some(OperationKind::Write),
-                state_effects: vec![StateEffect::StoreCron, StateEffect::MatrixOutbox],
+                state_effects: vec![EffectId::store_cron(), EffectId::matrix_outbox()],
                 default_duration: "one_turn".to_string(),
                 reason_template: "Schedule a Matrix notification cron job.".to_string(),
             }],
@@ -2012,10 +2100,10 @@ fn hook_ids(values: &[&str]) -> Vec<HookId> {
         .collect()
 }
 
-fn tool_ids(values: &[&str]) -> Vec<CapabilityId> {
+fn tool_ids(values: &[&str]) -> Vec<ToolId> {
     values
         .iter()
-        .map(|value| CapabilityId::new(*value).unwrap())
+        .map(|value| ToolId::new(*value).unwrap())
         .collect()
 }
 
@@ -2031,10 +2119,10 @@ fn temp_store_root(label: &str) -> PathBuf {
 fn selected_tool_smoke_skill_exposes_only_declared_tool() {
     let skill_registry = test_skill_registry();
     let mut extension_registry = ToolCatalog::new();
-    agl_tools::guards::register(&mut extension_registry).unwrap();
-    agl_tools::fs::register(&mut extension_registry).unwrap();
-    agl_tools::permissions::register(&mut extension_registry).unwrap();
-    agl_tools::skills::register(&mut extension_registry).unwrap();
+    agl_core_tools::guards::register(&mut extension_registry).unwrap();
+    agl_core_tools::fs::register(&mut extension_registry).unwrap();
+    agl_core_tools::permissions::register(&mut extension_registry).unwrap();
+    agl_core_tools::skills::register(&mut extension_registry).unwrap();
 
     let tools = selected_skill_visible_tools(
         &skill_registry,
@@ -2049,7 +2137,11 @@ fn selected_tool_smoke_skill_exposes_only_declared_tool() {
             .iter()
             .map(|tool| tool.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["fs.read"]
+        vec![
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search"
+        ]
     );
 }
 

@@ -1,15 +1,16 @@
 use std::collections::BTreeSet;
 
 use agl_actions::{ParsedModelOutput, RepairStrategy, ToolCall, ToolJsonRepair};
-use agl_capabilities::{DispatchDenialCode, HookBatchRequest, HookBatchResult, HookEvent};
 use agl_content::Content;
 use agl_events::{EventDraft, EventScope, RuntimeEvent};
+use agl_extension::{HookBatchRequest, HookBatchResult, HookEvent};
 use agl_ids::MessageId;
+use agl_kernel::{DispatchDenialCode, ToolOutcome};
 use agl_turn::policy::{ToolCallDecision, ToolCallStop, decide_tool_call};
 use agl_turn::{
     HookBatchOutcome, HookBatchSummary, IncompleteOutputReason, ModelRequest, ModelResponseOutcome,
-    StopReason, TurnFailureOperation, TurnHookBatch, TurnInput, TurnMessage, TurnOutput, TurnPhase,
-    TurnState, TurnTerminalStatus, TurnTransition,
+    StopReason, ToolDispatchRequest, TurnFailureOperation, TurnHookBatch, TurnInput, TurnMessage,
+    TurnOutput, TurnPhase, TurnState, TurnTerminalStatus, TurnTransition,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::json;
@@ -176,6 +177,16 @@ enum ExecutorPhase {
         content: Content,
         provisional_message_id: MessageId,
     },
+    ToolBeforeHook {
+        tool_call: ToolCall,
+        dispatch: ToolDispatchRequest,
+        capability_name: String,
+    },
+    ToolAfterHook {
+        tool_call: ToolCall,
+        capability_name: String,
+        outcome: Box<ToolOutcome>,
+    },
     ArtifactWriteHook {
         answer: String,
         provisional_message_id: MessageId,
@@ -204,7 +215,7 @@ struct PendingEffect {
 enum EffectContinuation {
     Hook {
         batch: TurnHookBatch,
-        next: HookContinuation,
+        next: Box<HookContinuation>,
     },
     Model {
         request_index: usize,
@@ -241,6 +252,16 @@ enum HookContinuation {
         content: Content,
         outcome: ModelResponseOutcome,
         provisional_message_id: MessageId,
+    },
+    ToolBefore {
+        tool_call: ToolCall,
+        dispatch: ToolDispatchRequest,
+        capability_name: String,
+    },
+    ToolAfter {
+        tool_call: ToolCall,
+        capability_name: String,
+        outcome: Box<ToolOutcome>,
     },
     ArtifactWrite {
         answer: String,
@@ -384,6 +405,9 @@ impl TurnExecutor {
         events: &mut Vec<EventDraft<RuntimeEvent>>,
     ) -> Result<(), TurnExecutorError> {
         loop {
+            if self.checkpoint.pending.is_some() {
+                return Ok(());
+            }
             if self.checkpoint.cancellation_requested {
                 self.cancel(events)?;
                 return Ok(());
@@ -504,6 +528,47 @@ impl TurnExecutor {
                         return Ok(());
                     }
                 }
+                ExecutorPhase::ToolBeforeHook {
+                    tool_call,
+                    dispatch,
+                    capability_name,
+                } => {
+                    let payload = tool_before_payload(&self.checkpoint.state, &dispatch);
+                    if self.schedule_hook(
+                        HookEvent::ToolCallBefore,
+                        payload,
+                        HookContinuation::ToolBefore {
+                            tool_call: tool_call.clone(),
+                            dispatch: dispatch.clone(),
+                            capability_name: capability_name.clone(),
+                        },
+                        events,
+                    )? {
+                        return Ok(());
+                    }
+                    self.schedule_capability(tool_call, dispatch, capability_name, events)?;
+                    return Ok(());
+                }
+                ExecutorPhase::ToolAfterHook {
+                    tool_call,
+                    capability_name,
+                    outcome,
+                } => {
+                    let payload = tool_after_payload(&self.checkpoint.state, &outcome);
+                    if self.schedule_hook(
+                        HookEvent::ToolCallAfter,
+                        payload,
+                        HookContinuation::ToolAfter {
+                            tool_call: tool_call.clone(),
+                            capability_name: capability_name.clone(),
+                            outcome: outcome.clone(),
+                        },
+                        events,
+                    )? {
+                        return Ok(());
+                    }
+                    self.finish_capability(tool_call, capability_name, *outcome, events)?;
+                }
                 ExecutorPhase::ArtifactWriteHook {
                     answer,
                     provisional_message_id,
@@ -586,7 +651,7 @@ impl TurnExecutor {
             (
                 EffectContinuation::Hook { batch, next },
                 TurnEffectResult::HookBatch { outcome, .. },
-            ) => self.consume_hook_result(batch, next, outcome, events),
+            ) => self.consume_hook_result(batch, *next, outcome, events),
             (
                 EffectContinuation::Model { request_index },
                 TurnEffectResult::ModelGeneration { outcome, .. },
@@ -624,26 +689,13 @@ impl TurnExecutor {
                     capability_name,
                 },
                 TurnEffectResult::CapabilityDispatch { outcome, .. },
-            ) => match outcome {
+            ) => match *outcome {
                 EffectOutcome::Succeeded(response) => {
-                    self.apply(
-                        TurnTransition::FinishToolCall {
-                            name: capability_name.clone(),
-                            result: response.result.clone(),
-                        },
-                        events,
-                    )?;
-                    self.apply(
-                        TurnTransition::AppendObservation {
-                            name: capability_name,
-                            result: response.result.clone(),
-                        },
-                        events,
-                    )?;
-                    self.checkpoint
-                        .state
-                        .append_tool_result(tool_call, response.result);
-                    self.checkpoint.phase = ExecutorPhase::StartModelRequest;
+                    self.checkpoint.phase = ExecutorPhase::ToolAfterHook {
+                        tool_call,
+                        capability_name,
+                        outcome: Box::new(response.result),
+                    };
                     Ok(())
                 }
                 EffectOutcome::Failed(failure) => self.fail_effect(
@@ -785,6 +837,22 @@ impl TurnExecutor {
                     return Ok(());
                 }
             },
+            HookContinuation::ToolBefore {
+                tool_call,
+                dispatch,
+                capability_name,
+            } => {
+                self.schedule_capability(tool_call, dispatch, capability_name, events)?;
+                return Ok(());
+            }
+            HookContinuation::ToolAfter {
+                tool_call,
+                capability_name,
+                outcome,
+            } => {
+                self.finish_capability(tool_call, capability_name, *outcome, events)?;
+                return Ok(());
+            }
             HookContinuation::ArtifactWrite {
                 answer,
                 provisional_message_id,
@@ -966,6 +1034,21 @@ impl TurnExecutor {
             },
             events,
         )?;
+        self.checkpoint.phase = ExecutorPhase::ToolBeforeHook {
+            tool_call,
+            dispatch,
+            capability_name,
+        };
+        Ok(())
+    }
+
+    fn schedule_capability(
+        &mut self,
+        tool_call: ToolCall,
+        dispatch: ToolDispatchRequest,
+        capability_name: String,
+        events: &mut Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<(), TurnExecutorError> {
         self.apply(
             TurnTransition::StartToolCall {
                 name: capability_name.clone(),
@@ -983,6 +1066,48 @@ impl TurnExecutor {
                 capability_name,
             },
         )
+    }
+
+    fn finish_capability(
+        &mut self,
+        tool_call: ToolCall,
+        capability_name: String,
+        outcome: ToolOutcome,
+        events: &mut Vec<EventDraft<RuntimeEvent>>,
+    ) -> Result<(), TurnExecutorError> {
+        if let Some(event) = &outcome.workflow_event {
+            let event = agl_kernel::KernelWorkflowEvent::parse(event).ok_or_else(|| {
+                TurnExecutorError::Transition(format!(
+                    "Tool outcome requested unknown workflow event `{event}`"
+                ))
+            })?;
+            if event != agl_kernel::KernelWorkflowEvent::ToolObservationAppend {
+                return Err(TurnExecutorError::Transition(format!(
+                    "workflow event `{}` is not legal after a Tool call",
+                    event.id()
+                )));
+            }
+        }
+        let observation = outcome.observation_result();
+        self.apply(
+            TurnTransition::FinishToolCall {
+                name: capability_name.clone(),
+                result: observation.clone(),
+            },
+            events,
+        )?;
+        self.apply(
+            TurnTransition::AppendObservation {
+                name: capability_name,
+                result: observation.clone(),
+            },
+            events,
+        )?;
+        self.checkpoint
+            .state
+            .append_tool_result(tool_call, observation);
+        self.checkpoint.phase = ExecutorPhase::StartModelRequest;
+        Ok(())
     }
 
     fn schedule_hook(
@@ -1011,7 +1136,10 @@ impl TurnExecutor {
         };
         self.set_pending(
             |key| TurnEffect::HookBatch { key, request },
-            EffectContinuation::Hook { batch, next },
+            EffectContinuation::Hook {
+                batch,
+                next: Box::new(next),
+            },
         )?;
         Ok(true)
     }
@@ -1248,13 +1376,13 @@ impl TurnExecutor {
         };
         let (capability_id, code) = match stop {
             ToolCallStop::HiddenTool { name } => (
-                agl_capabilities::CapabilityId::new(name.clone())
+                agl_extension::ToolId::new(name.clone())
                     .ok()
                     .map(|id| id.as_str().to_string()),
                 DispatchDenialCode::CapabilityNotEffective,
             ),
             ToolCallStop::InvalidArguments { name, .. } => (
-                agl_capabilities::CapabilityId::new(name.clone())
+                agl_extension::ToolId::new(name.clone())
                     .ok()
                     .map(|id| id.as_str().to_string()),
                 DispatchDenialCode::InvalidArguments,
@@ -1320,6 +1448,22 @@ fn model_response_payload(
         "turn_id": state.input.turn_id,
         "request_index": request_index,
         "content_bytes": content_bytes,
+    })
+}
+
+fn tool_before_payload(state: &TurnState, dispatch: &ToolDispatchRequest) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "tool_id": dispatch.capability_id,
+        "arguments": dispatch.arguments,
+    })
+}
+
+fn tool_after_payload(state: &TurnState, outcome: &ToolOutcome) -> serde_json::Value {
+    json!({
+        "turn_id": state.input.turn_id,
+        "tool_id": outcome.tool_id,
+        "outcome": outcome,
     })
 }
 

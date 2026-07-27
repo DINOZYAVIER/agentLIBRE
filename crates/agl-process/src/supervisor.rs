@@ -1618,18 +1618,22 @@ impl Reactor {
                 "execution output has expired",
             ));
         }
-        let chunks = self.spool.read(
+        let read = self.spool.read(
             execution_id,
             cursor.after_sequence,
             status.last_sequence,
             maximum_bytes,
         )?;
-        let next_sequence = chunks
-            .last()
-            .map_or(status.last_sequence, |chunk| chunk.sequence);
+        let next_sequence = if read.complete {
+            status.last_sequence
+        } else {
+            read.chunks
+                .last()
+                .map_or(cursor.after_sequence, |chunk| chunk.sequence)
+        };
         Ok(ExecutionReadResult {
             execution_id: execution_id.clone(),
-            chunks,
+            chunks: read.chunks,
             next_sequence,
             state: status.state,
             output_truncated: status.output_truncated,
@@ -1643,10 +1647,10 @@ impl Reactor {
         owner: Option<&ExecutionOwner>,
         maximum_bytes: usize,
     ) -> Result<ShellIntegrationReadResult> {
-        if maximum_bytes == 0 || maximum_bytes > self.options.max_result_bytes {
+        if maximum_bytes == 0 || maximum_bytes > MAX_SHELL_INTEGRATION_FRAME_BYTES {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
-                "shell integration read bound is zero or exceeds the supervisor result limit",
+                "shell integration read bound is zero or exceeds the private protocol frame limit",
             ));
         }
         let status = self.checked_status(execution_id, owner)?;
@@ -3269,6 +3273,7 @@ mod tests {
             creating_step_id: agl_ids::StepId::generate(),
             kind: crate::ExecutionKind::Shell,
             program: std::path::PathBuf::from("/bin/sh"),
+            argv0: "/bin/sh".to_owned(),
             program_digest: None,
             args: Vec::new(),
             workspace_root: workspace.clone(),
@@ -3416,6 +3421,7 @@ mod tests {
             creating_run_id: root_run_id,
             creating_step_id: agl_ids::StepId::generate(),
             kind: crate::ExecutionKind::Shell,
+            argv0: program.display().to_string(),
             program,
             program_digest: Some(shell.snapshot.executable_digest.clone()),
             args: Vec::new(),
@@ -3650,6 +3656,18 @@ mod tests {
             .reactor
             .read_shell_integration(&execution_id, None, 1)
             .unwrap();
+        fixture
+            .reactor
+            .read_shell_integration(&execution_id, None, MAX_SHELL_INTEGRATION_FRAME_BYTES)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .reactor
+                .read_shell_integration(&execution_id, None, MAX_SHELL_INTEGRATION_FRAME_BYTES + 1,)
+                .unwrap_err()
+                .code(),
+            ProcessErrorCode::InvalidRequest
+        );
         assert_eq!(
             fixture
                 .reactor
@@ -3927,13 +3945,13 @@ mod tests {
     fn grant_reconciliation_ignores_workspace_processes_and_fences_missing_leases() {
         let live = BTreeSet::from(["grant-live".to_owned()]);
         let live_lease = crate::ExecutionGrantLease {
-            origin: crate::ExecutionLeaseOrigin::CapabilityGrant,
+            origin: crate::ExecutionLeaseOrigin::ToolGrant,
             grant_id: "grant-live".to_owned(),
             duration: "session".to_owned(),
             scope_digest: "sha256:live".to_owned(),
         };
         let stale_lease = crate::ExecutionGrantLease {
-            origin: crate::ExecutionLeaseOrigin::CapabilityGrant,
+            origin: crate::ExecutionLeaseOrigin::ToolGrant,
             grant_id: "grant-stale".to_owned(),
             duration: "one_turn".to_owned(),
             scope_digest: "sha256:stale".to_owned(),
@@ -3994,6 +4012,7 @@ mod tests {
             creating_step_id: agl_ids::StepId::generate(),
             kind: crate::ExecutionKind::Argv,
             program: std::path::PathBuf::from("/bin/echo"),
+            argv0: "/bin/echo".to_owned(),
             program_digest: None,
             args: Vec::new(),
             workspace_root: workspace.clone(),
@@ -4060,7 +4079,10 @@ mod tests {
             .code(),
             ProcessErrorCode::StateConflict
         );
-        assert_eq!(spool.read(&execution_id, 0, 4, 64).unwrap(), [committed]);
+        assert_eq!(
+            spool.read(&execution_id, 0, 4, 64).unwrap().chunks,
+            [committed]
+        );
 
         let terminal = ExecutionTerminalUpdate {
             state: ExecutionState::Exited,
@@ -4133,6 +4155,7 @@ mod tests {
             creating_step_id: agl_ids::StepId::generate(),
             kind: crate::ExecutionKind::Argv,
             program: std::path::PathBuf::from("/bin/sleep"),
+            argv0: "/bin/sleep".to_owned(),
             program_digest: None,
             args: vec!["30".to_owned()],
             workspace_root: workspace.clone(),
@@ -4508,6 +4531,7 @@ mod tests {
             creating_run_id: run_id,
             creating_step_id: agl_ids::StepId::generate(),
             kind: crate::ExecutionKind::Argv,
+            argv0: executable.display().to_string(),
             program: executable.clone(),
             program_digest: None,
             args: Vec::new(),

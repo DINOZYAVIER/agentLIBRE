@@ -1,0 +1,15 @@
+[package]
+name = "agl-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+agl-extension.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+agl-ids.workspace = true
+schemars.workspace = true

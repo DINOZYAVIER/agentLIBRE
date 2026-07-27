@@ -6,7 +6,8 @@ use agl_artifact::{
     ArtifactAdapter, ArtifactAdapterRegistry, ArtifactCandidate, ArtifactLock, ArtifactPackageRef,
     ArtifactPathRouter, ArtifactResolver, ArtifactSource, ArtifactSourceId, ArtifactSourceKind,
     ArtifactSourceTier, ArtifactTypeId, DirectoryArtifactSource, DirectoryPackageView,
-    InMemoryPackageView, ResolvedArtifactGraph, StaticArtifactSource, WorkspaceManifest,
+    ExtensionArtifactAdapter, InMemoryPackageView, ResolvedArtifactGraph, StaticArtifactSource,
+    WorkspaceManifest,
 };
 use agl_function::FunctionArtifactAdapter;
 use agl_model::ModelArtifactAdapter;
@@ -159,6 +160,7 @@ pub fn compose_artifacts(
         Arc::new(FunctionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
         Arc::new(SkillArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
         Arc::new(ModelArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
+        Arc::new(ExtensionArtifactAdapter::default()) as Arc<dyn ArtifactAdapter>,
     ])?);
     let workspace_root = workspace_root.into();
     let lock =
@@ -329,7 +331,13 @@ title: Test Function
             std::env::temp_dir().join(format!("agl-app-composition-{}", std::process::id()));
         fs::create_dir_all(&workspace).unwrap();
         let composition = compose_artifacts(&paths, &workspace).unwrap();
-        assert_eq!(composition.registry.iter().count(), 3);
+        assert_eq!(composition.registry.iter().count(), 4);
+        assert!(
+            composition
+                .registry
+                .lookup(&ArtifactTypeId::extension())
+                .is_ok()
+        );
         assert!(
             composition
                 .sources

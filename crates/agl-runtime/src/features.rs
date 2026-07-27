@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use agl_extension::ExtensionDescriptor;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP: usize = 512;
@@ -24,6 +25,7 @@ pub struct RuntimeFeatureRenderOptions<'a> {
     pub workspace_root: Option<&'a Path>,
     pub tool_mode: &'a str,
     pub available_model_tools: &'a [&'a str],
+    pub extension_descriptors: &'a [ExtensionDescriptor],
     pub char_cap: usize,
 }
 
@@ -165,16 +167,6 @@ pub fn first_party_runtime_features() -> &'static [RuntimeFeature] {
             requires: &["agl-store for durable request/grant evidence"],
             model_tools: &["permissions.status", "permissions.request"],
         },
-        RuntimeFeature {
-            id: "filesystem_tools",
-            title: "Filesystem tools",
-            summary: "only listed repository fs tools are callable",
-            read_only_actions: &["fs.list", "fs.read", "fs.search"],
-            write_actions: &["fs.edit"],
-            commands: &[],
-            requires: &["workspace root"],
-            model_tools: &["fs.list", "fs.read", "fs.search", "fs.edit"],
-        },
     ]
 }
 
@@ -192,7 +184,7 @@ pub fn render_runtime_feature_context(
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    let feature_ids = features
+    let mut feature_ids = features
         .iter()
         .filter(|feature| {
             feature
@@ -201,7 +193,21 @@ pub fn render_runtime_feature_context(
                 .any(|tool| available_tools.contains(tool))
         })
         .map(|feature| feature.id.to_string())
-        .collect();
+        .collect::<Vec<_>>();
+    feature_ids.extend(
+        options
+            .extension_descriptors
+            .iter()
+            .filter(|extension| {
+                extension
+                    .tools
+                    .iter()
+                    .any(|tool| available_tools.contains(tool.id.as_str()))
+            })
+            .map(|extension| format!("extension:{}", extension.id)),
+    );
+    feature_ids.sort();
+    feature_ids.dedup();
     let content = render_context(&options);
     let rendered_chars = content.chars().count();
     RenderedRuntimeFeatureContext {
@@ -212,9 +218,33 @@ pub fn render_runtime_feature_context(
             rendered_chars,
             budget_cap_chars: cap,
             truncated: rendered_chars > cap,
-            registry_hash: runtime_feature_registry_hash(features),
+            registry_hash: runtime_feature_registry_hash_with_extensions(
+                features,
+                options.extension_descriptors,
+            ),
         },
     }
+}
+
+fn runtime_feature_registry_hash_with_extensions(
+    features: &[RuntimeFeature],
+    extensions: &[ExtensionDescriptor],
+) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    hash_bytes(
+        &mut hash,
+        runtime_feature_registry_hash(features).as_bytes(),
+    );
+    let mut descriptors = extensions
+        .iter()
+        .map(|extension| (extension.id.as_str(), extension.digest()))
+        .collect::<Vec<_>>();
+    descriptors.sort_by_key(|(id, _)| *id);
+    for (id, digest) in descriptors {
+        hash_bytes(&mut hash, id.as_bytes());
+        hash_bytes(&mut hash, digest.as_str().as_bytes());
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 pub fn runtime_feature_registry_hash(features: &[RuntimeFeature]) -> String {
@@ -290,12 +320,36 @@ mod tests {
 
     #[test]
     fn rendered_context_is_explicitly_informational() {
-        let tool_names = ["fs.list", "fs.read", "fs.search"];
+        let tool_names = [
+            "core.workspace:fs.list",
+            "core.workspace:fs.read",
+            "core.workspace:fs.search",
+        ];
+        let workspace_extension = agl_extension::ExtensionDescriptor::builtin(
+            agl_extension::ExtensionId::new("core.workspace").unwrap(),
+            "Core Workspace",
+            "1.0.0",
+        )
+        .unwrap()
+        .with_tool(
+            agl_extension::ToolDeclaration::new(
+                agl_extension::ToolId::new("core.workspace:fs.read").unwrap(),
+                "Read",
+                serde_json::json!({
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "type": "object",
+                    "additionalProperties": false
+                }),
+                agl_extension::OperationKind::Read,
+            )
+            .unwrap(),
+        );
         let rendered = render_runtime_feature_context(RuntimeFeatureRenderOptions {
             version: "1.0.0-alpha.test",
             workspace_root: Some(Path::new("/repo")),
             tool_mode: "read-only",
             available_model_tools: &tool_names,
+            extension_descriptors: &[workspace_extension],
             char_cap: DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP,
         });
 
@@ -313,7 +367,7 @@ mod tests {
         assert!(!rendered.content.contains("memory"));
         assert_eq!(
             rendered.evidence.feature_ids,
-            vec!["filesystem_tools".to_string()]
+            vec!["extension:core.workspace".to_owned()]
         );
         assert_eq!(rendered.evidence.tool_mode, "read-only");
         assert!(rendered.evidence.rendered_chars <= DEFAULT_RUNTIME_FEATURE_CONTEXT_CHAR_CAP);

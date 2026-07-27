@@ -23,7 +23,7 @@ use agl_ids::{
     ExecutionId, MessageId, RequestId, RunId, SessionId, TerminalSessionId, WriterLeaseId,
 };
 use agl_protocol::{
-    ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationActionResult,
+    ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationToolResult,
     ClientEffectKind, CommandAvailability, CommandCatalogRequest, CommandDescriptor,
     CommandSuggestion, CommandSuggestionsRequest, ExecutionProfile, ExecutionStatusRequest,
     ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest,
@@ -1164,7 +1164,7 @@ async fn resolve_session(
         .await
         .context("failed to open interactive session")?;
     match response.result {
-        ApplicationActionResult::SessionOpened { session_id, .. } => Ok(session_id),
+        ApplicationToolResult::SessionOpened { session_id, .. } => Ok(session_id),
         result => bail!("daemon returned an invalid launch result: {result:?}"),
     }
 }
@@ -2176,28 +2176,28 @@ async fn handle_picker_submit(
         .await;
     match response {
         Ok(event) => match event.result {
-            ApplicationActionResult::SessionOpened { session_id, .. } => {
+            ApplicationToolResult::SessionOpened { session_id, .. } => {
                 Ok(SubmissionOutcome::SwitchSession { session_id })
             }
-            ApplicationActionResult::ModelChanged { header } => {
+            ApplicationToolResult::ModelChanged { header } => {
                 state.snapshot.header = header;
                 reload_command_catalog(client, state).await?;
                 state.notice("model selection changed");
                 Ok(SubmissionOutcome::Continue)
             }
-            ApplicationActionResult::ModeChanged { header } => {
+            ApplicationToolResult::ModeChanged { header } => {
                 state.snapshot.header = header;
                 reload_command_catalog(client, state).await?;
                 state.notice("operation mode changed");
                 Ok(SubmissionOutcome::Continue)
             }
-            ApplicationActionResult::SkillsChanged { header } => {
+            ApplicationToolResult::SkillsChanged { header } => {
                 state.snapshot.header = header;
                 reload_command_catalog(client, state).await?;
                 state.notice("skill selection changed");
                 Ok(SubmissionOutcome::Continue)
             }
-            ApplicationActionResult::AttachAccepted {
+            ApplicationToolResult::AttachAccepted {
                 execution_id,
                 read_only,
             } => {
@@ -2214,13 +2214,13 @@ async fn handle_picker_submit(
                     },
                 )))
             }
-            ApplicationActionResult::KillAccepted { execution_id, mode } => {
+            ApplicationToolResult::KillAccepted { execution_id, mode } => {
                 state.notice(format!(
                     "execution {execution_id} termination requested ({mode:?})"
                 ));
                 Ok(SubmissionOutcome::Continue)
             }
-            ApplicationActionResult::TerminalPromoted { terminal } => {
+            ApplicationToolResult::TerminalPromoted { terminal } => {
                 state.last_terminal = Some(terminal.terminal_id.clone());
                 let _ = apply_presentation_event(
                     state,
@@ -3194,7 +3194,7 @@ async fn continue_incomplete_output(
         })
         .await
         .context("daemon rejected incomplete-output continuation")?;
-    let ApplicationActionResult::IncompleteTurnContinued { admission } = response.result else {
+    let ApplicationToolResult::IncompleteTurnContinued { admission } = response.result else {
         bail!("daemon returned an invalid incomplete-output continuation result")
     };
     if admission.session_id != *session_id {
@@ -3421,7 +3421,7 @@ async fn open_process_picker(
         })
         .await
         .context("failed to load terminal picker entries")?;
-    let ApplicationActionResult::Terminals { terminals } = terminals.result else {
+    let ApplicationToolResult::Terminals { terminals } = terminals.result else {
         bail!("daemon returned an invalid terminal-list result");
     };
     let executions = client
@@ -3432,7 +3432,7 @@ async fn open_process_picker(
         })
         .await
         .context("failed to load execution picker entries")?;
-    let ApplicationActionResult::Executions { executions } = executions.result else {
+    let ApplicationToolResult::Executions { executions } = executions.result else {
         bail!("daemon returned an invalid execution-list result");
     };
 
@@ -3769,13 +3769,13 @@ async fn handle_command(
         .await;
     match response {
         Ok(event) => match event.result {
-            ApplicationActionResult::SessionOpened { session_id, .. } => {
+            ApplicationToolResult::SessionOpened { session_id, .. } => {
                 return Ok(CommandOutcome::SwitchSession { session_id });
             }
-            ApplicationActionResult::SessionExited { .. } => {
+            ApplicationToolResult::SessionExited { .. } => {
                 return Ok(CommandOutcome::Disconnect);
             }
-            ApplicationActionResult::Status { header } => {
+            ApplicationToolResult::Status { header } => {
                 let notice = match name.as_str() {
                     "workspace" => Some(display_path(&header.workspace_root)),
                     _ => None,
@@ -3785,16 +3785,16 @@ async fn handle_command(
                     state.notice(notice);
                 }
             }
-            ApplicationActionResult::WorkspaceChanged { header } => {
+            ApplicationToolResult::WorkspaceChanged { header } => {
                 state.snapshot.header = header;
                 state.workspace_change_armed = None;
             }
-            ApplicationActionResult::ModelChanged { header }
-            | ApplicationActionResult::ModeChanged { header }
-            | ApplicationActionResult::SkillsChanged { header } => {
+            ApplicationToolResult::ModelChanged { header }
+            | ApplicationToolResult::ModeChanged { header }
+            | ApplicationToolResult::SkillsChanged { header } => {
                 state.snapshot.header = header;
             }
-            ApplicationActionResult::Executions { executions } => {
+            ApplicationToolResult::Executions { executions } => {
                 let summary = executions
                     .iter()
                     .take(4)
@@ -3819,7 +3819,7 @@ async fn handle_command(
                     summary
                 });
             }
-            ApplicationActionResult::AttachAccepted { .. } => {
+            ApplicationToolResult::AttachAccepted { .. } => {
                 let (terminal, writable) = attach_candidate
                     .context("daemon accepted an attachment for an unknown terminal")?;
                 state.last_terminal = Some(terminal.terminal_id.clone());
@@ -3827,7 +3827,7 @@ async fn handle_command(
                     TerminalViewRequest { terminal, writable },
                 )));
             }
-            ApplicationActionResult::Cleared { .. } => {
+            ApplicationToolResult::Cleared { .. } => {
                 state.snapshot.items.clear();
                 state.assistant_deltas.clear();
                 state.notice("conversation context cleared");
@@ -6722,9 +6722,9 @@ mod tests {
             agl_protocol::ActivityNodeKind::Step,
             agl_protocol::ActivityPhase::Tool,
             agl_protocol::ActivityNodeState::Waiting,
-            "fs.list",
+            "core.workspace:fs.list",
             agl_protocol::ActivityDetailView::UnknownCapability {
-                capability_id: "fs.list".to_owned(),
+                capability_id: "core.workspace:fs.list".to_owned(),
             },
         );
         let first = agl_protocol::ActivityGraphDeltaBatch {

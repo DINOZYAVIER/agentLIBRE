@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agl_capabilities::CapabilityId;
 use agl_config::ResolvedInferenceConfig;
 use agl_content::Content;
+use agl_extension::ToolId;
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{AttemptId, MessageId, RequestId, SessionId};
 use agl_loop::{EffectOutcome, TurnEffect, TurnEffectResult};
@@ -45,7 +45,7 @@ pub enum ChatRunInput {
         artifact_root: PathBuf,
         inference_config: ResolvedInferenceConfig,
         delegation_plan: RuntimeDelegationPlan,
-        authority_ceiling: BTreeSet<CapabilityId>,
+        authority_ceiling: BTreeSet<ToolId>,
     },
 }
 
@@ -54,7 +54,7 @@ pub enum ChatRunInput {
 struct ChatDriverCheckpoint {
     turn: agl_loop::TurnCheckpoint,
     effective_policy_hash: String,
-    delegation_authority_ceiling: BTreeSet<CapabilityId>,
+    delegation_authority_ceiling: BTreeSet<ToolId>,
 }
 
 #[derive(Clone)]
@@ -636,7 +636,7 @@ impl DurableRunDriver for ChatSupervisorDriver {
             self.execution.pending_effect(),
             Some(TurnEffect::CapabilityDispatch { request, .. })
                 if request.capability_id.as_str()
-                    == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+                    == agl_extension::AGENT_DELEGATE_TOOL_ID
         );
         let tokens_before = service.model_token_usage();
         if !self.cancellation.is_cancelled() {
@@ -763,14 +763,14 @@ fn retryable_failure(result: &TurnEffectResult) -> Option<&agl_loop::EffectFailu
             outcome: EffectOutcome::Failed(failure),
             ..
         }
-        | TurnEffectResult::CapabilityDispatch {
-            outcome: EffectOutcome::Failed(failure),
-            ..
-        }
         | TurnEffectResult::TranscriptAppend {
             outcome: EffectOutcome::Failed(failure),
             ..
         } if failure.retryable => Some(failure),
+        TurnEffectResult::CapabilityDispatch { outcome, .. } => match outcome.as_ref() {
+            EffectOutcome::Failed(failure) if failure.retryable => Some(failure),
+            _ => None,
+        },
         _ => None,
     }
 }

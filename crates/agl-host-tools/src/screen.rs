@@ -7,14 +7,13 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use agl_capabilities::{
-    ActionDeclaration, ActionDispatchContext, ActionHandler, ActionHandlerError, ActionInvocation,
-    ActionResult, CapabilityId, OperationKind, ProviderDeclaration, ProviderId, SensitiveInput,
-    StateEffect,
-};
 use agl_content::{
     ArtifactRetention, ArtifactSensitivity, ArtifactSource, ArtifactSourceKind, Content,
     ContentPart, ImageDimensions, MediaType,
+};
+use agl_extension::{
+    EffectId, ExtensionDescriptor, ExtensionId, OperationKind, SensitiveInput, ToolDeclaration,
+    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
 };
 use agl_ids::RunId;
 use agl_store::AglStore;
@@ -124,10 +123,7 @@ impl ScreenTools {
         }
     }
 
-    pub fn capture(
-        &self,
-        invocation: &ActionInvocation,
-    ) -> Result<ActionResult, ScreenCaptureError> {
+    pub fn capture(&self, invocation: &ToolInvocation) -> Result<ToolResult, ScreenCaptureError> {
         if invocation.capability_id.as_str() != SCREEN_CAPTURE_TOOL_ID {
             return Err(ScreenCaptureError::UnknownCapability);
         }
@@ -140,7 +136,7 @@ impl ScreenTools {
         let mut capture = match self.backend.capture() {
             Ok(capture) => capture,
             Err(ScreenCaptureError::Cancelled) => {
-                return Ok(ActionResult::new(json!({
+                return Ok(ToolResult::new(json!({
                     "tool": SCREEN_CAPTURE_TOOL_ID,
                     "status": "cancelled",
                     "reason": "portal_cancelled",
@@ -169,7 +165,7 @@ impl ScreenTools {
         let reference = stored.reference;
         let content = Content::new([ContentPart::artifact(reference.clone())])
             .map_err(|error| ScreenCaptureError::InvalidImage(error.to_string()))?;
-        Ok(ActionResult::new(json!({
+        Ok(ToolResult::new(json!({
             "tool": SCREEN_CAPTURE_TOOL_ID,
             "status": "captured",
             "artifact_id": reference.artifact_id,
@@ -183,11 +179,13 @@ impl ScreenTools {
     }
 }
 
-impl ActionHandler for ScreenTools {
-    fn dispatch(&self, context: ActionDispatchContext) -> Result<ActionResult, ActionHandlerError> {
-        let invocation = context.into_invocation();
-        self.capture(&invocation)
-            .map_err(|error| Box::new(error) as ActionHandlerError)
+impl ToolHandler for ScreenTools {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+        Box::pin(async move {
+            let invocation = context.into_invocation();
+            self.capture(&invocation)
+                .map_err(|error| ToolHandlerError::execution_failed(error.to_string()))
+        })
     }
 }
 
@@ -196,22 +194,21 @@ pub fn provider_available() -> bool {
     *AVAILABLE.get_or_init(|| PortalScreenCaptureBackend.probe().is_ok())
 }
 
-pub fn declaration() -> ProviderDeclaration {
-    ProviderDeclaration::builtin(
-        ProviderId::new(PROVIDER_ID).expect("builtin screen provider id is valid"),
+pub fn declaration() -> ExtensionDescriptor {
+    ExtensionDescriptor::builtin(
+        ExtensionId::new(PROVIDER_ID).expect("builtin screen provider id is valid"),
         "Screen Tools",
         env!("CARGO_PKG_VERSION"),
     )
     .expect("builtin screen provider declaration is valid")
-    .with_action(
-        ActionDeclaration::from_schema::<CaptureArgs>(
-            CapabilityId::new(SCREEN_CAPTURE_TOOL_ID)
-                .expect("builtin screen capability id is valid"),
+    .with_tool(
+        ToolDeclaration::from_schema::<CaptureArgs>(
+            ToolId::new(SCREEN_CAPTURE_TOOL_ID).expect("builtin screen capability id is valid"),
             "Capture one user-approved screen snapshot through the desktop portal.",
             OperationKind::Read,
         )
         .expect("builtin screen capture declaration is valid")
-        .with_state_effects([StateEffect::HostScreenCapture])
+        .with_state_effects([EffectId::host_screen_capture()])
         .with_sensitive_inputs([SensitiveInput::ScreenCapture]),
     )
 }
@@ -479,7 +476,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use agl_capabilities::{DeclarationDigest, PolicyHash};
+    use agl_extension::{DeclarationDigest, PolicyHash};
     use agl_ids::ExecutionScope;
     use agl_store::{DurableRunDraft, RunBudget, RunKind};
 
@@ -581,14 +578,14 @@ mod tests {
         }
     }
 
-    fn invocation(run_id: &RunId) -> ActionInvocation {
+    fn invocation(run_id: &RunId) -> ToolInvocation {
         let provider = declaration();
         let action = provider
-            .action(&CapabilityId::new(SCREEN_CAPTURE_TOOL_ID).unwrap())
+            .tool(&ToolId::new(SCREEN_CAPTURE_TOOL_ID).unwrap())
             .unwrap();
-        ActionInvocation::new(
+        ToolInvocation::new(
             ExecutionScope::builder(run_id.clone()).build().unwrap(),
-            CapabilityId::new(SCREEN_CAPTURE_TOOL_ID).unwrap(),
+            ToolId::new(SCREEN_CAPTURE_TOOL_ID).unwrap(),
             provider.id.clone(),
             DeclarationDigest::parse(action.digest().as_str()).unwrap(),
             PolicyHash::parse(&format!("sha256:{}", "0".repeat(64))).unwrap(),

@@ -10,7 +10,7 @@ use agl_app::{
 };
 use agl_ids::{DaemonInstanceId, RequestId, SessionId};
 use agl_protocol::{
-    ApplicationActionResultEvent, CommandCatalogEvent, CommandCatalogRequest, DaemonEvent,
+    ApplicationToolResultEvent, CommandCatalogEvent, CommandCatalogRequest, DaemonEvent,
     DaemonEventKind, DaemonRequestKind, HumanHostTerminalEnsureRequest, HumanTerminalEnsuredEvent,
     ProtocolError, ProtocolErrorCode, ProtocolRunState, RunAcceptedEvent, RunSubmitRequest,
 };
@@ -127,7 +127,7 @@ impl ApplicationBackend for DaemonApplicationBackend {
         &self,
         context: ApplicationCallContext,
         request: agl_app::ApplicationActionRequest,
-    ) -> Result<agl_app::ApplicationActionResult, ApplicationError> {
+    ) -> Result<agl_app::ApplicationToolResult, ApplicationError> {
         let state = self.state.upgrade().ok_or_else(|| {
             ApplicationError::new(
                 ApplicationErrorCode::OutcomeUnknown,
@@ -210,9 +210,7 @@ pub(crate) async fn handle_finite_request(
                 .await
                 .and_then(application_action_result)
                 .map(|result| {
-                    DaemonEventKind::ApplicationActionResult(ApplicationActionResultEvent {
-                        result,
-                    })
+                    DaemonEventKind::ApplicationToolResult(ApplicationToolResultEvent { result })
                 }),
             Err(error) => Err(error),
         },
@@ -309,21 +307,21 @@ fn client_effect_is_admitted(
 }
 
 fn application_action_result(
-    result: agl_app::ApplicationActionResult,
-) -> Result<agl_protocol::ApplicationActionResult, ApplicationError> {
+    result: agl_app::ApplicationToolResult,
+) -> Result<agl_protocol::ApplicationToolResult, ApplicationError> {
     match result {
-        agl_app::ApplicationActionResult::SessionOpened { opened } => {
-            Ok(agl_protocol::ApplicationActionResult::SessionOpened {
+        agl_app::ApplicationToolResult::SessionOpened { opened } => {
+            Ok(agl_protocol::ApplicationToolResult::SessionOpened {
                 session_id: opened.session_id,
                 resumed: opened.resumed,
             })
         }
-        agl_app::ApplicationActionResult::SessionExited {
+        agl_app::ApplicationToolResult::SessionExited {
             session_id,
             cancelled_runs,
             terminated_terminals,
             terminated_executions: _,
-        } => Ok(agl_protocol::ApplicationActionResult::SessionExited {
+        } => Ok(agl_protocol::ApplicationToolResult::SessionExited {
             session_id,
             cancelled_runs,
             terminated_terminals,

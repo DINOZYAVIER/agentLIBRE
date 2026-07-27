@@ -1,4 +1,4 @@
-use agl_capabilities::CapabilityId;
+use agl_extension::ToolId;
 
 use crate::loader::parse_function_document;
 use crate::*;
@@ -61,9 +61,9 @@ fn runtime_function_preserves_function_tool_policy_states() {
         FunctionToolPolicy::new(
             allow
                 .iter()
-                .map(|id| CapabilityId::new(*id).expect("test capability ID is valid")),
+                .map(|id| ToolId::new(*id).expect("test capability ID is valid")),
             deny.iter()
-                .map(|id| CapabilityId::new(*id).expect("test capability ID is valid")),
+                .map(|id| ToolId::new(*id).expect("test capability ID is valid")),
         )
     }
 
@@ -86,13 +86,16 @@ fn runtime_function_preserves_function_tool_policy_states() {
         },
         Case {
             name: "allow-and-deny",
-            tools_yaml: "tools:\n  allow:\n    - fs.read\n    - repo.status\n  deny:\n    - repo.status\n",
-            expected: Some(policy(&["fs.read", "repo.status"], &["repo.status"])),
+            tools_yaml: "tools:\n  allow:\n    - core.workspace:fs.read\n    - repo.status\n  deny:\n    - repo.status\n",
+            expected: Some(policy(
+                &["core.workspace:fs.read", "repo.status"],
+                &["repo.status"],
+            )),
         },
         Case {
             name: "deny-only",
-            tools_yaml: "tools:\n  deny:\n    - fs.edit\n",
-            expected: Some(policy(&[], &["fs.edit"])),
+            tools_yaml: "tools:\n  deny:\n    - core.workspace:fs.apply_patch\n",
+            expected: Some(policy(&[], &["core.workspace:fs.apply_patch"])),
         },
     ];
 
@@ -109,7 +112,7 @@ fn runtime_function_preserves_function_tool_policy_states() {
         std::fs::write(
             function_root.join(FUNCTION_FILE_NAME),
             format!(
-                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires: []\ntitle: Policy {index}\n{}---\n",
+                "---\nartifact:\n  schema: agentlibre.artifact/v1\n  type: function\n  id: {id}\n  version: 1.0.0\n  payload_schema: agentlibre.function/v2\n  agl:\n    compatible: \">=1.0.0-alpha.12\"\n    tested: [1.0.0-alpha.12]\n  requires:\n    - extension:core.workspace@^1.0\ntitle: Policy {index}\n{}---\n",
                 case.tools_yaml
             ),
         )

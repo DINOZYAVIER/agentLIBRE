@@ -10,6 +10,8 @@ artifact:
     tested: [1.0.0-alpha.12]
   requires:
     - model:gemma4-e2b@^1.0
+    - extension:core.workspace@^1.0
+    - extension:core.process@^1.0
 title: Gemma 4 E2B
 description: Local Gemma 4 E2B official QAT function with native tool calls.
 model:

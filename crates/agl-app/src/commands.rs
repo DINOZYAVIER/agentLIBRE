@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use agl_capabilities::ToolAccessMode;
 use agl_ids::{ExecutionId, MessageId, SessionId, TerminalSessionId};
+use agl_kernel::ToolAccessMode;
 use agl_process::KillMode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

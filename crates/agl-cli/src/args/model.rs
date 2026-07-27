@@ -29,9 +29,31 @@ pub(crate) enum CliCommand {
     Repo(RepoCommand),
     Skill(SkillCommand),
     Process(ProcessCommand),
+    Trace(TraceCommand),
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
     Run(RunOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TraceCommand {
+    Export(TraceExportOptions),
+    Replay(TraceReplayOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TraceExportOptions {
+    pub(crate) events: PathBuf,
+    pub(crate) identity: PathBuf,
+    pub(crate) content_refs: Option<PathBuf>,
+    pub(crate) out: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TraceReplayOptions {
+    pub(crate) trace: PathBuf,
+    pub(crate) identity: PathBuf,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -12,6 +12,7 @@ agl-artifact.workspace = true
 [build-dependencies]
 agl-config.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

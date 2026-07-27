@@ -8,8 +8,8 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agl_app::{
-    ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationActionResult,
-    ApplicationCallContext, ApplicationError, ApplicationErrorCode, CommandContext,
+    ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationCallContext,
+    ApplicationError, ApplicationErrorCode, ApplicationToolResult, CommandContext,
     ContinueActionView, ContinueUnavailableReason, ExecutionView, HumanCommandCardState,
     HumanCommandCardView, HumanTerminalCommandAccepted, HumanTerminalCommandAdmission,
     HumanTerminalCommandSubmit, HumanTerminalEnsure, IncompleteAssistantItemView,
@@ -1556,7 +1556,10 @@ impl DaemonState {
         let (host_startup, authorization, grant_lease) = match authority {
             HumanTerminalAuthority::Workspace => (
                 ProcessHostStartupPolicy::ManagedOnly,
-                ExecutionAuthorization::default(),
+                ExecutionAuthorization {
+                    workspace_write: true,
+                    ..ExecutionAuthorization::default()
+                },
                 None,
             ),
             HumanTerminalAuthority::LocalOperatorHost { operator_uid } => {
@@ -1569,6 +1572,7 @@ impl DaemonState {
                     ExecutionAuthorization {
                         host_process_execution: true,
                         shell_login_startup: sources_user_rc,
+                        workspace_write: true,
                     },
                     Some(ExecutionGrantLease {
                         origin: ExecutionLeaseOrigin::LocalOperatorTerminal,
@@ -3461,7 +3465,7 @@ impl DaemonState {
     pub(crate) fn application_invoke(
         &mut self,
         request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         self.application_invoke_with_context(request, &ApplicationCallContext::new())
     }
 
@@ -3469,7 +3473,7 @@ impl DaemonState {
         &mut self,
         request: ApplicationActionRequest,
         context: &ApplicationCallContext,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         ensure_application_call_live(context)?;
         if request.client_submission_id.is_empty() || request.client_submission_id.len() > 256 {
             return Err(ApplicationError::new(
@@ -3515,7 +3519,7 @@ impl DaemonState {
                     }
                 }
                 self.application_open_session(SessionOpen { launch })
-                    .map(|opened| ApplicationActionResult::SessionOpened {
+                    .map(|opened| ApplicationToolResult::SessionOpened {
                         opened: Box::new(opened),
                     })
             }
@@ -3562,7 +3566,7 @@ impl DaemonState {
                     _ => unreachable!("session resume has one response family"),
                 };
                 let snapshot = self.application_snapshot(&opened.session_id)?;
-                Ok(ApplicationActionResult::SessionOpened {
+                Ok(ApplicationToolResult::SessionOpened {
                     opened: Box::new(SessionOpened {
                         session_id: opened.session_id,
                         resumed: true,
@@ -3592,7 +3596,7 @@ impl DaemonState {
                 match action {
                     ApplicationAction::SessionStatus | ApplicationAction::WorkspaceGet => self
                         .application_snapshot(&session_id)
-                        .map(|snapshot| ApplicationActionResult::Status {
+                        .map(|snapshot| ApplicationToolResult::Status {
                             header: snapshot.header,
                         }),
                     ApplicationAction::WorkspaceSet {
@@ -3640,7 +3644,7 @@ impl DaemonState {
                             .map_err(application_busy_error)?;
                         self.refresh_session_execution_context(&session_id)?;
                         self.application_snapshot(&session_id).map(|snapshot| {
-                            ApplicationActionResult::WorkspaceChanged {
+                            ApplicationToolResult::WorkspaceChanged {
                                 header: snapshot.header,
                             }
                         })
@@ -3650,7 +3654,7 @@ impl DaemonState {
                         .iter()
                         .map(|record| self.terminal_view(record))
                         .collect::<Result<Vec<_>, _>>()
-                        .map(|terminals| ApplicationActionResult::Terminals { terminals }),
+                        .map(|terminals| ApplicationToolResult::Terminals { terminals }),
                     ApplicationAction::TerminalPromote { terminal_id } => {
                         let current = self
                             .terminal_registry
@@ -3666,24 +3670,23 @@ impl DaemonState {
                             .terminal_registry
                             .promote_subagent(&terminal_id, &session_id)
                             .map_err(terminal_application_error)?;
-                        Ok(ApplicationActionResult::TerminalPromoted {
+                        Ok(ApplicationToolResult::TerminalPromoted {
                             terminal: self.terminal_view(&promoted)?,
                         })
                     }
                     ApplicationAction::IncompleteTurnContinue {
                         message_id,
                         expected_execution_context_revision,
-                    } => {
-                        self.application_continue_incomplete(
+                    } => self
+                        .application_continue_incomplete(
                             &session_id,
                             message_id,
                             &client_submission_id,
                             expected_execution_context_revision,
                         )
-                        .map(|admission| {
-                            ApplicationActionResult::IncompleteTurnContinued { admission }
-                        })
-                    }
+                        .map(|admission| ApplicationToolResult::IncompleteTurnContinued {
+                            admission,
+                        }),
                     ApplicationAction::ExecutionList { include_finished } => self
                         .process_handle
                         .operator_list(ExecutionListFilter {
@@ -3692,7 +3695,7 @@ impl DaemonState {
                             include_finished,
                         })
                         .map_err(application_process_error)
-                        .map(|executions| ApplicationActionResult::Executions {
+                        .map(|executions| ApplicationToolResult::Executions {
                             executions: executions.into_iter().map(execution_view).collect(),
                         }),
                     ApplicationAction::ExecutionAttach {
@@ -3700,7 +3703,7 @@ impl DaemonState {
                         read_only,
                     } => {
                         self.ensure_application_execution_owner(&session_id, &execution_id)?;
-                        Ok(ApplicationActionResult::AttachAccepted {
+                        Ok(ApplicationToolResult::AttachAccepted {
                             execution_id,
                             read_only,
                         })
@@ -3710,7 +3713,7 @@ impl DaemonState {
                         self.process_handle
                             .operator_kill(&execution_id, mode)
                             .map_err(application_process_error)?;
-                        Ok(ApplicationActionResult::KillAccepted { execution_id, mode })
+                        Ok(ApplicationToolResult::KillAccepted { execution_id, mode })
                     }
                     ApplicationAction::RuntimeContextReload => {
                         let (visible_tools, revision) = self
@@ -3729,7 +3732,7 @@ impl DaemonState {
                                 )
                             })?
                             .runtime_context_revision = revision;
-                        Ok(ApplicationActionResult::Reloaded {
+                        Ok(ApplicationToolResult::Reloaded {
                             visible_tools: (0..visible_tools)
                                 .map(|index| format!("visible-tool-{index}"))
                                 .collect(),
@@ -3741,7 +3744,7 @@ impl DaemonState {
                             .chat_factory
                             .with_session(&session_id, |service| service.clear_context())
                             .map_err(application_busy_error)?;
-                        Ok(ApplicationActionResult::Cleared {
+                        Ok(ApplicationToolResult::Cleared {
                             removed_messages: removed_messages as u64,
                             cursor: PresentationCursor {
                                 daemon_instance_id: self.daemon_instance_id.clone(),
@@ -3773,7 +3776,7 @@ impl DaemonState {
                             agl_protocol::SessionFinishReason::ExitCommand,
                             context,
                         )?;
-                        Ok(ApplicationActionResult::SessionExited {
+                        Ok(ApplicationToolResult::SessionExited {
                             session_id,
                             cancelled_runs,
                             terminated_terminals: terminated.terminals,
@@ -3783,7 +3786,7 @@ impl DaemonState {
                     ApplicationAction::ModelSelect { model_id } => {
                         self.select_session_model(&session_id, &model_id)?;
                         self.application_snapshot(&session_id).map(|snapshot| {
-                            ApplicationActionResult::ModelChanged {
+                            ApplicationToolResult::ModelChanged {
                                 header: snapshot.header,
                             }
                         })
@@ -3805,7 +3808,7 @@ impl DaemonState {
                         session.options.inference.tool_mode = mode;
                         session.runtime_context_revision = revision;
                         self.application_snapshot(&session_id).map(|snapshot| {
-                            ApplicationActionResult::ModeChanged {
+                            ApplicationToolResult::ModeChanged {
                                 header: snapshot.header,
                             }
                         })
@@ -3827,7 +3830,7 @@ impl DaemonState {
                         session.options.inference.skills = selected;
                         session.runtime_context_revision = revision;
                         self.application_snapshot(&session_id).map(|snapshot| {
-                            ApplicationActionResult::SkillsChanged {
+                            ApplicationToolResult::SkillsChanged {
                                 header: snapshot.header,
                             }
                         })
@@ -5385,7 +5388,7 @@ impl DaemonStateExecutor {
         &self,
         context: ApplicationCallContext,
         request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         let ApplicationAction::SessionExit { confirm_active } = &request.action else {
             return self
                 .call(context, move |state, context| {
@@ -5416,7 +5419,7 @@ impl DaemonStateExecutor {
             state.complete_session_exit(plan, context)
         })
         .map_err(daemon_state_application_error)??;
-        Ok(ApplicationActionResult::SessionExited {
+        Ok(ApplicationToolResult::SessionExited {
             session_id: completed_session_id,
             cancelled_runs: outcome.cancelled_runs,
             terminated_terminals: outcome.terminated.terminals,

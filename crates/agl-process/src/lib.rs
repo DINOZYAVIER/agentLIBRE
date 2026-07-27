@@ -27,7 +27,7 @@ pub use context::{ExecutionContextSnapshot, resolve_execution_directory};
 pub use error::{ProcessError, ProcessErrorCode, Result};
 pub use repository::{
     CommittedOutputFrame, ExecutionRepository, ExecutionTerminalUpdate,
-    InMemoryExecutionRepository, OutputSpool,
+    InMemoryExecutionRepository, OutputSpool, OutputSpoolRead,
 };
 pub use request::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,

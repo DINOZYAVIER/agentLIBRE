@@ -316,14 +316,14 @@ fn exec_target(
     program_fd: RawFd,
     private_environment: Option<OwnedFd>,
 ) -> Result<()> {
-    let program = CString::new(request.request.program.as_os_str().as_bytes()).map_err(|_| {
+    let argv0 = CString::new(request.request.argv0.as_bytes()).map_err(|_| {
         ProcessError::new(
             ProcessErrorCode::InvalidRequest,
-            "program path contains NUL",
+            "process argv0 contains NUL",
         )
     })?;
     let mut argv = Vec::with_capacity(request.request.args.len() + 1);
-    argv.push(program.clone());
+    argv.push(argv0);
     for argument in &request.request.args {
         argv.push(CString::new(argument.as_bytes()).map_err(|_| {
             ProcessError::new(
@@ -1241,6 +1241,7 @@ mod tests {
                 creating_run_id: run_id,
                 creating_step_id: StepId::generate(),
                 kind: ExecutionKind::Argv,
+                argv0: program.display().to_string(),
                 program,
                 program_digest: None,
                 args: Vec::new(),

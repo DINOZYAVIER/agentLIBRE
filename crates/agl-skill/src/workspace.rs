@@ -9,7 +9,7 @@ use agl_artifact::{
     ArtifactSourceKind, ArtifactSourceTier, ArtifactTypeId, DirectoryPackageView,
     StaticArtifactSource,
 };
-use agl_capabilities::{CapabilityId, SkillId};
+use agl_extension::{SkillId, ToolId};
 use agl_repo::{
     ComponentState, ComponentStatus, RepoStatusOptions, WorkspaceComponentKind,
     status_repo_workspace,
@@ -1204,7 +1204,7 @@ fn routing_broadens_builtin(workspace: &SkillHarness, builtin: &SkillHarness) ->
         || has_extra_tools(&builtin.denied_tools, &workspace.denied_tools)
 }
 
-fn has_extra_tools(left: &[CapabilityId], right: &[CapabilityId]) -> bool {
+fn has_extra_tools(left: &[ToolId], right: &[ToolId]) -> bool {
     let right = right.iter().collect::<BTreeSet<_>>();
     left.iter().any(|tool| !right.contains(tool))
 }
@@ -1517,8 +1517,8 @@ fn build_trust_record(
 
 fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
     let harness = skill.harness.as_ref().context("skill harness is missing")?;
-    let catalog =
-        agl_tools::builtin_tool_catalog().context("failed to register builtin tool catalog")?;
+    let catalog = agl_core_tools::builtin_tool_catalog()
+        .context("failed to register builtin tool catalog")?;
     for hook in &harness.required_hooks {
         if catalog.trusted_hook(hook).is_none() {
             bail!("skill `{}` requires missing hook `{hook}`", harness.name);
@@ -1556,11 +1556,11 @@ fn validate_trust_target_tools(skill: &WorkspaceSkillStatus) -> Result<()> {
 fn validate_trust_tool_refs(
     skill_name: &str,
     field: &str,
-    tools: &[CapabilityId],
-    catalog: &agl_tools::ToolCatalog,
+    tools: &[ToolId],
+    catalog: &agl_kernel::ToolCatalog,
 ) -> Result<()> {
     for tool in tools {
-        if catalog.action(tool).is_none() {
+        if catalog.tool(tool).is_none() {
             bail!("skill `{skill_name}` references missing tool `{tool}` in {field}");
         }
     }

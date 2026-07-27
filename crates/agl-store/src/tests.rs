@@ -914,7 +914,7 @@ fn process_owner_recovery_fences_the_linked_at_most_once_step() {
         effect_sequence: 1,
         effect_kind: "capability_dispatch".to_owned(),
         delivery_class: EffectDeliveryClass::AtMostOnce,
-        request: json!({"capability_id": "process.start"}),
+        request: json!({"capability_id": "core.process:process.start"}),
     };
     store
         .publish_run_step(&run_lease, &json!({}), &step, &[], 3)
@@ -1175,7 +1175,8 @@ fn supervisor_recovery_validates_full_committed_spool_and_truncates_only_orphans
     assert_eq!(
         spool
             .read(&status.execution_id, 0, recovered.last_sequence, 64)
-            .unwrap(),
+            .unwrap()
+            .chunks,
         [committed]
     );
     supervisor.shutdown().unwrap();
@@ -1953,7 +1954,7 @@ fn session_permission_expiry_is_exact_and_idempotent() {
     let other_session = SessionId::generate();
     let grant = |session_id: &SessionId, duration: &str| PermissionGrantDraft {
         request_id: None,
-        tool_id: "process.start".to_owned(),
+        tool_id: "core.process:process.start".to_owned(),
         max_operation_kind: "execute".to_owned(),
         state_effects: vec![
             "spawn_process".to_owned(),
@@ -2404,6 +2405,7 @@ fn execution_fixture(
         creating_step_id: step_id.clone(),
         kind: ExecutionKind::Argv,
         program: PathBuf::from("/bin/echo"),
+        argv0: "/bin/echo".to_owned(),
         program_digest: None,
         args,
         workspace_root: workspace.clone(),

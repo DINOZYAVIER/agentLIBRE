@@ -20,7 +20,7 @@ Options:
   --socket PATH         daemon Unix socket path
   --workspace-root PATH workspace root passed to agl serve
   --max-output-tokens N max generated tokens per turn
-  --tool-mode MODE      read-only or write
+  --tool-mode MODE      read-only, write, execute, approve, or admin
   --log-filter FILTER   tracing filter for AGL_LOG
   --enable              enable the socket unit
   --restart             restart the socket unit after writing it
@@ -410,9 +410,9 @@ if [[ ! "$max_output_tokens" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 case "$tool_mode" in
-  read-only|write) ;;
+  read-only|write|execute|approve|admin) ;;
   *)
-    echo "--tool-mode must be read-only or write: $tool_mode" >&2
+    echo "--tool-mode must be read-only, write, execute, approve, or admin: $tool_mode" >&2
     exit 2
     ;;
 esac

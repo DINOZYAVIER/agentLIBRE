@@ -5,12 +5,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use agl_capabilities::ToolAccessMode;
 use agl_content::Content;
 use agl_ids::{
     AttemptId, DaemonInstanceId, ExecutionId, MessageId, RunId, SessionId, StepId,
     TerminalSessionId, TurnId, WriterLeaseId,
 };
+use agl_kernel::ToolAccessMode;
 use agl_process::{ExecutionProfile, ExecutionState, TerminalSize};
 
 use super::*;
@@ -789,7 +789,7 @@ async fn session_exit_publishes_a_terminal_boundary_to_peer_subscribers() {
         .unwrap();
     assert!(matches!(
         result,
-        ApplicationActionResult::SessionExited { .. }
+        ApplicationToolResult::SessionExited { .. }
     ));
     assert!(matches!(
         subscription.next().await.unwrap().event,
@@ -992,7 +992,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 attempt_id: Some(retry_attempt_id.clone()),
                 provisional_message_id: Some(message_id.clone()),
                 step_id: step_id.clone(),
-                capability_id: agl_capabilities::CapabilityId::new("fs.list").unwrap(),
+                capability_id: agl_extension::ToolId::new("core.workspace:fs.list").unwrap(),
             },
         ),
         agl_chat::PresentationDelivery::Delivered,
@@ -1025,7 +1025,7 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
                 attempt_id: Some(retry_attempt_id.clone()),
                 provisional_message_id: Some(message_id.clone()),
                 step_id,
-                capability_id: agl_capabilities::CapabilityId::new("fs.list").unwrap(),
+                capability_id: agl_extension::ToolId::new("core.workspace:fs.list").unwrap(),
                 outcome: agl_chat::ToolActionOutcome::Succeeded,
                 detail: Some(agl_chat::CapabilityPresentationDetail::FilesystemList {
                     path: "crates".to_owned(),
@@ -1274,7 +1274,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
         },
         agl_chat::TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
@@ -1283,7 +1283,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
             outcome: agl_chat::ToolActionOutcome::Waiting,
             detail: None,
         },
@@ -1391,7 +1391,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id.clone()),
             provisional_message_id: Some(root_message_id.clone()),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
         },
         agl_chat::TurnPresentationEvent::ToolActionFinished {
             session_id: session_id.clone(),
@@ -1400,7 +1400,7 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             attempt_id: Some(root_attempt_id),
             provisional_message_id: Some(root_message_id),
             step_id: spawn_step_id.clone(),
-            capability_id: agl_capabilities::CapabilityId::new("agent.delegate").unwrap(),
+            capability_id: agl_extension::ToolId::new("agent.delegate").unwrap(),
             outcome: agl_chat::ToolActionOutcome::Succeeded,
             detail: None,
         },
@@ -1612,7 +1612,7 @@ impl ApplicationBackend for BlockingSnapshotBackend {
         &self,
         _context: ApplicationCallContext,
         _request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         Err(ApplicationError::new(
             ApplicationErrorCode::CommandUnavailable,
             "not used",
@@ -1698,7 +1698,7 @@ impl ApplicationBackend for SequencedSnapshotBackend {
         &self,
         _context: ApplicationCallContext,
         _request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         Err(ApplicationError::new(
             ApplicationErrorCode::CommandUnavailable,
             "not used",
@@ -1778,9 +1778,9 @@ impl ApplicationBackend for FakeBackend {
         &self,
         _context: crate::ApplicationCallContext,
         _request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResult, ApplicationError> {
+    ) -> Result<ApplicationToolResult, ApplicationError> {
         if self.exit_on_invoke {
-            return Ok(ApplicationActionResult::SessionExited {
+            return Ok(ApplicationToolResult::SessionExited {
                 session_id: self.snapshot.session_id.clone(),
                 cancelled_runs: 0,
                 terminated_terminals: 0,

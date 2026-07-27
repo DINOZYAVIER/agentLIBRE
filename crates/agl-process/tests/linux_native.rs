@@ -438,7 +438,7 @@ fn executable_and_host_contract(harness: &Harness) {
     );
     request.authorization.host_process_execution = true;
     request.grant_lease = Some(ExecutionGrantLease {
-        origin: agl_process::ExecutionLeaseOrigin::CapabilityGrant,
+        origin: agl_process::ExecutionLeaseOrigin::ToolGrant,
         grant_id: "native-smoke-host-grant".to_owned(),
         duration: "one_turn".to_owned(),
         scope_digest: "sha256:native-smoke".to_owned(),
@@ -579,6 +579,7 @@ impl Harness {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
             program: self.helper.clone(),
+            argv0: self.helper.display().to_string(),
             program_digest: None,
             args,
             workspace_root: self.workspace.clone(),

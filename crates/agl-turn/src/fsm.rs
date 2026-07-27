@@ -3,8 +3,8 @@ use std::fmt;
 
 use agl_ids::{RunId, TurnId};
 
-use agl_capabilities::ActionResult;
 use agl_content::Content;
+use agl_extension::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -129,11 +129,11 @@ pub enum TurnTransition {
     },
     FinishToolCall {
         name: String,
-        result: ActionResult,
+        result: ToolResult,
     },
     AppendObservation {
         name: String,
-        result: ActionResult,
+        result: ToolResult,
     },
     FinalAnswer {
         answer: String,
@@ -450,6 +450,8 @@ fn hook_boundary_matches(phase: TurnPhase, event: HookEvent) -> bool {
         (TurnPhase::Started, HookEvent::ContextPrepare)
             | (TurnPhase::AwaitingModel, HookEvent::ModelRequest)
             | (TurnPhase::ModelResponded, HookEvent::ModelResponse)
+            | (TurnPhase::ToolReady, HookEvent::ToolCallBefore)
+            | (TurnPhase::ToolRunning, HookEvent::ToolCallAfter)
             | (TurnPhase::AnswerReady, HookEvent::ArtifactWrite)
             | (TurnPhase::AnswerReady, HookEvent::TurnFinish)
     )

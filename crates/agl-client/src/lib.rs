@@ -580,12 +580,12 @@ impl AgentLibreClient {
     pub async fn application_action(
         &self,
         request: ApplicationActionRequest,
-    ) -> Result<ApplicationActionResultEvent, ClientError> {
+    ) -> Result<ApplicationToolResultEvent, ClientError> {
         match self
             .request(DaemonRequestKind::ApplicationAction(request))
             .await?
         {
-            DaemonEventKind::ApplicationActionResult(event) => Ok(event),
+            DaemonEventKind::ApplicationToolResult(event) => Ok(event),
             other => Err(unexpected("application_action_result", &other)),
         }
     }
@@ -1535,7 +1535,7 @@ impl Expected {
                 Self::CommandCatalog => matches!(event, DaemonEventKind::CommandCatalog(_)),
                 Self::CommandSuggestions => matches!(event, DaemonEventKind::CommandSuggestions(_)),
                 Self::ApplicationAction => {
-                    matches!(event, DaemonEventKind::ApplicationActionResult(_))
+                    matches!(event, DaemonEventKind::ApplicationToolResult(_))
                 }
                 Self::SubscriptionCancelled => {
                     matches!(event, DaemonEventKind::SubscriptionCancelled(_))
@@ -1862,7 +1862,7 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         DaemonEventKind::ModelUnload(_) => "model_unload",
         DaemonEventKind::CommandCatalog(_) => "command_catalog",
         DaemonEventKind::CommandSuggestions(_) => "command_suggestions",
-        DaemonEventKind::ApplicationActionResult(_) => "application_action_result",
+        DaemonEventKind::ApplicationToolResult(_) => "application_action_result",
         DaemonEventKind::SessionPresentationSnapshotManifest(_) => {
             "session_presentation_snapshot_manifest"
         }

@@ -10,6 +10,48 @@ fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
         .command
 }
 
+#[test]
+fn trace_export_and_replay_arguments_are_explicit() {
+    assert_command(
+        [
+            "agl",
+            "trace",
+            "export",
+            "--events",
+            "events.jsonl",
+            "--identity",
+            "identity.json",
+            "--content-refs",
+            "refs.json",
+            "--out",
+            "trace.json",
+        ],
+        CliCommand::Trace(TraceCommand::Export(TraceExportOptions {
+            events: PathBuf::from("events.jsonl"),
+            identity: PathBuf::from("identity.json"),
+            content_refs: Some(PathBuf::from("refs.json")),
+            out: PathBuf::from("trace.json"),
+        })),
+    );
+    assert_command(
+        [
+            "agl",
+            "trace",
+            "replay",
+            "--trace",
+            "trace.json",
+            "--identity",
+            "identity.json",
+            "--json",
+        ],
+        CliCommand::Trace(TraceCommand::Replay(TraceReplayOptions {
+            trace: PathBuf::from("trace.json"),
+            identity: PathBuf::from("identity.json"),
+            json: true,
+        })),
+    );
+}
+
 fn assert_command(args: impl IntoIterator<Item = &'static str>, expected: CliCommand) {
     assert_eq!(parse_command(args), expected);
 }

@@ -3,12 +3,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agl_capabilities::{
-    ActionDispatchContext, ActionHandler, ActionHandlerError, ActionInvocation, ActionResult,
-    CapabilityId, DelegateActionArgs,
-};
 use agl_config::{ResolvedInferenceConfig, load_local_inference_config};
 use agl_content::Content;
+use agl_extension::{
+    DelegateActionArgs, ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation,
+    ToolResult,
+};
 use agl_function::{RuntimeDelegationPlan, RuntimeSubagentSpec};
 use agl_ids::{RunId, SessionId, TurnId};
 use agl_store::{
@@ -35,7 +35,7 @@ struct DelegationContext {
     parent_inference_config: ResolvedInferenceConfig,
     plan: RuntimeDelegationPlan,
     children: BTreeSet<String>,
-    authority_ceiling: BTreeSet<CapabilityId>,
+    authority_ceiling: BTreeSet<ToolId>,
     execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
 }
 
@@ -74,7 +74,7 @@ impl DelegationHandler {
         })
     }
 
-    fn dispatch_inner(&self, invocation: ActionInvocation) -> Result<ActionResult> {
+    fn dispatch_inner(&self, invocation: ToolInvocation) -> Result<ToolResult> {
         let context = self
             .context
             .as_ref()
@@ -197,14 +197,13 @@ impl DelegationHandler {
     }
 }
 
-impl ActionHandler for DelegationHandler {
-    fn dispatch(
-        &self,
-        context: ActionDispatchContext,
-    ) -> std::result::Result<ActionResult, ActionHandlerError> {
-        let invocation = context.into_invocation();
-        self.dispatch_inner(invocation)
-            .map_err(|error| std::io::Error::other(format!("{error:#}")).into())
+impl ToolHandler for DelegationHandler {
+    fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
+        Box::pin(async move {
+            let invocation = context.into_invocation();
+            self.dispatch_inner(invocation)
+                .map_err(|error| ToolHandlerError::execution_failed(format!("{error:#}")))
+        })
     }
 }
 
@@ -281,9 +280,9 @@ fn validate_existing_child(
     Ok(())
 }
 
-fn delegation_result(child: &DurableRunRecord) -> Result<ActionResult> {
+fn delegation_result(child: &DurableRunRecord) -> Result<ToolResult> {
     if !child.state.is_terminal() {
-        return Ok(ActionResult::new(serde_json::json!({
+        return Ok(ToolResult::new(serde_json::json!({
             "status": "waiting",
             "child_run_id": child.run_id,
             "subagent_id": child.subagent_id,
@@ -298,7 +297,7 @@ fn delegation_result(child: &DurableRunRecord) -> Result<ActionResult> {
                 .flatten()
         })
         .map(str::to_string);
-    let mut result = ActionResult::new(serde_json::json!({
+    let mut result = ToolResult::new(serde_json::json!({
         "status": child.state.as_str(),
         "child_run_id": child.run_id,
         "subagent_id": child.subagent_id,
@@ -313,13 +312,16 @@ fn delegation_result(child: &DurableRunRecord) -> Result<ActionResult> {
 }
 
 pub(crate) fn result_is_waiting(result: &agl_loop::TurnEffectResult) -> bool {
+    let agl_loop::TurnEffectResult::CapabilityDispatch { outcome, .. } = result else {
+        return false;
+    };
     matches!(
-        result,
-        agl_loop::TurnEffectResult::CapabilityDispatch {
-            outcome: agl_loop::EffectOutcome::Succeeded(response),
-            ..
-        } if response.result.data.get("status").and_then(serde_json::Value::as_str)
-            == Some("waiting")
+        outcome.as_ref(),
+        agl_loop::EffectOutcome::Succeeded(response)
+            if response.result.data.as_ref()
+                .and_then(|data| data.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("waiting")
     )
 }
 

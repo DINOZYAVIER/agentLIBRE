@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-pub use agl_capabilities::{
+pub use agl_extension::{
     HookBatchRequest, HookBatchResult, HookEvent, HookId, HookMessage, HookResult, HookStatus,
 };
 use serde::{Deserialize, Serialize, Serializer};

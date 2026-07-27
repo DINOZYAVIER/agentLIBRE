@@ -72,6 +72,7 @@ pub enum ExecutionKind {
 pub struct ExecutionAuthorization {
     pub host_process_execution: bool,
     pub shell_login_startup: bool,
+    pub workspace_write: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -122,7 +123,7 @@ pub struct ExecutionGrantLease {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionLeaseOrigin {
-    CapabilityGrant,
+    ToolGrant,
     LocalOperatorTerminal,
 }
 
@@ -151,7 +152,7 @@ impl ExecutionGrantLease {
     }
 
     pub fn is_capability_grant(&self) -> bool {
-        self.origin == ExecutionLeaseOrigin::CapabilityGrant
+        self.origin == ExecutionLeaseOrigin::ToolGrant
     }
 }
 
@@ -288,6 +289,7 @@ pub struct ExecutionRequest {
     pub creating_step_id: StepId,
     pub kind: ExecutionKind,
     pub program: PathBuf,
+    pub argv0: String,
     pub program_digest: Option<String>,
     pub args: Vec<String>,
     pub workspace_root: PathBuf,
@@ -307,6 +309,12 @@ pub struct ExecutionRequest {
 impl ExecutionRequest {
     pub fn validate(&self) -> Result<()> {
         validate_program(&self.program)?;
+        if self.argv0.is_empty() || self.argv0.contains('\0') {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "process argv0 must be nonempty and contain no NUL",
+            ));
+        }
         match (self.kind, self.program_digest.as_deref()) {
             (ExecutionKind::Shell, Some(digest)) => validate_sha256_digest(digest)?,
             (ExecutionKind::Shell, None) => {
@@ -503,6 +511,7 @@ mod tests {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
+            argv0: "/bin/echo".to_owned(),
             program_digest: None,
             args: vec![
                 "space value".to_owned(),
@@ -619,6 +628,7 @@ mod tests {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
+            argv0: "/bin/echo".to_owned(),
             program_digest: None,
             args: Vec::new(),
             workspace_root: workspace(),
@@ -664,6 +674,7 @@ mod tests {
             creating_step_id: StepId::generate(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
+            argv0: "/bin/echo".to_owned(),
             program_digest: None,
             args: Vec::new(),
             workspace_root: workspace(),
@@ -692,7 +703,7 @@ mod tests {
 
         request.authorization.host_process_execution = true;
         request.grant_lease = Some(ExecutionGrantLease {
-            origin: ExecutionLeaseOrigin::CapabilityGrant,
+            origin: ExecutionLeaseOrigin::ToolGrant,
             grant_id: "grant-test".to_owned(),
             duration: "one_turn".to_owned(),
             scope_digest: "sha256:test".to_owned(),

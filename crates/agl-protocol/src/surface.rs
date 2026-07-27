@@ -1245,7 +1245,7 @@ pub struct HumanTerminalCommandAcceptedEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ApplicationActionResult {
+pub enum ApplicationToolResult {
     SessionOpened {
         session_id: SessionId,
         resumed: bool,
@@ -1326,8 +1326,8 @@ pub enum PromptAdmissionState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ApplicationActionResultEvent {
-    pub result: ApplicationActionResult,
+pub struct ApplicationToolResultEvent {
+    pub result: ApplicationToolResult,
 }
 
 impl StructuredEnvironmentOverlay {
@@ -2544,7 +2544,7 @@ impl DaemonEventKind {
         match self {
             Self::CommandCatalog(event) => validate_catalog(event),
             Self::CommandSuggestions(event) => validate_suggestions(event),
-            Self::ApplicationActionResult(event) => validate_action_result(&event.result),
+            Self::ApplicationToolResult(event) => validate_action_result(&event.result),
             Self::SessionPresentationSnapshotManifest(event) => event.validate(),
             Self::SessionPresentationSnapshotChunk(event) => event.validate(),
             Self::SessionPresentationSnapshotFinished(event) => event.validate(),
@@ -2992,17 +2992,17 @@ fn validate_launch(launch: &SessionLaunchOptions) -> Result<(), SurfaceValidatio
     )
 }
 
-fn validate_action_result(result: &ApplicationActionResult) -> Result<(), SurfaceValidationError> {
+fn validate_action_result(result: &ApplicationToolResult) -> Result<(), SurfaceValidationError> {
     match result {
-        ApplicationActionResult::SessionOpened { .. } => Ok(()),
-        ApplicationActionResult::Status { header } => validate_header(header),
-        ApplicationActionResult::ModelChanged { header }
-        | ApplicationActionResult::ModeChanged { header }
-        | ApplicationActionResult::SkillsChanged { header }
-        | ApplicationActionResult::WorkspaceChanged { header } => validate_header(header),
-        ApplicationActionResult::Terminals { terminals } => validate_terminals(terminals),
-        ApplicationActionResult::TerminalPromoted { terminal } => terminal.validate(),
-        ApplicationActionResult::Executions { executions } => {
+        ApplicationToolResult::SessionOpened { .. } => Ok(()),
+        ApplicationToolResult::Status { header } => validate_header(header),
+        ApplicationToolResult::ModelChanged { header }
+        | ApplicationToolResult::ModeChanged { header }
+        | ApplicationToolResult::SkillsChanged { header }
+        | ApplicationToolResult::WorkspaceChanged { header } => validate_header(header),
+        ApplicationToolResult::Terminals { terminals } => validate_terminals(terminals),
+        ApplicationToolResult::TerminalPromoted { terminal } => terminal.validate(),
+        ApplicationToolResult::Executions { executions } => {
             bound_count(
                 executions.len(),
                 MAX_PRESENTATION_ITEMS,
@@ -3013,17 +3013,17 @@ fn validate_action_result(result: &ApplicationActionResult) -> Result<(), Surfac
             }
             Ok(())
         }
-        ApplicationActionResult::Reloaded { visible_tools, .. } => validate_identifier_list(
+        ApplicationToolResult::Reloaded { visible_tools, .. } => validate_identifier_list(
             visible_tools,
             MAX_COMMAND_DESCRIPTORS,
             "visible tools",
             "tool ID",
         ),
-        ApplicationActionResult::AttachAccepted { .. }
-        | ApplicationActionResult::KillAccepted { .. }
-        | ApplicationActionResult::Cleared { .. }
-        | ApplicationActionResult::SessionExited { .. } => Ok(()),
-        ApplicationActionResult::IncompleteTurnContinued { admission } => {
+        ApplicationToolResult::AttachAccepted { .. }
+        | ApplicationToolResult::KillAccepted { .. }
+        | ApplicationToolResult::Cleared { .. }
+        | ApplicationToolResult::SessionExited { .. } => Ok(()),
+        ApplicationToolResult::IncompleteTurnContinued { admission } => {
             if admission.queued
                 != matches!(
                     admission.state,
@@ -4363,7 +4363,7 @@ mod tests {
             serde_json::from_value::<ActivityDetailView>(serde_json::json!({
                 "kind": "unknown_capability",
                 "detail": {
-                    "capability_id": "fs.list",
+                    "capability_id": "core.workspace:fs.list",
                     "raw_arguments": "super-secret-token"
                 }
             }))

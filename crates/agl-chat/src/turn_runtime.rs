@@ -3,21 +3,24 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use agl_capabilities::{
-    ActionInvocation, CapabilityId, DispatchDenial, DispatchDenialCode, HookInput,
-};
 use agl_events::{
-    CapabilityExclusionEvent, EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope,
-    RuntimeEventWriter, SafeRuntimeEventEnvelope,
+    EventDraft, EventScope, RuntimeEvent, RuntimeEventEnvelope, RuntimeEventWriter,
+    SafeRuntimeEventEnvelope, ToolExclusionEvent,
 };
-use agl_ids::{AttemptId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_extension::{HookInput, ToolId, ToolInvocation};
+use agl_ids::{
+    AttemptId, EventId, ExecutionScope, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
+};
 use agl_inference::{InferenceCancellation, InferenceFinishReason, InferenceOutputSink};
+use agl_kernel::{
+    DispatchDenial, DispatchDenialCode, ToolEffectJournal, ToolEffectJournalError,
+    ToolEffectJournalRecord, ToolRuntime,
+};
 use agl_loop::{
     HookBatchRequest, HookBatchResult, HookMessage, HookResult, HookStatus, IncompleteOutputReason,
     ModelRequest, ModelResponse, ModelResponseOutcome, ToolDispatchRequest, ToolDispatchResponse,
 };
 use agl_store::EffectDeliveryClass;
-use agl_tools::ToolRuntime;
 use anyhow::{Context, Result, ensure};
 
 use crate::session::{InferenceExecutionControl, InferenceSession};
@@ -32,9 +35,63 @@ use crate::{
 
 struct CapabilityCancellation(InferenceCancellation);
 
-impl agl_capabilities::CancellationSignal for CapabilityCancellation {
+impl agl_extension::CancellationSignal for CapabilityCancellation {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
+    }
+}
+
+struct RuntimeToolEffectJournal {
+    writer: RuntimeEventWriter,
+    scope: EventScope,
+    request_id: Option<RequestId>,
+    caused_by: Option<EventId>,
+    events: Vec<SafeRuntimeEventEnvelope>,
+}
+
+impl ToolEffectJournal for RuntimeToolEffectJournal {
+    fn append(
+        &mut self,
+        record: &ToolEffectJournalRecord,
+    ) -> std::result::Result<String, ToolEffectJournalError> {
+        let mut draft = EventDraft::new(
+            self.scope.clone(),
+            RuntimeEvent::ToolEffectLifecycle {
+                call_id: record.call_id.clone(),
+                tool_id: record.tool_id.as_str().to_owned(),
+                extension_id: record.extension_id.as_str().to_owned(),
+                schema_digest: record.schema_digest.as_str().to_owned(),
+                delivery: record.delivery.as_str().to_owned(),
+                state: record.state.as_str().to_owned(),
+                admitted_effects: record
+                    .admitted_effects
+                    .iter()
+                    .map(|effect| effect.as_str().to_owned())
+                    .collect(),
+                observed_effects: record
+                    .observed_effects
+                    .iter()
+                    .map(|effect| agl_events::ObservedEffectEvent {
+                        effect_id: effect.effect_id.as_str().to_owned(),
+                        scope: effect.scope.clone(),
+                    })
+                    .collect(),
+                outcome_code: record.outcome_code.clone(),
+            },
+        );
+        if let Some(request_id) = &self.request_id {
+            draft = draft.with_request_id(request_id.clone());
+        }
+        if let Some(caused_by) = &self.caused_by {
+            draft = draft.with_causation(caused_by.clone());
+        }
+        let (full, safe) = self
+            .writer
+            .append_with_full(draft)
+            .map_err(|error| ToolEffectJournalError::new(format!("{error:#}")))?;
+        self.caused_by = Some(full.event_id.clone());
+        self.events.push(safe);
+        Ok(full.event_id.to_string())
     }
 }
 
@@ -104,10 +161,10 @@ impl ChatProcessExecutionContext {
     }
 }
 
-impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
-    fn load(&self, scope: &ExecutionScope) -> Result<agl_tools::ProcessExecutionAdmission> {
+impl agl_core_tools::ProcessExecutionContext for ChatProcessExecutionContext {
+    fn load(&self, scope: &ExecutionScope) -> Result<agl_core_tools::ProcessExecutionAdmission> {
         let (owner, durable_session_id) = self.admission_identity(scope)?;
-        Ok(agl_tools::ProcessExecutionAdmission {
+        Ok(agl_core_tools::ProcessExecutionAdmission {
             snapshot: self.snapshot()?,
             owner,
             durable_session_id,
@@ -119,7 +176,7 @@ impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
         scope: &ExecutionScope,
         expected_revision: u64,
         next: agl_process::ExecutionContextSnapshot,
-    ) -> Result<agl_tools::ProcessExecutionAdmission> {
+    ) -> Result<agl_core_tools::ProcessExecutionAdmission> {
         let (owner, durable_session_id) = self.admission_identity(scope)?;
         let current = self.snapshot()?;
         ensure!(
@@ -148,7 +205,7 @@ impl agl_tools::ProcessExecutionContext for ChatProcessExecutionContext {
             .lock()
             .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))? =
             persisted.clone();
-        Ok(agl_tools::ProcessExecutionAdmission {
+        Ok(agl_core_tools::ProcessExecutionAdmission {
             snapshot: persisted,
             owner,
             durable_session_id,
@@ -165,15 +222,15 @@ pub struct ChatTurnRuntime {
     session: InferenceSession,
     execution_context: agl_process::ExecutionContextSnapshot,
     execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
-    process_tools: agl_tools::ProcessTools,
-    active_effective_capabilities: Option<agl_capabilities::EffectiveCapabilitySet>,
+    process_tools: agl_core_tools::ProcessTools,
+    active_effective_capabilities: Option<agl_kernel::EffectiveToolSet>,
     event_sink: Option<RuntimeEventWriter>,
     event_scope: Option<EventScope>,
     request_id: Option<RequestId>,
     runtime_events: Vec<SafeRuntimeEventEnvelope>,
     attempt_ids: Vec<AttemptId>,
-    core_guards: agl_tools::guards::CoreGuards,
-    core_tools: agl_tools::CoreTools,
+    core_guards: agl_core_tools::guards::CoreGuards,
+    core_tools: agl_core_tools::CoreTools,
     tool_runtime: ToolRuntime,
     generated_requests: usize,
     model_input_tokens: u64,
@@ -201,7 +258,7 @@ impl ChatTurnRuntime {
             execution_context.workspace_root == workspace_root.as_ref(),
             "execution context workspace does not match the chat workspace"
         );
-        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
+        let core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to initialize core filesystem tools")?;
         let execution_context_state = Arc::new(Mutex::new(execution_context.clone()));
         let process_context = Arc::new(ChatProcessExecutionContext {
@@ -231,7 +288,7 @@ impl ChatTurnRuntime {
             request_id: None,
             runtime_events: Vec::new(),
             attempt_ids: Vec::new(),
-            core_guards: agl_tools::guards::CoreGuards::new(),
+            core_guards: agl_core_tools::guards::CoreGuards::new(),
             core_tools,
             tool_runtime,
             generated_requests: 0,
@@ -431,7 +488,7 @@ impl ChatTurnRuntime {
         turn_id: &TurnId,
         request_id: Option<RequestId>,
         durable_event_sequence: u64,
-        delegation_authority_ceiling: BTreeSet<CapabilityId>,
+        delegation_authority_ceiling: BTreeSet<ToolId>,
     ) -> Result<()> {
         self.initialize_turn(
             session_id,
@@ -450,7 +507,7 @@ impl ChatTurnRuntime {
         turn_id: &TurnId,
         request_id: Option<RequestId>,
         durable_event_sequence: Option<u64>,
-        persisted_delegation_authority: Option<BTreeSet<CapabilityId>>,
+        persisted_delegation_authority: Option<BTreeSet<ToolId>>,
     ) -> Result<()> {
         ensure!(
             self.active_effective_capabilities.is_none(),
@@ -500,10 +557,10 @@ impl ChatTurnRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_policy_hash(&self) -> Option<&agl_capabilities::PolicyHash> {
+    pub(crate) fn active_policy_hash(&self) -> Option<&agl_extension::PolicyHash> {
         self.active_effective_capabilities
             .as_ref()
-            .map(agl_capabilities::EffectiveCapabilitySet::policy_hash)
+            .map(agl_kernel::EffectiveToolSet::policy_hash)
     }
 
     pub fn take_attempt_ids(&mut self) -> Vec<AttemptId> {
@@ -597,7 +654,7 @@ impl ChatTurnRuntime {
             self.active_effective_capabilities.is_none(),
             "cannot change workspace root during an active turn"
         );
-        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
+        let core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to validate core filesystem tool root")?;
         let mut session = self.session.clone();
         session.set_workspace_root_and_refresh(workspace_root.as_ref())?;
@@ -616,7 +673,7 @@ impl ChatTurnRuntime {
             self.active_effective_capabilities.is_none(),
             "cannot change workspace root during an active turn"
         );
-        let core_tools = agl_tools::CoreTools::new(workspace_root.as_ref())
+        let core_tools = agl_core_tools::CoreTools::new(workspace_root.as_ref())
             .context("failed to update core filesystem tool root")?;
         let mut session = self.session.clone();
         session.set_workspace_root_and_refresh(workspace_root.as_ref())?;
@@ -695,7 +752,7 @@ impl ChatTurnRuntime {
 
     pub(crate) fn capability_delivery_class(
         &self,
-        capability_id: &agl_capabilities::CapabilityId,
+        capability_id: &agl_extension::ToolId,
     ) -> Result<EffectDeliveryClass> {
         let capability = self
             .active_effective_capabilities
@@ -704,9 +761,9 @@ impl ChatTurnRuntime {
             .capability(capability_id)
             .context("pending capability is not in the effective turn snapshot")?;
         Ok(match capability.declaration().delivery {
-            agl_capabilities::ActionDelivery::ReplaySafe => EffectDeliveryClass::ReplaySafe,
-            agl_capabilities::ActionDelivery::IdempotentRunStep => EffectDeliveryClass::Idempotent,
-            agl_capabilities::ActionDelivery::AtMostOnce => EffectDeliveryClass::AtMostOnce,
+            agl_extension::ToolDelivery::ReplaySafe => EffectDeliveryClass::ReplaySafe,
+            agl_extension::ToolDelivery::IdempotentRunStep => EffectDeliveryClass::Idempotent,
+            agl_extension::ToolDelivery::AtMostOnce => EffectDeliveryClass::AtMostOnce,
         })
     }
 
@@ -895,11 +952,12 @@ impl ChatTurnRuntime {
         );
         let outcome = match &result {
             Ok(response)
-                if capability_id.as_str() == agl_capabilities::AGENT_DELEGATE_CAPABILITY_ID
+                if capability_id.as_str() == agl_extension::AGENT_DELEGATE_TOOL_ID
                     && response
                         .result
                         .data
-                        .get("status")
+                        .as_ref()
+                        .and_then(|data| data.get("status"))
                         .and_then(serde_json::Value::as_str)
                         == Some("waiting") =>
             {
@@ -909,11 +967,9 @@ impl ChatTurnRuntime {
             Err(_) => ToolActionOutcome::Failed,
         };
         let detail = result.as_ref().ok().and_then(|response| {
-            capability_presentation_detail(
-                capability_id.as_str(),
-                &arguments,
-                &response.result.data,
-            )
+            response.result.data.as_ref().and_then(|data| {
+                capability_presentation_detail(capability_id.as_str(), &arguments, data)
+            })
         });
         self.presentation_sink
             .try_publish(TurnPresentationEvent::ToolActionFinished {
@@ -975,7 +1031,7 @@ impl ChatTurnRuntime {
             return Err(denial).context("capability dispatch was denied");
         };
         let scope = execution_scope(&active_scope, step_id)?;
-        let mut invocation = ActionInvocation::new(
+        let mut invocation = ToolInvocation::new(
             scope,
             capability_id.clone(),
             capability.provider_id().clone(),
@@ -1021,20 +1077,34 @@ impl ChatTurnRuntime {
             request.capability_id.as_str(),
             &request.arguments,
         )?;
-        let output = self
-            .tool_runtime
-            .dispatch(
-                invocation,
-                &effective,
-                agl_capabilities::ActionDispatchControl::new(
-                    std::sync::Arc::new(CapabilityCancellation(cancellation)),
-                    deadline,
-                ),
-            )
-            .map_err(|error| {
-                anyhow::Error::new(error)
-                    .context(format!("capability `{}` failed", request.capability_id))
-            })?;
+        let mut effect_journal = RuntimeToolEffectJournal {
+            writer: self
+                .event_sink
+                .as_ref()
+                .context("turn event writer is not initialized")?
+                .clone(),
+            scope: active_scope,
+            request_id: self.request_id.clone(),
+            caused_by: self
+                .runtime_events
+                .last()
+                .map(|event| event.event_id.clone()),
+            events: Vec::new(),
+        };
+        let dispatched = self.tool_runtime.dispatch_with_journal(
+            invocation,
+            &effective,
+            agl_extension::ToolDispatchControl::new(
+                std::sync::Arc::new(CapabilityCancellation(cancellation)),
+                deadline,
+            ),
+            &mut effect_journal,
+        );
+        self.runtime_events.extend(effect_journal.events);
+        let output = dispatched.map_err(|error| {
+            anyhow::Error::new(error)
+                .context(format!("capability `{}` failed", request.capability_id))
+        })?;
         self.execution_context = self
             .execution_context_state
             .lock()
@@ -1048,7 +1118,7 @@ impl ChatTurnRuntime {
         run_id: &RunId,
         turn_id: &TurnId,
         step_id: &StepId,
-        capability_id: CapabilityId,
+        capability_id: ToolId,
         outcome: PolicyPresentationOutcome,
     ) {
         self.presentation_sink
@@ -1070,7 +1140,7 @@ fn capability_presentation_detail(
     result: &serde_json::Value,
 ) -> Option<CapabilityPresentationDetail> {
     match capability_id {
-        agl_tools::FS_LIST_TOOL_ID => {
+        agl_core_tools::FS_LIST_TOOL_ID => {
             let path = safe_repository_path(result.get("path")?.as_str()?)?;
             let entries = u32::try_from(result.get("entry_count")?.as_u64()?).ok()?;
             let completeness = match result.get("outcome")?.get("state")?.as_str()? {
@@ -1084,7 +1154,7 @@ fn capability_presentation_detail(
                 completeness,
             })
         }
-        agl_tools::FS_READ_TOOL_ID => {
+        agl_core_tools::FS_READ_TOOL_ID => {
             let path = safe_repository_path(result.get("path")?.as_str()?)?;
             let bytes = result
                 .get("lines")?
@@ -1096,7 +1166,7 @@ fn capability_presentation_detail(
                 });
             Some(CapabilityPresentationDetail::FilesystemRead { path, bytes })
         }
-        agl_tools::FS_SEARCH_TOOL_ID => {
+        agl_core_tools::FS_SEARCH_TOOL_ID => {
             let scope = safe_repository_path(result.get("path")?.as_str()?)?;
             let matches = u32::try_from(result.get("match_count")?.as_u64()?).ok()?;
             let complete = !result.get("truncated")?.as_bool()?;
@@ -1106,9 +1176,9 @@ fn capability_presentation_detail(
                 complete,
             })
         }
-        agl_tools::PROCESS_EXEC_TOOL_ID
-        | agl_tools::PROCESS_START_TOOL_ID
-        | agl_tools::SHELL_EXEC_TOOL_ID => {
+        agl_core_tools::PROCESS_EXEC_TOOL_ID
+        | agl_core_tools::PROCESS_START_TOOL_ID
+        | agl_core_tools::SHELL_EXEC_TOOL_ID => {
             let profile = match arguments.get("profile").and_then(serde_json::Value::as_str) {
                 Some("host") => CapabilityPresentationExecutionProfile::Host,
                 None | Some("workspace") => CapabilityPresentationExecutionProfile::Workspace,
@@ -1163,9 +1233,7 @@ fn inference_correlation(
     Ok((active_scope.session_id().cloned(), request_id.cloned()))
 }
 
-fn capability_policy_resolved_event(
-    effective: &agl_capabilities::EffectiveCapabilitySet,
-) -> RuntimeEvent {
+fn capability_policy_resolved_event(effective: &agl_kernel::EffectiveToolSet) -> RuntimeEvent {
     RuntimeEvent::CapabilityPolicyResolved {
         policy_hash: effective.policy_hash().as_str().to_string(),
         capability_ids: effective
@@ -1174,7 +1242,7 @@ fn capability_policy_resolved_event(
             .collect(),
         exclusions: effective
             .exclusions()
-            .map(|exclusion| CapabilityExclusionEvent {
+            .map(|exclusion| ToolExclusionEvent {
                 capability_id: exclusion.capability_id.as_str().to_string(),
                 reason_code: exclusion.reason.code().to_string(),
             })
@@ -1201,7 +1269,7 @@ fn execution_scope(scope: &EventScope, step_id: Option<&StepId>) -> Result<Execu
         .context("active event scope is invalid for capability invocation")
 }
 
-fn missing_hook_result(hook_id: agl_capabilities::HookId) -> HookResult {
+fn missing_hook_result(hook_id: agl_extension::HookId) -> HookResult {
     HookResult {
         hook_id,
         status: HookStatus::Fail,
@@ -1215,8 +1283,8 @@ fn missing_hook_result(hook_id: agl_capabilities::HookId) -> HookResult {
 
 fn permission_runtime_status(
     session: &crate::InferenceSession,
-) -> agl_tools::PermissionRuntimeStatus {
-    agl_tools::PermissionRuntimeStatus {
+) -> agl_core_tools::PermissionRuntimeStatus {
+    agl_core_tools::PermissionRuntimeStatus {
         current_mode: session.tool_mode().as_str().to_string(),
         visible_tools: session
             .turn_visible_tools()
@@ -1231,15 +1299,15 @@ fn permission_runtime_status(
 
 fn build_process_tools(
     runtime: &agl_runtime::AgentLibreRuntimeConfig,
-    context: Arc<dyn agl_tools::ProcessExecutionContext>,
-) -> Result<agl_tools::ProcessTools> {
+    context: Arc<dyn agl_core_tools::ProcessExecutionContext>,
+) -> Result<agl_core_tools::ProcessTools> {
     let process = shared_process_handle(runtime)?;
     let terminals = shared_terminal_registry(runtime)?;
-    agl_tools::ProcessTools::new(
+    agl_core_tools::ProcessTools::new(
         process,
         terminals,
         context,
-        agl_tools::ProcessToolRuntimeConfig {
+        agl_core_tools::ProcessToolRuntimeConfig {
             base_environment: runtime.execution.admitted_environment()?,
             maximum_environment_bytes: runtime.execution.environment.maximum_bytes,
             runtime_read_only_roots: runtime.execution.runtime_read_only_roots.clone(),
@@ -1332,12 +1400,12 @@ fn process_launcher_path() -> Result<PathBuf> {
 
 fn build_chat_tool_runtime(
     session: &InferenceSession,
-    core_tools: &agl_tools::CoreTools,
+    core_tools: &agl_core_tools::CoreTools,
     workspace_root: &Path,
-    process_tools: &agl_tools::ProcessTools,
+    process_tools: &agl_core_tools::ProcessTools,
     execution_context_state: &Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
 ) -> Result<ToolRuntime> {
-    let screen_id = agl_capabilities::CapabilityId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
+    let screen_id = agl_extension::ToolId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
     chat_tool_runtime(ChatToolRuntimeConfig {
         core_tools,
         store_root: session.store_root(),
@@ -1347,7 +1415,7 @@ fn build_chat_tool_runtime(
         process_tools: Some(process_tools.clone()),
         screen_admitted_run: session
             .permission_grants()
-            .sensitive_input_run(&screen_id, agl_capabilities::SensitiveInput::ScreenCapture)
+            .sensitive_input_run(&screen_id, agl_extension::SensitiveInput::ScreenCapture)
             .cloned(),
         delegation_handler: crate::delegation::DelegationHandler::from_session(
             session,
@@ -1423,7 +1491,7 @@ mod tests {
     #[test]
     fn capability_presentation_details_are_closed_redacted_facts() {
         let list = capability_presentation_detail(
-            agl_tools::FS_LIST_TOOL_ID,
+            agl_core_tools::FS_LIST_TOOL_ID,
             &serde_json::json!({"path": "IGNORED_ARGUMENT_SENTINEL"}),
             &serde_json::json!({
                 "path": ".",
@@ -1442,7 +1510,7 @@ mod tests {
         );
 
         let read = capability_presentation_detail(
-            agl_tools::FS_READ_TOOL_ID,
+            agl_core_tools::FS_READ_TOOL_ID,
             &serde_json::json!({"path": "ignored"}),
             &serde_json::json!({
                 "path": "src/lib.rs",
@@ -1461,7 +1529,7 @@ mod tests {
         );
 
         let search = capability_presentation_detail(
-            agl_tools::FS_SEARCH_TOOL_ID,
+            agl_core_tools::FS_SEARCH_TOOL_ID,
             &serde_json::json!({"pattern": "PRIVATE_PATTERN_SENTINEL"}),
             &serde_json::json!({
                 "path": "crates",
@@ -1480,7 +1548,7 @@ mod tests {
         );
 
         let process = capability_presentation_detail(
-            agl_tools::PROCESS_EXEC_TOOL_ID,
+            agl_core_tools::PROCESS_EXEC_TOOL_ID,
             &serde_json::json!({
                 "program": "/PRIVATE/HOST/PROGRAM_SENTINEL",
                 "args": ["PRIVATE_ARG_SENTINEL"],
@@ -1527,7 +1595,7 @@ mod tests {
         ] {
             assert_eq!(
                 capability_presentation_detail(
-                    agl_tools::FS_READ_TOOL_ID,
+                    agl_core_tools::FS_READ_TOOL_ID,
                     &serde_json::json!({}),
                     &serde_json::json!({"path": path, "lines": []}),
                 ),

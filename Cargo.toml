@@ -2,19 +2,20 @@
 members = [
     "crates/agl-artifact",
     "crates/agl-assets",
-    "crates/agl-capabilities",
+    "crates/agl-extension",
     "crates/agl-chat",
     "crates/agl-client",
     "crates/agl-cli",
     "crates/agl-cron",
     "crates/agl-daemon",
     "crates/agl-function",
-    "crates/agl-tools",
+    "crates/agl-core-tools",
     "crates/agl-hooks",
     "crates/agl-host-tools",
     "crates/agl-ids",
     "crates/agl-inference",
     "crates/agl-inference-worker",
+    "crates/agl-kernel",
     "crates/agl-llama-cpp-sys",
     "crates/agl-loop",
     "crates/agl-memory",
@@ -46,7 +47,7 @@ license = "LGPL-3.0-or-later"
 repository = "https://github.com/agentlibre/agentLIBRE"
 
 [workspace.dependencies]
-agl-capabilities = { path = "crates/agl-capabilities" }
+agl-extension = { path = "crates/agl-extension" }
 agl-artifact = { path = "crates/agl-artifact" }
 agl-events = { path = "crates/agl-events" }
 agl-actions = { path = "crates/agl-actions" }
@@ -60,11 +61,12 @@ agl-function = { path = "crates/agl-function" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
 agl-content = { path = "crates/agl-content" }
-agl-tools = { path = "crates/agl-tools" }
+agl-core-tools = { path = "crates/agl-core-tools" }
 agl-hooks = { path = "crates/agl-hooks" }
 agl-host-tools = { path = "crates/agl-host-tools" }
 agl-ids = { path = "crates/agl-ids" }
 agl-inference = { path = "crates/agl-inference" }
+agl-kernel = { path = "crates/agl-kernel" }
 agl-llama-cpp-sys = { path = "crates/agl-llama-cpp-sys" }
 agl-loop = { path = "crates/agl-loop" }
 agl-memory = { path = "crates/agl-memory" }

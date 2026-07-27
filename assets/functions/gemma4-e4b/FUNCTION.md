@@ -10,6 +10,8 @@ artifact:
     tested: [1.0.0-alpha.12]
   requires:
     - model:gemma4-e4b@^1.0
+    - extension:core.workspace@^1.0
+    - extension:core.process@^1.0
 title: Gemma 4 E4B
 description: Conservative local Gemma 4 E4B QAT function with vision and native tool calls.
 model:

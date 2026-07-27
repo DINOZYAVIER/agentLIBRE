@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 
-use agl_capabilities::{
-    ActionDeclaration, ActionResult, CapabilityId, HookBatchResult, HookId, HookMessage,
-    HookResult, HookStatus, OperationKind,
-};
 use agl_content::Content;
+use agl_extension::{
+    DeclarationDigest, ExtensionId, HookBatchResult, HookId, HookMessage, HookResult, HookStatus,
+    OperationKind, ToolDeclaration, ToolId, ToolResult,
+};
 use agl_ids::{RunId, TurnId};
+use agl_kernel::ToolOutcome;
 use agl_turn::{
     IncompleteOutputReason, ModelResponse, ModelResponseOutcome, StopReason, TurnHookBatch,
     TurnInput, TurnOutput, VisibleTool,
@@ -57,12 +58,18 @@ impl Script {
     fn observation(mut self, value: serde_json::Value) -> Self {
         self.capability
             .push_back(EffectOutcome::Succeeded(agl_turn::ToolDispatchResponse {
-                result: ActionResult::new(value),
+                result: ToolOutcome::succeeded(
+                    "test-call".to_string(),
+                    ToolId::new("test:observe").unwrap(),
+                    ExtensionId::new("test").unwrap(),
+                    DeclarationDigest::from_json(&json!({"test": true})),
+                    ToolResult::new(value),
+                ),
             }));
         self
     }
 
-    fn hook(mut self, event: agl_capabilities::HookEvent, status: HookStatus) -> Self {
+    fn hook(mut self, event: agl_extension::HookEvent, status: HookStatus) -> Self {
         self.hooks
             .push_back(EffectOutcome::Succeeded(HookEffectOutput {
                 result: HookBatchResult {
@@ -118,10 +125,11 @@ impl Script {
             },
             TurnEffect::CapabilityDispatch { key, .. } => TurnEffectResult::CapabilityDispatch {
                 key: key.clone(),
-                outcome: self
-                    .capability
-                    .pop_front()
-                    .expect("missing scripted capability result"),
+                outcome: Box::new(
+                    self.capability
+                        .pop_front()
+                        .expect("missing scripted capability result"),
+                ),
             },
             TurnEffect::TranscriptAppend { key, .. } => TurnEffectResult::TranscriptAppend {
                 key: key.clone(),
@@ -188,8 +196,8 @@ fn input() -> TurnInput {
 }
 
 fn read_tool() -> VisibleTool {
-    let declaration = ActionDeclaration::new(
-        CapabilityId::new("read_file").unwrap(),
+    let declaration = ToolDeclaration::new(
+        ToolId::new("read_file").unwrap(),
         "Read a file",
         json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -350,6 +358,74 @@ fn tool_observation_loops_back_to_model_without_driver_policy() {
 }
 
 #[test]
+fn tool_before_guard_failure_prevents_dispatch() {
+    let before = TurnHookBatch::new(agl_extension::HookEvent::ToolCallBefore)
+        .with_required_hook(hook_id("guard:test"));
+    let result = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1)
+            .with_hook_batch(before),
+        Script::default()
+            .model(tool_call("read_file", json!({"path": "README.md"})))
+            .hook(agl_extension::HookEvent::ToolCallBefore, HookStatus::Fail),
+        true,
+    );
+
+    assert!(!result.effects.contains(&TurnEffectKind::CapabilityDispatch));
+    assert!(matches!(
+        result.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Hook,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn tool_after_guard_runs_after_dispatch_and_before_observation() {
+    let before = TurnHookBatch::new(agl_extension::HookEvent::ToolCallBefore)
+        .with_required_hook(hook_id("guard:test"));
+    let after = TurnHookBatch::new(agl_extension::HookEvent::ToolCallAfter)
+        .with_required_hook(hook_id("guard:test"));
+    let result = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(1)
+            .with_hook_batch(before)
+            .with_hook_batch(after),
+        Script::default()
+            .model(tool_call("read_file", json!({"path": "README.md"})))
+            .hook(agl_extension::HookEvent::ToolCallBefore, HookStatus::Pass)
+            .observation(json!({"text": "contents"}))
+            .hook(agl_extension::HookEvent::ToolCallAfter, HookStatus::Fail),
+        true,
+    );
+
+    assert_eq!(
+        result.effects,
+        [
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::HookBatch,
+            TurnEffectKind::CapabilityDispatch,
+            TurnEffectKind::HookBatch,
+        ]
+    );
+    assert!(!event_kinds(&result.events).contains(&"observation.appended"));
+    assert!(matches!(
+        result.terminal,
+        TurnTerminal::Failed {
+            failure: TurnExecutionFailure {
+                code: EffectFailureCode::Hook,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
 fn hidden_invalid_and_limited_tools_stop_before_dispatch() {
     let hidden = run_script(
         input()
@@ -459,7 +535,7 @@ fn disabled_malformed_tool_repair_stops_without_a_repair_event() {
 
 #[test]
 fn hook_repair_reissues_model_and_hook_failure_is_typed() {
-    let artifact_hook = TurnHookBatch::new(agl_capabilities::HookEvent::ArtifactWrite)
+    let artifact_hook = TurnHookBatch::new(agl_extension::HookEvent::ArtifactWrite)
         .with_required_hook(hook_id("guard:test"));
     let repaired = run_script(
         input()
@@ -468,11 +544,8 @@ fn hook_repair_reissues_model_and_hook_failure_is_typed() {
         Script::default()
             .model("bad")
             .model("good")
-            .hook(
-                agl_capabilities::HookEvent::ArtifactWrite,
-                HookStatus::Repair,
-            )
-            .hook(agl_capabilities::HookEvent::ArtifactWrite, HookStatus::Pass),
+            .hook(agl_extension::HookEvent::ArtifactWrite, HookStatus::Repair)
+            .hook(agl_extension::HookEvent::ArtifactWrite, HookStatus::Pass),
         true,
     );
     assert_eq!(
@@ -489,7 +562,7 @@ fn hook_repair_reissues_model_and_hook_failure_is_typed() {
         input().with_hook_batch(artifact_hook),
         Script::default()
             .model("bad")
-            .hook(agl_capabilities::HookEvent::ArtifactWrite, HookStatus::Fail),
+            .hook(agl_extension::HookEvent::ArtifactWrite, HookStatus::Fail),
         false,
     );
     assert!(matches!(

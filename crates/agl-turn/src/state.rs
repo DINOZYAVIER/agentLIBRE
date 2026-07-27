@@ -1,5 +1,5 @@
 use agl_actions::ToolCall;
-use agl_capabilities::ActionResult;
+use agl_extension::ToolResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,7 +39,7 @@ impl TurnState {
         self.machine.apply(transition)
     }
 
-    pub fn append_tool_result(&mut self, tool_call: ToolCall, result: ActionResult) {
+    pub fn append_tool_result(&mut self, tool_call: ToolCall, result: ToolResult) {
         self.tool_call_count += 1;
         self.messages.push(TurnMessage::AssistantToolCall {
             name: tool_call.name.clone(),

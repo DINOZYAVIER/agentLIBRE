@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agl_artifact::{ArtifactPackageView, ArtifactRelativePath};
-use agl_capabilities::CapabilityId;
+use agl_extension::ToolId;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -115,7 +115,7 @@ impl SubagentTools {
         validate_unique_non_empty("subagent.tools.allow", &self.allow)?;
         validate_unique_non_empty("subagent.tools.deny", &self.deny)?;
         for id in self.allow.iter().chain(&self.deny) {
-            CapabilityId::new(id.clone())
+            ToolId::new(id.clone())
                 .with_context(|| format!("invalid subagent tool capability ID `{id}`"))?;
         }
         Ok(())
@@ -124,11 +124,11 @@ impl SubagentTools {
     pub(crate) fn to_runtime_policy(&self) -> FunctionToolPolicy {
         FunctionToolPolicy::new(
             self.allow.iter().map(|id| {
-                CapabilityId::new(id.clone())
+                ToolId::new(id.clone())
                     .expect("validated subagent allow capability ID must remain valid")
             }),
             self.deny.iter().map(|id| {
-                CapabilityId::new(id.clone())
+                ToolId::new(id.clone())
                     .expect("validated subagent deny capability ID must remain valid")
             }),
         )

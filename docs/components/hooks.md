@@ -252,7 +252,7 @@ assistant prose.
 ## Implementation Plan
 
 1. Add `core:runtime.identity.validate` and `core:runtime.identity.require` constants,
-   declarations, validators, and tests in `agl-tools`.
+   declarations, validators, and tests in `agl-core-tools`.
 2. Extend `artifact_write_payload` in `agl-loop` or the chat host so it can
    include `runtime_identity` and `runtime_identity_validation`.
 3. Extend `InferenceSession` to build runtime identity from resolved function,

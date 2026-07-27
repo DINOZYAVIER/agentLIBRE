@@ -85,7 +85,7 @@ fn rendered_history_matches_only_isolated_semantic_tool_calls() {
         role: RenderedMessageRole::Assistant,
         content: text(format!(
             "{DISABLED_THINKING_PREFILL}{}",
-            r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
+            r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
         )),
         name: None,
         tool_calls: Vec::new(),
@@ -93,14 +93,14 @@ fn rendered_history_matches_only_isolated_semantic_tool_calls() {
     let canonical = RenderedMessage {
         role: RenderedMessageRole::Assistant,
         content: text(
-            r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"fs.read"}</tool_call>"#,
+            r#"<tool_call>{"arguments":{"limit_lines":20,"path":"facts.txt"},"name":"core.workspace:fs.read"}</tool_call>"#,
         ),
-        name: Some("fs.read".to_string()),
+        name: Some("core.workspace:fs.read".to_string()),
         tool_calls: Vec::new(),
     };
     let mut changed = canonical.clone();
     changed.content = text(
-        r#"<tool_call>{"arguments":{"limit_lines":20,"path":"other.txt"},"name":"fs.read"}</tool_call>"#,
+        r#"<tool_call>{"arguments":{"limit_lines":20,"path":"other.txt"},"name":"core.workspace:fs.read"}</tool_call>"#,
     );
     let mut with_prose = canonical.clone();
     with_prose.content = text(format!(
@@ -111,12 +111,12 @@ fn rendered_history_matches_only_isolated_semantic_tool_calls() {
     user_call.role = RenderedMessageRole::User;
     let mut user_call_reordered = user_call.clone();
     user_call_reordered.content = text(
-        r#"<tool_call>{"name":"fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
+        r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"facts.txt","limit_lines":20}}</tool_call>"#,
     );
     let repaired = RenderedMessage {
         role: RenderedMessageRole::Assistant,
         content: text(
-            r#"<tool_call>"{\"name\":\"fs.read\",\"arguments\":{\"path\":\"facts.txt\",\"limit_lines\":20}}"</tool_call>"#,
+            r#"<tool_call>"{\"name\":\"core.workspace:fs.read\",\"arguments\":{\"path\":\"facts.txt\",\"limit_lines\":20}}"</tool_call>"#,
         ),
         name: None,
         tool_calls: Vec::new(),
@@ -153,7 +153,7 @@ fn rendered_history_matches_only_isolated_semantic_tool_calls() {
 
 #[test]
 fn cached_gemma_history_restores_structured_tool_calls_from_the_transcript() {
-    let native_call = "<|tool_call>call:process.exec{args:[<|\"|>ok<|\"|>],program:<|\"|>/usr/bin/printf<|\"|>}<tool_call|>";
+    let native_call = "<|tool_call>call:core.process:process.exec{args:[<|\"|>ok<|\"|>],program:<|\"|>/usr/bin/printf<|\"|>}<tool_call|>";
     let mut cached = vec![RenderedMessage {
         role: RenderedMessageRole::Assistant,
         content: text(native_call),
@@ -163,9 +163,9 @@ fn cached_gemma_history_restores_structured_tool_calls_from_the_transcript() {
     let incoming = vec![RenderedMessage {
         role: RenderedMessageRole::Assistant,
         content: text(native_call),
-        name: Some("process.exec".to_string()),
+        name: Some("core.process:process.exec".to_string()),
         tool_calls: vec![RenderedToolCall {
-            name: "process.exec".to_string(),
+            name: "core.process:process.exec".to_string(),
             arguments: json!({
                 "args": ["ok"],
                 "program": "/usr/bin/printf",
@@ -175,7 +175,7 @@ fn cached_gemma_history_restores_structured_tool_calls_from_the_transcript() {
 
     restore_cached_gemma_tool_calls(&mut cached, &incoming, 1);
 
-    assert_eq!(cached[0].name.as_deref(), Some("process.exec"));
+    assert_eq!(cached[0].name.as_deref(), Some("core.process:process.exec"));
     assert_eq!(cached[0].tool_calls, incoming[0].tool_calls);
     assert_eq!(cached[0].content, text(native_call));
 }
@@ -250,11 +250,11 @@ fn normalizes_qwen_thinking_and_maps_the_append_boundary() {
 #[test]
 fn normalizes_gemma_thought_channel_and_maps_the_append_boundary() {
     let exact_history = format!(
-        "system\n{GEMMA_THOUGHT_PREFIX}<|tool_call>call:fs.read{{}}<tool_call|><turn|>\n{GEMMA_THOUGHT_PREFIX}answer"
+        "system\n{GEMMA_THOUGHT_PREFIX}<|tool_call>call:core.workspace:fs.read{{}}<tool_call|><turn|>\n{GEMMA_THOUGHT_PREFIX}answer"
     );
     let normalized_history = normalize_assistant_context(&exact_history);
     let incoming = format!(
-        "system\n<|tool_call>call:fs.read{{}}<tool_call|><turn|>\nanswer<turn|>\n<|turn>user\nnext\n{GEMMA_THOUGHT_PREFIX}"
+        "system\n<|tool_call>call:core.workspace:fs.read{{}}<tool_call|><turn|>\nanswer<turn|>\n<|turn>user\nnext\n{GEMMA_THOUGHT_PREFIX}"
     );
     let normalized_incoming = normalize_assistant_context(&incoming);
 
@@ -443,7 +443,7 @@ fn tool_schema_bridge_keeps_nested_schema_bytes_exact() {
         "additionalProperties": false
     });
     let prepared = PreparedTools::new(&[RenderedTool {
-        name: "fs.read".to_string(),
+        name: "core.workspace:fs.read".to_string(),
         description: "Read a file".to_string(),
         input_schema: schema.clone(),
     }])
@@ -576,7 +576,7 @@ fn rejected_mtp_tail_is_not_part_of_the_committed_sequence() {
 fn constrained_output_corpus_never_enters_repair() {
     let corpus = [
         "plain answer",
-        r#"<tool_call>{"name":"fs.read","arguments":{"path":"README.md"}}</tool_call>"#,
+        r#"<tool_call>{"name":"core.workspace:fs.read","arguments":{"path":"README.md"}}</tool_call>"#,
         r#"<tool_call>{"name":"nested","arguments":{"request":{"path":"README.md","flags":["a","b"]}}}</tool_call>"#,
         r#"<|tool_call>call:screen.capture{}<tool_call|>"#,
     ];

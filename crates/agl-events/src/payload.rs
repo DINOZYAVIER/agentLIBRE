@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use agl_content::Content;
@@ -13,6 +14,13 @@ use crate::{
 
 pub type RuntimeEventEnvelope = EventEnvelope<RuntimeEvent>;
 pub type SafeRuntimeEventEnvelope = EventEnvelope<SafeRuntimeEvent>;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedEffectEvent {
+    pub effect_id: String,
+    pub scope: BTreeMap<String, String>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -84,7 +92,7 @@ pub enum RuntimeEvent {
     CapabilityPolicyResolved {
         policy_hash: String,
         capability_ids: Vec<String>,
-        exclusions: Vec<CapabilityExclusionEvent>,
+        exclusions: Vec<ToolExclusionEvent>,
     },
     #[serde(rename = "capability.call_admitted")]
     CapabilityCallAdmitted {
@@ -98,6 +106,18 @@ pub enum RuntimeEvent {
         policy_hash: String,
         capability_id: Option<String>,
         reason_code: String,
+    },
+    #[serde(rename = "tool.effect_lifecycle")]
+    ToolEffectLifecycle {
+        call_id: String,
+        tool_id: String,
+        extension_id: String,
+        schema_digest: String,
+        delivery: String,
+        state: String,
+        admitted_effects: Vec<String>,
+        observed_effects: Vec<ObservedEffectEvent>,
+        outcome_code: Option<String>,
     },
     #[serde(rename = "tool.json_malformed")]
     ToolJsonMalformed {
@@ -216,6 +236,7 @@ impl RuntimeEvent {
             Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
             Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
             Self::CapabilityCallDenied { .. } => "capability.call_denied",
+            Self::ToolEffectLifecycle { .. } => "tool.effect_lifecycle",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
             Self::ToolJsonRepairSucceeded { .. } => "tool.json_repair_succeeded",
@@ -319,7 +340,7 @@ pub enum SafeRuntimeEvent {
     CapabilityPolicyResolved {
         policy_hash: String,
         capability_ids: Vec<String>,
-        exclusions: Vec<CapabilityExclusionEvent>,
+        exclusions: Vec<ToolExclusionEvent>,
     },
     #[serde(rename = "capability.call_admitted")]
     CapabilityCallAdmitted {
@@ -333,6 +354,18 @@ pub enum SafeRuntimeEvent {
         policy_hash: String,
         capability_id: Option<String>,
         reason_code: String,
+    },
+    #[serde(rename = "tool.effect_lifecycle")]
+    ToolEffectLifecycle {
+        call_id: String,
+        tool_id: String,
+        extension_id: String,
+        schema_digest: String,
+        delivery: String,
+        state: String,
+        admitted_effects: Vec<String>,
+        observed_effects: Vec<ObservedEffectEvent>,
+        outcome_code: Option<String>,
     },
     #[serde(rename = "tool.json_malformed")]
     ToolJsonMalformed {
@@ -472,6 +505,7 @@ impl SafeRuntimeEvent {
             Self::CapabilityPolicyResolved { .. } => "capability.policy_resolved",
             Self::CapabilityCallAdmitted { .. } => "capability.call_admitted",
             Self::CapabilityCallDenied { .. } => "capability.call_denied",
+            Self::ToolEffectLifecycle { .. } => "tool.effect_lifecycle",
             Self::ToolJsonMalformed { .. } => "tool.json_malformed",
             Self::ToolJsonRepairAttempted { .. } => "tool.json_repair_attempted",
             Self::ToolJsonRepairSucceeded { .. } => "tool.json_repair_succeeded",
@@ -514,7 +548,7 @@ pub struct HookResultEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CapabilityExclusionEvent {
+pub struct ToolExclusionEvent {
     pub capability_id: String,
     pub reason_code: String,
 }
@@ -697,6 +731,27 @@ impl From<&RuntimeEvent> for SafeRuntimeEvent {
                 policy_hash: policy_hash.clone(),
                 capability_id: capability_id.clone(),
                 reason_code: reason_code.clone(),
+            },
+            RuntimeEvent::ToolEffectLifecycle {
+                call_id,
+                tool_id,
+                extension_id,
+                schema_digest,
+                delivery,
+                state,
+                admitted_effects,
+                observed_effects,
+                outcome_code,
+            } => Self::ToolEffectLifecycle {
+                call_id: call_id.clone(),
+                tool_id: tool_id.clone(),
+                extension_id: extension_id.clone(),
+                schema_digest: schema_digest.clone(),
+                delivery: delivery.clone(),
+                state: state.clone(),
+                admitted_effects: admitted_effects.clone(),
+                observed_effects: observed_effects.clone(),
+                outcome_code: outcome_code.clone(),
             },
             RuntimeEvent::ToolJsonMalformed {
                 classification,

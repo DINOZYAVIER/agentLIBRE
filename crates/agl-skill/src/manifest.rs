@@ -6,7 +6,7 @@ use std::str;
 use agl_artifact::{
     ArtifactEnvelope, ArtifactPackageView, ArtifactVersion, SKILL_TYPE, compute_package_digest,
 };
-use agl_capabilities::{CapabilityId, HookId, OperationKind, SkillId, StateEffect};
+use agl_extension::{EffectId, HookId, OperationKind, SkillId, ToolId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -54,9 +54,9 @@ pub struct SkillHarness {
     pub source: SkillSource,
     pub pack: String,
     pub required_hooks: Vec<HookId>,
-    pub allowed_tools: Vec<CapabilityId>,
-    pub requestable_tools: Vec<CapabilityId>,
-    pub denied_tools: Vec<CapabilityId>,
+    pub allowed_tools: Vec<ToolId>,
+    pub requestable_tools: Vec<ToolId>,
+    pub denied_tools: Vec<ToolId>,
     pub permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     pub permissions: SkillPermissions,
     pub context_budget_tokens: u32,
@@ -226,11 +226,11 @@ impl SkillHarness {
 #[serde(deny_unknown_fields)]
 pub struct SkillPermissionRequestTemplate {
     pub id: String,
-    pub tools: Vec<CapabilityId>,
+    pub tools: Vec<ToolId>,
     #[serde(default)]
     pub max_operation_kind: Option<OperationKind>,
     #[serde(default)]
-    pub state_effects: Vec<StateEffect>,
+    pub state_effects: Vec<EffectId>,
     pub default_duration: String,
     pub reason_template: String,
 }
@@ -297,11 +297,11 @@ struct RawSkillManifest {
     description: String,
     pack: String,
     required_hooks: Vec<HookId>,
-    allowed_tools: Vec<CapabilityId>,
+    allowed_tools: Vec<ToolId>,
     #[serde(default)]
-    requestable_tools: Vec<CapabilityId>,
+    requestable_tools: Vec<ToolId>,
     #[serde(default)]
-    denied_tools: Vec<CapabilityId>,
+    denied_tools: Vec<ToolId>,
     #[serde(default)]
     permission_request_templates: Vec<SkillPermissionRequestTemplate>,
     #[serde(default)]
@@ -690,9 +690,9 @@ fn validate_skill_artifact(
 }
 
 fn validate_tool_routing(
-    allowed_tools: &[CapabilityId],
-    requestable_tools: &[CapabilityId],
-    denied_tools: &[CapabilityId],
+    allowed_tools: &[ToolId],
+    requestable_tools: &[ToolId],
+    denied_tools: &[ToolId],
 ) -> Result<(), SkillManifestError> {
     reject_tool_overlap(
         allowed_tools,
@@ -711,8 +711,8 @@ fn validate_tool_routing(
 }
 
 fn reject_tool_overlap(
-    first: &[CapabilityId],
-    second: &[CapabilityId],
+    first: &[ToolId],
+    second: &[ToolId],
     first_field: &'static str,
     second_field: &'static str,
 ) -> Result<(), SkillManifestError> {
@@ -731,7 +731,7 @@ fn reject_tool_overlap(
 
 fn normalize_permission_request_templates(
     templates: Vec<SkillPermissionRequestTemplate>,
-    requestable_tools: &[CapabilityId],
+    requestable_tools: &[ToolId],
 ) -> Result<Vec<SkillPermissionRequestTemplate>, SkillManifestError> {
     let requestable = requestable_tools.iter().collect::<BTreeSet<_>>();
     let mut normalized = Vec::with_capacity(templates.len());
@@ -1076,7 +1076,7 @@ Body.
         assert!(matches!(err, SkillManifestError::InvalidYaml { .. }));
         assert!(
             err.to_string()
-                .contains("hook ID must be provider-qualified")
+                .contains("hook ID must be extension-qualified")
         );
     }
 
@@ -1183,7 +1183,7 @@ pack: agl
 required_hooks:
   - core:task_spec.validate
 allowed_tools:
-  - fs.read
+  - core.workspace:fs.read
 requestable_tools:
   - cron.add
   - matrix.outbox.enqueue
@@ -1196,7 +1196,7 @@ permission_request_templates:
       - cron.add
     max_operation_kind: write
     state_effects:
-      - store_permission_requests
+      - agl:store.permission_requests
     default_duration: one_turn
     reason_template: Schedule a recurring Matrix notification.
 context_budget_tokens: 128
@@ -1216,7 +1216,7 @@ Body.
                 .iter()
                 .map(|tool| tool.as_str())
                 .collect::<Vec<_>>(),
-            vec!["fs.read"]
+            vec!["core.workspace:fs.read"]
         );
         assert_eq!(
             skill
@@ -1267,9 +1267,9 @@ pack: agl
 required_hooks:
   - core:task_spec.validate
 allowed_tools:
-  - fs.read
+  - core.workspace:fs.read
 requestable_tools:
-  - fs.read
+  - core.workspace:fs.read
 context_budget_tokens: 128
 references:
   include: []
@@ -1284,7 +1284,7 @@ Body.
         assert_eq!(
             err,
             SkillManifestError::ConflictingToolRouting {
-                tool: "fs.read".to_string(),
+                tool: "core.workspace:fs.read".to_string(),
                 first_field: "allowed_tools",
                 second_field: "requestable_tools",
             }

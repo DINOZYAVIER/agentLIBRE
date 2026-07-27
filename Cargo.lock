@@ -55,11 +55,12 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-assets",
- "agl-capabilities",
  "agl-chat",
  "agl-content",
+ "agl-extension",
  "agl-function",
  "agl-ids",
+ "agl-kernel",
  "agl-model",
  "agl-process",
  "agl-runtime",
@@ -89,21 +90,9 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-config",
- "sha2 0.11.0",
- "toml",
-]
-
-[[package]]
-name = "agl-capabilities"
-version = "1.0.0-alpha.12"
-dependencies = [
- "agl-content",
- "agl-ids",
- "jsonschema",
- "schemars",
- "serde",
  "serde_json",
  "sha2 0.11.0",
+ "toml",
 ]
 
 [[package]]
@@ -112,14 +101,16 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-assets",
- "agl-capabilities",
  "agl-config",
  "agl-content",
+ "agl-core-tools",
  "agl-events",
+ "agl-extension",
  "agl-function",
  "agl-host-tools",
  "agl-ids",
  "agl-inference",
+ "agl-kernel",
  "agl-loop",
  "agl-memory",
  "agl-model",
@@ -130,7 +121,6 @@ dependencies = [
  "agl-skill",
  "agl-store",
  "agl-supervisor",
- "agl-tools",
  "agl-turn",
  "anyhow",
  "serde",
@@ -146,13 +136,14 @@ dependencies = [
  "agl-app",
  "agl-artifact",
  "agl-assets",
- "agl-capabilities",
  "agl-chat",
  "agl-client",
  "agl-config",
  "agl-content",
  "agl-cron",
  "agl-daemon",
+ "agl-events",
+ "agl-extension",
  "agl-function",
  "agl-ids",
  "agl-inference",
@@ -217,6 +208,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-core-tools"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-cron",
+ "agl-extension",
+ "agl-ids",
+ "agl-kernel",
+ "agl-memory",
+ "agl-notes",
+ "agl-process",
+ "agl-repo",
+ "agl-store",
+ "anyhow",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "agl-cron"
 version = "1.0.0-alpha.12"
 dependencies = [
@@ -268,6 +279,21 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "agl-extension"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-content",
+ "agl-ids",
+ "anyhow",
+ "jsonschema",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -276,8 +302,9 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-assets",
- "agl-capabilities",
  "agl-config",
+ "agl-extension",
+ "agl-kernel",
  "agl-model",
  "anyhow",
  "serde",
@@ -289,7 +316,7 @@ dependencies = [
 name = "agl-hooks"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-capabilities",
+ "agl-extension",
  "anyhow",
  "serde",
  "serde_json",
@@ -300,13 +327,13 @@ dependencies = [
 name = "agl-host-tools"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-capabilities",
  "agl-content",
+ "agl-core-tools",
+ "agl-extension",
  "agl-ids",
  "agl-process",
  "agl-skill",
  "agl-store",
- "agl-tools",
  "anyhow",
  "ashpd",
  "image",
@@ -367,6 +394,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-kernel"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-extension",
+ "agl-ids",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agl-llama-cpp-sys"
 version = "1.0.0-alpha.12"
 dependencies = [
@@ -378,10 +416,11 @@ name = "agl-loop"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-actions",
- "agl-capabilities",
  "agl-content",
  "agl-events",
+ "agl-extension",
  "agl-ids",
+ "agl-kernel",
  "agl-turn",
  "serde",
  "serde_json",
@@ -391,13 +430,13 @@ dependencies = [
 name = "agl-matrix-bridge"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-capabilities",
  "agl-client",
  "agl-content",
+ "agl-core-tools",
+ "agl-extension",
  "agl-ids",
  "agl-protocol",
  "agl-store",
- "agl-tools",
  "anyhow",
  "clap",
  "futures-util",
@@ -454,9 +493,9 @@ dependencies = [
 name = "agl-oven"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-capabilities",
  "agl-config",
  "agl-content",
+ "agl-extension",
  "agl-ids",
  "agl-turn",
  "anyhow",
@@ -511,6 +550,7 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-assets",
+ "agl-extension",
  "agl-function",
  "agl-ids",
  "agl-model",
@@ -547,9 +587,10 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-artifact",
  "agl-assets",
- "agl-capabilities",
+ "agl-core-tools",
+ "agl-extension",
+ "agl-kernel",
  "agl-repo",
- "agl-tools",
  "anyhow",
  "serde",
  "serde_yaml",
@@ -576,29 +617,11 @@ dependencies = [
 name = "agl-supervisor"
 version = "1.0.0-alpha.12"
 dependencies = [
- "agl-capabilities",
  "agl-events",
+ "agl-extension",
  "agl-ids",
  "agl-process",
  "agl-store",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agl-tools"
-version = "1.0.0-alpha.12"
-dependencies = [
- "agl-capabilities",
- "agl-cron",
- "agl-ids",
- "agl-memory",
- "agl-notes",
- "agl-process",
- "agl-repo",
- "agl-store",
- "anyhow",
- "schemars",
  "serde",
  "serde_json",
 ]
@@ -608,9 +631,10 @@ name = "agl-turn"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-actions",
- "agl-capabilities",
  "agl-content",
+ "agl-extension",
  "agl-ids",
+ "agl-kernel",
  "serde",
  "serde_json",
 ]

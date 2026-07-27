@@ -1475,6 +1475,120 @@ pub trait ArtifactAdapter: Send + Sync {
     ) -> Result<ErasedArtifactPayload, ArtifactError>;
 }
 
+pub const EXTENSION_ENTRYPOINT: &str = "EXTENSION.json";
+pub const EXTENSION_PAYLOAD_SCHEMA: &str = "agentlibre.extension/v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionArtifactManifest {
+    #[serde(flatten)]
+    pub artifact: ArtifactEnvelope,
+    pub api_major: u32,
+    pub implementation: String,
+}
+
+impl ExtensionArtifactManifest {
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        self.artifact.validate()?;
+        if self.artifact.type_id != ArtifactTypeId::extension() {
+            return Err(ArtifactError::AdapterEnvelope {
+                type_id: EXTENSION_TYPE.to_string(),
+                reason: format!("Extension artifact has type `{}`", self.artifact.type_id),
+            });
+        }
+        if self.artifact.payload_schema.as_str() != EXTENSION_PAYLOAD_SCHEMA {
+            return Err(ArtifactError::AdapterEnvelope {
+                type_id: EXTENSION_TYPE.to_string(),
+                reason: format!(
+                    "unsupported Extension payload schema `{}`",
+                    self.artifact.payload_schema
+                ),
+            });
+        }
+        if self.api_major != 1 {
+            return Err(ArtifactError::AdapterPayload {
+                type_id: EXTENSION_TYPE.to_string(),
+                reason: format!("unsupported Extension API major `{}`", self.api_major),
+            });
+        }
+        if self.implementation.trim().is_empty() {
+            return Err(ArtifactError::AdapterPayload {
+                type_id: EXTENSION_TYPE.to_string(),
+                reason: "Extension implementation cannot be blank".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ExtensionArtifactAdapter {
+    descriptor: ArtifactAdapterDescriptor,
+}
+
+impl ExtensionArtifactAdapter {
+    pub fn new() -> Result<Self, ArtifactError> {
+        Ok(Self {
+            descriptor: ArtifactAdapterDescriptor::new(
+                ArtifactTypeId::extension(),
+                EXTENSION_ROOT,
+                ArtifactEntrypoint::new(EXTENSION_ENTRYPOINT)?,
+            )?,
+        })
+    }
+
+    fn parse(
+        &self,
+        package: &dyn ArtifactPackageView,
+    ) -> Result<ExtensionArtifactManifest, ArtifactError> {
+        let path = EXTENSION_ENTRYPOINT.parse()?;
+        let bytes = package.read_file(&path)?;
+        let manifest =
+            serde_json::from_slice::<ExtensionArtifactManifest>(&bytes).map_err(|error| {
+                ArtifactError::AdapterEnvelope {
+                    type_id: EXTENSION_TYPE.to_string(),
+                    reason: format!("EXTENSION.json is invalid: {error}"),
+                }
+            })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+}
+
+impl Default for ExtensionArtifactAdapter {
+    fn default() -> Self {
+        Self::new().expect("Extension adapter descriptor is valid")
+    }
+}
+
+impl ArtifactAdapter for ExtensionArtifactAdapter {
+    fn descriptor(&self) -> &ArtifactAdapterDescriptor {
+        &self.descriptor
+    }
+
+    fn extract_envelope(
+        &self,
+        package: &dyn ArtifactPackageView,
+    ) -> Result<ArtifactEnvelope, ArtifactError> {
+        Ok(self.parse(package)?.artifact)
+    }
+
+    fn validate_payload(
+        &self,
+        package: &dyn ArtifactPackageView,
+        envelope: &ArtifactEnvelope,
+    ) -> Result<ErasedArtifactPayload, ArtifactError> {
+        let manifest = self.parse(package)?;
+        if &manifest.artifact != envelope {
+            return Err(ArtifactError::AdapterPayload {
+                type_id: EXTENSION_TYPE.to_string(),
+                reason: "EXTENSION.json envelope changed during validation".to_string(),
+            });
+        }
+        Ok(Box::new(manifest))
+    }
+}
+
 impl<T> ArtifactAdapter for Arc<T>
 where
     T: ArtifactAdapter + ?Sized,

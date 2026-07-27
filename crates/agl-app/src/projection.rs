@@ -2,12 +2,12 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Debug, Formatter};
 use std::path::Path;
 
-use agl_capabilities::ToolAccessMode;
 use agl_content::Content;
 use agl_ids::{
     AttemptId, DaemonInstanceId, EventId, ExecutionId, MessageId, RunId, SessionId, StepId,
     TerminalSessionId, TurnId,
 };
+use agl_kernel::ToolAccessMode;
 use agl_process::{
     ExecutionCursor, ExecutionExit, ExecutionProfile, ExecutionState, SanitizedTerminalOutput,
 };

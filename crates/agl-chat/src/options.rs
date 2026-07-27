@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use agl_ids::SessionId;
 use serde::{Deserialize, Serialize};
 
-pub use agl_capabilities::ToolAccessMode;
+pub use agl_kernel::ToolAccessMode;
 
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 256;
 

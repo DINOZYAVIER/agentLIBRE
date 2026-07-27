@@ -36,6 +36,7 @@ pub struct RuntimeFunction {
     pub tool_policy: Option<FunctionToolPolicy>,
     pub max_output_tokens: Option<u32>,
     pub skills: Vec<String>,
+    pub extensions: Vec<String>,
     pub memory_enabled: bool,
     pub subagents: Vec<RuntimeSubagent>,
     pub subagent_specs: BTreeMap<String, RuntimeSubagentSpec>,
@@ -215,6 +216,12 @@ pub(crate) fn runtime_function_from_loaded(
         tool_policy: loaded.front_matter.tool_policy(),
         max_output_tokens: loaded.front_matter.runtime_max_output_tokens(),
         skills: loaded.front_matter.selected_skills().to_vec(),
+        extensions: loaded
+            .front_matter
+            .required_extensions()
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect(),
         memory_enabled: loaded.front_matter.enables_memory_context(),
         system_prompt_path: loaded.system_prompt_path.clone(),
         runtime_identity_validation: loaded.front_matter.runtime_identity_validation(),
