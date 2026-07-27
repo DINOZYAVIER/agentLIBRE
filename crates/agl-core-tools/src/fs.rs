@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,6 +205,7 @@ impl CoreTools {
                         relative: relative.clone(),
                         before: None,
                         after: Some(content.into_bytes()),
+                        after_permissions: None,
                     });
                     receipts.push(PatchReceipt {
                         operation: "create",
@@ -223,8 +224,12 @@ impl CoreTools {
                     expected_digest,
                     content,
                 } => {
-                    let (relative, before) =
+                    let (relative, snapshot) =
                         self.read_preconditioned_file(&path, &expected_digest)?;
+                    let ExistingFile {
+                        content: before,
+                        permissions,
+                    } = snapshot;
                     ensure_unique_path(&mut touched, &relative)?;
                     content_bytes = checked_patch_bytes(content_bytes, content.len())?;
                     let after = content.into_bytes();
@@ -240,14 +245,16 @@ impl CoreTools {
                         relative,
                         before: Some(before),
                         after: Some(after),
+                        after_permissions: Some(permissions),
                     });
                 }
                 PatchOperation::Delete {
                     path,
                     expected_digest,
                 } => {
-                    let (relative, before) =
+                    let (relative, snapshot) =
                         self.read_preconditioned_file(&path, &expected_digest)?;
+                    let before = snapshot.content;
                     ensure_unique_path(&mut touched, &relative)?;
                     receipts.push(PatchReceipt {
                         operation: "delete",
@@ -261,6 +268,7 @@ impl CoreTools {
                         relative,
                         before: Some(before),
                         after: None,
+                        after_permissions: None,
                     });
                 }
                 PatchOperation::Move {
@@ -274,8 +282,12 @@ impl CoreTools {
                             "move requires expected_destination_absent=true",
                         ));
                     }
-                    let (source, before) =
+                    let (source, snapshot) =
                         self.read_preconditioned_file(&from, &expected_digest)?;
+                    let ExistingFile {
+                        content: before,
+                        permissions,
+                    } = snapshot;
                     let destination = self.resolve_absent_target(&to)?;
                     ensure_unique_path(&mut touched, &source)?;
                     ensure_unique_path(&mut touched, &destination)?;
@@ -292,11 +304,13 @@ impl CoreTools {
                         relative: source,
                         before: Some(before.clone()),
                         after: None,
+                        after_permissions: None,
                     });
                     changes.push(PlannedFileChange {
                         relative: destination,
                         before: None,
                         after: Some(before),
+                        after_permissions: Some(permissions),
                     });
                 }
             }
@@ -309,7 +323,7 @@ impl CoreTools {
         &self,
         raw: &str,
         expected_digest: &str,
-    ) -> std::result::Result<(PathBuf, Vec<u8>), PatchError> {
+    ) -> std::result::Result<(PathBuf, ExistingFile), PatchError> {
         let relative = normalize_repo_path(raw, false)
             .map_err(|error| PatchError::invalid(error.to_string()))?;
         self.enforce_artifact_write_access(&relative)
@@ -323,13 +337,28 @@ impl CoreTools {
                     PatchError::not_found(raw)
                 }
             })?;
-        let content = fs::read(&path)
+        let mut file = fs::File::open(&path)
+            .map_err(|error| PatchError::terminal(format!("failed to open `{raw}`: {error}")))?;
+        let permissions = file
+            .metadata()
+            .map_err(|error| {
+                PatchError::terminal(format!("failed to inspect `{raw}` permissions: {error}"))
+            })?
+            .permissions();
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)
             .map_err(|error| PatchError::terminal(format!("failed to read `{raw}`: {error}")))?;
         let actual = content_digest(&content);
         if actual != expected_digest {
             return Err(PatchError::conflict(raw, expected_digest, &actual));
         }
-        Ok((relative, content))
+        Ok((
+            relative,
+            ExistingFile {
+                content,
+                permissions,
+            },
+        ))
     }
 
     fn resolve_absent_target(&self, raw: &str) -> std::result::Result<PathBuf, PatchError> {
@@ -408,12 +437,21 @@ impl CoreTools {
         let result = (|| {
             for (index, change) in plan.changes.iter().enumerate() {
                 if let Some(after) = &change.after {
-                    fs::write(staged_root.join(index.to_string()), after).map_err(|error| {
+                    let staged = staged_root.join(index.to_string());
+                    fs::write(&staged, after).map_err(|error| {
                         PatchError::terminal(format!(
                             "failed to stage `{}`: {error}",
                             display_relative(&change.relative)
                         ))
                     })?;
+                    if let Some(permissions) = &change.after_permissions {
+                        fs::set_permissions(&staged, permissions.clone()).map_err(|error| {
+                            PatchError::terminal(format!(
+                                "failed to preserve permissions for staged `{}`: {error}",
+                                display_relative(&change.relative)
+                            ))
+                        })?;
+                    }
                 }
             }
 
@@ -1171,6 +1209,12 @@ struct PlannedFileChange {
     relative: PathBuf,
     before: Option<Vec<u8>>,
     after: Option<Vec<u8>>,
+    after_permissions: Option<fs::Permissions>,
+}
+
+struct ExistingFile {
+    content: Vec<u8>,
+    permissions: fs::Permissions,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
@@ -1261,6 +1305,20 @@ mod tests {
     use crate::test_support::temp_root;
 
     use super::*;
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
 
     fn declare_artifact(root: &Path, id: &str, path: &str, access: &str) {
         let manifest_path = root.join(agl_repo::WORKSPACE_MANIFEST_PATH);
@@ -1726,6 +1784,69 @@ mod tests {
         assert_eq!(fs::read_to_string(path).unwrap(), "hello new\n");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_preserves_permissions_when_updating_files() {
+        let root = temp_root("apply-patch-update-permissions");
+        let executable = root.join("executable.sh");
+        let restricted = root.join("restricted.txt");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&restricted, "restricted old\n").unwrap();
+        set_mode(&executable, 0o755);
+        set_mode(&restricted, 0o640);
+        let tools = CoreTools::new(&root).unwrap();
+
+        tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [
+                    {
+                        "op": "update",
+                        "path": "executable.sh",
+                        "expected_digest": content_digest(b"#!/bin/sh\nexit 0\n"),
+                        "content": "#!/bin/sh\nexit 1\n"
+                    },
+                    {
+                        "op": "update",
+                        "path": "restricted.txt",
+                        "expected_digest": content_digest(b"restricted old\n"),
+                        "content": "restricted new\n"
+                    }
+                ]}),
+            )
+            .unwrap();
+
+        assert_eq!(mode(&executable), 0o755);
+        assert_eq!(mode(&restricted), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_preserves_permissions_when_moving_a_file() {
+        let root = temp_root("apply-patch-move-permissions");
+        let source = root.join("source.sh");
+        let destination = root.join("destination.sh");
+        fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+        set_mode(&source, 0o751);
+        let tools = CoreTools::new(&root).unwrap();
+
+        tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "move",
+                    "from": "source.sh",
+                    "to": "destination.sh",
+                    "expected_digest": content_digest(b"#!/bin/sh\nexit 0\n"),
+                    "expected_destination_absent": true
+                }]}),
+            )
+            .unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(mode(&destination), 0o751);
+    }
+
     #[test]
     fn apply_patch_atomically_creates_missing_parent_directories() {
         let root = temp_root("apply-patch-new-parents");
@@ -1858,6 +1979,45 @@ mod tests {
             fs::read_to_string(root.join("second.txt")).unwrap(),
             "second old\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_patch_rollback_restores_original_permissions() {
+        let root = temp_root("apply-patch-rollback-permissions");
+        let first = root.join("first.sh");
+        let second = root.join("second.txt");
+        fs::write(&first, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&second, "second old\n").unwrap();
+        set_mode(&first, 0o755);
+        set_mode(&second, 0o640);
+        let tools = CoreTools::new(&root).unwrap();
+        tools.fail_commit_after(Some(1));
+
+        tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [
+                    {
+                        "op": "update",
+                        "path": "first.sh",
+                        "expected_digest": content_digest(b"#!/bin/sh\nexit 0\n"),
+                        "content": "#!/bin/sh\nexit 1\n"
+                    },
+                    {
+                        "op": "update",
+                        "path": "second.txt",
+                        "expected_digest": content_digest(b"second old\n"),
+                        "content": "second new\n"
+                    }
+                ]}),
+            )
+            .unwrap_err();
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "#!/bin/sh\nexit 0\n");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second old\n");
+        assert_eq!(mode(&first), 0o755);
+        assert_eq!(mode(&second), 0o640);
     }
 
     #[test]

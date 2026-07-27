@@ -147,6 +147,7 @@ struct RunResult {
     terminal: TurnTerminal,
     events: Vec<agl_events::RuntimeEvent>,
     effects: Vec<TurnEffectKind>,
+    messages: Vec<TurnMessage>,
 }
 
 fn run_script(input: TurnInput, mut script: Script, checkpoint_each: bool) -> RunResult {
@@ -162,6 +163,7 @@ fn run_script(input: TurnInput, mut script: Script, checkpoint_each: bool) -> Ru
                     terminal,
                     events,
                     effects,
+                    messages: executor.checkpoint().state().messages.clone(),
                 };
             }
             TurnAdvanceState::Pending { effect } => {
@@ -426,7 +428,7 @@ fn tool_after_guard_runs_after_dispatch_and_before_observation() {
 }
 
 #[test]
-fn hidden_invalid_and_limited_tools_stop_before_dispatch() {
+fn hidden_and_limited_tools_stop_before_dispatch() {
     let hidden = run_script(
         input()
             .with_visible_tool(read_tool())
@@ -447,23 +449,6 @@ fn hidden_invalid_and_limited_tools_stop_before_dispatch() {
         }
     ));
 
-    let invalid = run_script(
-        input()
-            .with_visible_tool(read_tool())
-            .with_max_tool_calls(1),
-        Script::default().model(tool_call("read_file", json!({"other": true}))),
-        false,
-    );
-    assert!(matches!(
-        invalid.terminal,
-        TurnTerminal::Completed {
-            output: TurnOutput::Stopped {
-                reason: StopReason::InvalidToolArguments,
-                ..
-            }
-        }
-    ));
-
     let limited = run_script(
         input().with_visible_tool(read_tool()),
         Script::default().model(tool_call("read_file", json!({"path": "README.md"}))),
@@ -474,6 +459,160 @@ fn hidden_invalid_and_limited_tools_stop_before_dispatch() {
         TurnTerminal::Completed {
             output: TurnOutput::Stopped {
                 reason: StopReason::ToolLimitReached,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn invalid_tool_arguments_are_observed_then_corrected_without_dispatching_rejection() {
+    let result = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(2)
+            .with_capability_policy_hash("policy-test"),
+        Script::default()
+            .model(tool_call("read_file", json!({"other": true})))
+            .model(tool_call("read_file", json!({"path": "README.md"})))
+            .observation(json!({"text": "contents"}))
+            .model("done"),
+        true,
+    );
+
+    assert_eq!(
+        result.effects,
+        [
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::CapabilityDispatch,
+            TurnEffectKind::ModelGeneration,
+            TurnEffectKind::TranscriptAppend,
+        ]
+    );
+    assert_eq!(
+        event_kinds(&result.events)
+            .into_iter()
+            .filter(|kind| *kind == "tool.args_invalid")
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_kinds(&result.events)
+            .into_iter()
+            .filter(|kind| *kind == "tool.args_validated")
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_kinds(&result.events)
+            .into_iter()
+            .filter(|kind| *kind == "tool.call_started")
+            .count(),
+        1
+    );
+    assert!(event_kinds(&result.events).contains(&"capability.call_denied"));
+    let observations = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            agl_events::RuntimeEvent::ObservationAppended { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observations[0],
+        &json!({
+            "schema": "agentlibre.tool-argument-observation.v1alpha",
+            "status": "recoverable_error",
+            "outcome_code": "invalid_arguments",
+            "error": {
+                "code": "invalid_arguments",
+                "message": "action arguments failed schema validation; /: Additional properties are not allowed ('other' was unexpected); /: \"path\" is a required property",
+                "data": {"tool_id": "read_file"}
+            }
+        })
+    );
+    assert_eq!(
+        result.messages[1],
+        TurnMessage::AssistantToolCall {
+            name: "read_file".to_string(),
+            arguments: json!({"other": true}),
+        }
+    );
+    let TurnMessage::ToolObservation {
+        name,
+        result: observation_result,
+    } = &result.messages[2]
+    else {
+        panic!("invalid arguments did not append a Tool observation");
+    };
+    assert_eq!(name, "read_file");
+    assert_eq!(observation_result.outcome_code, "invalid_arguments");
+    assert_eq!(observation_result.data, *observations[0]);
+    assert!(matches!(
+        result.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Answered { ref answer }
+        } if answer == "done"
+    ));
+}
+
+#[test]
+fn repeated_invalid_tool_arguments_consume_existing_tool_limit() {
+    let invalid = tool_call("read_file", json!({"other": true}));
+    let result = run_script(
+        input()
+            .with_visible_tool(read_tool())
+            .with_max_tool_calls(2),
+        Script::default()
+            .model(invalid.clone())
+            .model(invalid)
+            .model(tool_call("read_file", json!({"path": "README.md"}))),
+        true,
+    );
+
+    assert!(!result.effects.contains(&TurnEffectKind::CapabilityDispatch));
+    assert_eq!(
+        event_kinds(&result.events)
+            .into_iter()
+            .filter(|kind| *kind == "tool.args_invalid")
+            .count(),
+        2
+    );
+    assert!(matches!(
+        result.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::ToolLimitReached,
+                ..
+            }
+        }
+    ));
+}
+
+#[test]
+fn invalid_registered_tool_schema_remains_terminal() {
+    let invalid_schema = VisibleTool {
+        id: ToolId::new("broken").unwrap(),
+        description: "broken".to_string(),
+        input_schema: json!({"type": "not-a-json-schema-type"}),
+    };
+    let result = run_script(
+        input()
+            .with_visible_tool(invalid_schema)
+            .with_max_tool_calls(1),
+        Script::default().model(tool_call("broken", json!({}))),
+        true,
+    );
+
+    assert!(!result.effects.contains(&TurnEffectKind::CapabilityDispatch));
+    assert!(!event_kinds(&result.events).contains(&"observation.appended"));
+    assert!(matches!(
+        result.terminal,
+        TurnTerminal::Completed {
+            output: TurnOutput::Stopped {
+                reason: StopReason::InvalidToolArguments,
                 ..
             }
         }

@@ -227,7 +227,7 @@ fn policy_stops_hidden_tool_before_dispatch() {
 }
 
 #[test]
-fn policy_stops_invalid_tool_arguments_before_dispatch() {
+fn policy_observes_invalid_tool_arguments_before_dispatch() {
     let state = TurnState::new(
         test_input("read README")
             .with_visible_tool(read_file_tool())
@@ -241,11 +241,35 @@ fn policy_stops_invalid_tool_arguments_before_dispatch() {
 
     assert_eq!(
         decision,
-        ToolCallDecision::Stop(ToolCallStop::InvalidArguments {
+        ToolCallDecision::ObserveInvalidArguments(crate::policy::InvalidToolArguments {
             name: "read_file".to_string(),
             message: "action arguments failed schema validation; /: Additional properties are not allowed ('other' was unexpected); /: \"path\" is a required property".to_string(),
         })
     );
+}
+
+#[test]
+fn policy_stops_invalid_registered_schema_before_dispatch() {
+    let state = TurnState::new(
+        test_input("read README")
+            .with_visible_tool(crate::VisibleTool {
+                id: agl_extension::ToolId::new("read_file").unwrap(),
+                description: "invalid schema".to_string(),
+                input_schema: json!({"type": "not-a-json-schema-type"}),
+            })
+            .with_max_tool_calls(1),
+    );
+
+    let decision = decide_tool_call(
+        &state,
+        &tool_call("read_file", json!({"path": "README.MD"})),
+    );
+
+    assert!(matches!(
+        decision,
+        ToolCallDecision::Stop(ToolCallStop::InvalidSchema { name, .. })
+            if name == "read_file"
+    ));
 }
 
 #[test]
