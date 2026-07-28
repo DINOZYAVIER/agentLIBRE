@@ -34,6 +34,7 @@ fn resolves_builtin_gemma4_function_with_embedded_config() {
     assert_eq!(runtime.source, FunctionPackageSource::Builtin);
     assert_eq!(runtime.model_profile, None);
     assert_eq!(runtime.profile_path, None);
+    assert_eq!(runtime.max_output_tokens, Some(512));
     assert!(runtime.inference_config_toml.is_some());
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -94,6 +95,13 @@ fn builtin_gemma4_31b_uses_extended_turn_and_context_limits() {
 
     let runtime = resolve_runtime_function("gemma4-31b", &workspace, &config).unwrap();
     assert_eq!(runtime.max_capability_calls, Some(32));
+    assert_eq!(runtime.max_output_tokens, Some(4096));
+    assert!(runtime.context.contains("including the `sha256:` prefix"));
+    assert!(
+        runtime
+            .context
+            .contains("its receipt status is `committed`")
+    );
     assert!(
         runtime
             .inference_config_toml

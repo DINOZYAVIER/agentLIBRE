@@ -1045,8 +1045,12 @@ impl CowWorkspaceTransaction {
                     "op": "update",
                     "path": display,
                     "expected_digest": shell_content_digest(&before.bytes),
-                    "content": std::str::from_utf8(&after.bytes)
-                        .context("shell-updated files must be UTF-8 for atomic commit")?,
+                    "edits": [{
+                        "old_text": std::str::from_utf8(&before.bytes)
+                            .context("shell-updated files must be UTF-8 for atomic commit")?,
+                        "new_text": std::str::from_utf8(&after.bytes)
+                            .context("shell-updated files must be UTF-8 for atomic commit")?,
+                    }],
                 }),
                 (None, None) => unreachable!("path originated in before or after"),
             };

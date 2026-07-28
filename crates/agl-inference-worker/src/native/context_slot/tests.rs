@@ -462,6 +462,15 @@ fn tool_schema_bridge_keeps_nested_schema_bytes_exact() {
 fn tool_schema_bridge_inlines_local_definitions_for_the_model_boundary() {
     let schema = json!({
         "$defs": {
+            "PatchEdit": {
+                "type": "object",
+                "properties": {
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"}
+                },
+                "required": ["old_text", "new_text"],
+                "additionalProperties": false
+            },
             "Operation": {
                 "oneOf": [
                     {
@@ -473,6 +482,20 @@ fn tool_schema_bridge_inlines_local_definitions_for_the_model_boundary() {
                             "expected_absent": {"type": "boolean"}
                         },
                         "required": ["op", "path", "content", "expected_absent"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "op": {"const": "update"},
+                            "path": {"type": "string"},
+                            "expected_digest": {"type": "string"},
+                            "edits": {
+                                "type": "array",
+                                "items": {"$ref": "#/$defs/PatchEdit"}
+                            }
+                        },
+                        "required": ["op", "path", "expected_digest", "edits"],
                         "additionalProperties": false
                     }
                 ]
@@ -509,6 +532,10 @@ fn tool_schema_bridge_inlines_local_definitions_for_the_model_boundary() {
         projected["properties"]["operations"]["items"]["oneOf"][0]["required"],
         json!(["op", "path", "content", "expected_absent"])
     );
+    let update = &projected["properties"]["operations"]["items"]["oneOf"][1]["properties"]["edits"];
+    assert!(update["items"].get("$ref").is_none());
+    assert_eq!(update["items"]["required"], json!(["old_text", "new_text"]));
+    assert_eq!(update["items"]["additionalProperties"], json!(false));
 }
 
 #[test]
