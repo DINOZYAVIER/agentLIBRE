@@ -33,6 +33,7 @@ const DEFAULT_SEARCH_MATCHES: usize = 50;
 const MAX_SEARCH_MATCHES: usize = 200;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_PATCH_OPERATIONS: usize = 64;
+const MAX_PATCH_EDITS: usize = 64;
 const MAX_PATCH_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -222,7 +223,7 @@ impl CoreTools {
                 PatchOperation::Update {
                     path,
                     expected_digest,
-                    content,
+                    edits,
                 } => {
                     let (relative, snapshot) =
                         self.read_preconditioned_file(&path, &expected_digest)?;
@@ -231,8 +232,8 @@ impl CoreTools {
                         permissions,
                     } = snapshot;
                     ensure_unique_path(&mut touched, &relative)?;
-                    content_bytes = checked_patch_bytes(content_bytes, content.len())?;
-                    let after = content.into_bytes();
+                    let after = apply_exact_text_edits(&path, &before, edits)?;
+                    content_bytes = checked_patch_bytes(content_bytes, after.len())?;
                     receipts.push(PatchReceipt {
                         operation: "update",
                         path: Some(display_relative(&relative)),
@@ -825,12 +826,12 @@ pub fn declaration() -> ExtensionDescriptor {
     .with_tool(
         action::<ApplyPatchArgs, ApplyPatchOutput>(
             FS_APPLY_PATCH_TOOL_ID,
-            "Atomically mutate repository files. Operation objects use `op` as the discriminator; create requires `expected_absent=true`, while update/delete/move require an expected digest.",
+            "Atomically mutate repository files. Operation objects use `op` as the discriminator; create requires `expected_absent=true`, update applies exact `old_text`/`new_text` edits, and update/delete/move require the complete digest returned by `fs.read`, including its `sha256:` prefix. Use at most one operation per path and group all updates to that path in one `edits` array.",
             OperationKind::Write,
         )
         .with_errors([
             agl_extension::ToolErrorDeclaration::recoverable("invalid_patch")
-                .with_data_schema::<EmptyToolErrorData>(),
+                .with_data_schema::<InvalidPatchErrorData>(),
             agl_extension::ToolErrorDeclaration::recoverable("not_found")
                 .with_data_schema::<PathNotFoundErrorData>(),
             agl_extension::ToolErrorDeclaration::recoverable("conflict")
@@ -912,6 +913,83 @@ fn checked_patch_bytes(
         )));
     }
     Ok(total)
+}
+
+fn apply_exact_text_edits(
+    path: &str,
+    before: &[u8],
+    edits: Vec<PatchEdit>,
+) -> std::result::Result<Vec<u8>, PatchError> {
+    if edits.is_empty() || edits.len() > MAX_PATCH_EDITS {
+        return Err(PatchError::invalid_at(
+            path,
+            None,
+            format!("edits must contain between 1 and {MAX_PATCH_EDITS} items"),
+        ));
+    }
+    let source = std::str::from_utf8(before)
+        .map_err(|_| PatchError::invalid_at(path, None, "update target is not valid UTF-8"))?;
+    let edit_count = edits.len();
+    let mut resolved = Vec::with_capacity(edit_count);
+
+    for (edit_index, edit) in edits.into_iter().enumerate() {
+        let (start, end) = if edit.old_text.is_empty() {
+            if source.is_empty() && edit_count == 1 {
+                (0, 0)
+            } else {
+                return Err(PatchError::invalid_at(
+                    path,
+                    Some(edit_index),
+                    "empty old_text requires an empty file and exactly one edit",
+                ));
+            }
+        } else {
+            let needle = edit.old_text.as_bytes();
+            let mut matches = source
+                .as_bytes()
+                .windows(needle.len())
+                .enumerate()
+                .filter_map(|(offset, candidate)| (candidate == needle).then_some(offset));
+            let Some(start) = matches.next() else {
+                return Err(PatchError::invalid_at(
+                    path,
+                    Some(edit_index),
+                    "old_text did not match the original file",
+                ));
+            };
+            if matches.next().is_some() {
+                return Err(PatchError::invalid_at(
+                    path,
+                    Some(edit_index),
+                    "old_text matched the original file more than once",
+                ));
+            }
+            (start, start + needle.len())
+        };
+        resolved.push(ResolvedPatchEdit {
+            edit_index,
+            start,
+            end,
+            new_text: edit.new_text.into_bytes(),
+        });
+    }
+
+    resolved.sort_by_key(|edit| (edit.start, edit.end));
+    for pair in resolved.windows(2) {
+        if pair[1].start < pair[0].end {
+            return Err(PatchError::invalid_at(
+                path,
+                Some(pair[1].edit_index),
+                format!("edit overlaps edit {}", pair[0].edit_index),
+            ));
+        }
+    }
+
+    let mut after = before.to_vec();
+    for edit in resolved.into_iter().rev() {
+        after.splice(edit.start..edit.end, edit.new_text);
+    }
+    Ok(after)
 }
 
 fn content_digest(content: &[u8]) -> String {
@@ -1058,7 +1136,9 @@ struct SearchArgs {
 #[serde(deny_unknown_fields)]
 struct ApplyPatchArgs {
     /// Atomic create, update, delete, and move operations. Each object uses
-    /// `op` as its discriminator and includes its required precondition.
+    /// `op` as its discriminator and includes its required precondition. Use
+    /// at most one operation per path and group same-file replacements in one
+    /// update `edits` array.
     #[schemars(length(min = 1, max = 64))]
     operations: Vec<PatchOperation>,
 }
@@ -1075,23 +1155,37 @@ enum PatchOperation {
     },
     Update {
         path: String,
-        /// SHA-256 content digest returned by `fs.read`.
+        /// Complete opaque digest returned by `fs.read`. Copy the `sha256:`
+        /// prefix and hexadecimal value without normalization.
         expected_digest: String,
-        content: String,
+        /// Exact UTF-8 spans resolved against the digest-pinned original file.
+        #[schemars(length(min = 1, max = 64))]
+        edits: Vec<PatchEdit>,
     },
     Delete {
         path: String,
-        /// SHA-256 content digest returned by `fs.read`.
+        /// Complete opaque digest returned by `fs.read`. Copy the `sha256:`
+        /// prefix and hexadecimal value without normalization.
         expected_digest: String,
     },
     Move {
         from: String,
         to: String,
-        /// SHA-256 content digest of the existing source file.
+        /// Complete opaque source digest returned by `fs.read`. Copy the
+        /// `sha256:` prefix and hexadecimal value without normalization.
         expected_digest: String,
         /// Must be explicitly true so move conflicts with an existing target.
         expected_destination_absent: bool,
     },
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PatchEdit {
+    /// Exact original text. It must identify one unique source span.
+    old_text: String,
+    /// UTF-8 replacement text. Use an empty string to delete the selected span.
+    new_text: String,
 }
 
 #[derive(JsonSchema)]
@@ -1186,6 +1280,14 @@ struct EmptyToolErrorData {}
 #[derive(JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
+struct InvalidPatchErrorData {
+    path: Option<String>,
+    edit_index: Option<usize>,
+}
+
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct PathNotFoundErrorData {
     path: String,
 }
@@ -1217,6 +1319,13 @@ struct ExistingFile {
     permissions: fs::Permissions,
 }
 
+struct ResolvedPatchEdit {
+    edit_index: usize,
+    start: usize,
+    end: usize,
+    new_text: Vec<u8>,
+}
+
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PatchReceipt {
@@ -1238,6 +1347,14 @@ struct PatchError {
 impl PatchError {
     fn invalid(message: impl Into<String>) -> Self {
         Self::new("invalid_patch", message, json!({}))
+    }
+
+    fn invalid_at(path: &str, edit_index: Option<usize>, message: impl Into<String>) -> Self {
+        let data = match edit_index {
+            Some(edit_index) => json!({"path": path, "edit_index": edit_index}),
+            None => json!({"path": path}),
+        };
+        Self::new("invalid_patch", message, data)
     }
 
     fn not_found(path: &str) -> Self {
@@ -1355,6 +1472,15 @@ mod tests {
                 .tool(&ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap())
                 .is_some()
         );
+        assert_eq!(
+            declaration
+                .tool(&ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap())
+                .unwrap()
+                .declared_error("invalid_patch")
+                .unwrap()
+                .class,
+            ToolErrorClass::Recoverable
+        );
         for id in [FS_READ_TOOL_ID, FS_LIST_TOOL_ID, FS_SEARCH_TOOL_ID] {
             let tool = declaration.tool(&ToolId::new(id).unwrap()).unwrap();
             assert_eq!(
@@ -1429,6 +1555,61 @@ mod tests {
     }
 
     #[test]
+    fn invalid_exact_edit_is_one_recoverable_observation_without_mutation() {
+        let root = temp_root("apply-patch-recoverable-edit");
+        let path = root.join("file.txt");
+        fs::write(&path, "before\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+        let descriptor = declaration();
+        let bindings = descriptor
+            .tools
+            .iter()
+            .map(|tool| ToolBinding::new(tool.id.clone(), tools.clone()))
+            .collect::<Vec<_>>();
+        let mut runtime = agl_kernel::ToolRuntime::new();
+        runtime
+            .register_extension(ExtensionRegistration::new(descriptor.clone(), bindings))
+            .unwrap();
+        let tool_id = ToolId::new(FS_APPLY_PATCH_TOOL_ID).unwrap();
+        let effective = ToolPolicyInput::new(
+            [descriptor.clone()],
+            [tool_id.clone()],
+            ToolAccessMode::Write,
+        )
+        .resolve()
+        .unwrap();
+        let declaration = descriptor.tool(&tool_id).unwrap();
+        let invocation = ToolInvocation::new(
+            ExecutionScope::builder(RunId::generate())
+                .step_id(StepId::generate())
+                .build()
+                .unwrap(),
+            tool_id,
+            descriptor.id.clone(),
+            declaration.digest(),
+            effective.policy_hash().clone(),
+            json!({"operations": [{
+                "op": "update",
+                "path": "file.txt",
+                "expected_digest": content_digest(b"before\n"),
+                "edits": [{"old_text": "missing", "new_text": "after"}]
+            }]}),
+        );
+
+        let outcome = runtime
+            .dispatch(invocation, &effective, ToolDispatchControl::uncancellable())
+            .unwrap();
+
+        assert_eq!(outcome.status, ToolOutcomeStatus::RecoverableError);
+        assert_eq!(outcome.outcome_code, "invalid_patch");
+        assert_eq!(
+            outcome.error.unwrap().data,
+            json!({"path": "file.txt", "edit_index": 0})
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "before\n");
+    }
+
+    #[test]
     fn apply_patch_schema_explains_the_live_create_shape() {
         let declaration = declaration();
         let patch = declaration
@@ -1436,9 +1617,13 @@ mod tests {
             .unwrap();
         assert!(patch.description.contains("use `op` as the discriminator"));
         assert!(patch.description.contains("`expected_absent=true`"));
+        assert!(patch.description.contains("including its `sha256:` prefix"));
+        assert!(patch.description.contains("at most one operation per path"));
         let encoded_schema = patch.input_schema.to_string();
         assert!(encoded_schema.contains("explicit concurrency precondition"));
         assert!(encoded_schema.contains("Must be explicitly true"));
+        assert!(encoded_schema.contains("prefix and hexadecimal value"));
+        assert!(encoded_schema.contains("one operation per path"));
 
         let schema = patch.compile_schema().unwrap();
         let error = schema
@@ -1468,6 +1653,36 @@ mod tests {
                 }))
                 .is_ok()
         );
+        assert!(
+            schema
+                .validate(&json!({
+                    "operations": [{
+                        "op": "update",
+                        "path": "test.file",
+                        "expected_digest": "sha256:example",
+                        "edits": [{
+                            "old_text": "before",
+                            "new_text": "after"
+                        }]
+                    }]
+                }))
+                .is_ok()
+        );
+        assert!(
+            schema
+                .validate(&json!({
+                    "operations": [{
+                        "op": "update",
+                        "path": "test.file",
+                        "expected_digest": "sha256:example",
+                        "content": "obsolete"
+                    }]
+                }))
+                .is_err()
+        );
+        assert!(encoded_schema.contains("old_text"));
+        assert!(encoded_schema.contains("new_text"));
+        assert!(encoded_schema.contains("\"edits\""));
     }
 
     #[test]
@@ -1774,7 +1989,7 @@ mod tests {
                     "op": "update",
                     "path": "README.MD",
                     "expected_digest": content_digest(b"hello old\n"),
-                    "content": "hello new\n"
+                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
                 }]}),
             )
             .unwrap();
@@ -1782,6 +1997,194 @@ mod tests {
         assert_eq!(output["status"], "committed");
         assert_eq!(output["changes"][0]["path"], "README.MD");
         assert_eq!(fs::read_to_string(path).unwrap(), "hello new\n");
+    }
+
+    #[test]
+    fn apply_patch_updates_large_file_after_one_bounded_read() {
+        let root = temp_root("apply-patch-large-paged");
+        let path = root.join("large.txt");
+        let before = (1..=600)
+            .map(|line| format!("line {line} original\n"))
+            .collect::<String>();
+        fs::write(&path, &before).unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let page = tools
+            .dispatch(
+                FS_READ_TOOL_ID,
+                json!({"path": "large.txt", "offset_line": 540, "limit_lines": 20}),
+            )
+            .unwrap();
+        assert_eq!(page["start_line"], 540);
+        assert_eq!(page["end_line"], 559);
+        assert_eq!(page["total_lines"], 600);
+        assert_eq!(page["truncated"], true);
+
+        tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": "large.txt",
+                    "expected_digest": page["digest"],
+                    "edits": [{
+                        "old_text": "line 550 original",
+                        "new_text": "line 550 changed"
+                    }]
+                }]}),
+            )
+            .unwrap();
+
+        let after = fs::read_to_string(path).unwrap();
+        assert!(after.contains("line 549 original\nline 550 changed\nline 551 original"));
+        assert_eq!(after.lines().count(), 600);
+    }
+
+    #[test]
+    fn apply_patch_applies_multiple_exact_utf8_edits_against_one_snapshot() {
+        let root = temp_root("apply-patch-multiple-edits");
+        let path = root.join("unicode.txt");
+        let before = "alpha\nпривет мир\nomega\n";
+        fs::write(&path, before).unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        tools
+            .dispatch(
+                FS_APPLY_PATCH_TOOL_ID,
+                json!({"operations": [{
+                    "op": "update",
+                    "path": "unicode.txt",
+                    "expected_digest": content_digest(before.as_bytes()),
+                    "edits": [
+                        {"old_text": "alpha", "new_text": "first"},
+                        {"old_text": "привет", "new_text": "здравствуй"},
+                        {"old_text": "omega", "new_text": ""}
+                    ]
+                }]}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "first\nздравствуй мир\n\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rejects_missing_ambiguous_and_overlapping_edits_without_changes() {
+        let cases = [
+            (
+                "missing",
+                "alpha beta gamma\n",
+                json!([{"old_text": "absent", "new_text": "changed"}]),
+                json!({"path": "file.txt", "edit_index": 0}),
+            ),
+            (
+                "ambiguous",
+                "same same\n",
+                json!([{"old_text": "same", "new_text": "changed"}]),
+                json!({"path": "file.txt", "edit_index": 0}),
+            ),
+            (
+                "overlap",
+                "alpha beta gamma\n",
+                json!([
+                    {"old_text": "alpha beta", "new_text": "first"},
+                    {"old_text": "beta gamma", "new_text": "second"}
+                ]),
+                json!({"path": "file.txt", "edit_index": 1}),
+            ),
+        ];
+
+        for (name, before, edits, expected_data) in cases {
+            let root = temp_root(&format!("apply-patch-{name}"));
+            let path = root.join("file.txt");
+            fs::write(&path, before).unwrap();
+            let tools = CoreTools::new(&root).unwrap();
+            let error = tools
+                .apply_patch(json!({"operations": [{
+                    "op": "update",
+                    "path": "file.txt",
+                    "expected_digest": content_digest(before.as_bytes()),
+                    "edits": edits
+                }]}))
+                .unwrap_err();
+
+            assert_eq!(error.code, "invalid_patch");
+            assert_eq!(error.data, expected_data);
+            assert_eq!(fs::read_to_string(path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn apply_patch_rejects_invalid_utf8_and_excessive_edits_without_changes() {
+        let invalid_root = temp_root("apply-patch-invalid-utf8");
+        let invalid_path = invalid_root.join("file.bin");
+        let invalid_before = [0xff, 0xfe];
+        fs::write(&invalid_path, invalid_before).unwrap();
+        let invalid_tools = CoreTools::new(&invalid_root).unwrap();
+        let invalid_error = invalid_tools
+            .apply_patch(json!({"operations": [{
+                "op": "update",
+                "path": "file.bin",
+                "expected_digest": content_digest(&invalid_before),
+                "edits": [{"old_text": "x", "new_text": "y"}]
+            }]}))
+            .unwrap_err();
+        assert_eq!(invalid_error.code, "invalid_patch");
+        assert_eq!(invalid_error.data, json!({"path": "file.bin"}));
+        assert_eq!(fs::read(invalid_path).unwrap(), invalid_before);
+
+        let excessive_root = temp_root("apply-patch-excessive-edits");
+        let excessive_path = excessive_root.join("file.txt");
+        fs::write(&excessive_path, "before\n").unwrap();
+        let excessive_tools = CoreTools::new(&excessive_root).unwrap();
+        let edits = (0..=MAX_PATCH_EDITS)
+            .map(|_| json!({"old_text": "before", "new_text": "after"}))
+            .collect::<Vec<_>>();
+        let excessive_error = excessive_tools
+            .apply_patch(json!({"operations": [{
+                "op": "update",
+                "path": "file.txt",
+                "expected_digest": content_digest(b"before\n"),
+                "edits": edits
+            }]}))
+            .unwrap_err();
+        assert_eq!(excessive_error.code, "invalid_patch");
+        assert_eq!(excessive_error.data, json!({"path": "file.txt"}));
+        assert_eq!(fs::read_to_string(excessive_path).unwrap(), "before\n");
+    }
+
+    #[test]
+    fn apply_patch_rejects_legacy_full_file_update_and_staged_byte_overflow() {
+        let root = temp_root("apply-patch-clean-cutover");
+        let path = root.join("file.txt");
+        fs::write(&path, "before\n").unwrap();
+        let tools = CoreTools::new(&root).unwrap();
+
+        let legacy = tools
+            .apply_patch(json!({"operations": [{
+                "op": "update",
+                "path": "file.txt",
+                "expected_digest": content_digest(b"before\n"),
+                "content": "after\n"
+            }]}))
+            .unwrap_err();
+        assert_eq!(legacy.code, "invalid_patch");
+        assert!(legacy.message.contains("unknown field `content`"));
+
+        let oversized = "x".repeat(MAX_PATCH_CONTENT_BYTES + 1);
+        let overflow = tools
+            .apply_patch(json!({"operations": [{
+                "op": "update",
+                "path": "file.txt",
+                "expected_digest": content_digest(b"before\n"),
+                "edits": [{"old_text": "before", "new_text": oversized}]
+            }]}))
+            .unwrap_err();
+        assert_eq!(overflow.code, "invalid_patch");
+        assert!(overflow.message.contains("patch content exceeds"));
+        assert_eq!(fs::read_to_string(path).unwrap(), "before\n");
     }
 
     #[cfg(unix)]
@@ -1804,13 +2207,13 @@ mod tests {
                         "op": "update",
                         "path": "executable.sh",
                         "expected_digest": content_digest(b"#!/bin/sh\nexit 0\n"),
-                        "content": "#!/bin/sh\nexit 1\n"
+                        "edits": [{"old_text": "exit 0", "new_text": "exit 1"}]
                     },
                     {
                         "op": "update",
                         "path": "restricted.txt",
                         "expected_digest": content_digest(b"restricted old\n"),
-                        "content": "restricted new\n"
+                        "edits": [{"old_text": "restricted old", "new_text": "restricted new"}]
                     }
                 ]}),
             )
@@ -1884,7 +2287,7 @@ mod tests {
                     "op": "update",
                     "path": "README.MD",
                     "expected_digest": content_digest(b"stale\n"),
-                    "content": "changed\n"
+                    "edits": [{"old_text": "same", "new_text": "changed"}]
                 }]}),
             )
             .unwrap_err();
@@ -1899,6 +2302,7 @@ mod tests {
     #[test]
     fn apply_patch_commits_create_delete_and_move_together() {
         let root = temp_root("apply-patch-mixed");
+        fs::write(root.join("update.txt"), "update old\n").unwrap();
         fs::write(root.join("delete.txt"), "delete me\n").unwrap();
         fs::write(root.join("move.txt"), "move me\n").unwrap();
         let tools = CoreTools::new(&root).unwrap();
@@ -1912,6 +2316,12 @@ mod tests {
                         "path": "created.txt",
                         "content": "created\n",
                         "expected_absent": true
+                    },
+                    {
+                        "op": "update",
+                        "path": "update.txt",
+                        "expected_digest": content_digest(b"update old\n"),
+                        "edits": [{"old_text": "update old", "new_text": "update new"}]
                     },
                     {
                         "op": "delete",
@@ -1929,10 +2339,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(output["change_count"], 3);
+        assert_eq!(output["change_count"], 4);
         assert_eq!(
             fs::read_to_string(root.join("created.txt")).unwrap(),
             "created\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("update.txt")).unwrap(),
+            "update new\n"
         );
         assert!(!root.join("delete.txt").exists());
         assert!(!root.join("move.txt").exists());
@@ -1958,13 +2372,13 @@ mod tests {
                         "op": "update",
                         "path": "first.txt",
                         "expected_digest": content_digest(b"first old\n"),
-                        "content": "first new\n"
+                        "edits": [{"old_text": "first old", "new_text": "first new"}]
                     },
                     {
                         "op": "update",
                         "path": "second.txt",
                         "expected_digest": content_digest(b"second old\n"),
-                        "content": "second new\n"
+                        "edits": [{"old_text": "second old", "new_text": "second new"}]
                     }
                 ]}),
             )
@@ -2002,13 +2416,13 @@ mod tests {
                         "op": "update",
                         "path": "first.sh",
                         "expected_digest": content_digest(b"#!/bin/sh\nexit 0\n"),
-                        "content": "#!/bin/sh\nexit 1\n"
+                        "edits": [{"old_text": "exit 0", "new_text": "exit 1"}]
                     },
                     {
                         "op": "update",
                         "path": "second.txt",
                         "expected_digest": content_digest(b"second old\n"),
-                        "content": "second new\n"
+                        "edits": [{"old_text": "second old", "new_text": "second new"}]
                     }
                 ]}),
             )
@@ -2034,9 +2448,6 @@ mod tests {
         .unwrap();
         let tools = CoreTools::new(&root).unwrap();
         let before = fs::read(root.join(".agl/tasks/task.md")).unwrap();
-        let after = String::from_utf8(before.clone())
-            .unwrap()
-            .replace("old problem.", "new problem.");
 
         let output = tools
             .dispatch(
@@ -2045,7 +2456,7 @@ mod tests {
                     "op": "update",
                     "path": ".agl/tasks/task.md",
                     "expected_digest": content_digest(&before),
-                    "content": after
+                    "edits": [{"old_text": "old problem.", "new_text": "new problem."}]
                 }]}),
             )
             .unwrap();
@@ -2074,7 +2485,7 @@ mod tests {
                     "op": "update",
                     "path": ".agl/skills/SKILL.md",
                     "expected_digest": content_digest(b"hello old\n"),
-                    "content": "hello new\n"
+                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
                 }]}),
             )
             .unwrap_err();
@@ -2099,7 +2510,7 @@ mod tests {
                     "op": "update",
                     "path": ".agl/unknown/file.md",
                     "expected_digest": content_digest(b"hello old\n"),
-                    "content": "hello new\n"
+                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
                 }]}),
             )
             .unwrap_err();
@@ -2125,7 +2536,7 @@ mod tests {
                     "op": "update",
                     "path": ".agl/tasks",
                     "expected_digest": content_digest(b"hello old\n"),
-                    "content": "hello new\n"
+                    "edits": [{"old_text": "hello old", "new_text": "hello new"}]
                 }]}),
             )
             .unwrap_err();

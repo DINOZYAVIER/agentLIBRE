@@ -2467,6 +2467,10 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         &thirty_one_b_show_stdout,
         "function.runtime.max_capability_calls=32",
     );
+    assert_contains(
+        &thirty_one_b_show_stdout,
+        "function.runtime.max_output_tokens=4096",
+    );
     assert_contains(&thirty_one_b_show_stdout, "max_context_tokens = 65536");
 }
 

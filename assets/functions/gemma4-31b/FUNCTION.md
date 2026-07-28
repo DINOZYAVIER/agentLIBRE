@@ -18,7 +18,7 @@ model:
   config: inference.toml
 runtime:
   tool_mode: read-only
-  max_output_tokens: 512
+  max_output_tokens: 4096
   max_capability_calls: 32
 skills:
   use: []
