@@ -567,7 +567,7 @@ pub struct RunBudget {
 impl Default for RunBudget {
     fn default() -> Self {
         Self {
-            wall_time_ms: 300_000,
+            wall_time_ms: 600_000,
             model_input_tokens: 1_000_000,
             model_output_tokens: 100_000,
             model_attempts: 32,

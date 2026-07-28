@@ -44,6 +44,45 @@ use super::*;
 
 static TEST_RUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn default_root_run_budget_is_identical_across_protocol_application_and_store() {
+    let protocol = RunBudgetRequest::default();
+    let application = agl_app::PromptBudget::default();
+    let store = agl_store::RunBudget::default();
+
+    assert_eq!(protocol.wall_time_ms, 600_000);
+    assert_eq!(application.wall_time_ms, protocol.wall_time_ms);
+    assert_eq!(store.wall_time_ms, protocol.wall_time_ms);
+    assert_eq!(
+        (
+            application.model_input_tokens,
+            application.model_output_tokens,
+            application.model_attempts,
+            application.capability_calls,
+        ),
+        (
+            protocol.model_input_tokens,
+            protocol.model_output_tokens,
+            protocol.model_attempts,
+            protocol.capability_calls,
+        )
+    );
+    assert_eq!(
+        (
+            store.model_input_tokens,
+            store.model_output_tokens,
+            store.model_attempts,
+            store.capability_calls,
+        ),
+        (
+            protocol.model_input_tokens,
+            protocol.model_output_tokens,
+            protocol.model_attempts,
+            protocol.capability_calls,
+        )
+    );
+}
+
 struct TestRuntime {
     runtime: AgentLibreRuntimeConfig,
     inference: InferenceOptions,

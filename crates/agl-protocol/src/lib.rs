@@ -844,7 +844,7 @@ pub struct RunBudgetRequest {
 impl Default for RunBudgetRequest {
     fn default() -> Self {
         Self {
-            wall_time_ms: 300_000,
+            wall_time_ms: 600_000,
             model_input_tokens: 1_000_000,
             model_output_tokens: 100_000,
             model_attempts: 32,
@@ -1115,6 +1115,17 @@ pub enum ProtocolErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_run_request_budget_covers_the_longest_admitted_inference_operation() {
+        let budget = RunBudgetRequest::default();
+
+        assert_eq!(budget.wall_time_ms, 600_000);
+        assert_eq!(budget.model_input_tokens, 1_000_000);
+        assert_eq!(budget.model_output_tokens, 100_000);
+        assert_eq!(budget.model_attempts, 32);
+        assert_eq!(budget.capability_calls, 64);
+    }
 
     const REQUEST_ID: &str = "req_01890f17-4a00-7000-8000-000000000001";
     const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000002";
