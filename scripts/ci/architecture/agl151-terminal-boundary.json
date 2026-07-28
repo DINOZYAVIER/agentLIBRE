@@ -1,0 +1,139 @@
+{
+  "schema": "agentlibre.architecture-boundary.v1",
+  "policy_version": "1.0",
+  "dependency_kinds": ["normal", "build", "dev"],
+  "exact_identity_matching": true,
+  "diagnostics": {
+    "stable_sorted": true
+  },
+  "inventory": {
+    "current": [
+      {"name": "agl-actions", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-app", "owner": "agentLIBRE", "category": "presentation"},
+      {"name": "agl-artifact", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-assets", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-chat", "owner": "agentLIBRE", "category": "presentation"},
+      {"name": "agl-cli", "owner": "agentLIBRE", "category": "presentation"},
+      {"name": "agl-client", "owner": "agentLIBRE", "category": "sdk"},
+      {"name": "agl-config", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-content", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-core-tools", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-cron", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-daemon", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-events", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-extension", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-function", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-hooks", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-host-tools", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-ids", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-inference", "owner": "agentLIBRE", "category": "inference"},
+      {"name": "agl-inference-worker", "owner": "agentLIBRE", "category": "inference"},
+      {"name": "agl-kernel", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-llama-cpp-sys", "owner": "agentLIBRE", "category": "inference"},
+      {"name": "agl-loop", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-matrix-bridge", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-memory", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-model", "owner": "agentLIBRE", "category": "inference"},
+      {"name": "agl-notes", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-oven", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-process", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-protocol", "owner": "agentLIBRE", "category": "protocol"},
+      {"name": "agl-repo", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-runtime", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-session", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-skill", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-store", "owner": "agentLIBRE", "category": "store"},
+      {"name": "agl-supervisor", "owner": "agentLIBRE", "category": "core"},
+      {"name": "agl-turn", "owner": "agentLIBRE", "category": "core"}
+    ],
+    "future": [
+      {"name": "agl-exec", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
+      {"name": "agl-pty", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
+      {"name": "agl-terminal", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
+      {"name": "agl-terminal-protocol", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
+      {"name": "agl-terminal-client", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
+      {"name": "agl-process-launcher", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"},
+      {"name": "agl-terminald", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"},
+      {"name": "agl-terminal-ui", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"}
+    ]
+  },
+  "rules": [
+    {
+      "id": "non-ui-terminal-no-agent-deps",
+      "description": "Non-UI terminal packages cannot depend on any agent package",
+      "selector": {
+        "category": "terminal",
+        "exclude": ["agl-terminal-ui"]
+      },
+      "forbidden_dependencies": {
+        "owner": "agentLIBRE"
+      }
+    },
+    {
+      "id": "ui-terminal-bounded-sdk",
+      "description": "Only agl-terminal-ui may depend on bounded agent SDK (agl-client); any other agentLIBRE targets are forbidden",
+      "selector": {
+        "name": "agl-terminal-ui"
+      },
+      "allowed_dependencies": [
+        {"name": "agl-client", "kind": ["normal", "build", "dev"]}
+      ],
+      "forbidden_dependencies": {
+        "owner": "agentLIBRE",
+        "exclude": ["agl-client"]
+      }
+    },
+    {
+      "id": "non-ui-terminal-no-presentation",
+      "description": "Non-UI terminal cannot depend on agent presentation",
+      "selector": {
+        "category": "terminal",
+        "exclude": ["agl-terminal-ui"]
+      },
+      "forbidden_dependencies": [
+        {"name": "agl-app"},
+        {"name": "agl-chat"},
+        {"name": "agl-cli"}
+      ]
+    },
+    {
+      "id": "terminal-no-mixed-protocol-store",
+      "description": "Terminal cannot depend on mixed protocol/store",
+      "selector": {
+        "category": "terminal"
+      },
+      "forbidden_dependencies": [
+        {"name": "agl-protocol"},
+        {"name": "agl-store"}
+      ]
+    },
+    {
+      "id": "inference-no-terminal",
+      "description": "Inference packages cannot depend on terminal packages",
+      "selector": {
+        "name": ["agl-inference", "agl-inference-worker", "agl-llama-cpp-sys", "agl-model"]
+      },
+      "forbidden_dependencies": {
+        "category": "terminal"
+      }
+    },
+    {
+      "id": "terminal-immutable-source",
+      "description": "Any present terminal package requires pinned immutable git source precise revision regardless of owner; path and mutable git are forbidden",
+      "selector": {
+        "category": "terminal",
+        "status": "present"
+      },
+      "requirement": "immutable_pinned_git_source",
+      "forbidden_source_types": ["path", "git-without-precise-rev", "mutable-git"]
+    },
+    {
+      "id": "h01-future-optional",
+      "description": "H01 not-yet-present packages are optional",
+      "selector": {
+        "status": "not-yet-present"
+      },
+      "requirement": "optional"
+    }
+  ]
+}

@@ -283,6 +283,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agl-exec"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "agl-extension"
 version = "1.0.0-alpha.12"
 dependencies = [
