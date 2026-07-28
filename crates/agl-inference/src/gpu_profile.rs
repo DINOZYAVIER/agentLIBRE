@@ -493,6 +493,24 @@ fn matching_gpu_profiles(
         ]);
     }
 
+    if !has_projector && exact_runtime_shape(runtime, 65_536, 512, 256, Some(true), Some(true)) {
+        profiles.push(planner_profile(
+            "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-64k-auto-20260727",
+            AllocationEstimate {
+                model_bytes: 16_950 * MIB,
+                context_bytes: 3_850 * MIB,
+                transient_bytes: 320 * MIB,
+                uncertainty_bytes: 256 * MIB,
+            },
+            AllocationReceipt {
+                model_bytes: 16_819 * MIB,
+                context_bytes: 3_850 * MIB,
+                transient_bytes: 320 * MIB,
+            },
+            ProfileArtifacts::Gemma4ThirtyOneB,
+        ));
+    }
+
     if !has_projector && exact_runtime_shape(runtime, 32_768, 2048, 512, None, None) {
         profiles.push(KnownGpuProfile {
             id: "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-32k-20260722",
@@ -923,6 +941,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_31b_64k_planner_profile_has_a_conservative_reviewed_envelope() {
+        let config = planner_config(65_536, false);
+        let candidates = matching_gpu_profiles(&config).unwrap();
+        assert_eq!(candidates.len(), 1);
+
+        let profile = select(&config, ProfileArtifacts::Gemma4ThirtyOneB);
+        assert_eq!(
+            profile.id(),
+            "gemma4-31b-qat-q4_0-rx7900xtx-vulkan-q8-64k-auto-20260727"
+        );
+        assert_profile_bytes(profile, (16_819, 3_850, 320), (16_950, 3_850, 320, 256));
+        profile
+            .receipt()
+            .validate_against(profile.estimate())
+            .unwrap();
+
+        let mut context = config.clone();
+        context.runtime.context_tokens = 65_535;
+        assert!(matches!(
+            matching_gpu_profiles(&context),
+            Err(GpuProfileError::UnknownFixedConfiguration)
+        ));
+
+        let candidates = matching_gpu_profiles(&config).unwrap();
+        assert!(select_verified_profile(&candidates, &identity(GEMMA4_12B_MAIN), None).is_none());
+    }
+
+    #[test]
     fn projector_profiles_require_the_exact_family_pair() {
         let e4b = planner_config(32_768, true);
         let e4b_candidates = matching_gpu_profiles(&e4b).unwrap();
@@ -1027,6 +1073,10 @@ mod tests {
             ),
             select(
                 &planner_config(32_768, false),
+                ProfileArtifacts::Gemma4ThirtyOneB,
+            ),
+            select(
+                &planner_config(65_536, false),
                 ProfileArtifacts::Gemma4ThirtyOneB,
             ),
         ];

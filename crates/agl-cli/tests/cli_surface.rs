@@ -2459,6 +2459,15 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert_contains(&e2b_show_stdout, "max_context_tokens = 32768");
     assert!(!e2b_show_stdout.contains("multimodal_projector_id"));
     assert!(!e2b_show_stdout.contains("[runtime.mtp]"));
+
+    let thirty_one_b_show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-31b"]);
+    assert_success_no_stderr(&thirty_one_b_show);
+    let thirty_one_b_show_stdout = stdout(&thirty_one_b_show);
+    assert_contains(
+        &thirty_one_b_show_stdout,
+        "function.runtime.max_capability_calls=32",
+    );
+    assert_contains(&thirty_one_b_show_stdout, "max_context_tokens = 65536");
 }
 
 #[test]

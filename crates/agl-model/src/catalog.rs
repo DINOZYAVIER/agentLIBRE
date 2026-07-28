@@ -559,39 +559,58 @@ mod tests {
                 "cpu-8gb-32768",
                 32_768,
                 "gpu-rx7900xtx-32768",
+                32_768,
                 3_753_902_080,
+                "evidence/20260723-five-gemma4-rx7900xtx.md",
             ),
             (
                 "gemma4-e4b",
                 "cpu-8gb-32768",
                 32_768,
                 "gpu-rx7900xtx-32768",
+                32_768,
                 6_459_228_160,
+                "evidence/20260723-five-gemma4-rx7900xtx.md",
             ),
             (
                 "gemma4-12b",
                 "cpu-16gb-65536",
                 65_536,
                 "gpu-rx7900xtx-65536",
+                65_536,
                 9_982_443_520,
+                "evidence/20260723-five-gemma4-rx7900xtx.md",
             ),
             (
                 "gemma4-26b",
                 "cpu-20gb-32768",
                 32_768,
                 "gpu-rx7900xtx-32768",
+                32_768,
                 17_165_189_120,
+                "evidence/20260723-five-gemma4-rx7900xtx.md",
             ),
             (
                 "gemma4-31b",
                 "cpu-40gb-32768",
                 32_768,
-                "gpu-rx7900xtx-32768",
-                22_041_067_520,
+                "gpu-rx7900xtx-65536",
+                65_536,
+                23_488_102_400,
+                "evidence/20260727-gemma4-31b-64k-rx7900xtx.md",
             ),
         ];
 
-        for (package_id, cpu_profile_id, context, gpu_profile_id, required_vram) in expected {
+        for (
+            package_id,
+            cpu_profile_id,
+            cpu_context,
+            gpu_profile_id,
+            gpu_context,
+            required_vram,
+            benchmark_evidence,
+        ) in expected
+        {
             let package = catalog
                 .package(&ModelPackageId::new(package_id).unwrap())
                 .unwrap();
@@ -602,7 +621,7 @@ mod tests {
                 .find(|profile| profile.device == ProfileDevice::Cpu)
                 .unwrap();
             assert_eq!(cpu.id, cpu_profile_id);
-            assert_eq!(cpu.context_tokens, context);
+            assert_eq!(cpu.context_tokens, cpu_context);
             assert_eq!(cpu.required_vram_bytes, 0);
             assert_eq!(cpu.gpu_layers, 0);
 
@@ -612,7 +631,7 @@ mod tests {
                 .find(|profile| profile.device == ProfileDevice::Gpu)
                 .unwrap();
             assert_eq!(gpu.id, gpu_profile_id);
-            assert_eq!(gpu.context_tokens, context);
+            assert_eq!(gpu.context_tokens, gpu_context);
             assert_eq!(gpu.required_vram_bytes, required_vram);
             assert_eq!(gpu.gpu_layers, 999);
             assert_eq!(gpu.pci_device_id.as_deref(), Some("1002:744c"));
@@ -620,10 +639,7 @@ mod tests {
             assert_eq!(gpu.batch_size, 512);
             assert_eq!(gpu.ubatch_size, 256);
             assert_eq!(gpu.threads, 8);
-            assert_eq!(
-                gpu.benchmark_evidence,
-                "evidence/20260723-five-gemma4-rx7900xtx.md"
-            );
+            assert_eq!(gpu.benchmark_evidence, benchmark_evidence);
         }
     }
 }

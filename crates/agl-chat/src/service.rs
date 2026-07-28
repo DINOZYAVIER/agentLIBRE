@@ -25,7 +25,7 @@ use crate::{
     assistant_text_for_terminal, session::SubagentSessionConfig,
 };
 
-const MAX_TOOL_CALLS_PER_TURN: usize = 8;
+const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatSessionSummary {
@@ -214,6 +214,7 @@ impl ChatService {
             session_id.clone(),
             inference_client,
         )?;
+        let max_tool_calls = main_tool_call_limit(session.function_max_capability_calls());
         let (chat_history, replay, execution_context) = if history_enabled {
             if resumed_session {
                 let history =
@@ -278,7 +279,7 @@ impl ChatService {
             messages,
             context_released: false,
             session_finished: false,
-            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
+            max_tool_calls,
             runtime_selection_revision,
         })
     }
@@ -1367,6 +1368,15 @@ fn model_effect_failure(error: anyhow::Error) -> EffectOutcome<agl_turn::ModelRe
         format!("model request failed: {error:#}"),
         false,
     ))
+}
+
+fn main_tool_call_limit(configured: Option<u32>) -> usize {
+    configured
+        .map(|limit| {
+            usize::try_from(limit)
+                .expect("validated function capability-call limit must fit in usize")
+        })
+        .unwrap_or(DEFAULT_MAX_TOOL_CALLS_PER_TURN)
 }
 
 pub(crate) fn build_turn_input(spec: TurnInputSpec<'_>) -> TurnInput {
@@ -3044,7 +3054,7 @@ tool_call_format = "hermes_json"
             hook_payload: serde_json::json!({"runtime_identity": {"skills": []}}),
             max_hook_repair_attempts: 1,
             repair_malformed_tool_calls: false,
-            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &visible_tools,
             capability_policy_hash: Some("sha256:test".to_string()),
             user_input: &user_input,
@@ -3061,10 +3071,20 @@ tool_call_format = "hermes_json"
         );
         assert_eq!(input.request_index_start, 7);
         assert_eq!(input.visible_tools, visible_tools);
-        assert_eq!(input.max_tool_calls, MAX_TOOL_CALLS_PER_TURN);
+        assert_eq!(input.max_tool_calls, DEFAULT_MAX_TOOL_CALLS_PER_TURN);
         assert_eq!(input.max_hook_repair_attempts, 1);
         assert!(!input.repair_malformed_tool_calls);
         assert_eq!(input.capability_policy_hash.as_deref(), Some("sha256:test"));
+    }
+
+    #[test]
+    fn main_tool_call_limit_defaults_to_eight_and_accepts_function_override() {
+        assert_eq!(main_tool_call_limit(None), 8);
+        assert_eq!(main_tool_call_limit(Some(32)), 32);
+        assert_eq!(
+            main_tool_call_limit(Some(agl_function::MAX_FUNCTION_CAPABILITY_CALLS)),
+            64
+        );
     }
 
     #[test]
@@ -3081,7 +3101,7 @@ tool_call_format = "hermes_json"
             hook_payload: serde_json::json!({}),
             max_hook_repair_attempts: 0,
             repair_malformed_tool_calls: true,
-            max_tool_calls: MAX_TOOL_CALLS_PER_TURN,
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS_PER_TURN,
             visible_tools: &[],
             capability_policy_hash: None,
             user_input: &user_input,

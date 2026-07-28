@@ -82,6 +82,30 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
 }
 
 #[test]
+fn builtin_gemma4_31b_uses_extended_turn_and_context_limits() {
+    let root = std::env::temp_dir().join(format!(
+        "agl-function-builtin-gemma4-31b-{}",
+        std::process::id()
+    ));
+    let workspace = root.join("workspace");
+    let config = root.join("config");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let runtime = resolve_runtime_function("gemma4-31b", &workspace, &config).unwrap();
+    assert_eq!(runtime.max_capability_calls, Some(32));
+    assert!(
+        runtime
+            .inference_config_toml
+            .as_deref()
+            .unwrap()
+            .contains("max_context_tokens = 65536")
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn lists_builtin_functions() {
     let root =
         std::env::temp_dir().join(format!("agl-function-list-builtin-{}", std::process::id()));

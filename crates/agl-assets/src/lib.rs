@@ -183,7 +183,7 @@ tool_call_format = "gemma_function_call"
     }
 
     #[test]
-    fn gemma4_e2b_and_12b_presets_match_builtin_policy() {
+    fn gemma4_agent_presets_match_builtin_policy() {
         let e2b = builtin_artifact_package("gemma4-e2b").expect("Gemma 4 E2B must be embedded");
         let e2b_text = std::str::from_utf8(
             e2b.files
@@ -228,6 +228,34 @@ tool_call_format = "gemma_function_call"
         assert_eq!(twelve_b_runtime.max_batch_size, 512);
         assert_eq!(twelve_b_runtime.max_ubatch_size, 256);
         assert!(!twelve_b_preset.runtime.mtp_enabled());
+
+        let thirty_one_b =
+            builtin_artifact_package("gemma4-31b").expect("Gemma 4 31B must be embedded");
+        let thirty_one_b_preset = agl_config::load_inference_preset_from_str(
+            "gemma4-31b",
+            std::str::from_utf8(
+                thirty_one_b
+                    .files
+                    .iter()
+                    .find(|file| file.path == "inference.toml")
+                    .unwrap()
+                    .bytes,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let thirty_one_b_runtime = thirty_one_b_preset.runtime.auto_policy().unwrap();
+
+        assert_eq!(thirty_one_b_runtime.max_context_tokens, 65_536);
+        assert_eq!(
+            thirty_one_b_runtime.cache_type_k,
+            agl_config::KvCacheType::Q8_0
+        );
+        assert_eq!(
+            thirty_one_b_runtime.cache_type_v,
+            agl_config::KvCacheType::Q8_0
+        );
+        assert!(!thirty_one_b_preset.runtime.mtp_enabled());
     }
 
     #[test]
