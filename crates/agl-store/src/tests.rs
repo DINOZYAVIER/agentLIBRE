@@ -21,6 +21,17 @@ use agl_process::{
 use serde_json::json;
 
 #[test]
+fn default_root_run_budget_covers_the_longest_admitted_inference_operation() {
+    let budget = RunBudget::default();
+
+    assert_eq!(budget.wall_time_ms, 600_000);
+    assert_eq!(budget.model_input_tokens, 1_000_000);
+    assert_eq!(budget.model_output_tokens, 100_000);
+    assert_eq!(budget.model_attempts, 32);
+    assert_eq!(budget.capability_calls, 64);
+}
+
+#[test]
 fn current_schema_version_matches_last_migration() {
     assert_eq!(
         STORE_MIGRATIONS.last().map(|migration| migration.version),
