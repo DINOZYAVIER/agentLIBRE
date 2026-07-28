@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agl_ids::{ExecutionId, RequestId, RunId, WriterLeaseId};
+use agl_exec::{ExecutionId, WriterLeaseId};
+use agl_ids::{RequestId, RunId};
 
 use crate::terminal::shell::ManagedShellStartup;
 use crate::{

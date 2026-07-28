@@ -3,7 +3,8 @@ use std::fmt::{self, Debug, Formatter};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use agl_ids::{ExecutionId, TerminalSessionId};
+use agl_exec::ExecutionId;
+use agl_ids::TerminalSessionId;
 
 use crate::terminal::shell::{ShellExit, TerminalPromptState};
 use crate::{ProcessBytes, ProcessError, ProcessErrorCode, Result};

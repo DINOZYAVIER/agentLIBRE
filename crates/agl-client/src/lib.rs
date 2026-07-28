@@ -505,7 +505,7 @@ impl AgentLibreClient {
 
     pub async fn attach_execution(
         &self,
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         after_sequence: u64,
         writable: bool,
     ) -> Result<ExecutionAttachment, ClientError> {
@@ -1157,7 +1157,7 @@ impl PresentationSubscription {
 pub struct ExecutionAttachment {
     client: AgentLibreClient,
     attachment_id: RequestId,
-    execution_id: agl_ids::ExecutionId,
+    execution_id: ExecutionId,
     last_sequence: u64,
     pub started: ExecutionAttachmentStartedEvent,
     raw: RawSubscription,
@@ -1176,7 +1176,7 @@ impl ExecutionAttachment {
         &self.attachment_id
     }
 
-    pub fn writer_lease_id(&self) -> Option<&agl_ids::WriterLeaseId> {
+    pub fn writer_lease_id(&self) -> Option<&WriterLeaseId> {
         self.started.writer_lease_id.as_ref()
     }
 
@@ -2344,7 +2344,7 @@ mod tests {
     #[tokio::test]
     async fn execution_attachment_accepts_monotonic_output_with_metadata_sequence_gaps() {
         let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let execution_id = agl_ids::ExecutionId::generate();
+        let execution_id = ExecutionId::generate();
         let server_execution_id = execution_id.clone();
         let server = tokio::spawn(async move {
             let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
@@ -3061,7 +3061,7 @@ mod tests {
     fn terminal(session_id: &agl_ids::SessionId) -> TerminalSessionView {
         TerminalSessionView {
             terminal_id: agl_ids::TerminalSessionId::generate(),
-            execution_id: agl_ids::ExecutionId::generate(),
+            execution_id: ExecutionId::generate(),
             owner: TerminalOwnerView::Human {
                 session_id: session_id.clone(),
             },

@@ -17,12 +17,12 @@ use agl_process::{
 use agl_protocol::{
     DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionAttachmentFinishReason, ExecutionAttachmentFinishedEvent,
-    ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionInputAcceptedEvent,
-    ExecutionLeaseRenewedEvent, ExecutionOutputEvent, ExecutionResizeAcceptedEvent,
-    PresentationSubscriptionFinishReason, ProtocolError, ProtocolErrorCode,
-    RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent, SessionPresentationSnapshotTransfer,
-    SessionPresentationSnapshotTransferPurpose, SessionPresentationSubscriptionFinishedEvent,
-    SubscriptionCancelledEvent,
+    ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionId,
+    ExecutionInputAcceptedEvent, ExecutionLeaseRenewedEvent, ExecutionOutputEvent,
+    ExecutionResizeAcceptedEvent, PresentationSubscriptionFinishReason, ProtocolError,
+    ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
+    SessionPresentationSnapshotTransfer, SessionPresentationSnapshotTransferPurpose,
+    SessionPresentationSubscriptionFinishedEvent, SubscriptionCancelledEvent, WriterLeaseId,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use agl_store::{AglStore, MatrixNotificationOutboxDraft, RunState};
@@ -947,7 +947,7 @@ struct ConnectionAttachments {
 #[cfg(unix)]
 #[derive(Clone)]
 struct ConnectionAttachment {
-    execution_id: agl_ids::ExecutionId,
+    execution_id: ExecutionId,
     lease: InputLease,
     cursor: u64,
 }
@@ -968,7 +968,7 @@ impl ConnectionAttachments {
 
     fn get_by_writer_lease_id(
         &self,
-        writer_lease_id: &agl_ids::WriterLeaseId,
+        writer_lease_id: &WriterLeaseId,
     ) -> std::result::Result<ConnectionAttachment, ProtocolError> {
         self.inner
             .lock()
@@ -2254,8 +2254,8 @@ mod connection_writer_tests {
     fn attachments_reject_duplicates_without_replacing_and_are_bounded() {
         let attachments = ConnectionAttachments::default();
         let first_id = agl_ids::RequestId::generate();
-        let first_execution_id = agl_ids::ExecutionId::generate();
-        let first_writer_id = agl_ids::WriterLeaseId::generate();
+        let first_execution_id = ExecutionId::generate();
+        let first_writer_id = WriterLeaseId::generate();
         let first = ConnectionAttachment {
             execution_id: first_execution_id.clone(),
             lease: InputLease {
@@ -2266,7 +2266,7 @@ mod connection_writer_tests {
         };
         attachments.insert(first_id.clone(), first).unwrap();
 
-        let replacement_execution_id = agl_ids::ExecutionId::generate();
+        let replacement_execution_id = ExecutionId::generate();
         let duplicate = attachments
             .insert(
                 first_id.clone(),
@@ -2292,8 +2292,7 @@ mod connection_writer_tests {
                 .execution_id,
             first_execution_id
         );
-        let missing_writer =
-            attachments.get_by_writer_lease_id(&agl_ids::WriterLeaseId::generate());
+        let missing_writer = attachments.get_by_writer_lease_id(&WriterLeaseId::generate());
         assert!(matches!(
             missing_writer,
             Err(ProtocolError {
@@ -2308,7 +2307,7 @@ mod connection_writer_tests {
                 .insert(
                     attachment_id.clone(),
                     ConnectionAttachment {
-                        execution_id: agl_ids::ExecutionId::generate(),
+                        execution_id: ExecutionId::generate(),
                         lease: InputLease {
                             attachment_id,
                             writer_lease_id: None,
@@ -2323,7 +2322,7 @@ mod connection_writer_tests {
             .insert(
                 overflow_id.clone(),
                 ConnectionAttachment {
-                    execution_id: agl_ids::ExecutionId::generate(),
+                    execution_id: ExecutionId::generate(),
                     lease: InputLease {
                         attachment_id: overflow_id,
                         writer_lease_id: None,

@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agl_ids::{ExecutionId, RequestId, RunId, SessionId, StepId, TerminalSessionId};
+use agl_exec::ExecutionId;
+use agl_ids::{RequestId, RunId, SessionId, StepId, TerminalSessionId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -2999,7 +3000,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use agl_ids::WriterLeaseId;
+    use agl_exec::WriterLeaseId;
 
     use super::*;
     use crate::terminal::command::MAX_AGENT_TERMINAL_COMMAND_BYTES;

@@ -9,14 +9,14 @@ use agl_extension::{
     EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
 };
-use agl_ids::{ExecutionId, ExecutionScope, RequestId, SessionId, StepId};
+use agl_ids::{ExecutionScope, RequestId, SessionId, StepId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
-    ExecutionContextSnapshot, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionIo,
-    ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest,
-    HostStartupPolicy, KillMode, ProcessBytes, ProcessBytesEncoding, ProcessHandle,
-    TerminalEnsureRequest, TerminalEnvironmentRequest, TerminalHistorySeed, TerminalOwner,
-    TerminalRegistry, TerminalSize, resolve_execution_directory,
+    ExecutionContextSnapshot, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionId,
+    ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile,
+    ExecutionRequest, HostStartupPolicy, KillMode, ProcessBytes, ProcessBytesEncoding,
+    ProcessHandle, TerminalEnsureRequest, TerminalEnvironmentRequest, TerminalHistorySeed,
+    TerminalOwner, TerminalRegistry, TerminalSize, resolve_execution_directory,
 };
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
@@ -2801,7 +2801,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "agl-process-tools-cd-{}-{}",
             std::process::id(),
-            agl_ids::ExecutionId::generate()
+            ExecutionId::generate()
         ));
         std::fs::create_dir_all(root.join("workspace/child")).unwrap();
         std::fs::create_dir_all(root.join("spool")).unwrap();

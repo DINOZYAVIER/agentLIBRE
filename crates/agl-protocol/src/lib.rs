@@ -5,9 +5,9 @@ pub use surface::*;
 
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
+pub use agl_exec::{ExecutionId, WriterLeaseId};
 use agl_ids::{
-    AttemptId, DaemonInstanceId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
-    TurnId, WriterLeaseId,
+    AttemptId, DaemonInstanceId, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
 pub use agl_process::{
     ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionIo, ExecutionOutputChunk,

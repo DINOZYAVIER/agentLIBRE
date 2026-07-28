@@ -620,15 +620,15 @@ fn process_list_fails_clearly_when_daemon_is_unavailable() {
 #[test]
 fn process_operator_commands_render_stable_table_json_and_raw_output() {
     use agl_process::{
-        ExecutionChannel, ExecutionIo, ExecutionOwner, ExecutionProfile, ExecutionReadResult,
-        ExecutionState, ExecutionStatus, KillMode, ProcessBytes,
+        ExecutionChannel, ExecutionId, ExecutionIo, ExecutionOwner, ExecutionProfile,
+        ExecutionReadResult, ExecutionState, ExecutionStatus, KillMode, ProcessBytes,
     };
     use agl_protocol::{
         DaemonEventKind, DaemonRequestKind, ExecutionKillAcceptedEvent, ExecutionListEvent,
         ExecutionPrivateCommand, ExecutionReadEvent, ExecutionStatusEvent,
     };
 
-    let execution_id = agl_ids::ExecutionId::generate();
+    let execution_id = ExecutionId::generate();
     let run_id = agl_ids::RunId::generate();
     let status = ExecutionStatus {
         execution_id: execution_id.clone(),

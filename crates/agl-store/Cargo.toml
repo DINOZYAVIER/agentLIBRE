@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 agl-content.workspace = true
+agl-exec.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 agl-process.workspace = true

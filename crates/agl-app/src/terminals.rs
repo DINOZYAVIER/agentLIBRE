@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
 
-use agl_ids::{ExecutionId, RunId, SessionId, TerminalSessionId, WriterLeaseId};
-use agl_process::{ExecutionExit, ExecutionProfile, ExecutionState, TerminalSize};
+use agl_ids::{RunId, SessionId, TerminalSessionId};
+use agl_process::{
+    ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState, TerminalSize, WriterLeaseId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{ApplicationError, ApplicationErrorCode, SanitizedDisplayPath};

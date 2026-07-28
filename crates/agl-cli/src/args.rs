@@ -2,7 +2,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use agl_extension::SkillId;
-use agl_ids::{ExecutionId, RunId, SessionId};
+use agl_ids::{RunId, SessionId};
+use agl_process::ExecutionId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
