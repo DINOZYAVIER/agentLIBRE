@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agl_ids::{ExecutionId, RequestId, WriterLeaseId};
+use agl_exec::{ExecutionId, WriterLeaseId};
+use agl_ids::RequestId;
 
 use crate::platform::{self, LaunchDirectories, LaunchedProcess};
 use crate::terminal::shell::{

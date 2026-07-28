@@ -1232,7 +1232,7 @@ mod tests {
         let request = LauncherRequest {
             protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
             build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
-            execution_id: agl_ids::ExecutionId::generate(),
+            execution_id: agl_exec::ExecutionId::generate(),
             request: crate::ExecutionRequest {
                 owner: ExecutionOwner::Session {
                     session_id: SessionId::generate(),

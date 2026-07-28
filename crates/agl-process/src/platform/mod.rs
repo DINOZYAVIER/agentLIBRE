@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use agl_ids::ExecutionId;
+use agl_exec::ExecutionId;
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 

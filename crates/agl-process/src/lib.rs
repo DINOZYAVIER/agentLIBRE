@@ -1,7 +1,5 @@
-mod bytes;
 mod config;
 mod context;
-mod error;
 mod platform;
 mod repository;
 mod request;
@@ -18,13 +16,15 @@ mod supervisor;
 mod supervisor_unsupported_contract;
 pub mod terminal;
 
-pub use bytes::{ProcessBytes, ProcessBytesEncoding};
+pub use agl_exec::{
+    ExecutionId, ProcessBytes, ProcessBytesEncoding, ProcessError, ProcessErrorCode, Result,
+    WriterLeaseId,
+};
 pub use config::{
     ProcessPlatformDiagnostics, ProcessSupervisorOptions, WRITABLE_INPUT_LEASE_HEARTBEAT,
     WRITABLE_INPUT_LEASE_TTL,
 };
 pub use context::{ExecutionContextSnapshot, resolve_execution_directory};
-pub use error::{ProcessError, ProcessErrorCode, Result};
 pub use repository::{
     CommittedOutputFrame, ExecutionRepository, ExecutionTerminalUpdate,
     InMemoryExecutionRepository, OutputSpool, OutputSpoolRead,

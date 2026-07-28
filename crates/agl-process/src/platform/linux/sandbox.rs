@@ -1008,7 +1008,8 @@ fn write_probe(path: &Path, value: &[u8]) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use agl_ids::{ExecutionId, RunId, StepId};
+    use agl_exec::ExecutionId;
+    use agl_ids::{RunId, StepId};
 
     use super::*;
     use crate::{

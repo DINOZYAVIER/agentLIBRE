@@ -3,12 +3,11 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agl_client::{AgentLibreClient, ExecutionAttachment, ExecutionAttachmentEvent};
-use agl_ids::ExecutionId;
 use agl_process::ProcessPlatformDiagnostics;
 use agl_protocol::{
-    ExecutionChannel, ExecutionIo, ExecutionKillRequest, ExecutionListRequest, ExecutionOwner,
-    ExecutionReadRequest, ExecutionStatus, ExecutionStatusRequest, KillMode, PROTOCOL_VERSION,
-    ProcessBytes,
+    ExecutionChannel, ExecutionId, ExecutionIo, ExecutionKillRequest, ExecutionListRequest,
+    ExecutionOwner, ExecutionReadRequest, ExecutionStatus, ExecutionStatusRequest, KillMode,
+    PROTOCOL_VERSION, ProcessBytes,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context, Result, bail};

@@ -2,7 +2,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agl_ids::{ExecutionId, RunId, SessionId, TerminalSessionId};
+use agl_exec::ExecutionId;
+use agl_ids::{RunId, SessionId, TerminalSessionId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionProfile, ProcessError, ProcessErrorCode,
     ShellIntegrationHealth, ShellProfileSnapshot, StoredTerminalRecord, TerminalOwner,
@@ -815,7 +816,8 @@ fn terminal_store_error(error: StoreError) -> ProcessError {
 mod tests {
     use std::path::PathBuf;
 
-    use agl_ids::{ExecutionId, RunId, SessionId, TerminalSessionId};
+    use agl_exec::ExecutionId;
+    use agl_ids::{RunId, SessionId, TerminalSessionId};
     use agl_process::{ProcessErrorCode, TerminalRepository, terminal_slot_key};
 
     use super::*;

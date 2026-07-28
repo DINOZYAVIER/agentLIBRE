@@ -19,20 +19,18 @@ use agl_client::{
     AgentLibreClient, ClientError, ExecutionAttachment, ExecutionAttachmentEvent,
     PresentationSubscription, PresentationSubscriptionEvent, RunSubscriptionEvent,
 };
-use agl_ids::{
-    ExecutionId, MessageId, RequestId, RunId, SessionId, TerminalSessionId, WriterLeaseId,
-};
+use agl_ids::{MessageId, RequestId, RunId, SessionId, TerminalSessionId};
 use agl_protocol::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationToolResult,
     ClientEffectKind, CommandAvailability, CommandCatalogRequest, CommandDescriptor,
-    CommandSuggestion, CommandSuggestionsRequest, ExecutionProfile, ExecutionStatusRequest,
-    ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest,
+    CommandSuggestion, CommandSuggestionsRequest, ExecutionId, ExecutionProfile,
+    ExecutionStatusRequest, ExecutionView, HostStartupPolicy, HumanHostTerminalEnsureRequest,
     HumanTerminalCommandSubmitRequest, HumanTerminalEnsureRequest, HumanTerminalEnsuredEvent,
     KillMode, ProcessBytes, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest,
     RunSubscribeRequest, RunSubscriptionFinishedEvent, SessionLaunchOptions,
     SessionPresentationItem, SessionPresentationRequest, SessionPresentationSnapshot,
     SessionPresentationSubscribeRequest, SessionSelector, StructuredEnvironmentOverlay,
-    TerminalOwnerView, TerminalPromptState, TerminalSessionView, TerminalSize,
+    TerminalOwnerView, TerminalPromptState, TerminalSessionView, TerminalSize, WriterLeaseId,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
 use anyhow::{Context as _, Result, bail};

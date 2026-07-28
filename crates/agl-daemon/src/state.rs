@@ -31,8 +31,8 @@ use agl_chat::{
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{
-    DaemonInstanceId, EventId, ExecutionId, MessageId, RequestId, RunId, SessionId, StepId,
-    TerminalSessionId, TurnId,
+    DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TerminalSessionId,
+    TurnId,
 };
 use agl_inference::worker_supervisor::WorkerLifecyclePhase;
 use agl_inference::{
@@ -43,7 +43,7 @@ use agl_inference::{
 };
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionAuthorization, ExecutionCursor,
-    ExecutionGrantLease, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
+    ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
     ExecutionOwner, ExecutionProfile, ExecutionState,
     HostStartupPolicy as ProcessHostStartupPolicy, HumanShellHistoryStore, InputLease, KillMode,
     LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ProcessError, ProcessErrorCode, TerminalEnsureRequest,
@@ -814,7 +814,7 @@ impl DaemonState {
 
     fn execution_status(
         &self,
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         include_private_command: bool,
     ) -> Result<DaemonEventKind, ProtocolError> {
         let status = self
@@ -836,7 +836,7 @@ impl DaemonState {
 
     fn execution_read(
         &self,
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         after_sequence: u64,
         max_bytes: usize,
     ) -> Result<DaemonEventKind, ProtocolError> {
@@ -857,7 +857,7 @@ impl DaemonState {
 
     fn execution_kill(
         &self,
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         mode: agl_process::KillMode,
     ) -> Result<DaemonEventKind, ProtocolError> {
         self.process_handle

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use agl_ids::{ExecutionId, WriterLeaseId};
+use agl_exec::{ExecutionId, WriterLeaseId};
 
 use crate::{
     ExecutionChannel, ExecutionExit, ExecutionListFilter, ExecutionOutputChunk,

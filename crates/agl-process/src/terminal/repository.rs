@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::sync::Mutex;
 
-use agl_ids::{ExecutionId, TerminalSessionId};
+use agl_exec::ExecutionId;
+use agl_ids::TerminalSessionId;
 
 use super::registry::{TerminalOwner, TerminalRecord, TerminalState};
 use super::shell::{ShellIntegrationHealth, TerminalPromptState};

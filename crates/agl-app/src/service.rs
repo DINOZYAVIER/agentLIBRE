@@ -6,7 +6,7 @@ use std::sync::{
 
 use agl_content::Content;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RunId, SessionId, TurnId};
-use agl_process::KillMode;
+use agl_process::{ExecutionId, KillMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 
@@ -228,11 +228,11 @@ pub enum ApplicationToolResult {
         executions: Vec<ExecutionView>,
     },
     AttachAccepted {
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         read_only: bool,
     },
     KillAccepted {
-        execution_id: agl_ids::ExecutionId,
+        execution_id: ExecutionId,
         mode: KillMode,
     },
     Reloaded {

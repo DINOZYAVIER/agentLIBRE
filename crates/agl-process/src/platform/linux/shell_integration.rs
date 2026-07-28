@@ -658,7 +658,7 @@ fn shell_integration_io(context: &str, error: std::io::Error) -> ProcessError {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use agl_ids::ExecutionId;
+    use agl_exec::ExecutionId;
 
     use super::*;
 

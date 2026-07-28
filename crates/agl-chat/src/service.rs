@@ -2721,7 +2721,7 @@ tool_call_format = "hermes_json"
         let child = chat.root.join("child");
         let outside = chat.root.parent().unwrap().join(format!(
             "agl-chat-service-outside-{}",
-            agl_ids::ExecutionId::generate()
+            agl_process::ExecutionId::generate()
         ));
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&outside).unwrap();

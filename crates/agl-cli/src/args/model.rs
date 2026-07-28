@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use agl_ids::{ExecutionId, RunId, SessionId};
+use agl_ids::{RunId, SessionId};
+use agl_process::ExecutionId;
 use clap::ValueEnum;
 use clap_complete::Shell;
 
