@@ -4,7 +4,7 @@ model_id = "gemma4-31b"
 
 [runtime]
 mode = "auto"
-max_context_tokens = 32768
+max_context_tokens = 65536
 max_batch_size = 512
 max_ubatch_size = 256
 flash_attention = "on"

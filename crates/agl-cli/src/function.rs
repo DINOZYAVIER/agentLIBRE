@@ -341,6 +341,9 @@ fn print_loaded_function(function: &LoadedFunction) {
     if let Some(max_output_tokens) = function.front_matter.runtime_max_output_tokens() {
         println!("function.runtime.max_output_tokens={max_output_tokens}");
     }
+    if let Some(max_capability_calls) = function.front_matter.runtime_max_capability_calls() {
+        println!("function.runtime.max_capability_calls={max_capability_calls}");
+    }
     let tool_policy = function.front_matter.tool_policy();
     print_function_tool_policy(tool_policy.as_ref());
     println!(

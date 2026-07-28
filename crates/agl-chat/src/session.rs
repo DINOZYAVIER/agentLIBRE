@@ -802,6 +802,12 @@ impl InferenceSession {
         self.function_ref.clone()
     }
 
+    pub(crate) fn function_max_capability_calls(&self) -> Option<u32> {
+        self.runtime_function
+            .as_ref()
+            .and_then(|function| function.max_capability_calls)
+    }
+
     pub(crate) fn context_limit_tokens(&self) -> u32 {
         self.inference_config.runtime.context_tokens
     }

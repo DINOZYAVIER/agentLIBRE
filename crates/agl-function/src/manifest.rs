@@ -16,6 +16,7 @@ pub const FUNCTION_PAYLOAD_SCHEMA: &str = "agentlibre.function/v2";
 pub const SUBAGENT_SCHEMA: &str = "agentlibre/subagent/v1";
 pub const FUNCTION_FILE_NAME: &str = "FUNCTION.md";
 pub const FUNCTION_SYSTEM_PROMPT_FILE_NAME: &str = "SYSTEM.md";
+pub const MAX_FUNCTION_CAPABILITY_CALLS: u32 = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FunctionToolMode {
@@ -195,6 +196,12 @@ impl AgentFunctionFrontMatter {
             .and_then(|runtime| runtime.max_output_tokens)
     }
 
+    pub fn runtime_max_capability_calls(&self) -> Option<u32> {
+        self.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.max_capability_calls)
+    }
+
     pub fn tool_policy(&self) -> Option<FunctionToolPolicy> {
         self.tools.as_ref().map(FunctionTools::to_runtime_policy)
     }
@@ -317,6 +324,8 @@ pub struct FunctionRuntime {
     pub tool_mode: Option<FunctionToolMode>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub max_capability_calls: Option<u32>,
     #[serde(flatten, default)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
@@ -328,6 +337,12 @@ impl FunctionRuntime {
             ensure!(
                 max_output_tokens > 0,
                 "runtime.max_output_tokens must be greater than zero"
+            );
+        }
+        if let Some(max_capability_calls) = self.max_capability_calls {
+            ensure!(
+                (1..=MAX_FUNCTION_CAPABILITY_CALLS).contains(&max_capability_calls),
+                "runtime.max_capability_calls must be between 1 and {MAX_FUNCTION_CAPABILITY_CALLS}"
             );
         }
         Ok(())

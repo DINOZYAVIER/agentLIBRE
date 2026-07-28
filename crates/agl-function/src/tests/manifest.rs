@@ -21,6 +21,7 @@ model:
   config: inference.toml
 runtime:
   tool_mode: write
+  max_capability_calls: 32
 validation:
   runtime_identity:
     required: true
@@ -43,6 +44,7 @@ skills:
         front_matter.runtime_tool_mode(),
         Some(FunctionToolMode::Write)
     );
+    assert_eq!(front_matter.runtime_max_capability_calls(), Some(32));
     assert_eq!(
         front_matter.runtime_identity_validation(),
         Some(RuntimeIdentityValidation {
@@ -53,6 +55,46 @@ skills:
     );
     assert_eq!(front_matter.selected_skills(), ["repo-status"]);
     assert!(body.trim().is_empty());
+}
+
+#[test]
+fn validates_function_capability_call_boundaries() {
+    fn document(max_capability_calls: u32) -> String {
+        format!(
+            r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: coding
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+title: Coding
+runtime:
+  max_capability_calls: {max_capability_calls}
+---
+"#
+        )
+    }
+
+    for accepted in [1, MAX_FUNCTION_CAPABILITY_CALLS] {
+        let (front_matter, _) = parse_function_document(&document(accepted)).unwrap();
+        front_matter.validate().unwrap();
+        assert_eq!(front_matter.runtime_max_capability_calls(), Some(accepted));
+    }
+
+    for rejected in [0, MAX_FUNCTION_CAPABILITY_CALLS + 1] {
+        let (front_matter, _) = parse_function_document(&document(rejected)).unwrap();
+        let error = front_matter.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.max_capability_calls must be between 1 and 64")
+        );
+    }
 }
 
 #[test]
