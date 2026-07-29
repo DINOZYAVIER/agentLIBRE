@@ -509,7 +509,10 @@ impl AgentLibreClient {
         after_sequence: u64,
         writable: bool,
     ) -> Result<ExecutionAttachment, ClientError> {
+        let attachment_id = ExecutionRequestId::generate();
+        let expected_attachment_id = attachment_id.clone();
         let request = ExecutionAttachRequest {
+            attachment_id,
             execution_id: execution_id.clone(),
             after_sequence,
             writable,
@@ -519,7 +522,8 @@ impl AgentLibreClient {
             .await?;
         let started = match raw.recv().await? {
             DaemonEventKind::ExecutionAttachmentStarted(started)
-                if started.status.execution_id == execution_id
+                if started.attachment_id == expected_attachment_id
+                    && started.status.execution_id == execution_id
                     && started.writable == writable
                     && started.writable == started.writer_lease_id.is_some() =>
             {
@@ -706,7 +710,7 @@ impl AgentLibreClient {
             "request family does not produce a stream".to_owned(),
         ))?;
         let cancellation = expected
-            .stream_cancellation()
+            .stream_cancellation(&kind)
             .expect("a stream response family must define cancellation");
         let capacity = if matches!(expected, Expected::ExecutionStream) {
             EXECUTION_ATTACHMENT_CAPACITY
@@ -724,6 +728,7 @@ impl AgentLibreClient {
                 request,
                 route: Some(Route::Stream {
                     expected,
+                    cancellation: cancellation.clone(),
                     events,
                     failure,
                     last_sequence: 0,
@@ -1156,7 +1161,7 @@ impl PresentationSubscription {
 
 pub struct ExecutionAttachment {
     client: AgentLibreClient,
-    attachment_id: RequestId,
+    attachment_id: ExecutionRequestId,
     execution_id: ExecutionId,
     last_sequence: u64,
     pub started: ExecutionAttachmentStartedEvent,
@@ -1172,7 +1177,7 @@ pub enum ExecutionAttachmentEvent {
 }
 
 impl ExecutionAttachment {
-    pub fn attachment_id(&self) -> &RequestId {
+    pub fn attachment_id(&self) -> &ExecutionRequestId {
         &self.attachment_id
     }
 
@@ -1371,23 +1376,23 @@ enum ConnectionCommand {
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum StreamCancellation {
     Subscription,
-    ExecutionAttachment,
+    ExecutionAttachment(ExecutionRequestId),
 }
 
 impl StreamCancellation {
-    fn request(self, stream_request_id: RequestId) -> DaemonRequestKind {
+    fn request(&self, stream_request_id: RequestId) -> DaemonRequestKind {
         match self {
             Self::Subscription => {
                 DaemonRequestKind::SubscriptionCancel(SubscriptionCancelRequest {
                     subscription_request_id: stream_request_id,
                 })
             }
-            Self::ExecutionAttachment => {
+            Self::ExecutionAttachment(attachment_id) => {
                 DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
-                    attachment_id: stream_request_id,
+                    attachment_id: attachment_id.clone(),
                 })
             }
         }
@@ -1408,6 +1413,7 @@ enum Route {
     },
     Stream {
         expected: Expected,
+        cancellation: StreamCancellation,
         events: mpsc::Sender<DaemonEventKind>,
         failure: watch::Sender<Option<ClientError>>,
         last_sequence: u64,
@@ -1594,12 +1600,17 @@ impl Expected {
             }
     }
 
-    fn stream_cancellation(self) -> Option<StreamCancellation> {
+    fn stream_cancellation(self, request: &DaemonRequestKind) -> Option<StreamCancellation> {
         match self {
             Self::RunStream | Self::PresentationSnapshotStream | Self::PresentationStream => {
                 Some(StreamCancellation::Subscription)
             }
-            Self::ExecutionStream => Some(StreamCancellation::ExecutionAttachment),
+            Self::ExecutionStream => match request {
+                DaemonRequestKind::ExecutionAttach(request) => Some(
+                    StreamCancellation::ExecutionAttachment(request.attachment_id.clone()),
+                ),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1694,6 +1705,7 @@ async fn connection_task(
 struct AbandonedStream {
     request_id: RequestId,
     expected: Expected,
+    cancellation: StreamCancellation,
 }
 
 fn best_effort_cancel_stream(
@@ -1703,14 +1715,10 @@ fn best_effort_cancel_stream(
     let Some(command_sender) = command_sender.upgrade() else {
         return;
     };
-    let cancellation = abandoned
-        .expected
-        .stream_cancellation()
-        .expect("an abandoned stream must define cancellation");
     let _ = command_sender.try_send(ConnectionCommand::Send {
         request: DaemonRequest::new(
             RequestId::generate(),
-            cancellation.request(abandoned.request_id),
+            abandoned.cancellation.request(abandoned.request_id),
         ),
         route: None,
     });
@@ -1730,6 +1738,7 @@ fn dispatch_route(
         }
         Route::Stream {
             expected,
+            cancellation,
             events,
             failure,
             last_sequence,
@@ -1750,6 +1759,7 @@ fn dispatch_route(
                         request_id,
                         Route::Stream {
                             expected,
+                            cancellation,
                             events,
                             failure,
                             last_sequence: delivered_sequence,
@@ -1766,6 +1776,7 @@ fn dispatch_route(
                     Some(AbandonedStream {
                         request_id,
                         expected,
+                        cancellation,
                     })
                 }
             }
@@ -2350,10 +2361,14 @@ mod tests {
             let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
             let request: DaemonRequest =
                 serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
-            let attachment_id = request.request_id.clone();
+            let attachment_id = match &request.kind {
+                DaemonRequestKind::ExecutionAttach(request) => request.attachment_id.clone(),
+                other => panic!("unexpected request: {other:?}"),
+            };
             assert!(matches!(
                 request.kind,
                 DaemonRequestKind::ExecutionAttach(ExecutionAttachRequest {
+                    attachment_id: _,
                     ref execution_id,
                     after_sequence: 0,
                     writable: false,
@@ -2453,6 +2468,20 @@ mod tests {
                 if event.last_delivered_sequence == 7
         ));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn execution_stream_cancellation_uses_the_terminal_owned_attachment_id() {
+        let stream_request_id = RequestId::generate();
+        let attachment_id = ExecutionRequestId::generate();
+        let cancellation = StreamCancellation::ExecutionAttachment(attachment_id.clone());
+
+        assert!(matches!(
+            cancellation.request(stream_request_id),
+            DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
+                attachment_id: actual,
+            }) if actual == attachment_id
+        ));
     }
 
     #[tokio::test]

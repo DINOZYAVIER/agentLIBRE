@@ -4,54 +4,10 @@ use std::sync::Mutex;
 use agl_exec::{ExecutionId, WriterLeaseId};
 
 use crate::{
-    ExecutionChannel, ExecutionExit, ExecutionListFilter, ExecutionOutputChunk,
-    ExecutionPrivateCommand, ExecutionRequest, ExecutionState, ExecutionStatus, InputLease,
+    CommittedOutputFrame, ExecutionListFilter, ExecutionOutputChunk, ExecutionPrivateCommand,
+    ExecutionRequest, ExecutionState, ExecutionStatus, ExecutionTerminalUpdate, InputLease,
     ProcessError, ProcessErrorCode, Result, TerminalSize,
 };
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommittedOutputFrame {
-    pub sequence: u64,
-    pub channel: ExecutionChannel,
-    pub spool_offset: u64,
-    pub byte_length: u64,
-    pub safe_digest: String,
-}
-
-impl CommittedOutputFrame {
-    pub fn from_chunk(chunk: &ExecutionOutputChunk, spool_offset: u64) -> Result<Self> {
-        let payload = chunk.bytes.decode(usize::MAX)?;
-        Ok(Self {
-            sequence: chunk.sequence,
-            channel: chunk.channel,
-            spool_offset,
-            byte_length: payload.len() as u64,
-            safe_digest: sha256_digest(&payload),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionTerminalUpdate {
-    pub state: ExecutionState,
-    pub exit: Option<ExecutionExit>,
-    pub error_code: Option<String>,
-    pub finished_at_unix_ms: i64,
-    pub output_truncated: bool,
-    pub discarded_output_bytes: u64,
-}
-
-impl ExecutionTerminalUpdate {
-    pub fn validate(&self) -> Result<()> {
-        if !self.state.is_terminal() {
-            return Err(ProcessError::new(
-                ProcessErrorCode::StateConflict,
-                "execution terminal update requires a terminal state",
-            ));
-        }
-        Ok(())
-    }
-}
 
 /// Persistence-neutral durable execution metadata used by `ProcessSupervisor`.
 /// Implementations fence transitions so state is monotonic and output sequence
@@ -181,30 +137,6 @@ pub trait ExecutionRepository: Send + Sync {
         execution_id: &ExecutionId,
         expired_at_unix_ms: i64,
     ) -> Result<()>;
-}
-
-/// Private bounded byte storage. Implementations append and sync before the
-/// repository publishes matching metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OutputSpoolRead {
-    pub chunks: Vec<ExecutionOutputChunk>,
-    pub complete: bool,
-}
-
-pub trait OutputSpool: Send + Sync {
-    fn prepare(&self, execution_id: &ExecutionId) -> Result<()>;
-    fn append(&self, execution_id: &ExecutionId, chunk: &ExecutionOutputChunk) -> Result<u64>;
-    fn sync(&self, execution_id: &ExecutionId) -> Result<()>;
-    fn read(
-        &self,
-        execution_id: &ExecutionId,
-        after_sequence: u64,
-        through_sequence: u64,
-        maximum_bytes: usize,
-    ) -> Result<OutputSpoolRead>;
-    fn recover(&self, execution_id: &ExecutionId, committed: &[CommittedOutputFrame])
-    -> Result<()>;
-    fn remove(&self, execution_id: &ExecutionId) -> Result<()>;
 }
 
 #[derive(Default)]
@@ -770,18 +702,6 @@ impl ExecutionRepository for InMemoryExecutionRepository {
         record.status.first_retained_sequence = None;
         Ok(())
     }
-}
-
-fn sha256_digest(bytes: &[u8]) -> String {
-    use sha2::{Digest as _, Sha256};
-    use std::fmt::Write as _;
-
-    let mut rendered = String::with_capacity(71);
-    rendered.push_str("sha256:");
-    for byte in Sha256::digest(bytes) {
-        write!(&mut rendered, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    rendered
 }
 
 fn require_next_sequence(status: &ExecutionStatus, sequence: u64) -> Result<()> {

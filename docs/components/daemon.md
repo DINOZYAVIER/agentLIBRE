@@ -13,7 +13,7 @@ releases its generation's reservations, and preserves the daemon socket,
 session, presentation stream, and terminal PTYs.
 
 The first interactive transport is a private Unix socket. The server validates
-the peer UID, enforces bounded protocol v6alpha frames/streams, and supports
+the peer UID, enforces bounded protocol v7alpha frames/streams, and supports
 systemd user socket activation. A manual bind requires an absolute canonical
 parent owned by the daemon UID with mode `0700`, rejects symlinked or public
 custom parents, and verifies the bound socket is owned with mode `0600`.

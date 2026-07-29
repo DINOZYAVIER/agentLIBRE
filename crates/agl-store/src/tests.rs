@@ -9,14 +9,14 @@ use agl_content::{
 };
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
 use agl_exec::{ExecutionId, WriterLeaseId};
-use agl_ids::{EventId, RequestId, RunId, SessionId, StepId, TurnId};
+use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit,
     ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLeaseOrigin, ExecutionLimits,
     ExecutionOutputChunk, ExecutionOwner, ExecutionProfile, ExecutionRepository, ExecutionRequest,
-    ExecutionState, ExecutionStatus, ExecutionTerminalUpdate, FileOutputSpool, InputLease,
-    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OutputSpool, ProcessBytes, ProcessErrorCode,
-    ProcessSupervisor, ProcessSupervisorOptions,
+    ExecutionRequestId, ExecutionState, ExecutionStatus, ExecutionTerminalUpdate, FileOutputSpool,
+    InputLease, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OutputSpool, ProcessBytes,
+    ProcessErrorCode, ProcessSupervisor, ProcessSupervisorOptions,
 };
 use serde_json::json;
 
@@ -1038,11 +1038,11 @@ fn execution_transitions_are_sequence_owner_and_input_lease_fenced() {
     );
 
     let first_lease = InputLease {
-        attachment_id: RequestId::generate(),
+        attachment_id: ExecutionRequestId::generate(),
         writer_lease_id: Some(WriterLeaseId::generate()),
     };
     let second_lease = InputLease {
-        attachment_id: RequestId::generate(),
+        attachment_id: ExecutionRequestId::generate(),
         writer_lease_id: Some(WriterLeaseId::generate()),
     };
     repository

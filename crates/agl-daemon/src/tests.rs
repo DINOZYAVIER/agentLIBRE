@@ -23,13 +23,13 @@ use agl_inference::{
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, ExecutionId,
-    ExecutionListRequest, ExecutionReadRequest, ExecutionStatusRequest, HelloRequest,
-    InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest, ModelUnloadTarget,
-    PROTOCOL_VERSION, ProtocolErrorCode, ProtocolInferenceWorkerState, ProtocolRunKind,
-    ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest, RunEventsRequest,
-    RunStatusRequest, RunSubmitRequest, RunTreeRequest, SessionFinishReason, SessionFinishRequest,
-    SessionListRequest, SessionOpenRequest, SessionStatus, SessionStatusRequest,
-    SetupSmokeSessionOpenRequest,
+    ExecutionListRequest, ExecutionReadRequest, ExecutionRequestId, ExecutionStatusRequest,
+    HelloRequest, InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest,
+    ModelUnloadTarget, PROTOCOL_VERSION, ProtocolErrorCode, ProtocolInferenceWorkerState,
+    ProtocolRunKind, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest,
+    RunEventsRequest, RunStatusRequest, RunSubmitRequest, RunTreeRequest, SessionFinishReason,
+    SessionFinishRequest, SessionListRequest, SessionOpenRequest, SessionStatus,
+    SessionStatusRequest, SetupSmokeSessionOpenRequest,
 };
 use agl_runtime::{
     AgentLibreHistoryConfig, AgentLibreLoggingConfig, AgentLibrePaths, AgentLibreRuntimeConfig,
@@ -2442,7 +2442,11 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
     }
 
     let lease = process
-        .operator_attach(&ensured.terminal.execution_id, RequestId::generate(), true)
+        .operator_attach(
+            &ensured.terminal.execution_id,
+            ExecutionRequestId::generate(),
+            true,
+        )
         .unwrap();
     process
         .operator_write(

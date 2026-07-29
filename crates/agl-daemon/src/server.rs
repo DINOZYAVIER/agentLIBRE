@@ -19,8 +19,8 @@ use agl_protocol::{
     ExecutionAttachmentFinishReason, ExecutionAttachmentFinishedEvent,
     ExecutionAttachmentStartedEvent, ExecutionDetachAcceptedEvent, ExecutionId,
     ExecutionInputAcceptedEvent, ExecutionLeaseRenewedEvent, ExecutionOutputEvent,
-    ExecutionResizeAcceptedEvent, PresentationSubscriptionFinishReason, ProtocolError,
-    ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
+    ExecutionRequestId, ExecutionResizeAcceptedEvent, PresentationSubscriptionFinishReason,
+    ProtocolError, ProtocolErrorCode, RunSubscriptionFinishedEvent, RunSubscriptionStartedEvent,
     SessionPresentationSnapshotTransfer, SessionPresentationSnapshotTransferPurpose,
     SessionPresentationSubscriptionFinishedEvent, SubscriptionCancelledEvent, WriterLeaseId,
 };
@@ -941,7 +941,7 @@ where
 #[cfg(unix)]
 #[derive(Clone, Default)]
 struct ConnectionAttachments {
-    inner: Arc<Mutex<BTreeMap<agl_ids::RequestId, ConnectionAttachment>>>,
+    inner: Arc<Mutex<BTreeMap<ExecutionRequestId, ConnectionAttachment>>>,
 }
 
 #[cfg(unix)]
@@ -956,7 +956,7 @@ struct ConnectionAttachment {
 impl ConnectionAttachments {
     fn get(
         &self,
-        attachment_id: &agl_ids::RequestId,
+        attachment_id: &ExecutionRequestId,
     ) -> std::result::Result<ConnectionAttachment, ProtocolError> {
         self.inner
             .lock()
@@ -987,7 +987,7 @@ impl ConnectionAttachments {
 
     fn insert(
         &self,
-        attachment_id: agl_ids::RequestId,
+        attachment_id: ExecutionRequestId,
         attachment: ConnectionAttachment,
     ) -> std::result::Result<(), ProtocolError> {
         let mut attachments = self.inner.lock().map_err(attachment_lock_error)?;
@@ -1011,7 +1011,7 @@ impl ConnectionAttachments {
 
     fn remove(
         &self,
-        attachment_id: &agl_ids::RequestId,
+        attachment_id: &ExecutionRequestId,
     ) -> std::result::Result<Option<ConnectionAttachment>, ProtocolError> {
         Ok(self
             .inner
@@ -1404,9 +1404,10 @@ fn stream_execution_attachment(
     sender: &ConnectionEventSender,
     state: &SharedDaemonState,
     attachments: &ConnectionAttachments,
-    attachment_id: agl_ids::RequestId,
+    request_id: agl_ids::RequestId,
     request: agl_protocol::ExecutionAttachRequest,
 ) -> Result<()> {
+    let attachment_id = request.attachment_id.clone();
     let process = state.process_handle()?;
     let maximum_bytes = state.process_read_limit()?;
     let lease = match process.operator_attach(
@@ -1419,7 +1420,7 @@ fn stream_execution_attachment(
             return queue_event(
                 sender,
                 DaemonEvent::new(
-                    Some(attachment_id),
+                    Some(request_id),
                     DaemonEventKind::Error(process_error(error)),
                 ),
             );
@@ -1432,7 +1433,7 @@ fn stream_execution_attachment(
             return queue_event(
                 sender,
                 DaemonEvent::new(
-                    Some(attachment_id),
+                    Some(request_id),
                     DaemonEventKind::Error(process_error(error)),
                 ),
             );
@@ -1447,13 +1448,13 @@ fn stream_execution_attachment(
         let _ = process.operator_detach(&request.execution_id, lease);
         return queue_event(
             sender,
-            DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+            DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
         );
     }
     if let Err(error) = queue_event(
         sender,
         DaemonEvent::new(
-            Some(attachment_id.clone()),
+            Some(request_id.clone()),
             DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
                 attachment_id: attachment_id.clone(),
                 status,
@@ -1484,7 +1485,7 @@ fn stream_execution_attachment(
                 return queue_event(
                     sender,
                     DaemonEvent::new(
-                        Some(attachment_id.clone()),
+                        Some(request_id.clone()),
                         DaemonEventKind::ExecutionAttachmentFinished(
                             ExecutionAttachmentFinishedEvent {
                                 attachment_id,
@@ -1501,7 +1502,7 @@ fn stream_execution_attachment(
                 release_attachment(attachments, &process, &attachment_id);
                 return queue_event(
                     sender,
-                    DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+                    DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
                 );
             }
         };
@@ -1518,7 +1519,7 @@ fn stream_execution_attachment(
                     return queue_event(
                         sender,
                         DaemonEvent::new(
-                            Some(attachment_id.clone()),
+                            Some(request_id.clone()),
                             DaemonEventKind::ExecutionAttachmentFinished(
                                 ExecutionAttachmentFinishedEvent {
                                     attachment_id,
@@ -1537,7 +1538,7 @@ fn stream_execution_attachment(
                     return queue_event(
                         sender,
                         DaemonEvent::new(
-                            Some(attachment_id),
+                            Some(request_id),
                             DaemonEventKind::Error(process_error(error)),
                         ),
                     );
@@ -1561,7 +1562,7 @@ fn stream_execution_attachment(
                 );
                 return queue_event(
                     sender,
-                    DaemonEvent::new(Some(attachment_id), DaemonEventKind::Error(error)),
+                    DaemonEvent::new(Some(request_id), DaemonEventKind::Error(error)),
                 );
             }
         };
@@ -1579,7 +1580,7 @@ fn stream_execution_attachment(
             if let Err(error) = queue_event(
                 sender,
                 DaemonEvent::new(
-                    Some(attachment_id.clone()),
+                    Some(request_id.clone()),
                     DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
                         attachment_id: attachment_id.clone(),
                         execution_id: request.execution_id.clone(),
@@ -1616,7 +1617,7 @@ fn stream_execution_attachment(
             return queue_event(
                 sender,
                 DaemonEvent::new(
-                    Some(attachment_id.clone()),
+                    Some(request_id.clone()),
                     DaemonEventKind::ExecutionAttachmentFinished(
                         ExecutionAttachmentFinishedEvent {
                             attachment_id,
@@ -1811,7 +1812,7 @@ fn execution_detach_event(
 fn release_attachment(
     attachments: &ConnectionAttachments,
     process: &agl_process::ProcessHandle,
-    attachment_id: &agl_ids::RequestId,
+    attachment_id: &ExecutionRequestId,
 ) {
     let Ok(Some(attachment)) = attachments.remove(attachment_id) else {
         return;
@@ -1820,7 +1821,7 @@ fn release_attachment(
 }
 
 #[cfg(unix)]
-fn attachment_not_found(attachment_id: &agl_ids::RequestId) -> ProtocolError {
+fn attachment_not_found(attachment_id: &ExecutionRequestId) -> ProtocolError {
     ProtocolError::new(
         ProtocolErrorCode::NotFound,
         format!("execution attachment {attachment_id} not found on this connection"),
@@ -2253,7 +2254,7 @@ mod connection_writer_tests {
     #[test]
     fn attachments_reject_duplicates_without_replacing_and_are_bounded() {
         let attachments = ConnectionAttachments::default();
-        let first_id = agl_ids::RequestId::generate();
+        let first_id = ExecutionRequestId::generate();
         let first_execution_id = ExecutionId::generate();
         let first_writer_id = WriterLeaseId::generate();
         let first = ConnectionAttachment {
@@ -2302,7 +2303,7 @@ mod connection_writer_tests {
         ));
 
         for _ in 1..CONNECTION_ATTACHMENT_CAPACITY {
-            let attachment_id = agl_ids::RequestId::generate();
+            let attachment_id = ExecutionRequestId::generate();
             attachments
                 .insert(
                     attachment_id.clone(),
@@ -2317,7 +2318,7 @@ mod connection_writer_tests {
                 )
                 .unwrap();
         }
-        let overflow_id = agl_ids::RequestId::generate();
+        let overflow_id = ExecutionRequestId::generate();
         let overflow = attachments
             .insert(
                 overflow_id.clone(),

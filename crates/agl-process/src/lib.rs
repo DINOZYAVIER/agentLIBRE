@@ -1,9 +1,7 @@
 mod config;
-mod context;
 mod platform;
 mod repository;
 mod request;
-mod spool;
 mod status;
 #[cfg(target_os = "linux")]
 mod supervisor;
@@ -17,29 +15,21 @@ mod supervisor_unsupported_contract;
 pub mod terminal;
 
 pub use agl_exec::{
-    ExecutionId, ProcessBytes, ProcessBytesEncoding, ProcessError, ProcessErrorCode, Result,
-    WriterLeaseId,
+    CommittedOutputFrame, ExecutionChannel, ExecutionContextSnapshot, ExecutionCursor,
+    ExecutionExit, ExecutionId, ExecutionOutputChunk, ExecutionPrivateCommand, ExecutionReadResult,
+    ExecutionRequestId, ExecutionState, ExecutionTerminalUpdate, FileOutputSpool, InputLease,
+    KillMode, OutputSpool, OutputSpoolRead, ProcessBytes, ProcessBytesEncoding, ProcessError,
+    ProcessErrorCode, ProcessSupervisorOptions, Result, WRITABLE_INPUT_LEASE_HEARTBEAT,
+    WRITABLE_INPUT_LEASE_TTL, WriterLeaseId, resolve_execution_directory,
 };
-pub use config::{
-    ProcessPlatformDiagnostics, ProcessSupervisorOptions, WRITABLE_INPUT_LEASE_HEARTBEAT,
-    WRITABLE_INPUT_LEASE_TTL,
-};
-pub use context::{ExecutionContextSnapshot, resolve_execution_directory};
-pub use repository::{
-    CommittedOutputFrame, ExecutionRepository, ExecutionTerminalUpdate,
-    InMemoryExecutionRepository, OutputSpool, OutputSpoolRead,
-};
+pub use config::ProcessPlatformDiagnostics;
+pub use repository::{ExecutionRepository, InMemoryExecutionRepository};
 pub use request::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,
     ExecutionLeaseOrigin, ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest,
     LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ShellProfileSnapshot, TerminalSize,
 };
-pub use spool::FileOutputSpool;
-pub use status::{
-    ExecutionChannel, ExecutionCursor, ExecutionExit, ExecutionListFilter, ExecutionOutputChunk,
-    ExecutionPrivateCommand, ExecutionReadResult, ExecutionState, ExecutionStatus, InputLease,
-    KillMode, ShellIntegrationReadResult,
-};
+pub use status::{ExecutionListFilter, ExecutionStatus, ShellIntegrationReadResult};
 pub use supervisor::{ProcessHandle, ProcessSupervisor};
 pub use terminal::command::{
     AgentTerminalCommandQueue, CommandCardSanitizer, HumanTerminalCommandAdmission,

@@ -5,7 +5,7 @@ pub use surface::*;
 
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
-pub use agl_exec::{ExecutionId, WriterLeaseId};
+pub use agl_exec::{ExecutionId, ExecutionRequestId, WriterLeaseId};
 use agl_ids::{
     AttemptId, DaemonInstanceId, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
@@ -17,9 +17,9 @@ pub use agl_process::{
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v6alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v6alpha";
-pub const PROTOCOL_VERSION: &str = "v6alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v7alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v7alpha";
+pub const PROTOCOL_VERSION: &str = "v7alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -41,7 +41,7 @@ impl DaemonRequest {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != REQUEST_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon request schema does not match protocol v6alpha",
+                "daemon request schema does not match protocol v7alpha",
             ));
         }
         self.kind.validate_surface()?;
@@ -152,7 +152,7 @@ impl DaemonEvent {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != EVENT_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon event schema does not match protocol v6alpha",
+                "daemon event schema does not match protocol v7alpha",
             ));
         }
         validate_safe_metadata(&self.safe_metadata)?;
@@ -585,6 +585,7 @@ pub struct ExecutionReadRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionAttachRequest {
+    pub attachment_id: ExecutionRequestId,
     pub execution_id: ExecutionId,
     #[serde(default)]
     pub after_sequence: u64,
@@ -595,7 +596,7 @@ pub struct ExecutionAttachRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionInputRequest {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub bytes: ProcessBytes,
     #[serde(default)]
     pub eof: bool,
@@ -604,13 +605,13 @@ pub struct ExecutionInputRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionLeaseRenewRequest {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionResizeRequest {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub columns: u16,
     pub rows: u16,
 }
@@ -618,7 +619,7 @@ pub struct ExecutionResizeRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionDetachRequest {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -756,7 +757,7 @@ pub struct ExecutionReadEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionAttachmentStartedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub status: ExecutionStatus,
     pub writable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -771,14 +772,14 @@ pub struct ExecutionAttachmentStartedEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionLeaseRenewedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub lease_ttl_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionOutputEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub execution_id: ExecutionId,
     pub chunk: ExecutionOutputChunk,
     pub state: ExecutionState,
@@ -787,14 +788,14 @@ pub struct ExecutionOutputEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionInputAcceptedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub eof: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionResizeAcceptedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub columns: u16,
     pub rows: u16,
 }
@@ -802,7 +803,7 @@ pub struct ExecutionResizeAcceptedEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionDetachAcceptedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -815,7 +816,7 @@ pub struct ExecutionKillAcceptedEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionAttachmentFinishedEvent {
-    pub attachment_id: RequestId,
+    pub attachment_id: ExecutionRequestId,
     pub execution_id: ExecutionId,
     pub state: ExecutionState,
     pub last_delivered_sequence: u64,
@@ -1124,6 +1125,7 @@ mod tests {
     const MESSAGE_ID_3: &str = "msg_01890f17-4a00-7000-8000-000000000007";
     const ATTEMPT_ID: &str = "attempt_01890f17-4a00-7000-8000-000000000008";
     const EXECUTION_ID: &str = "exec_01890f17-4a00-7000-8000-000000000009";
+    const EXECUTION_REQUEST_ID: &str = "exec_req_01890f17-4a00-7000-8000-00000000000a";
 
     fn request_id() -> RequestId {
         RequestId::parse(REQUEST_ID).unwrap()
@@ -1153,6 +1155,10 @@ mod tests {
         ExecutionId::parse(EXECUTION_ID).unwrap()
     }
 
+    fn execution_request_id() -> ExecutionRequestId {
+        ExecutionRequestId::parse(EXECUTION_REQUEST_ID).unwrap()
+    }
+
     #[test]
     fn run_submit_request_round_trips_as_jsonl_shape() {
         let request = DaemonRequest::new(
@@ -1167,7 +1173,7 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v6alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v7alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
         assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -1584,17 +1590,37 @@ mod tests {
 
     #[test]
     fn execution_frames_preserve_typed_ids_and_explicit_binary_encoding() {
+        let attach = DaemonRequest::new(
+            request_id(),
+            DaemonRequestKind::ExecutionAttach(ExecutionAttachRequest {
+                attachment_id: execution_request_id(),
+                execution_id: execution_id(),
+                after_sequence: 0,
+                writable: true,
+            }),
+        );
+        let attach_value = serde_json::to_value(&attach).unwrap();
+        assert_eq!(attach_value["request_id"], REQUEST_ID);
+        assert_eq!(
+            attach_value["payload"]["attachment_id"],
+            EXECUTION_REQUEST_ID
+        );
+        assert_ne!(
+            attach_value["request_id"],
+            attach_value["payload"]["attachment_id"]
+        );
+
         let request = DaemonRequest::new(
             request_id(),
             DaemonRequestKind::ExecutionInput(ExecutionInputRequest {
-                attachment_id: request_id(),
+                attachment_id: execution_request_id(),
                 bytes: ProcessBytes::from_bytes(&[0xff, 0x00, 0x80]),
                 eof: true,
             }),
         );
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["kind"], "execution_input");
-        assert_eq!(value["payload"]["attachment_id"], REQUEST_ID);
+        assert_eq!(value["payload"]["attachment_id"], EXECUTION_REQUEST_ID);
         assert_eq!(value["payload"]["bytes"]["encoding"], "base64");
         assert_eq!(
             serde_json::from_value::<DaemonRequest>(value).unwrap(),
@@ -1604,7 +1630,7 @@ mod tests {
         let output = DaemonEvent::new(
             Some(request_id()),
             DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
-                attachment_id: request_id(),
+                attachment_id: execution_request_id(),
                 execution_id: execution_id(),
                 chunk: ExecutionOutputChunk {
                     sequence: 7,
@@ -1622,12 +1648,15 @@ mod tests {
         let renewal = DaemonRequest::new(
             request_id(),
             DaemonRequestKind::ExecutionLeaseRenew(ExecutionLeaseRenewRequest {
-                attachment_id: request_id(),
+                attachment_id: execution_request_id(),
             }),
         );
         let renewal_value = serde_json::to_value(&renewal).unwrap();
         assert_eq!(renewal_value["kind"], "execution_lease_renew");
-        assert_eq!(renewal_value["payload"]["attachment_id"], REQUEST_ID);
+        assert_eq!(
+            renewal_value["payload"]["attachment_id"],
+            EXECUTION_REQUEST_ID
+        );
         assert_eq!(
             serde_json::from_value::<DaemonRequest>(renewal_value).unwrap(),
             renewal
@@ -1636,7 +1665,7 @@ mod tests {
         let finished = DaemonEvent::new(
             Some(request_id()),
             DaemonEventKind::ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent {
-                attachment_id: request_id(),
+                attachment_id: execution_request_id(),
                 execution_id: execution_id(),
                 state: ExecutionState::Running,
                 last_delivered_sequence: 7,
@@ -1658,13 +1687,23 @@ mod tests {
             "request_id": REQUEST_ID,
             "kind": "execution_resize",
             "payload": {
-                "attachment_id": REQUEST_ID,
+                "attachment_id": EXECUTION_REQUEST_ID,
                 "columns": 80,
                 "rows": 24,
                 "legacy": true
             }
         });
         assert!(serde_json::from_value::<DaemonRequest>(unknown).is_err());
+
+        let correlation_id_as_attachment = serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "request_id": REQUEST_ID,
+            "kind": "execution_detach",
+            "payload": {
+                "attachment_id": REQUEST_ID
+            }
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(correlation_id_as_attachment).is_err());
 
         let untyped_execution = serde_json::json!({
             "schema": REQUEST_SCHEMA,
