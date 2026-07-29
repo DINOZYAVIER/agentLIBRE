@@ -287,8 +287,10 @@ name = "agl-exec"
 version = "1.0.0-alpha.12"
 dependencies = [
  "base64",
+ "libc",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "uuid",
 ]

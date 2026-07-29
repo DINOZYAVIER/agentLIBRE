@@ -3,12 +3,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agl_exec::ExecutionId;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CommittedOutputFrame, ExecutionChannel, ExecutionOutputChunk, OutputSpool, OutputSpoolRead,
-    ProcessBytes, ProcessError, ProcessErrorCode, Result,
+    CommittedOutputFrame, ExecutionChannel, ExecutionId, ExecutionOutputChunk, OutputSpool,
+    OutputSpoolRead, ProcessBytes, ProcessError, ProcessErrorCode, Result,
 };
 
 const HEADER: &[u8] = b"AGLSPOOL\x01";

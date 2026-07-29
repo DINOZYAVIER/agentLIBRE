@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 use crate::{ProcessError, ProcessErrorCode, Result};
@@ -148,4 +150,124 @@ impl EnvironmentOverride {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellProfileSnapshot {
+    pub program: PathBuf,
+    pub command_args: Vec<String>,
+    pub login_command_args: Option<Vec<String>>,
+    pub environment_names: Vec<String>,
+    pub executable_digest: String,
+    pub config_digest: String,
+}
+
+impl ShellProfileSnapshot {
+    pub fn validate(&self) -> Result<()> {
+        validate_program(&self.program)?;
+        validate_argv(&self.command_args)?;
+        if let Some(args) = &self.login_command_args {
+            validate_argv(args)?;
+        }
+        if self
+            .environment_names
+            .iter()
+            .any(|name| name.is_empty() || name.contains(['=', '\0']))
+        {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "shell environment names must be nonempty and contain no NUL or '='",
+            ));
+        }
+        if self.executable_digest.is_empty() || self.config_digest.is_empty() {
+            return Err(ProcessError::new(
+                ProcessErrorCode::InvalidRequest,
+                "shell admission digests must be nonempty",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn verify_executable(&self) -> Result<()> {
+        use sha2::{Digest as _, Sha256};
+
+        self.validate()?;
+        let canonical = self.program.canonicalize().map_err(|error| {
+            ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                format!("admitted shell executable cannot be resolved: {error}"),
+            )
+        })?;
+        if canonical != self.program {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                "admitted shell executable path changed after admission",
+            ));
+        }
+        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+            ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                format!("admitted shell executable cannot be inspected: {error}"),
+            )
+        })?;
+        if !metadata.is_file() || !is_executable(&metadata) {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                "admitted shell executable is not a regular executable",
+            ));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|error| {
+            ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                format!("admitted shell executable cannot be read: {error}"),
+            )
+        })?;
+        let mut digest = String::with_capacity(71);
+        digest.push_str("sha256:");
+        use std::fmt::Write as _;
+        for byte in Sha256::digest(bytes) {
+            write!(&mut digest, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        if digest != self.executable_digest {
+            return Err(ProcessError::new(
+                ProcessErrorCode::SandboxExecutableUnavailable,
+                "admitted shell executable identity changed after admission",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_program(program: &Path) -> Result<()> {
+    let value = program.as_os_str().to_string_lossy();
+    if value.is_empty() || value.contains('\0') || !program.is_absolute() {
+        return Err(ProcessError::new(
+            ProcessErrorCode::InvalidRequest,
+            "admitted program must be an absolute path containing no NUL",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_argv(args: &[String]) -> Result<()> {
+    if args.iter().any(|arg| arg.contains('\0')) {
+        return Err(ProcessError::new(
+            ProcessErrorCode::InvalidRequest,
+            "process arguments must contain no NUL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_metadata: &std::fs::Metadata) -> bool {
+    true
 }

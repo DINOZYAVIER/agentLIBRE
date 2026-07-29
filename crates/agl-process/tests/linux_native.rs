@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agl_ids::{RequestId, RunId, StepId};
+use agl_ids::{RunId, StepId};
 use agl_process::ExecutionId;
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionCursor,
     ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
-    ExecutionProfile, ExecutionRequest, ExecutionState, FileOutputSpool,
+    ExecutionProfile, ExecutionRequest, ExecutionRequestId, ExecutionState, FileOutputSpool,
     InMemoryExecutionRepository, InputLease, ProcessBytes, ProcessErrorCode, ProcessHandle,
     ProcessSupervisor, ProcessSupervisorOptions, TerminalSize, process_platform_diagnostics,
 };
@@ -127,7 +127,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
     let mut echo = harness.request(vec!["stdin-echo".to_owned()], ExecutionIo::Pipes);
     echo.close_stdin_after_initial = false;
     let started = harness.handle.start(echo).unwrap();
-    let writer_id = RequestId::generate();
+    let writer_id = ExecutionRequestId::generate();
     let writer = harness
         .handle
         .attach(
@@ -143,7 +143,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .attach(
             &started.execution_id,
             &harness.owner,
-            RequestId::generate(),
+            ExecutionRequestId::generate(),
             false,
         )
         .unwrap();
@@ -152,7 +152,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .attach(
             &started.execution_id,
             &harness.owner,
-            RequestId::generate(),
+            ExecutionRequestId::generate(),
             false,
         )
         .unwrap();
@@ -162,7 +162,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
             .attach(
                 &started.execution_id,
                 &harness.owner,
-                RequestId::generate(),
+                ExecutionRequestId::generate(),
                 true,
             )
             .unwrap_err()
@@ -205,7 +205,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .attach(
             &binary_status.execution_id,
             &harness.owner,
-            RequestId::generate(),
+            ExecutionRequestId::generate(),
             false,
         )
         .unwrap();
@@ -294,7 +294,7 @@ fn argv_pipe_and_pty_contract(harness: &Harness) {
         .attach(
             &started.execution_id,
             &harness.owner,
-            RequestId::generate(),
+            ExecutionRequestId::generate(),
             true,
         )
         .unwrap();
@@ -354,7 +354,7 @@ fn supervisor_concurrency_and_backpressure_contract(harness: &Harness) {
         .attach(
             &started.execution_id,
             &harness.owner,
-            RequestId::generate(),
+            ExecutionRequestId::generate(),
             true,
         )
         .unwrap();
@@ -682,7 +682,7 @@ fn wait_for_output(
             .attach(
                 execution_id,
                 &harness.owner,
-                RequestId::generate(),
+                ExecutionRequestId::generate(),
                 writable,
             )
             .unwrap()

@@ -9,14 +9,15 @@ use agl_extension::{
     EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
 };
-use agl_ids::{ExecutionScope, RequestId, SessionId, StepId};
+use agl_ids::{ExecutionScope, SessionId, StepId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
     ExecutionContextSnapshot, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionId,
     ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile,
-    ExecutionRequest, HostStartupPolicy, KillMode, ProcessBytes, ProcessBytesEncoding,
-    ProcessHandle, TerminalEnsureRequest, TerminalEnvironmentRequest, TerminalHistorySeed,
-    TerminalOwner, TerminalRegistry, TerminalSize, resolve_execution_directory,
+    ExecutionRequest, ExecutionRequestId, HostStartupPolicy, KillMode, ProcessBytes,
+    ProcessBytesEncoding, ProcessHandle, TerminalEnsureRequest, TerminalEnvironmentRequest,
+    TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize,
+    resolve_execution_directory,
 };
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
@@ -667,7 +668,7 @@ impl ProcessTools {
         let owner = self.context.load(&invocation.scope)?.owner;
         let lease = self
             .process
-            .attach(&execution_id, &owner, RequestId::generate(), true)
+            .attach(&execution_id, &owner, ExecutionRequestId::generate(), true)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let written = self.process.write(
             &execution_id,

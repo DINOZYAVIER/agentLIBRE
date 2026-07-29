@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use agl_exec::ExecutionRequestId;
 use agl_exec::{ExecutionId, WriterLeaseId};
-use agl_ids::{RequestId, RunId};
+use agl_ids::RunId;
 
 use crate::terminal::shell::ManagedShellStartup;
 use crate::{
@@ -135,7 +136,7 @@ impl ProcessHandle {
         &self,
         _execution_id: &ExecutionId,
         _owner: &ExecutionOwner,
-        _attachment_id: RequestId,
+        _attachment_id: ExecutionRequestId,
         _writable: bool,
     ) -> Result<InputLease> {
         unsupported()
@@ -144,7 +145,7 @@ impl ProcessHandle {
     pub fn operator_attach(
         &self,
         _execution_id: &ExecutionId,
-        _attachment_id: RequestId,
+        _attachment_id: ExecutionRequestId,
         _writable: bool,
     ) -> Result<InputLease> {
         unsupported()

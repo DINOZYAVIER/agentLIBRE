@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agl_exec::{ExecutionId, WriterLeaseId};
-use agl_ids::RequestId;
+use agl_exec::{ExecutionId, ExecutionRequestId, WriterLeaseId};
 
 use crate::platform::{self, LaunchDirectories, LaunchedProcess};
 use crate::terminal::shell::{
@@ -87,7 +86,7 @@ enum Command {
     Attach {
         execution_id: ExecutionId,
         owner: Option<ExecutionOwner>,
-        attachment_id: RequestId,
+        attachment_id: ExecutionRequestId,
         writable: bool,
         reply: Reply<InputLease>,
     },
@@ -267,13 +266,17 @@ struct BufferedShellIntegrationPacket {
 
 #[derive(Clone)]
 struct WritableInputLease {
-    attachment_id: RequestId,
+    attachment_id: ExecutionRequestId,
     writer_lease_id: WriterLeaseId,
     expires_at: Instant,
 }
 
 impl WritableInputLease {
-    fn new(attachment_id: RequestId, writer_lease_id: WriterLeaseId, now: Instant) -> Self {
+    fn new(
+        attachment_id: ExecutionRequestId,
+        writer_lease_id: WriterLeaseId,
+        now: Instant,
+    ) -> Self {
         Self {
             attachment_id,
             writer_lease_id,
@@ -549,7 +552,7 @@ impl ProcessHandle {
         &self,
         execution_id: &ExecutionId,
         owner: &ExecutionOwner,
-        attachment_id: RequestId,
+        attachment_id: ExecutionRequestId,
         writable: bool,
     ) -> Result<InputLease> {
         self.attach_with_owner(execution_id, Some(owner.clone()), attachment_id, writable)
@@ -558,7 +561,7 @@ impl ProcessHandle {
     pub fn operator_attach(
         &self,
         execution_id: &ExecutionId,
-        attachment_id: RequestId,
+        attachment_id: ExecutionRequestId,
         writable: bool,
     ) -> Result<InputLease> {
         self.attach_with_owner(execution_id, None, attachment_id, writable)
@@ -817,7 +820,7 @@ impl ProcessHandle {
         &self,
         execution_id: &ExecutionId,
         owner: Option<ExecutionOwner>,
-        attachment_id: RequestId,
+        attachment_id: ExecutionRequestId,
         writable: bool,
     ) -> Result<InputLease> {
         self.request(|reply| Command::Attach {
@@ -1315,11 +1318,13 @@ impl Reactor {
             self.require_reserved_execution_id_available(execution_id)?;
         }
         request.validate()?;
-        if let Some(root) = request
-            .read_only_roots
-            .iter()
-            .find(|root| !self.options.admits_runtime_read_only_root(root))
-        {
+        if let Some(root) = request.read_only_roots.iter().find(|root| {
+            !self
+                .options
+                .runtime_read_only_roots
+                .iter()
+                .any(|configured| root.starts_with(configured))
+        }) {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
                 format!(
@@ -1769,7 +1774,7 @@ impl Reactor {
         &mut self,
         execution_id: &ExecutionId,
         owner: Option<&ExecutionOwner>,
-        attachment_id: RequestId,
+        attachment_id: ExecutionRequestId,
         writable: bool,
     ) -> Result<InputLease> {
         self.checked_status(execution_id, owner)?;
@@ -3475,8 +3480,11 @@ mod tests {
     #[test]
     fn writable_input_lease_deadline_is_exact_and_renewal_replaces_it() {
         let started = Instant::now();
-        let mut lease =
-            WritableInputLease::new(RequestId::generate(), WriterLeaseId::generate(), started);
+        let mut lease = WritableInputLease::new(
+            ExecutionRequestId::generate(),
+            WriterLeaseId::generate(),
+            started,
+        );
         assert!(!lease.is_expired(started + WRITABLE_INPUT_LEASE_TTL - Duration::from_nanos(1)));
         assert!(lease.is_expired(started + WRITABLE_INPUT_LEASE_TTL));
 
@@ -3493,7 +3501,7 @@ mod tests {
         let execution_id = fixture.execution_id.clone();
         let first = fixture
             .reactor
-            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .attach_input(&execution_id, None, ExecutionRequestId::generate(), true)
             .unwrap();
         let first_writer = first.writer_lease_id().unwrap().clone();
         assert_eq!(
@@ -3504,7 +3512,7 @@ mod tests {
             first
         );
         let forged_attachment = InputLease {
-            attachment_id: RequestId::generate(),
+            attachment_id: ExecutionRequestId::generate(),
             writer_lease_id: Some(first_writer.clone()),
         };
         assert_eq!(
@@ -3552,7 +3560,7 @@ mod tests {
 
         let replacement = fixture
             .reactor
-            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .attach_input(&execution_id, None, ExecutionRequestId::generate(), true)
             .unwrap();
         let replacement_writer = replacement.writer_lease_id().unwrap().clone();
         assert_ne!(replacement_writer, first_writer);
@@ -3639,7 +3647,12 @@ mod tests {
         assert_eq!(
             fixture
                 .reactor
-                .attach_input(&execution_id, Some(&run_owner), RequestId::generate(), true,)
+                .attach_input(
+                    &execution_id,
+                    Some(&run_owner),
+                    ExecutionRequestId::generate(),
+                    true,
+                )
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::ExecutionNotOwned
@@ -3711,7 +3724,7 @@ mod tests {
 
         let lease = fixture
             .reactor
-            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .attach_input(&execution_id, None, ExecutionRequestId::generate(), true)
             .unwrap();
         assert_eq!(
             fixture
@@ -3836,7 +3849,7 @@ mod tests {
         let execution_id = fixture.execution_id.clone();
         let lease = fixture
             .reactor
-            .attach_input(&execution_id, None, RequestId::generate(), true)
+            .attach_input(&execution_id, None, ExecutionRequestId::generate(), true)
             .unwrap();
         let chunk = vec![b'x'; LIMIT / 2];
         for _ in 0..3 {

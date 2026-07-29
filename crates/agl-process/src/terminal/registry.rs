@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agl_exec::ExecutionId;
-use agl_ids::{RequestId, RunId, SessionId, StepId, TerminalSessionId};
+use agl_exec::{ExecutionId, ExecutionRequestId};
+use agl_ids::{RunId, SessionId, StepId, TerminalSessionId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -276,7 +276,11 @@ trait TerminalExecutionStarter: Send + Sync {
         frame: ProcessBytes,
     ) -> Result<u64>;
 
-    fn attach(&self, execution_id: &ExecutionId, attachment_id: RequestId) -> Result<InputLease>;
+    fn attach(
+        &self,
+        execution_id: &ExecutionId,
+        attachment_id: ExecutionRequestId,
+    ) -> Result<InputLease>;
 
     fn detach(&self, execution_id: &ExecutionId, lease: InputLease) -> Result<()>;
 
@@ -339,7 +343,11 @@ impl TerminalExecutionStarter for SupervisorTerminalStarter {
             .operator_send_shell_integration_control(execution_id, frame)
     }
 
-    fn attach(&self, execution_id: &ExecutionId, attachment_id: RequestId) -> Result<InputLease> {
+    fn attach(
+        &self,
+        execution_id: &ExecutionId,
+        attachment_id: ExecutionRequestId,
+    ) -> Result<InputLease> {
         self.0.operator_attach(execution_id, attachment_id, true)
     }
 
@@ -1243,7 +1251,7 @@ impl TerminalRegistry {
             previous_prompt
         };
 
-        let attachment_id = RequestId::generate();
+        let attachment_id = ExecutionRequestId::generate();
         let attached = self.starter.attach(execution_id, attachment_id);
         let (lease, submitted) = match attached {
             Ok(lease) => {
@@ -3053,7 +3061,7 @@ mod tests {
         records: Mutex<BTreeMap<ExecutionId, ExecutionStatus>>,
         tokens: Mutex<BTreeMap<ExecutionId, ShellIntegrationToken>>,
         integrations: Mutex<BTreeMap<ExecutionId, FakeIntegration>>,
-        writable_leases: Mutex<BTreeMap<ExecutionId, (RequestId, WriterLeaseId)>>,
+        writable_leases: Mutex<BTreeMap<ExecutionId, (ExecutionRequestId, WriterLeaseId)>>,
         writes: Mutex<Vec<(ExecutionId, Vec<u8>)>>,
         controls: Mutex<Vec<(ExecutionId, Vec<String>)>>,
     }
@@ -3228,7 +3236,7 @@ mod tests {
         fn attach(
             &self,
             execution_id: &ExecutionId,
-            attachment_id: RequestId,
+            attachment_id: ExecutionRequestId,
         ) -> Result<InputLease> {
             self.status(execution_id)?;
             let mut leases = self.writable_leases.lock().unwrap();
@@ -4457,7 +4465,7 @@ mod tests {
             .poll_private_integration(&subagent.terminal_id, AGENT_TERMINAL_INTEGRATION_READ_BYTES)
             .unwrap();
         let lease = starter
-            .attach(&subagent.execution_id, RequestId::generate())
+            .attach(&subagent.execution_id, ExecutionRequestId::generate())
             .unwrap();
         let (active_sequence, queued_sequence) = {
             let mut state = registry.lock().unwrap();
@@ -5036,7 +5044,7 @@ mod tests {
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         let lease = starter
-            .attach(&terminal.execution_id, RequestId::generate())
+            .attach(&terminal.execution_id, ExecutionRequestId::generate())
             .unwrap();
 
         registry
@@ -5169,7 +5177,7 @@ mod tests {
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         let lease = starter
-            .attach(&terminal.execution_id, RequestId::generate())
+            .attach(&terminal.execution_id, ExecutionRequestId::generate())
             .unwrap();
 
         registry
@@ -5342,7 +5350,7 @@ mod tests {
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         let lease = starter
-            .attach(&terminal.execution_id, RequestId::generate())
+            .attach(&terminal.execution_id, ExecutionRequestId::generate())
             .unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
 

@@ -3573,7 +3573,7 @@ mod tests {
     }
 
     #[test]
-    fn human_terminal_ensure_has_strict_v6_wire_shape_and_redacted_debug() {
+    fn human_terminal_ensure_has_strict_v7_wire_shape_and_redacted_debug() {
         let request = DaemonRequest::new(
             request_id(),
             DaemonRequestKind::HumanTerminalEnsure(ensure_request()),

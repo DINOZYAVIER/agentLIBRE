@@ -2125,7 +2125,7 @@ fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads()
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=running");
-    assert_contains(&stdout, "protocol_version=v6alpha");
+    assert_contains(&stdout, "protocol_version=v7alpha");
     assert_contains(&stdout, "product_version=");
     assert_contains(&stdout, "daemon_instance_id=");
     assert_contains(&stdout, "worker_build_id=sha256:test-worker");
