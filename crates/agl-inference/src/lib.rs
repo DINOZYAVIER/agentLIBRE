@@ -41,8 +41,8 @@ pub use model_manager::{
     ModelGeneration, ModelKey, ModelManager, ModelManagerError, ModelManagerHandle,
     ModelManagerOptions, ModelManagerStatus, ModelManagerStatusDetail, ModelReleaseOutcome,
     ModelReleaseReason, ModelRuntime, ModelUnloadOutcome, ModelUnloadResult, ModelUnloadTarget,
-    ResolvedContentPart, ResolvedMessageContent, ResolvedModelContent, RuntimeFailure,
-    RuntimeFailureKind, RuntimeOperation,
+    ResolvedContentPart, ResolvedMessageContent, ResolvedModelContent, ResourceAdmissionDetails,
+    RuntimeFailure, RuntimeFailureKind, RuntimeOperation,
 };
 pub use output::{
     InferenceOutputEvent, InferenceOutputSink, InferenceProductStage, InferenceProgressUnit,

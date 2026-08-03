@@ -76,6 +76,8 @@ struct FakeState {
     fail_model_release: bool,
     backend_lost_on_context_release: bool,
     resource_failure_on_load: Option<(String, String)>,
+    resource_failure_details_on_load: Option<ResourceAdmissionDetails>,
+    resource_admission_on_generate: Option<ResourceAdmissionDetails>,
     reaped_resource_failure_on_generate: Option<(String, String)>,
     inventory_calls: usize,
 }
@@ -178,15 +180,20 @@ impl ModelRuntime for FakeRuntime {
             .unwrap()
             .operations
             .push(format!("load_model:{}", key.digest()));
-        if let Some((code, message)) = self
-            .control
-            .state
-            .lock()
-            .unwrap()
-            .resource_failure_on_load
-            .clone()
-        {
-            return Err(RuntimeFailure::resource_admission(code, message, ""));
+        let resource_failure = {
+            let state = self.control.state.lock().unwrap();
+            state
+                .resource_failure_on_load
+                .clone()
+                .map(|failure| (failure, state.resource_failure_details_on_load.clone()))
+        };
+        if let Some(((code, message), details)) = resource_failure {
+            return Err(match details {
+                Some(details) => {
+                    RuntimeFailure::resource_admission_with_details(code, message, "", details)
+                }
+                None => RuntimeFailure::resource_admission(code, message, ""),
+            });
         }
         Ok(RuntimeOperation::new(
             FakeModel {
@@ -249,6 +256,7 @@ impl ModelRuntime for FakeRuntime {
         let panic_on_generate = state.panic_on_generate;
         let finish_reason = state.finish_reason.unwrap_or(InferenceFinishReason::Stop);
         let reaped_resource_failure = state.reaped_resource_failure_on_generate.clone();
+        let resource_admission = state.resource_admission_on_generate.clone();
         drop(state);
         if panic_on_generate {
             panic!("injected fake worker panic");
@@ -273,6 +281,7 @@ impl ModelRuntime for FakeRuntime {
                 selected_device: Some("fake:0".to_string()),
                 input_tokens: 4,
                 output_tokens: 1,
+                resource_admission,
             },
             format!("fake generate {attempt}"),
         ))
@@ -1486,15 +1495,56 @@ fn resource_admission_codes_survive_manager_mapping_and_reaped_generations() {
         "accelerator_capacity_exceeded".to_string(),
         "requested profile does not fit".to_string(),
     ));
+    let details = ResourceAdmissionDetails {
+        selected_profile_id: "gemma4-31b-64k-reviewed".to_string(),
+        context_tokens: 65_536,
+        model_key: "11".repeat(32),
+        context_key: "22".repeat(32),
+        snapshot: crate::admission::DeviceMemorySnapshot {
+            physical_device_id: "drm-render-128".to_string(),
+            driver_id: "amdgpu-test".to_string(),
+            total_bytes: 24_000,
+            available_bytes: 21_473,
+            observed_at_unix_ms: 1_000,
+        },
+        estimate: crate::admission::AllocationEstimate {
+            model_bytes: 16_950,
+            context_bytes: 3_850,
+            transient_bytes: 320,
+            uncertainty_bytes: 256,
+        },
+        required_bytes: 22_400,
+        available_bytes: 21_473,
+        reserved_bytes: 0,
+        pressure_bytes: 2_527,
+        reserve_bytes: 1_024,
+        fallback_allowed: false,
+        model_load_started: false,
+        tool_effect_started: false,
+    };
+    control
+        .state
+        .lock()
+        .unwrap()
+        .resource_failure_details_on_load = Some(details.clone());
     let error = handle
         .generate(job(&root, &config, "capacity", 1))
         .unwrap_err();
     assert!(matches!(error, ModelManagerError::ResourceAdmission { .. }));
     assert_eq!(error.code(), "accelerator_capacity_exceeded");
     assert!(!error.retryable());
+    assert_eq!(error.resource_admission_details(), Some(&details));
 
     control.state.lock().unwrap().resource_failure_on_load = None;
-    handle.generate(job(&root, &config, "receipt", 2)).unwrap();
+    control
+        .state
+        .lock()
+        .unwrap()
+        .resource_failure_details_on_load = None;
+    control.state.lock().unwrap().resource_admission_on_generate = Some(details.clone());
+    let response = handle.generate(job(&root, &config, "receipt", 2)).unwrap();
+    assert_eq!(response.metadata.resource_admission, Some(details));
+    control.state.lock().unwrap().resource_admission_on_generate = None;
     control
         .state
         .lock()

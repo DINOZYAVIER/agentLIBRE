@@ -61,6 +61,385 @@ fn effective_capabilities(ids: &[&str]) -> EffectiveToolSet {
 }
 
 #[test]
+fn external_same_id_extension_cannot_bind_the_builtin_provider() {
+    let root =
+        std::env::temp_dir().join(format!("agl-chat-extension-binding-{}", std::process::id()));
+    let workspace = root.join("workspace");
+    let function_root = workspace.join(".agl/functions/external-extension");
+    let extension_root = workspace.join(".agl/extensions/core.workspace");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&function_root).unwrap();
+    std::fs::create_dir_all(&extension_root).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: external-extension
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - extension:core.workspace@^1.0
+title: External extension fixture
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 32
+skills:
+  use: []
+subagents:
+  use: []
+doctor:
+  smoke_prompt: "Reply without tools."
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Do not execute tools.\n").unwrap();
+    std::fs::write(
+        extension_root.join("EXTENSION.json"),
+        r#"{
+  "schema": "agentlibre.artifact/v1",
+  "type": "extension",
+  "id": "core.workspace",
+  "version": "1.1.0",
+  "payload_schema": "agentlibre.extension/v1",
+  "agl": {
+    "compatible": ">=1.0.0-alpha.12",
+    "tested": ["1.0.0-alpha.12"]
+  },
+  "requires": [],
+  "api_major": 1,
+  "implementation": "builtin:agl-core-tools/fs"
+}
+"#,
+    )
+    .unwrap();
+    let paths = AgentLibrePaths::from_agl_home(root.join("home"));
+    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let bundle = composition
+        .resolve_runtime_bundle(
+            &workspace,
+            &paths.config_dir,
+            "external-extension",
+            false,
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        bundle.graph.nodes[&bundle.extensions["core.workspace"].node_key]
+            .candidate
+            .tier,
+        ArtifactSourceTier::Workspace
+    );
+
+    let error = bind_runtime_extensions(&bundle).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot bind to a builtin provider")
+    );
+    assert!(error.to_string().contains("no Tool effect occurred"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn selected_skill_context_uses_the_admitted_bundle_bytes() {
+    let root = std::env::temp_dir().join(format!("agl-chat-skill-snapshot-{}", std::process::id()));
+    let workspace = root.join("workspace");
+    let function_root = workspace.join(".agl/functions/skill-snapshot");
+    let skill_root = workspace.join(".agl/skills/snapshot-skill");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&function_root).unwrap();
+    std::fs::create_dir_all(&skill_root).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: skill-snapshot
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - skill:snapshot-skill@^1.0
+title: Skill snapshot fixture
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 32
+skills:
+  use: [snapshot-skill]
+subagents:
+  use: []
+doctor:
+  smoke_prompt: "Reply without tools."
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(function_root.join("SYSTEM.md"), "Use the selected skill.\n").unwrap();
+    let skill_document = |body: &str| {
+        format!(
+            r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: skill
+  id: snapshot-skill
+  version: 1.0.0
+  payload_schema: agentlibre.skill/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires: []
+description: Snapshot test skill.
+pack: test
+required_hooks: []
+allowed_tools: []
+context_budget_tokens: 256
+references:
+  include: []
+guarantees:
+  - admitted bytes remain stable
+---
+
+{body}
+"#
+        )
+    };
+    std::fs::write(skill_root.join("SKILL.md"), skill_document("admitted body")).unwrap();
+    let paths = AgentLibrePaths::from_agl_home(root.join("home"));
+    let composition = agl_runtime::compose_artifacts(&paths, &workspace).unwrap();
+    let bundle = composition
+        .resolve_runtime_bundle(&workspace, &paths.config_dir, "skill-snapshot", false, &[])
+        .unwrap();
+    std::fs::write(skill_root.join("SKILL.md"), skill_document("mutated body")).unwrap();
+    let selected = vec![SkillId::new("snapshot-skill").unwrap()];
+    let registry = composed_skill_registry(
+        &paths,
+        &workspace,
+        &paths.state_dir.join("skill-trust.toml"),
+        &selected,
+        Some(&bundle),
+    )
+    .unwrap();
+    let harness = &registry.get(&selected[0]).unwrap().harness;
+    assert!(harness.body.contains("admitted body"));
+    assert!(!harness.body.contains("mutated body"));
+    assert_eq!(bundle.skills["snapshot-skill"].harness.body, harness.body);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn runtime_resolution_is_one_atomic_canonical_record() {
+    let root = temp_store_root("runtime-resolution-record");
+    let workspace = root.join("workspace");
+    let function_root = workspace.join(".agl/functions/evidence-function");
+    let artifact_root = root.join("artifacts");
+    let config_path = root.join("inference.toml");
+    std::fs::create_dir_all(&function_root).unwrap();
+    std::fs::write(
+        function_root.join("FUNCTION.md"),
+        r#"---
+artifact:
+  schema: agentlibre.artifact/v1
+  type: function
+  id: evidence-function
+  version: 1.0.0
+  payload_schema: agentlibre.function/v2
+  agl:
+    compatible: ">=1.0.0-alpha.12"
+    tested: [1.0.0-alpha.12]
+  requires:
+    - extension:core.workspace@^1.0
+title: Evidence function
+runtime:
+  tool_mode: read-only
+  max_output_tokens: 64
+  max_capability_calls: 3
+skills:
+  use: []
+subagents:
+  use: []
+doctor:
+  smoke_prompt: "Reply with evidence."
+---
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        function_root.join("SYSTEM.md"),
+        "Write canonical evidence.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[backend]
+kind = "llama_cpp"
+model = "{}"
+
+[runtime]
+gpu_layers = 0
+context_tokens = 128
+threads = 1
+batch_size = 16
+ubatch_size = 16
+
+[model]
+dialect = "qwen3"
+tool_call_format = "hermes_json"
+"#,
+            root.join("missing-model.gguf").display()
+        ),
+    )
+    .unwrap();
+    let runtime = AgentLibreRuntimeConfig {
+        paths: AgentLibrePaths::from_agl_home(root.join("home")),
+        logging: agl_runtime::AgentLibreLoggingConfig::default(),
+        history: agl_runtime::AgentLibreHistoryConfig::default(),
+        workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        inference: agl_runtime::AgentLibreInferenceConfig::default(),
+        execution: agl_runtime::AgentLibreExecutionConfig::default(),
+    };
+    let session_id = session_id();
+    let run_id = run_id();
+    let turn_id = turn_id();
+    let mut session = InferenceSession::new(
+        InferenceOptions {
+            config: Some(config_path),
+            function_ref: Some("evidence-function".to_owned()),
+            artifact_root: Some(artifact_root.clone()),
+            workspace_root: Some(workspace),
+            ..Default::default()
+        },
+        &runtime,
+        None,
+        session_id.clone(),
+        crate::inference_client::test_inference_client(),
+    )
+    .unwrap();
+    session
+        .refresh_runtime_context(Some(&run_id), Some(&turn_id))
+        .unwrap();
+    let attempt_id = AttemptId::generate();
+    session
+        .write_runtime_resolution(&run_id, Some(&turn_id), Some(&attempt_id), None, None)
+        .unwrap();
+
+    let run_dir = InferenceArtifactRoot::new(artifact_root).run_dir(&run_id);
+    let path = run_dir.join("runtime-resolution.json");
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(record["schema"], "agentlibre.runtime-resolution/v1");
+    assert_eq!(record["run_id"], run_id.as_str());
+    assert_eq!(record["session_id"], session_id.as_str());
+    assert_eq!(record["turn_id"], turn_id.as_str());
+    assert_eq!(record["attempt_id"], attempt_id.as_str());
+    assert_eq!(
+        record["artifacts"]["root"],
+        "function:evidence-function@1.0.0"
+    );
+    assert_eq!(
+        record["extension_bindings"]["core.workspace"]["implementation"],
+        "builtin:agl-core-tools/fs"
+    );
+    assert_eq!(record["function_policy"]["max_capability_calls"], 3);
+    assert_eq!(record["admission"]["fallback_allowed"], false);
+    assert_eq!(record["admission"]["status"], "pre_effect_admitted");
+    assert!(record["model_reuse_key"].as_str().is_some());
+    assert!(record["context_reuse_key"].as_str().is_some());
+    assert_eq!(record["client_runtime"], record["daemon_runtime"]);
+
+    let details = ResourceAdmissionDetails {
+        selected_profile_id: "gemma4-31b-64k-reviewed".to_owned(),
+        context_tokens: 65_536,
+        model_key: record["model_reuse_key"].as_str().unwrap().to_owned(),
+        context_key: record["context_reuse_key"].as_str().unwrap().to_owned(),
+        snapshot: agl_inference::admission::DeviceMemorySnapshot {
+            physical_device_id: "drm-render-128".to_owned(),
+            driver_id: "amdgpu-test".to_owned(),
+            total_bytes: 25_752_453_120,
+            available_bytes: 22_516_338_688,
+            observed_at_unix_ms: 1_000,
+        },
+        estimate: agl_inference::admission::AllocationEstimate {
+            model_bytes: 17_773_363_200,
+            context_bytes: 4_037_017_600,
+            transient_bytes: 335_544_320,
+            uncertainty_bytes: 268_435_456,
+        },
+        required_bytes: 23_488_102_400,
+        available_bytes: 22_516_338_688,
+        reserved_bytes: 0,
+        pressure_bytes: 3_236_114_432,
+        reserve_bytes: 1_073_741_824,
+        fallback_allowed: false,
+        model_load_started: false,
+        tool_effect_started: false,
+    };
+    let rejection = ModelManagerError::ResourceAdmission {
+        code: "accelerator_capacity_exceeded".to_owned(),
+        message: "reviewed 64K envelope does not fit".to_owned(),
+        details: Some(Box::new(details.clone())),
+    };
+    session
+        .write_runtime_resolution(
+            &run_id,
+            Some(&turn_id),
+            Some(&attempt_id),
+            Some(&rejection),
+            None,
+        )
+        .unwrap();
+    let rejected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(rejected["admission"]["status"], "rejected");
+    assert_eq!(
+        rejected["admission"]["error"]["code"],
+        "accelerator_capacity_exceeded"
+    );
+    assert_eq!(
+        rejected["admission"]["error"]["details"]["selected_profile_id"],
+        details.selected_profile_id
+    );
+    assert_eq!(
+        rejected["admission"]["error"]["details"]["estimate"]["context_bytes"],
+        details.estimate.context_bytes
+    );
+    assert_eq!(
+        rejected["admission"]["error"]["details"]["model_load_started"],
+        false
+    );
+    session
+        .write_runtime_resolution(
+            &run_id,
+            Some(&turn_id),
+            Some(&attempt_id),
+            None,
+            Some(&details),
+        )
+        .unwrap();
+    let granted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(granted["admission"]["status"], "granted");
+    assert_eq!(granted["admission"]["model_load_started"], true);
+    assert!(granted["admission"].get("error").is_none());
+    assert_eq!(
+        granted["admission"]["grant"]["selected_profile_id"],
+        details.selected_profile_id
+    );
+    assert!(!run_dir.join("function-resolution.json").exists());
+    assert!(!run_dir.join("runtime-identity.json").exists());
+    assert!(!run_dir.join("runtime-resolution.json.tmp").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn build_request_uses_agentlibre_boundaries() {
     let config = ModelConfig {
         dialect: ModelDialect::Qwen3,
@@ -2165,6 +2544,42 @@ fn resolves_default_paths_from_runtime_config() {
         InferenceSession::default_artifact_root(&runtime),
         PathBuf::from("/tmp/agl-home/data")
     );
+}
+
+#[test]
+fn embedded_function_profile_rejects_external_config_override() {
+    let root = temp_store_root("embedded-function-config-override");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let runtime = AgentLibreRuntimeConfig {
+        paths: agl_runtime::AgentLibrePaths::from_agl_home(root.join("home")),
+        logging: agl_runtime::AgentLibreLoggingConfig::default(),
+        history: agl_runtime::AgentLibreHistoryConfig::default(),
+        workspace: agl_runtime::AgentLibreWorkspaceConfig::default(),
+        inference: agl_runtime::AgentLibreInferenceConfig::default(),
+        execution: agl_runtime::AgentLibreExecutionConfig::default(),
+    };
+
+    let error = InferenceSession::new(
+        InferenceOptions {
+            config: Some(root.join("override.toml")),
+            function_ref: Some("gemma4-31b-32k".to_owned()),
+            artifact_root: Some(root.join("artifacts")),
+            workspace_root: Some(workspace),
+            ..Default::default()
+        },
+        &runtime,
+        None,
+        session_id(),
+        crate::inference_client::test_inference_client(),
+    )
+    .err()
+    .expect("external config must not replace an embedded Function profile");
+
+    let rendered = format!("{error:#}");
+    assert!(rendered.contains("function:gemma4-31b-32k@1.0.0"));
+    assert!(rendered.contains("owns an embedded inference profile"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

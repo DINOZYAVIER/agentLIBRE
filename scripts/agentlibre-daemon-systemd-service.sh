@@ -16,7 +16,8 @@ Options:
   --unit NAME           systemd user service unit name
   --cwd PATH            working directory for the service
   --binary PATH         installed managed agl runtime path or alias
-  --config PATH         local inference config TOML path
+  --config PATH         local inference config TOML path (without --function)
+  --function ID_OR_PATH Function with an authoritative embedded profile
   --socket PATH         daemon Unix socket path
   --workspace-root PATH workspace root passed to agl serve
   --max-output-tokens N max generated tokens per turn
@@ -32,6 +33,7 @@ Defaults:
   --cwd               current git repo root, or current directory outside git
   --binary            installed agl resolved from PATH
   --config            ~/.config/agentLIBRE/inference/local.toml
+  --function          unset; use the workspace default Function
   --socket            ~/.local/state/agentLIBRE/daemon/agl.sock
   --workspace-root    repo root
   --max-output-tokens 256
@@ -54,6 +56,11 @@ if [[ -z "$binary" ]]; then
   binary="$(command -v agl || true)"
 fi
 config="${AGL_DAEMON_CONFIG:-$config_home/agentLIBRE/inference/local.toml}"
+config_explicit=0
+if [[ -v AGL_DAEMON_CONFIG ]]; then
+  config_explicit=1
+fi
+function_ref="${AGL_DAEMON_FUNCTION:-}"
 socket="${AGL_DAEMON_SOCKET:-$state_home/agentLIBRE/daemon/agl.sock}"
 workspace_root="${AGL_DAEMON_WORKSPACE_ROOT:-$cwd}"
 max_output_tokens="${AGL_DAEMON_MAX_OUTPUT_TOKENS:-256}"
@@ -89,6 +96,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --config)
       config="${2:?missing value for --config}"
+      config_explicit=1
+      shift 2
+      ;;
+    --function)
+      function_ref="${2:?missing value for --function}"
       shift 2
       ;;
     --socket)
@@ -159,6 +171,7 @@ current_link="$runtime_dir/current"
 launcher="$generation_dir/agl-process-launcher"
 worker="$generation_dir/agl-inference-worker"
 native_bundle="$generation_dir/agl-inference-native"
+runtime_manifest="$generation_dir/runtime-manifest.json"
 
 resolve_native_bundle_relative() {
   local worker_elf="$1"
@@ -325,6 +338,7 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       ! -f "$launcher" || -L "$launcher" ||
       ! -f "$worker" || -L "$worker" ||
       ! -d "$native_bundle" || -L "$native_bundle" ||
+      ! -f "$runtime_manifest" || -L "$runtime_manifest" ||
       -e "$surface_worker" || -L "$surface_worker" ||
       ! -L "$current_link" ||
       "$(readlink -- "$current_link")" != "generations/$generation_name" ||
@@ -346,6 +360,9 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(stat -c '%h' -- "$resolved_binary" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%h' -- "$launcher" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%h' -- "$worker" 2>/dev/null || true)" != "1" ||
+      "$(stat -c '%a' -- "$runtime_manifest" 2>/dev/null || true)" != "444" ||
+      "$(stat -c '%u' -- "$runtime_manifest" 2>/dev/null || true)" != "$(id -u)" ||
+      "$(stat -c '%h' -- "$runtime_manifest" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%u' -- "$generation_dir" 2>/dev/null || true)" != "$(id -u)" ]]; then
   echo "$managed_layout_error: $requested_binary" >&2
   exit 1
@@ -400,6 +417,7 @@ agl_systemd_validate_absolute_vars \
   launcher \
   worker \
   native_bundle \
+  runtime_manifest \
   config \
   socket \
   workspace_root
@@ -418,6 +436,17 @@ case "$tool_mode" in
 esac
 
 agl_systemd_validate_nonempty_no_newline "--log-filter" "$log_filter"
+config_argument=" --config $(agl_systemd_quote "$config")"
+function_argument=""
+if [[ -n "$function_ref" ]]; then
+  if [[ "$config_explicit" -eq 1 ]]; then
+    echo "--function owns its inference profile and cannot be combined with --config or AGL_DAEMON_CONFIG" >&2
+    exit 2
+  fi
+  agl_systemd_validate_nonempty_no_newline "--function" "$function_ref"
+  function_argument=" --function $(agl_systemd_quote "$function_ref")"
+  config_argument=""
+fi
 if [[ -n "$vulkan_driver_environment" ]]; then
   if [[ -z "$vulkan_driver_files" ||
         "$vulkan_driver_files" == *[[:cntrl:]]* ||
@@ -454,7 +483,9 @@ if [[ "$dry_run" -eq 0 ]] &&
   echo "agl, its sibling process launcher, and its private inference worker do not have matching build identities: $resolved_binary" >&2
   exit 1
 fi
-agl_systemd_require_file "$dry_run" "$config" "config file"
+if [[ -z "$function_ref" ]]; then
+  agl_systemd_require_file "$dry_run" "$config" "config file"
+fi
 agl_systemd_prepare_private_socket_parent "$dry_run" "$socket"
 
 unit_dir="$config_home/systemd/user"
@@ -472,7 +503,7 @@ UMask=0077
 WorkingDirectory=$cwd
 Environment=AGL_LOG=$log_filter
 Environment=AGL_LOG_STDERR=always
-${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation --config $(agl_systemd_quote "$config") --workspace-root $(agl_systemd_quote "$workspace_root") --max-output-tokens $max_output_tokens --tool-mode $tool_mode
+${vulkan_environment_line}ExecStart=$(agl_systemd_quote "$binary") serve --systemd-activation${config_argument} --workspace-root $(agl_systemd_quote "$workspace_root")${function_argument} --max-output-tokens $max_output_tokens --tool-mode $tool_mode
 Restart=on-failure
 RestartSec=5
 "
@@ -502,8 +533,13 @@ echo "resolved binary: $resolved_binary"
 echo "process launcher: $launcher"
 echo "private inference worker: $worker"
 echo "native inference bundle: $native_bundle"
+echo "runtime manifest: $runtime_manifest"
 echo "Nix runtime roots: $generation_dir/.nix-gc-roots (required only for Nix-linked ELF objects)"
-echo "config: $config"
+if [[ -n "$function_ref" ]]; then
+  echo "function profile: $function_ref (embedded; local inference config disabled)"
+else
+  echo "config: $config"
+fi
 echo "socket: $socket"
 echo "workspace root: $workspace_root"
 echo "max output tokens: $max_output_tokens"

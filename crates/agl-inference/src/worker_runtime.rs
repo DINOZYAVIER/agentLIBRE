@@ -18,14 +18,14 @@ use agl_ids::AttemptId;
 use sha2::{Digest as _, Sha256};
 
 use crate::admission::{
-    AdmissionPolicy, AllocationReceipt as HostAllocationReceipt, DeviceMemoryEnvelope,
-    DeviceMemorySnapshot, ReservationLedger, ReservationLedgerError, ReservationRequest,
-    ReservationToken, SnapshotPolicy,
+    AdmissionError, AdmissionPolicy, AllocationReceipt as HostAllocationReceipt,
+    DeviceMemoryEnvelope, DeviceMemorySnapshot, ReservationLedger, ReservationLedgerError,
+    ReservationRequest, ReservationToken, SnapshotPolicy,
 };
 use crate::durable_health::{
     DurableHealthStore, ResourceEstimateQuarantine, ResourceQuarantineKey,
 };
-use crate::gpu_profile::GpuProfileVerifier;
+use crate::gpu_profile::{GpuProfileVerifier, KnownGpuProfile};
 use crate::private_directory::ensure_private_directory;
 use crate::worker_protocol::{
     AllocationReceipt, ContextResourceId, DescriptorSet, DeviceKind, DeviceSnapshot, HostCommand,
@@ -41,7 +41,7 @@ use crate::worker_supervisor::{
 use crate::{
     DeviceAuthorityLease, InferenceDeviceInfo, InferenceDeviceKind, InferenceJob,
     InferenceOutputEvent, InferenceStageValidator, ModelGeneration, ModelRuntime, OutputDelivery,
-    RuntimeFailure, RuntimeOperation,
+    ResourceAdmissionDetails, RuntimeFailure, RuntimeOperation,
 };
 
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -403,12 +403,14 @@ struct PendingAdmission {
     model_key: String,
     full_estimate: crate::admission::AllocationEstimate,
     quarantine_key: ResourceQuarantineKey,
+    details: ResourceAdmissionDetails,
 }
 
 #[derive(Clone, Debug)]
 struct ActiveAdmission {
     physical_device_id: String,
     token: ReservationToken,
+    details: ResourceAdmissionDetails,
 }
 
 impl WorkerModelRuntime {
@@ -701,16 +703,18 @@ impl WorkerModelRuntime {
             }
 
             let model_key = job.model_key().digest().to_string();
+            let model_load_started = admission.ledger.contains_model(&model_key);
+            let snapshot = DeviceMemorySnapshot {
+                physical_device_id: physical_device_id.clone(),
+                driver_id: resource.driver_build_id().to_string(),
+                total_bytes: observation.total_bytes,
+                available_bytes: observation.available_bytes,
+                observed_at_unix_ms: now_unix_ms,
+            };
             let pending = admission
                 .ledger
                 .validate_and_reserve(
-                    DeviceMemorySnapshot {
-                        physical_device_id: physical_device_id.clone(),
-                        driver_id: resource.driver_build_id().to_string(),
-                        total_bytes: observation.total_bytes,
-                        available_bytes: observation.available_bytes,
-                        observed_at_unix_ms: now_unix_ms,
-                    },
+                    snapshot.clone(),
                     &admission.envelope,
                     SnapshotPolicy::default(),
                     now_unix_ms,
@@ -720,7 +724,31 @@ impl WorkerModelRuntime {
                         estimate: profile.estimate(),
                     },
                 )
-                .map_err(resource_ledger_failure)?;
+                .map_err(|error| {
+                    profile_resource_ledger_failure(
+                        error,
+                        profile,
+                        job,
+                        snapshot.clone(),
+                        model_load_started,
+                    )
+                })?;
+            let grant = pending.grant;
+            let required_bytes = grant
+                .resident_reservation_bytes
+                .checked_add(grant.allocation_envelope_bytes)
+                .and_then(|required| required.checked_add(grant.reserve_bytes))
+                .expect("validated admission grant total cannot overflow");
+            let details = profile_admission_details(
+                profile,
+                job,
+                snapshot,
+                required_bytes,
+                grant.available_bytes,
+                grant.resident_reservation_bytes,
+                grant.external_pressure_bytes,
+                model_load_started,
+            );
             self.pending_admissions.insert(
                 context_key,
                 PendingAdmission {
@@ -729,6 +757,7 @@ impl WorkerModelRuntime {
                     model_key,
                     full_estimate: profile.estimate(),
                     quarantine_key,
+                    details,
                 },
             );
             self.refresh_status(Some(&physical_device_id));
@@ -904,6 +933,7 @@ impl WorkerModelRuntime {
             ActiveAdmission {
                 physical_device_id: pending.physical_device_id,
                 token: pending.token,
+                details: pending.details,
             },
         );
         self.refresh_status(Some(&physical_device_id));
@@ -2540,6 +2570,16 @@ impl ModelRuntime for WorkerModelRuntime {
         job: &InferenceJob,
     ) -> Result<RuntimeOperation<ModelGeneration>, RuntimeFailure> {
         self.ensure_job_admission(job)?;
+        let context_key = job.context_key().digest();
+        let resource_admission = self
+            .pending_admissions
+            .get(context_key)
+            .map(|admission| admission.details.clone())
+            .or_else(|| {
+                self.active_admissions
+                    .get(context_key)
+                    .map(|admission| admission.details.clone())
+            });
         if model.resource_id != context.model_resource_id
             || model.key_digest != job.model_key().digest()
             || context.key_digest != job.context_key().digest()
@@ -2563,7 +2603,7 @@ impl ModelRuntime for WorkerModelRuntime {
             },
             &payload,
         )?;
-        self.run_job_operation(
+        let mut operation = self.run_job_operation(
             operation_id,
             job,
             |event, descriptors| match event {
@@ -2573,9 +2613,10 @@ impl ModelRuntime for WorkerModelRuntime {
                     log,
                 } if received == operation_id => {
                     let bytes = result.read_from(descriptors).map_err(protocol_failure)?;
-                    let generation = serde_json::from_slice(&bytes).map_err(|error| {
-                        runtime_failure(format!("invalid worker generation result: {error}"))
-                    })?;
+                    let generation: ModelGeneration =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            runtime_failure(format!("invalid worker generation result: {error}"))
+                        })?;
                     let mut text = String::new();
                     append_optional_log(&mut text, log, descriptors)?;
                     Ok(Some(RuntimeOperation::new(generation, text)))
@@ -2589,7 +2630,9 @@ impl ModelRuntime for WorkerModelRuntime {
             },
             true,
             true,
-        )
+        )?;
+        operation.value.resource_admission = resource_admission;
+        Ok(operation)
     }
 
     fn clear_context(
@@ -3214,6 +3257,69 @@ fn resource_ledger_failure(error: ReservationLedgerError) -> RuntimeFailure {
     RuntimeFailure::resource_admission(error.code(), error.to_string(), "")
 }
 
+fn profile_resource_ledger_failure(
+    error: ReservationLedgerError,
+    profile: KnownGpuProfile,
+    job: &InferenceJob,
+    snapshot: DeviceMemorySnapshot,
+    model_load_started: bool,
+) -> RuntimeFailure {
+    let code = error.code().to_string();
+    let message = error.to_string();
+    match error {
+        ReservationLedgerError::Admission(AdmissionError::CapacityExceeded {
+            required_bytes,
+            available_bytes,
+            reserved_bytes,
+            pressure_bytes,
+        }) => RuntimeFailure::resource_admission_with_details(
+            code,
+            message,
+            "",
+            profile_admission_details(
+                profile,
+                job,
+                snapshot,
+                required_bytes,
+                available_bytes,
+                reserved_bytes,
+                pressure_bytes,
+                model_load_started,
+            ),
+        ),
+        _ => RuntimeFailure::resource_admission(code, message, ""),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_admission_details(
+    profile: KnownGpuProfile,
+    job: &InferenceJob,
+    snapshot: DeviceMemorySnapshot,
+    required_bytes: u64,
+    available_bytes: u64,
+    reserved_bytes: u64,
+    pressure_bytes: u64,
+    model_load_started: bool,
+) -> ResourceAdmissionDetails {
+    ResourceAdmissionDetails {
+        selected_profile_id: profile.id().to_owned(),
+        context_tokens: job.config().runtime.context_tokens,
+        model_key: job.model_key().digest().to_owned(),
+        context_key: job.context_key().digest().to_owned(),
+        snapshot,
+        estimate: profile.estimate(),
+        required_bytes,
+        available_bytes,
+        reserved_bytes,
+        pressure_bytes,
+        reserve_bytes: profile.reserve_bytes(),
+        fallback_allowed: false,
+        model_load_started,
+        tool_effect_started: false,
+    }
+}
+
 fn durable_health_failure(error: crate::durable_health::DurableHealthStoreError) -> RuntimeFailure {
     RuntimeFailure::resource_admission(error.code(), error.to_string(), "")
 }
@@ -3288,6 +3394,36 @@ mod tests {
 
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
+    }
+
+    fn test_admission_details(
+        physical_device_id: &str,
+        model_key: &str,
+        context_key: &str,
+        estimate: crate::admission::AllocationEstimate,
+    ) -> ResourceAdmissionDetails {
+        ResourceAdmissionDetails {
+            selected_profile_id: "test-reviewed-profile".to_owned(),
+            context_tokens: 32_768,
+            model_key: model_key.to_owned(),
+            context_key: context_key.to_owned(),
+            snapshot: DeviceMemorySnapshot {
+                physical_device_id: physical_device_id.to_owned(),
+                driver_id: "test-driver".to_owned(),
+                total_bytes: crate::admission::mib(128).unwrap(),
+                available_bytes: crate::admission::mib(128).unwrap(),
+                observed_at_unix_ms: 1,
+            },
+            estimate,
+            required_bytes: estimate.envelope_bytes().unwrap(),
+            available_bytes: crate::admission::mib(128).unwrap(),
+            reserved_bytes: 0,
+            pressure_bytes: 0,
+            reserve_bytes: 0,
+            fallback_allowed: false,
+            model_load_started: false,
+            tool_effect_started: false,
+        }
     }
 
     fn hostile_release_fixture(
@@ -3703,6 +3839,12 @@ mod tests {
             ActiveAdmission {
                 physical_device_id: physical_device_id.to_string(),
                 token: active.token,
+                details: test_admission_details(
+                    physical_device_id,
+                    &format!("model-active-{suffix}"),
+                    &format!("context-active-{suffix}"),
+                    active_estimate,
+                ),
             },
         );
         runtime.pending_admissions.insert(
@@ -3713,6 +3855,12 @@ mod tests {
                 model_key: format!("model-pending-{suffix}"),
                 full_estimate: pending_estimate,
                 quarantine_key: quarantine_key(quarantine_device, 2),
+                details: test_admission_details(
+                    physical_device_id,
+                    &format!("model-pending-{suffix}"),
+                    &format!("context-pending-{suffix}"),
+                    pending_estimate,
+                ),
             },
         );
     }
@@ -4047,6 +4195,7 @@ mod tests {
                     "e".repeat(64),
                 )
                 .unwrap(),
+                details: test_admission_details("pci:0000:03:00.0", "model", "context", estimate),
             },
         );
 

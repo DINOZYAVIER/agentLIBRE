@@ -4,9 +4,10 @@ model_id = "gemma4-31b"
 
 [runtime]
 mode = "auto"
-max_context_tokens = 65536
+max_context_tokens = 32768
 max_batch_size = 512
 max_ubatch_size = 256
+device = "vulkan0"
 flash_attention = "on"
 cache_type_k = "q8_0"
 cache_type_v = "q8_0"

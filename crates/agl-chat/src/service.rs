@@ -1987,6 +1987,7 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    resource_admission: None,
                 },
             })
         }
@@ -2057,6 +2058,7 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    resource_admission: None,
                 },
             })
         }
@@ -2250,6 +2252,7 @@ tool_call_format = "hermes_json"
                     duration_ms: 0,
                     input_tokens: 4,
                     output_tokens: 2,
+                    resource_admission: None,
                 },
             })
         }

@@ -22,6 +22,7 @@ agl-memory.workspace = true
 agl-model.workspace = true
 agl-oven.workspace = true
 agl-process.workspace = true
+agl-repo.workspace = true
 agl-runtime.workspace = true
 agl-session.workspace = true
 agl-skill.workspace = true

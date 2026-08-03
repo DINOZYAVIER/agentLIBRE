@@ -1,0 +1,65 @@
+schema = "agentlibre.builtin-catalog-baseline/v1"
+
+[[packages]]
+reference = "extension:core.process@1.0.0"
+digest = "sha256:c427d3c1410872754b093a60be4782eec713dd2839298c63213b4df535a787c9"
+
+[[packages]]
+reference = "extension:core.workspace@1.0.0"
+digest = "sha256:3590ec20edd50884e1ddbd751954b5f05564e901bbe15918edd6392eca5efa7b"
+
+[[packages]]
+reference = "function:gemma4-12b@1.0.0"
+digest = "sha256:f9d5f67cf437aee3fa50a617eeda80fcacfa732abdf75339c6598d8062293131"
+
+[[packages]]
+reference = "function:gemma4-26b@1.0.0"
+digest = "sha256:1a6f1e4b8a62c50b332847fba23f9f4c740e355a34a05c0d260f79b9382bba24"
+
+[[packages]]
+reference = "function:gemma4-31b-32k@1.0.0"
+digest = "sha256:46a3bf6dfc2218596e611eda2f7c436a996ff30c2f21029c9460be85420e080d"
+
+[[packages]]
+reference = "function:gemma4-31b-64k@1.0.0"
+digest = "sha256:efd182276c4585c8441212bd65427bc3db8f2d00231729f4f2cba1113122b5e8"
+
+[[packages]]
+reference = "function:gemma4-e2b@1.0.0"
+digest = "sha256:f7d6da412f21b070572768a0e21acaeaeea37abb6a96e387b702730a2eaf8854"
+
+[[packages]]
+reference = "function:gemma4-e4b@1.0.0"
+digest = "sha256:772e0e10a91fb2e913197b6a4d51da0cdebb235c07f0f6016452a8ec00c8dabf"
+
+[[packages]]
+reference = "model:gemma4-12b@1.0.0"
+digest = "sha256:c06999e31df60762d0f42ca9c278b068c88175f9f1a10f0c2a861e5adfffb8c6"
+
+[[packages]]
+reference = "model:gemma4-26b@1.0.0"
+digest = "sha256:bd6f838c8759c71d91aaf4afe69957aed64da5d75b69911cb767f79ce44a4e37"
+
+[[packages]]
+reference = "model:gemma4-31b@1.1.0"
+digest = "sha256:599a667ef335826011d0a7cd8cee7430f97c0be9865aaaf40a9ef80d7507812f"
+
+[[packages]]
+reference = "model:gemma4-e2b@1.0.0"
+digest = "sha256:762a325530f2026b26da23cc189dd1813ddb0baeed848c5df0ef0a59995a5d8d"
+
+[[packages]]
+reference = "model:gemma4-e4b@1.0.0"
+digest = "sha256:79c9320abe1bbb6a2d1aad5c3ccc04ba39525f2a5ebe6db49f292de845d0eed8"
+
+[[packages]]
+reference = "skill:process@1.0.0"
+digest = "sha256:46d3948271fd2f81410f91abc9af67eb54501b03faafb96d1e6c8442af20bd2d"
+
+[[packages]]
+reference = "skill:repo-status@1.0.0"
+digest = "sha256:bc52b973132961db5f99b3666246fb24b5be96e5276eb1e89e607c45a154f414"
+
+[[packages]]
+reference = "skill:skill@1.0.0"
+digest = "sha256:f87c1a92924959f19a7bfe69c5e49f9b74a0be539b754b390f163566ab720569"

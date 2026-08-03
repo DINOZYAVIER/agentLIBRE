@@ -1569,6 +1569,7 @@ mod tests {
                     selected_device: Some("fake-device".to_string()),
                     input_tokens: 4,
                     output_tokens: 1,
+                    resource_admission: None,
                 },
                 "fake generation log",
             ))
@@ -1704,6 +1705,7 @@ mod tests {
                     selected_device: Some("fake-device".to_string()),
                     input_tokens: 4,
                     output_tokens: 1,
+                    resource_admission: None,
                 },
                 "scripted generation log",
             ))

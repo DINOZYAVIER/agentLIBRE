@@ -31,7 +31,7 @@ pub use lifecycle::{
 };
 pub use planner::{
     CpuFallbackOffer, CpuResources, DiskResources, HostResources, LlamaDeviceInfo, LlamaDeviceKind,
-    ModelFit, ModelFitKind, RuntimePlan, RuntimePlanSet, RuntimePlanner,
+    ModelFit, ModelFitKind, RuntimePlan, RuntimePlanModelIdentity, RuntimePlanSet, RuntimePlanner,
 };
 pub use source::{HfSource, HfSourceKind};
 pub use status::{

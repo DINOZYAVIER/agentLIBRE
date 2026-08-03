@@ -2,6 +2,7 @@ mod artifacts;
 mod config;
 mod features;
 mod paths;
+mod runtime_manifest;
 mod tracing_setup;
 
 pub use artifacts::*;
@@ -19,6 +20,7 @@ pub use features::{
     render_runtime_feature_context, runtime_feature_registry_hash,
 };
 pub use paths::AgentLibrePaths;
+pub use runtime_manifest::*;
 pub use tracing_setup::{
     AgentLibreProcessMode, TracingGuards, init_tracing, logged_message_fields,
 };

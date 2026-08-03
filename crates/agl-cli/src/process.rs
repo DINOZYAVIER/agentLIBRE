@@ -10,7 +10,7 @@ use agl_protocol::{
     PROTOCOL_VERSION, ProcessBytes,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 
 use crate::args::{
@@ -275,7 +275,7 @@ fn daemon_client(runtime: &AgentLibreRuntimeConfig) -> Result<CliDaemonClient> {
             .context("failed to build CLI async runtime")?,
     );
     let client = async_runtime
-        .block_on(AgentLibreClient::connect(&socket_path))
+        .block_on(crate::runtime::connect_daemon(&socket_path))
         .with_context(|| {
             format!(
                 "agentLIBRE daemon is unavailable at {}; start it with `agl serve`",
@@ -600,6 +600,8 @@ fn runtime_sibling_directory() -> Result<PathBuf> {
 }
 
 pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
+    let runtime_identity = agl_runtime::current_runtime_identity()
+        .context("runtime manifest identity verification failed")?;
     let launcher = process_launcher_path()?;
     agl_process::verify_process_launcher_identity(&launcher)
         .map_err(anyhow::Error::from)
@@ -616,6 +618,16 @@ pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
             agl_inference::worker_protocol::WorkerProcess::spawn(&worker, Duration::from_secs(5))
                 .map_err(anyhow::Error::from)
                 .context("inference worker identity verification failed")?;
+        if runtime_identity.sealed() {
+            ensure!(
+                runtime_identity.worker_build_id() == Some(process.identity().build_id()),
+                "sealed runtime manifest worker build ID does not match the exact worker"
+            );
+            ensure!(
+                runtime_identity.native_bundle_id() == Some(process.native_bundle_id()),
+                "sealed runtime manifest native bundle ID does not match the exact worker"
+            );
+        }
         process
             .shutdown(
                 agl_inference::worker_protocol::ShutdownReason::Requested,

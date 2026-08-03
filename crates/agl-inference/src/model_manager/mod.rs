@@ -4,7 +4,9 @@ mod runtime;
 mod types;
 mod worker;
 
-pub use runtime::{ModelGeneration, RuntimeFailure, RuntimeFailureKind, RuntimeOperation};
+pub use runtime::{
+    ModelGeneration, ResourceAdmissionDetails, RuntimeFailure, RuntimeFailureKind, RuntimeOperation,
+};
 #[cfg(test)]
 pub(crate) use types::WorkerJobPayload;
 pub use types::{

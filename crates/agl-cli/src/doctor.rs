@@ -84,7 +84,7 @@ pub(crate) fn run_function_smoke(
         .enable_all()
         .build()
         .context("failed to build daemon-first function smoke runtime")?;
-    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let connection = async_runtime.block_on(crate::runtime::connect_daemon(&socket_path));
     let authority = inference_authority_decision(
         InferenceAuthoritySurface::FunctionSmoke,
         classify_daemon_connection(&connection),
@@ -105,6 +105,8 @@ pub(crate) fn run_function_smoke(
                         runtime_plan: SetupSmokeRuntimePlan {
                             profile_id: runtime_plan.profile_id.clone(),
                             selected_device: runtime_plan.selected_device.clone(),
+                            selected_device_identity: runtime_plan.selected_device_identity.clone(),
+                            model: runtime_plan.model.clone(),
                             runtime: runtime_plan.runtime.clone(),
                             smoke_timeout_seconds: runtime_plan.smoke_timeout_seconds,
                             expected_speed: runtime_plan.expected_speed.clone(),
@@ -415,6 +417,7 @@ mod tests {
                     duration_ms: 1,
                     input_tokens: 4,
                     output_tokens: 4,
+                    resource_admission: None,
                 },
             })
         }
@@ -459,6 +462,8 @@ mod tests {
         RuntimePlan {
             profile_id: "setup-cpu".to_owned(),
             selected_device: None,
+            selected_device_identity: None,
+            model: test_runtime_plan_model_identity(),
             runtime: agl_config::InferenceRuntimeConfig {
                 gpu_layers: 0,
                 context_tokens: 4_096,
@@ -478,6 +483,27 @@ mod tests {
             smoke_timeout_seconds: 30,
             expected_speed: "test".to_owned(),
         }
+    }
+
+    fn test_runtime_plan_model_identity() -> agl_model::RuntimePlanModelIdentity {
+        serde_json::from_value(serde_json::json!({
+            "provenance": {
+                "reference": "model:setup-smoke-model@=1.0.0",
+                "source_id": "test",
+                "source_tier": "workspace",
+                "source_kind": "directory",
+                "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "weights": [{
+                "role": "main",
+                "model_id": "setup-smoke-model",
+                "filename": "setup-smoke-model.gguf",
+                "byte_size": 18,
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "required": true
+            }]
+        }))
+        .unwrap()
     }
 
     #[test]

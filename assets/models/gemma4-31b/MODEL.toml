@@ -1,4 +1,4 @@
-artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "gemma4-31b", version = "1.0.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
+artifact = { schema = "agentlibre.artifact/v1", type = "model", id = "gemma4-31b", version = "1.1.0", payload_schema = "agentlibre.model/v2", agl = { compatible = ">=1.0.0-alpha.12", tested = ["1.0.0-alpha.12"] }, requires = [] }
 
 display_name = "Gemma 4 31B QAT Q4_0"
 capabilities = ["text", "tools"]
@@ -29,6 +29,23 @@ ubatch_size = 64
 threads = 8
 smoke_timeout_seconds = 600
 expected_speed = "slow"
+
+[[profiles]]
+id = "gpu-rx7900xtx-32768"
+device = "gpu"
+pci_device_id = "1002:744c"
+pci_subsystem_id = "1da2:471e"
+benchmark_evidence = "evidence/20260723-five-gemma4-rx7900xtx.md"
+required_total_ram_bytes = 42949672960
+required_available_ram_bytes = 40000000000
+required_vram_bytes = 22041067520
+gpu_layers = 999
+context_tokens = 32768
+batch_size = 512
+ubatch_size = 256
+threads = 8
+smoke_timeout_seconds = 600
+expected_speed = "fast"
 
 [[profiles]]
 id = "gpu-rx7900xtx-65536"

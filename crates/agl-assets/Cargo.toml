@@ -10,9 +10,11 @@ build = "build.rs"
 agl-artifact.workspace = true
 
 [build-dependencies]
+agl-artifact.workspace = true
 agl-config.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

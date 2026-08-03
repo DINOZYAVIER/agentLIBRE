@@ -25,7 +25,8 @@ use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, ExecutionId,
     ExecutionListRequest, ExecutionReadRequest, ExecutionRequestId, ExecutionStatusRequest,
     HelloRequest, InferenceInventoryRequest, InferenceStatusRequest, ModelUnloadRequest,
-    ModelUnloadTarget, PROTOCOL_VERSION, ProtocolErrorCode, ProtocolInferenceWorkerState,
+    ModelUnloadTarget, PROTOCOL_VERSION, ProtocolErrorCode, ProtocolErrorDetails,
+    ProtocolInferenceWorkerState,
     ProtocolRunKind, ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunCancelRequest,
     RunEventsRequest, RunStatusRequest, RunSubmitRequest, RunTreeRequest, SessionFinishReason,
     SessionFinishRequest, SessionListRequest, SessionOpenRequest, SessionStatus,
@@ -43,6 +44,27 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use super::*;
 
 static TEST_RUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
+    serde_json::from_value(serde_json::json!({
+        "provenance": {
+            "reference": format!("model:{id}@=1.0.0"),
+            "source_id": "test",
+            "source_tier": "workspace",
+            "source_kind": "directory",
+            "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "weights": [{
+            "role": "main",
+            "model_id": id,
+            "filename": format!("{id}.gguf"),
+            "byte_size": 18,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "required": true
+        }]
+    }))
+    .unwrap()
+}
 
 #[test]
 fn default_root_run_budget_is_identical_across_protocol_application_and_store() {
@@ -194,6 +216,7 @@ impl InferenceClient for ScriptedDelegationClient {
                 duration_ms: 1,
                 input_tokens: 4,
                 output_tokens: 2,
+                resource_admission: None,
             },
         })
     }
@@ -322,6 +345,7 @@ impl InferenceClient for ControlledInferenceClient {
                 duration_ms: 0,
                 input_tokens: 4,
                 output_tokens: 2,
+                resource_admission: None,
             },
         })
     }
@@ -444,6 +468,7 @@ async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
                 .handle_request_async(request(DaemonRequestKind::Hello(HelloRequest {
                     client_name: Some("bounded-bridge-test".to_owned()),
                     accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+                    client_runtime: None,
                 })))
                 .await
         }));
@@ -472,6 +497,7 @@ async fn aborted_requests_remain_charged_to_the_bounded_daemon_bridge() {
         .handle_request_async(request(DaemonRequestKind::Hello(HelloRequest {
             client_name: Some("bounded-bridge-overflow-test".to_owned()),
             accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+            client_runtime: None,
         })))
         .await;
     assert!(matches!(
@@ -625,7 +651,7 @@ tool_call_format = "gemma_function_call"
     )
     .unwrap();
 
-    let event = state.handle_request(request(DaemonRequestKind::SetupSmokeSessionOpen(
+    let event = state.handle_request(request(DaemonRequestKind::SetupSmokeSessionOpen(Box::new(
         SetupSmokeSessionOpenRequest {
             workspace_root: workspace.to_string_lossy().into_owned(),
             function_ref: "setup-smoke".to_owned(),
@@ -641,6 +667,8 @@ tool_call_format = "gemma_function_call"
             runtime_plan: agl_protocol::SetupSmokeRuntimePlan {
                 profile_id: "setup-cpu".to_owned(),
                 selected_device: None,
+                selected_device_identity: None,
+                model: test_runtime_plan_model_identity("setup-smoke-model"),
                 runtime: agl_config::InferenceRuntimeConfig {
                     gpu_layers: 0,
                     context_tokens: 4_096,
@@ -662,7 +690,7 @@ tool_call_format = "gemma_function_call"
             },
             max_output_tokens: 32,
         },
-    )));
+    ))));
     let session_id = match event.kind {
         DaemonEventKind::SessionOpened(opened) => {
             assert!(!opened.resumed);
@@ -1116,15 +1144,29 @@ fn incomplete_continue_joins_fifo_behind_prompts_already_queued() {
 fn hello_declares_strict_run_capabilities() {
     let test = TestRuntime::new();
     let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let expected_runtime = agl_runtime::current_runtime_identity().unwrap();
 
     let event = state.handle_request(request(DaemonRequestKind::Hello(HelloRequest {
         client_name: Some("test".to_string()),
         accepted_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
+        client_runtime: None,
     })));
 
     match event.kind {
         DaemonEventKind::Hello(hello) => {
             assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+            assert_eq!(
+                hello.worker_build_id,
+                agl_inference::worker_protocol::WORKER_BUILD_ID
+            );
+            assert_eq!(
+                hello.daemon_runtime.generation_id,
+                expected_runtime.generation_id
+            );
+            assert_eq!(
+                hello.daemon_runtime.builtin_catalog_digest,
+                expected_runtime.builtin_catalog_digest
+            );
             assert!(hello.capabilities.contains(&DaemonCapability::RunSubmit));
             assert!(hello.capabilities.contains(&DaemonCapability::RunStatus));
             assert!(hello.capabilities.contains(&DaemonCapability::RunTree));
@@ -1144,6 +1186,55 @@ fn hello_declares_strict_run_capabilities() {
             assert!(hello.capabilities.contains(&DaemonCapability::ModelUnload));
         }
         other => panic!("unexpected hello event: {other:?}"),
+    }
+}
+
+#[test]
+fn first_party_hello_rejects_runtime_mismatch_before_session_creation() {
+    let test = TestRuntime::new();
+    let mut state = daemon(&test, Arc::new(InferenceControl::default()));
+    let observed_daemon = match state
+        .handle_request(request(DaemonRequestKind::Hello(HelloRequest {
+            client_name: Some("identity-observer".to_owned()),
+            accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+            client_runtime: None,
+        })))
+        .kind
+    {
+        DaemonEventKind::Hello(hello) => hello.daemon_runtime,
+        other => panic!("unexpected identity observation event: {other:?}"),
+    };
+    let mut client = observed_daemon.clone();
+    client.executable_digest = format!("sha256:{}", "d".repeat(64));
+
+    let event = state.handle_request(request(DaemonRequestKind::Hello(HelloRequest {
+        client_name: Some("first-party-test".to_owned()),
+        accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+        client_runtime: Some(client.clone()),
+    })));
+
+    match event.kind {
+        DaemonEventKind::Error(error) => {
+            assert_eq!(error.code, ProtocolErrorCode::RuntimeIdentityMismatch);
+            match error.details.map(|details| *details) {
+                Some(ProtocolErrorDetails::RuntimeIdentityMismatch {
+                    client: actual_client,
+                    daemon: returned_daemon,
+                }) => {
+                    assert_eq!(actual_client, client);
+                    assert_eq!(returned_daemon, observed_daemon);
+                }
+                other => panic!("unexpected mismatch details: {other:?}"),
+            }
+        }
+        other => panic!("unexpected mismatch event: {other:?}"),
+    }
+    let event = state.handle_request(request(DaemonRequestKind::SessionList(
+        SessionListRequest::default(),
+    )));
+    match event.kind {
+        DaemonEventKind::SessionList(list) => assert!(list.sessions.is_empty()),
+        other => panic!("unexpected post-mismatch session list event: {other:?}"),
     }
 }
 

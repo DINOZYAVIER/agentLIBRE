@@ -2381,6 +2381,7 @@ fn validate_snapshot_transfer_summary(
 impl DaemonRequestKind {
     pub fn validate_surface(&self) -> Result<(), SurfaceValidationError> {
         match self {
+            Self::Hello(request) => validate_hello_request(request),
             Self::SetupSmokeSessionOpen(request) => validate_setup_smoke_session_open(request),
             Self::ModelUnload(request) => validate_model_unload_target(&request.target),
             Self::CommandCatalog(request) => {
@@ -2543,6 +2544,7 @@ fn validate_setup_smoke_session_open(
 impl DaemonEventKind {
     pub fn validate_surface(&self) -> Result<(), SurfaceValidationError> {
         match self {
+            Self::Hello(event) => validate_hello_event(event),
             Self::CommandCatalog(event) => validate_catalog(event),
             Self::CommandSuggestions(event) => validate_suggestions(event),
             Self::ApplicationToolResult(event) => validate_action_result(&event.result),
@@ -2565,11 +2567,124 @@ impl DaemonEventKind {
                     "protocol error message",
                     false,
                 )?;
-                validate_safe_metadata(&error.safe_metadata)
+                validate_safe_metadata(&error.safe_metadata)?;
+                match (&error.code, error.details.as_deref()) {
+                    (
+                        crate::ProtocolErrorCode::RuntimeIdentityMismatch,
+                        Some(crate::ProtocolErrorDetails::RuntimeIdentityMismatch {
+                            client,
+                            daemon,
+                        }),
+                    ) => {
+                        validate_runtime_generation_identity(client)?;
+                        validate_runtime_generation_identity(daemon)
+                    }
+                    (crate::ProtocolErrorCode::RuntimeIdentityMismatch, None) => {
+                        Err(SurfaceValidationError::new(
+                            "runtime identity mismatch error requires typed details",
+                        ))
+                    }
+                    (_, Some(_)) => Err(SurfaceValidationError::new(
+                        "protocol error details do not match the error code",
+                    )),
+                    (_, None) => Ok(()),
+                }
             }
             _ => Ok(()),
         }
     }
+}
+
+fn validate_hello_request(request: &crate::HelloRequest) -> Result<(), SurfaceValidationError> {
+    bound_optional_string(
+        request.client_name.as_deref(),
+        MAX_IDENTIFIER_BYTES,
+        "client name",
+    )?;
+    bound_count(
+        request.accepted_protocol_versions.len(),
+        8,
+        "accepted protocol versions",
+    )?;
+    let mut versions = BTreeSet::new();
+    for version in &request.accepted_protocol_versions {
+        bound_string(version, 64, "accepted protocol version", false)?;
+        if !versions.insert(version.as_str()) {
+            return Err(SurfaceValidationError::new(
+                "accepted protocol versions contain a duplicate",
+            ));
+        }
+    }
+    if let Some(identity) = &request.client_runtime {
+        validate_runtime_generation_identity(identity)?;
+    }
+    Ok(())
+}
+
+fn validate_hello_event(event: &crate::HelloEvent) -> Result<(), SurfaceValidationError> {
+    if event.protocol_version != crate::PROTOCOL_VERSION {
+        return Err(SurfaceValidationError::new(
+            "Hello protocol version does not match the event schema",
+        ));
+    }
+    bound_string(
+        &event.product_version,
+        MAX_IDENTIFIER_BYTES,
+        "product version",
+        false,
+    )?;
+    validate_runtime_generation_identity(&event.daemon_runtime)?;
+    validate_sha256_identity(&event.worker_build_id, "worker build ID")?;
+    match (
+        event.native_bundle_id.as_deref(),
+        event.composite_worker_build_id.as_deref(),
+    ) {
+        (Some(native), Some(composite)) => {
+            validate_sha256_identity(native, "native bundle ID")?;
+            if composite != format!("{}+{native}", event.worker_build_id) {
+                return Err(SurfaceValidationError::new(
+                    "composite worker build ID does not match its components",
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => {
+            return Err(SurfaceValidationError::new(
+                "native and composite worker identities must be present together",
+            ));
+        }
+    }
+    bound_count(event.capabilities.len(), 64, "daemon capabilities")?;
+    ensure_unique_copy(&event.capabilities, "daemon capabilities")
+}
+
+fn validate_runtime_generation_identity(
+    identity: &crate::RuntimeGenerationIdentity,
+) -> Result<(), SurfaceValidationError> {
+    validate_sha256_identity(&identity.generation_id, "runtime generation ID")?;
+    validate_sha256_identity(
+        &identity.builtin_catalog_digest,
+        "runtime builtin catalog digest",
+    )?;
+    validate_sha256_identity(&identity.executable_digest, "runtime executable digest")
+}
+
+fn validate_sha256_identity(value: &str, label: &str) -> Result<(), SurfaceValidationError> {
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        return Err(SurfaceValidationError::new(format!(
+            "{label} must be a canonical SHA-256 identity"
+        )));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SurfaceValidationError::new(format!(
+            "{label} must be a canonical SHA-256 identity"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_inference_inventory(
@@ -3573,7 +3688,7 @@ mod tests {
     }
 
     #[test]
-    fn human_terminal_ensure_has_strict_v7_wire_shape_and_redacted_debug() {
+    fn human_terminal_ensure_has_strict_v8_wire_shape_and_redacted_debug() {
         let request = DaemonRequest::new(
             request_id(),
             DaemonRequestKind::HumanTerminalEnsure(ensure_request()),

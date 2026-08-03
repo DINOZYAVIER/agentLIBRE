@@ -131,6 +131,8 @@ pub struct AutoRuntimePolicy {
     pub max_context_tokens: u32,
     pub max_batch_size: u32,
     pub max_ubatch_size: u32,
+    #[serde(default)]
+    pub device: Option<AutoRuntimeDevice>,
     pub flash_attention: RuntimeSwitch,
     pub cache_type_k: KvCacheType,
     pub cache_type_v: KvCacheType,
@@ -161,6 +163,20 @@ impl AutoRuntimePolicy {
             self.max_batch_size
         );
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRuntimeDevice {
+    Vulkan0,
+}
+
+impl AutoRuntimeDevice {
+    pub fn runtime_name(self) -> &'static str {
+        match self {
+            Self::Vulkan0 => "Vulkan0",
+        }
     }
 }
 

@@ -428,6 +428,7 @@ impl ModelRuntime for LlamaCppModelRuntime {
                 selected_device: model.metadata().selected_device.clone(),
                 input_tokens: output.input_tokens,
                 output_tokens: output.output_tokens,
+                resource_admission: None,
             })
         });
         if has_media {

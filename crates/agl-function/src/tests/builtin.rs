@@ -83,7 +83,7 @@ fn resolves_builtin_gemma4_e2b_without_projector_or_mtp() {
 }
 
 #[test]
-fn builtin_gemma4_31b_uses_extended_turn_and_context_limits() {
+fn builtin_gemma4_31b_profiles_are_explicit_and_keep_extended_turn_limits() {
     let root = std::env::temp_dir().join(format!(
         "agl-function-builtin-gemma4-31b-{}",
         std::process::id()
@@ -93,22 +93,21 @@ fn builtin_gemma4_31b_uses_extended_turn_and_context_limits() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let runtime = resolve_runtime_function("gemma4-31b", &workspace, &config).unwrap();
-    assert_eq!(runtime.max_capability_calls, Some(32));
-    assert_eq!(runtime.max_output_tokens, Some(4096));
-    assert!(runtime.context.contains("including the `sha256:` prefix"));
-    assert!(
-        runtime
-            .context
-            .contains("its receipt status is `committed`")
-    );
-    assert!(
-        runtime
-            .inference_config_toml
-            .as_deref()
-            .unwrap()
-            .contains("max_context_tokens = 65536")
-    );
+    for (function_id, context_tokens) in [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)] {
+        let runtime = resolve_runtime_function(function_id, &workspace, &config).unwrap();
+        assert_eq!(runtime.max_capability_calls, Some(32));
+        assert_eq!(runtime.max_output_tokens, Some(4096));
+        assert!(runtime.context.contains("including the `sha256:` prefix"));
+        assert!(
+            runtime
+                .context
+                .contains("its receipt status is `committed`")
+        );
+        let inference = runtime.inference_config_toml.as_deref().unwrap();
+        assert!(inference.contains(&format!("max_context_tokens = {context_tokens}")));
+        assert!(inference.contains("device = \"vulkan0\""));
+    }
+    assert!(resolve_runtime_function("gemma4-31b", &workspace, &config).is_err());
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -135,7 +134,8 @@ fn lists_builtin_functions() {
         vec![
             ("gemma4-12b", true),
             ("gemma4-26b", true),
-            ("gemma4-31b", true),
+            ("gemma4-31b-32k", true),
+            ("gemma4-31b-64k", true),
             ("gemma4-e2b", true),
             ("gemma4-e4b", true),
         ]

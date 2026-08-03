@@ -196,7 +196,7 @@ pub fn resolved_builtin_model_packages() -> Result<Vec<ModelPackage>> {
     let mut packages = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let reference = ArtifactPackageRef::parse(&format!(
-            "model:{}@{}",
+            "model:{}@={}",
             candidate.package_id, candidate.version
         ))?;
         let graph = resolver.resolve_and_validate(&reference, None)?;

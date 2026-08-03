@@ -30,6 +30,8 @@ pub struct InferenceResponseMetadata {
     pub duration_ms: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_admission: Option<crate::ResourceAdmissionDetails>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

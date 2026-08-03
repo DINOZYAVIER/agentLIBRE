@@ -34,6 +34,7 @@ use agl_ids::{
     DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TerminalSessionId,
     TurnId,
 };
+use agl_inference::worker_protocol::WORKER_BUILD_ID;
 use agl_inference::worker_supervisor::WorkerLifecyclePhase;
 use agl_inference::{
     InferenceDeviceKind, ModelManagerStatus, ModelManagerStatusDetail,
@@ -54,15 +55,19 @@ use agl_process::{
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
     ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionReadEvent, ExecutionStatusEvent,
-    HelloEvent, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
+    HelloEvent, HelloRequest, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
     InferenceStatusRequest, ModelReleaseOutcome, ModelReleaseReason, ModelUnloadEvent,
     ModelUnloadOutcome, ModelUnloadRequest, ModelUnloadTarget, PROTOCOL_VERSION, ProtocolError,
-    ProtocolErrorCode, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState, ProtocolRunKind,
-    ProtocolRunState, ProtocolToolMode, RunAcceptedEvent, RunEventsEvent, RunStatusEvent,
-    RunTreeEvent, RunTreeNodeEvent, RunUsageEvent, SessionFinishedEvent, SessionListEvent,
-    SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
+    ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceDeviceKind,
+    ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
+    RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent, RunTreeNodeEvent,
+    RunUsageEvent, RuntimeGenerationIdentity, RuntimeGenerationKind, SessionFinishedEvent,
+    SessionListEvent, SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary,
+    SessionTranscriptEvent,
 };
-use agl_runtime::AgentLibreRuntimeConfig;
+use agl_runtime::{
+    AgentLibreRuntimeConfig, CurrentRuntimeIdentity, RuntimeIdentityKind, current_runtime_identity,
+};
 use agl_session::{
     ChatSessionReverseRead, ChatSessionReverseReader, ChatSessionStore, SessionCatalogStatus,
 };
@@ -71,7 +76,7 @@ use agl_supervisor::{
     IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
     SupervisorHandle, SupervisorOptions,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::run_factory::{BuiltinCronRunInput, DaemonRunFactory};
@@ -100,6 +105,7 @@ const ACTIVE_ACTIVITY_ENCODING_OVERHEAD_BYTES: usize = 4 * 1024;
 
 pub struct DaemonState {
     daemon_instance_id: DaemonInstanceId,
+    runtime_identity: CurrentRuntimeIdentity,
     runtime: AgentLibreRuntimeConfig,
     inference_defaults: InferenceOptions,
     inference_client: InferenceClientHandle,
@@ -370,6 +376,31 @@ impl DaemonState {
         inference_client: InferenceClientHandle,
         inference_status: WorkerRuntimeStatusHandle,
     ) -> Result<Self> {
+        let runtime_identity =
+            current_runtime_identity().context("failed to verify daemon runtime identity")?;
+        Self::open_with_runtime_identity(
+            runtime,
+            inference_defaults,
+            inference_client,
+            inference_status,
+            runtime_identity,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_runtime_identity(
+        runtime: AgentLibreRuntimeConfig,
+        inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
+        runtime_identity: CurrentRuntimeIdentity,
+    ) -> Result<Self> {
+        if runtime_identity.sealed() {
+            ensure!(
+                runtime_identity.worker_build_id() == Some(WORKER_BUILD_ID),
+                "sealed daemon runtime manifest worker build ID does not match this daemon"
+            );
+        }
         let store_root = runtime.paths.store_root();
         let process_handle =
             shared_process_handle(&runtime).context("failed to start daemon process supervisor")?;
@@ -395,6 +426,7 @@ impl DaemonState {
         let supervisor_handle = supervisor.handle();
         Ok(Self {
             daemon_instance_id: DaemonInstanceId::generate(),
+            runtime_identity,
             runtime,
             inference_defaults,
             inference_client,
@@ -429,10 +461,10 @@ impl DaemonState {
     ) -> DaemonEvent {
         let request_id = request.request_id;
         let result = match request.kind {
-            DaemonRequestKind::Hello(_) => Ok(DaemonEventKind::Hello(self.hello())),
+            DaemonRequestKind::Hello(request) => self.hello(request),
             DaemonRequestKind::SessionOpen(request) => self.open_session(request),
             DaemonRequestKind::SetupSmokeSessionOpen(request) => {
-                self.open_setup_smoke_session(request)
+                self.open_setup_smoke_session(*request)
             }
             DaemonRequestKind::SessionClear(request) => self.clear_session(request.session_id),
             DaemonRequestKind::SessionFinish(request) => {
@@ -651,11 +683,45 @@ impl DaemonState {
         Ok(accepted)
     }
 
-    fn hello(&self) -> HelloEvent {
-        HelloEvent {
+    fn hello(&self, request: HelloRequest) -> Result<DaemonEventKind, ProtocolError> {
+        if !request.accepted_protocol_versions.is_empty()
+            && !request
+                .accepted_protocol_versions
+                .iter()
+                .any(|version| version == PROTOCOL_VERSION)
+        {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::UnsupportedProtocolVersion,
+                "client does not accept the daemon protocol version",
+                false,
+            ));
+        }
+        let daemon_runtime = protocol_runtime_identity(&self.runtime_identity);
+        if let Some(client_runtime) = request.client_runtime
+            && client_runtime != daemon_runtime
+        {
+            return Err(ProtocolError::new(
+                ProtocolErrorCode::RuntimeIdentityMismatch,
+                "first-party client and daemon runtime identities do not match",
+                false,
+            )
+            .with_details(ProtocolErrorDetails::RuntimeIdentityMismatch {
+                client: client_runtime,
+                daemon: daemon_runtime,
+            }));
+        }
+        let native_bundle_id = self.runtime_identity.native_bundle_id().map(str::to_owned);
+        let composite_worker_build_id = native_bundle_id
+            .as_ref()
+            .map(|native| format!("{WORKER_BUILD_ID}+{native}"));
+        Ok(DaemonEventKind::Hello(HelloEvent {
             protocol_version: PROTOCOL_VERSION.to_string(),
             product_version: env!("CARGO_PKG_VERSION").to_string(),
             daemon_instance_id: self.daemon_instance_id.clone(),
+            daemon_runtime,
+            worker_build_id: WORKER_BUILD_ID.to_string(),
+            native_bundle_id,
+            composite_worker_build_id,
             capabilities: vec![
                 DaemonCapability::SessionOpen,
                 DaemonCapability::SetupSmokeSessionOpen,
@@ -685,7 +751,7 @@ impl DaemonState {
                 DaemonCapability::HumanTerminal,
                 DaemonCapability::AssistantDeltas,
             ],
-        }
+        }))
     }
 
     fn inference_inventory(&self) -> Result<DaemonEventKind, ProtocolError> {
@@ -1012,6 +1078,8 @@ impl DaemonState {
         let runtime_plan = agl_model::RuntimePlan {
             profile_id: request.runtime_plan.profile_id,
             selected_device: request.runtime_plan.selected_device,
+            selected_device_identity: request.runtime_plan.selected_device_identity,
+            model: request.runtime_plan.model,
             runtime: request.runtime_plan.runtime,
             smoke_timeout_seconds: request.runtime_plan.smoke_timeout_seconds,
             expected_speed: request.runtime_plan.expected_speed,
@@ -5202,6 +5270,7 @@ fn application_protocol_error(error: ProtocolError) -> ApplicationError {
         ProtocolErrorCode::Unsupported | ProtocolErrorCode::UnsupportedProtocolVersion => {
             ApplicationErrorCode::CommandUnavailable
         }
+        ProtocolErrorCode::RuntimeIdentityMismatch => ApplicationErrorCode::CommandUnavailable,
         ProtocolErrorCode::RuntimeFailure | ProtocolErrorCode::Internal => {
             ApplicationErrorCode::Internal
         }
@@ -5231,6 +5300,18 @@ fn application_protocol_error(error: ProtocolError) -> ApplicationError {
         ProtocolErrorCode::OutcomeUnknown => ApplicationErrorCode::OutcomeUnknown,
     };
     ApplicationError::new(code, error.message)
+}
+
+fn protocol_runtime_identity(identity: &CurrentRuntimeIdentity) -> RuntimeGenerationIdentity {
+    RuntimeGenerationIdentity {
+        kind: match identity.kind {
+            RuntimeIdentityKind::Sealed => RuntimeGenerationKind::Sealed,
+            RuntimeIdentityKind::Development => RuntimeGenerationKind::Development,
+        },
+        generation_id: identity.generation_id.clone(),
+        builtin_catalog_digest: identity.builtin_catalog_digest.clone(),
+        executable_digest: identity.executable_digest.clone(),
+    }
 }
 
 fn application_process_error(error: ProcessError) -> ApplicationError {
@@ -5497,6 +5578,23 @@ impl SharedDaemonState {
             inference_defaults,
             inference_client,
             inference_status,
+        )?)
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_runtime_identity(
+        runtime: AgentLibreRuntimeConfig,
+        inference_defaults: InferenceOptions,
+        inference_client: InferenceClientHandle,
+        inference_status: WorkerRuntimeStatusHandle,
+        runtime_identity: CurrentRuntimeIdentity,
+    ) -> Result<Self> {
+        Self::from_state(DaemonState::open_with_runtime_identity(
+            runtime,
+            inference_defaults,
+            inference_client,
+            inference_status,
+            runtime_identity,
         )?)
     }
 

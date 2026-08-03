@@ -39,6 +39,7 @@ pub struct BuiltinArtifactPackage {
     pub id: &'static str,
     pub version: &'static str,
     pub entrypoint: &'static str,
+    pub requires: &'static [&'static str],
     pub files: &'static [BuiltinArtifactFile],
     pub digest: &'static str,
 }
@@ -122,7 +123,8 @@ mod tests {
             vec![
                 "gemma4-12b",
                 "gemma4-26b",
-                "gemma4-31b",
+                "gemma4-31b-32k",
+                "gemma4-31b-64k",
                 "gemma4-e2b",
                 "gemma4-e4b"
             ]
@@ -229,33 +231,73 @@ tool_call_format = "gemma_function_call"
         assert_eq!(twelve_b_runtime.max_ubatch_size, 256);
         assert!(!twelve_b_preset.runtime.mtp_enabled());
 
-        let thirty_one_b =
-            builtin_artifact_package("gemma4-31b").expect("Gemma 4 31B must be embedded");
-        let thirty_one_b_preset = agl_config::load_inference_preset_from_str(
-            "gemma4-31b",
-            std::str::from_utf8(
-                thirty_one_b
-                    .files
-                    .iter()
-                    .find(|file| file.path == "inference.toml")
-                    .unwrap()
-                    .bytes,
+        for (function_id, expected_context) in
+            [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)]
+        {
+            let thirty_one_b = builtin_artifact_package(function_id)
+                .unwrap_or_else(|| panic!("{function_id} must be embedded"));
+            let preset = agl_config::load_inference_preset_from_str(
+                function_id,
+                std::str::from_utf8(
+                    thirty_one_b
+                        .files
+                        .iter()
+                        .find(|file| file.path == "inference.toml")
+                        .unwrap()
+                        .bytes,
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .unwrap();
-        let thirty_one_b_runtime = thirty_one_b_preset.runtime.auto_policy().unwrap();
+            .unwrap();
+            let runtime = preset.runtime.auto_policy().unwrap();
 
-        assert_eq!(thirty_one_b_runtime.max_context_tokens, 65_536);
+            assert_eq!(preset.backend.model_id.as_str(), "gemma4-31b");
+            assert_eq!(runtime.max_context_tokens, expected_context);
+            assert_eq!(runtime.max_batch_size, 512);
+            assert_eq!(runtime.max_ubatch_size, 256);
+            assert_eq!(
+                runtime
+                    .device
+                    .map(agl_config::AutoRuntimeDevice::runtime_name),
+                Some("Vulkan0")
+            );
+            assert_eq!(runtime.flash_attention, agl_config::RuntimeSwitch::On);
+            assert_eq!(runtime.cache_type_k, agl_config::KvCacheType::Q8_0);
+            assert_eq!(runtime.cache_type_v, agl_config::KvCacheType::Q8_0);
+            assert!(!preset.runtime.mtp_enabled());
+        }
+        assert!(builtin_artifact_package("gemma4-31b").is_none());
+    }
+
+    #[test]
+    fn generated_package_digests_match_the_canonical_runtime_algorithm() {
+        for package in BUILTIN_ARTIFACT_PACKAGES {
+            let view = agl_artifact::InMemoryPackageView::new(package.files.iter().map(|file| {
+                (
+                    file.path.parse().expect("generated package path is valid"),
+                    file.bytes.to_vec(),
+                )
+            }))
+            .expect("generated package paths are unique");
+            assert_eq!(
+                package.digest,
+                agl_artifact::compute_package_digest(&view)
+                    .expect("generated package is canonical")
+                    .as_str(),
+                "{}:{}@{}",
+                package.type_id,
+                package.id,
+                package.version
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_catalog_identity_is_canonical_sha256() {
         assert_eq!(
-            thirty_one_b_runtime.cache_type_k,
-            agl_config::KvCacheType::Q8_0
+            BUILTIN_ARTIFACT_CATALOG_DIGEST,
+            "sha256:0a9fa9f4d96509792e1da0473164798e09f5c58e2e2a4bc6e1d5885d79205754"
         );
-        assert_eq!(
-            thirty_one_b_runtime.cache_type_v,
-            agl_config::KvCacheType::Q8_0
-        );
-        assert!(!thirty_one_b_preset.runtime.mtp_enabled());
     }
 
     #[test]

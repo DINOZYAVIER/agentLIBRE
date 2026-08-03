@@ -7,6 +7,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 // Ratatui's inline viewport redraws from the cursor down instead of clearing
 // the full physical screen.
 const INLINE_REDRAW_CLEAR: &[u8] = b"\x1b[J";
@@ -176,7 +178,7 @@ impl NativeTuiEnvironment {
         write_runtime_config(&paths, &workspace);
         let inference_config = write_inference_config(&root);
         let runtime = AgentLibreRuntimeConfig::from_paths(paths.clone()).unwrap();
-        let state = agl_daemon::SharedDaemonState::open(
+        let state = agl_daemon::SharedDaemonState::open_with_runtime_identity(
             runtime,
             InferenceOptions {
                 config: Some(inference_config),
@@ -184,6 +186,7 @@ impl NativeTuiEnvironment {
             },
             InferenceClientHandle::new(NoInference),
             WorkerRuntimeStatusHandle::default(),
+            agl_binary_runtime_identity(),
         )
         .unwrap();
         let socket = root.join("daemon.sock");
@@ -460,7 +463,7 @@ impl ParentTerminalFixture {
     }
 
     fn wait_for(&mut self, needle: &[u8]) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
         while !contains(&self.output, needle) {
             self.read_available();
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -472,7 +475,9 @@ impl ParentTerminalFixture {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for TUI output"
+                "timed out waiting for TUI output {:?}; output={}",
+                String::from_utf8_lossy(needle),
+                escaped(&self.output)
             );
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -583,6 +588,25 @@ fn write_runtime_config(paths: &AgentLibrePaths, workspace: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let workspace = serde_json::to_string(&workspace.to_string_lossy()).unwrap();
     std::fs::write(path, format!("[workspace]\nroot = {workspace}\n")).unwrap();
+}
+
+fn agl_binary_runtime_identity() -> agl_runtime::CurrentRuntimeIdentity {
+    static IDENTITY: OnceLock<agl_runtime::CurrentRuntimeIdentity> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let output = Command::new(env!("CARGO_BIN_EXE_agl"))
+                .args(["runtime", "identity"])
+                .output()
+                .expect("failed to inspect the test agl runtime identity");
+            assert!(
+                output.status.success(),
+                "test agl runtime identity failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(&output.stdout)
+                .expect("test agl returned an invalid runtime identity")
+        })
+        .clone()
 }
 
 fn write_inference_config(root: &Path) -> PathBuf {

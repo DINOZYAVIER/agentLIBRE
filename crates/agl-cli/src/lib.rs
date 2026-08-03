@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt;
 use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,7 @@ use agl_daemon::{
     CronExecution, CronNotification, CronNotifier, CronTargetExecutor, DaemonOptions, DaemonServer,
     default_socket_path, render_cron_notification_body, render_cron_skill_prompt, run_cron_tick,
 };
+use agl_ids::{RunId, SessionId};
 use agl_inference::{
     InferenceDeviceInfo, InferenceDeviceKind, ModelManager, ModelManagerOptions, WorkerModelRuntime,
 };
@@ -24,8 +26,8 @@ use agl_protocol::{
     AssistantItemState, DaemonCapability, InferenceStatusRequest, ModelReleaseOutcome,
     ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState,
     ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
-    SessionFinishReason, SessionFinishRequest, SessionOpenRequest, SessionPresentationItem,
-    SessionPresentationRequest,
+    RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionOpenRequest,
+    SessionPresentationItem, SessionPresentationRequest,
 };
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
@@ -59,6 +61,7 @@ mod one_shot;
 #[path = "process.rs"]
 mod process_command;
 mod repo;
+mod runtime;
 mod store;
 mod trace;
 mod tui;
@@ -104,6 +107,13 @@ pub(crate) fn print_json_or(
 }
 
 pub fn run_cli() {
+    if let Some(result) = runtime::internal_runtime_action() {
+        if let Err(err) = result {
+            eprintln!("error: {err:#}");
+            process::exit(1);
+        }
+        return;
+    }
     if env::var_os("AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE").as_deref()
         == Some(std::ffi::OsStr::new("1"))
     {
@@ -142,12 +152,15 @@ pub fn run_cli() {
         CliCommand::Artifact(command) => artifact::json_requested(command),
         _ => false,
     };
+    let run_json = matches!(&command, CliCommand::Run(options) if options.json);
     let runtime = match runtime_for_command(&command, invocation.home) {
         Ok(runtime) => runtime,
         Err(err) => {
             let err = err.context("failed to resolve agentLIBRE runtime");
             if artifact_json {
                 artifact::print_error_json(&err);
+            } else if run_json {
+                print_run_error_json(&err);
             } else {
                 eprintln!("error: {err:#}");
             }
@@ -178,6 +191,8 @@ pub fn run_cli() {
         tracing::error!(target: "agentlibre::app", error = %err, "agentLIBRE command failed");
         if artifact_json {
             artifact::print_error_json(&err);
+        } else if run_json {
+            print_run_error_json(&err);
         } else {
             eprintln!("error: {err:#}");
         }
@@ -301,6 +316,7 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Notes(_)
         | CliCommand::Process(_)
         | CliCommand::Trace(_)
+        | CliCommand::RuntimeIdentity
         | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
         CliCommand::Serve(_)
         | CliCommand::Inference(InferenceCommand::Serve(_))
@@ -332,6 +348,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Skill(command) => run_skill(command, runtime),
         CliCommand::Process(command) => run_process(command, runtime),
         CliCommand::Trace(command) => run_trace(command),
+        CliCommand::RuntimeIdentity => runtime::print_runtime_identity(),
         CliCommand::Serve(options) => run_serve(options, runtime),
         CliCommand::Inference(command) => run_inference(command, runtime),
         CliCommand::DaemonStatus(options) => run_daemon_status(options, runtime),
@@ -1502,7 +1519,7 @@ fn daemon_first_cron_inference(runtime: &AgentLibreRuntimeConfig) -> Result<CliC
         .enable_all()
         .build()
         .context("failed to build daemon-first cron runtime")?;
-    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let connection = async_runtime.block_on(runtime::connect_daemon(&socket_path));
     let authority = inference_authority_decision(
         InferenceAuthoritySurface::Cron,
         classify_daemon_connection(&connection),
@@ -1557,7 +1574,7 @@ pub(crate) fn daemon_first_inference_inventory(
         .enable_all()
         .build()
         .context("failed to build daemon inference inventory runtime")?;
-    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let connection = async_runtime.block_on(runtime::connect_daemon(&socket_path));
     let authority = inference_authority_decision(
         InferenceAuthoritySurface::InitInventory,
         classify_daemon_connection(&connection),
@@ -1627,6 +1644,169 @@ pub(crate) fn daemon_first_inference_inventory(
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+struct RunFailureDiagnostic {
+    code: String,
+    message: String,
+    context: RunFailureContext,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RunFailureContext {
+    session_id: String,
+    run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<String>,
+    evidence_path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_resolution: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct RunCommandFailure {
+    diagnostic: RunFailureDiagnostic,
+}
+
+impl fmt::Display for RunCommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let context = &self.diagnostic.context;
+        write!(
+            formatter,
+            "turn failed ({}): {}\nsession_id={}\nrun_id={}",
+            self.diagnostic.code, self.diagnostic.message, context.session_id, context.run_id
+        )?;
+        if let Some(attempt_id) = &context.attempt_id {
+            write!(formatter, "\nattempt_id={attempt_id}")?;
+        }
+        write!(
+            formatter,
+            "\nruntime_resolution={}",
+            context.evidence_path.display()
+        )?;
+        if let Some(evidence_error) = &context.evidence_error {
+            write!(formatter, "\nevidence_error={evidence_error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RunCommandFailure {}
+
+fn print_run_error_json(error: &anyhow::Error) {
+    let envelope = if let Some(failure) = error.downcast_ref::<RunCommandFailure>() {
+        serde_json::json!({ "error": failure.diagnostic })
+    } else {
+        serde_json::json!({
+            "error": {
+                "code": "run_error",
+                "message": format!("{error:#}"),
+                "context": {}
+            }
+        })
+    };
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&envelope).expect("run error envelope is serializable")
+    );
+}
+
+fn daemon_runtime_resolution_path(
+    runtime: &AgentLibreRuntimeConfig,
+    session_id: &SessionId,
+    run_id: &RunId,
+) -> PathBuf {
+    runtime
+        .paths
+        .sessions_root()
+        .join(session_id.as_str())
+        .join("runs")
+        .join(run_id.as_str())
+        .join("runtime-resolution.json")
+}
+
+fn daemon_run_failure(
+    runtime: &AgentLibreRuntimeConfig,
+    session_id: &SessionId,
+    run_id: &RunId,
+    cause_code: Option<String>,
+    message: String,
+) -> anyhow::Error {
+    let evidence_path = daemon_runtime_resolution_path(runtime, session_id, run_id);
+    run_failure_from_evidence_path(session_id, run_id, cause_code, message, evidence_path)
+}
+
+fn run_failure_from_evidence_path(
+    session_id: &SessionId,
+    run_id: &RunId,
+    cause_code: Option<String>,
+    message: String,
+    evidence_path: PathBuf,
+) -> anyhow::Error {
+    let (runtime_resolution, evidence_error) = match std::fs::read(&evidence_path) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(resolution) => (Some(resolution), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "canonical runtime resolution is invalid JSON: {error}"
+                )),
+            ),
+        },
+        Err(error) => (
+            None,
+            Some(format!(
+                "canonical runtime resolution is unavailable: {error}"
+            )),
+        ),
+    };
+    let attempt_id = runtime_resolution
+        .as_ref()
+        .and_then(|resolution| resolution.get("attempt_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let admission_code = runtime_resolution
+        .as_ref()
+        .and_then(|resolution| resolution.pointer("/admission/error/code"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let code = if evidence_error.is_some() {
+        "runtime_resolution_unavailable".to_owned()
+    } else {
+        admission_code
+            .or_else(|| cause_code.clone())
+            .unwrap_or_else(|| "chat_turn_failed".to_owned())
+    };
+    RunCommandFailure {
+        diagnostic: RunFailureDiagnostic {
+            code,
+            message,
+            context: RunFailureContext {
+                session_id: session_id.as_str().to_owned(),
+                run_id: run_id.as_str().to_owned(),
+                attempt_id,
+                evidence_path,
+                cause_code,
+                evidence_error,
+                runtime_resolution,
+            },
+        },
+    }
+    .into()
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RunSuccess {
+    status: &'static str,
+    session_id: String,
+    run_id: String,
+    answer: String,
+    runtime_resolution: PathBuf,
+}
+
 fn run_one_shot(mut options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     apply_workspace_default_function_to_run(&mut options, runtime)?;
     run_one_shot_raw(options, runtime)
@@ -1639,7 +1819,7 @@ fn run_one_shot_raw(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> R
         .enable_all()
         .build()
         .context("failed to build daemon-first run runtime")?;
-    let connection = async_runtime.block_on(AgentLibreClient::connect(&socket_path));
+    let connection = async_runtime.block_on(runtime::connect_daemon(&socket_path));
     let authority = inference_authority_decision(
         InferenceAuthoritySurface::DirectRun,
         classify_daemon_connection(&connection),
@@ -1665,6 +1845,7 @@ async fn run_one_shot_via_daemon(
     runtime: &AgentLibreRuntimeConfig,
     socket_path: &std::path::Path,
 ) -> Result<()> {
+    let json = options.json;
     if options.function_ref.is_none()
         || options.config.is_some()
         || options.artifact_root.is_some()
@@ -1724,9 +1905,10 @@ async fn run_one_shot_via_daemon(
             })
             .await
             .context("daemon rejected the one-shot run")?;
+        let run_id = accepted.run_id;
         let mut subscription = client
             .subscribe_run(RunSubscribeRequest {
-                run_id: accepted.run_id.clone(),
+                run_id: run_id.clone(),
                 after_sequence: 0,
             })
             .await
@@ -1741,9 +1923,16 @@ async fn run_one_shot_via_daemon(
         if finished.state != ProtocolRunState::Succeeded {
             let detail = finished
                 .error_message
-                .or(finished.error_code)
+                .clone()
+                .or_else(|| finished.error_code.clone())
                 .unwrap_or_else(|| format!("{:?}", finished.state));
-            bail!("turn failed: {detail}");
+            return Err(daemon_run_failure(
+                runtime,
+                &session_id,
+                &run_id,
+                finished.error_code,
+                detail,
+            ));
         }
         let snapshot = client
             .session_presentation(SessionPresentationRequest {
@@ -1764,7 +1953,7 @@ async fn run_one_shot_via_daemon(
                 )
             })
             .context("daemon completed the run without an assistant result")?;
-        match item {
+        let answer = match item {
             SessionPresentationItem::AssistantMessage { content, state, .. }
                 if *state == AssistantItemState::Final =>
             {
@@ -1784,7 +1973,14 @@ async fn run_one_shot_via_daemon(
                 bail!("assistant result is not final: {state:?}")
             }
             _ => unreachable!("assistant result filter only admits assistant items"),
-        }
+        }?;
+        Ok(RunSuccess {
+            status: "succeeded",
+            session_id: session_id.as_str().to_owned(),
+            run_id: run_id.as_str().to_owned(),
+            answer,
+            runtime_resolution: daemon_runtime_resolution_path(runtime, &session_id, &run_id),
+        })
     }
     .await;
 
@@ -1796,8 +1992,12 @@ async fn run_one_shot_via_daemon(
         .await
         .context("failed to finish the daemon one-shot session");
     match (turn, finish) {
-        (Ok(answer), Ok(_)) => {
-            println!("{answer}");
+        (Ok(outcome), Ok(_)) => {
+            if json {
+                print_json(&outcome)?;
+            } else {
+                println!("{}", outcome.answer);
+            }
             Ok(())
         }
         (Err(error), Ok(_)) => Err(error),
@@ -1807,6 +2007,7 @@ async fn run_one_shot_via_daemon(
 }
 
 fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
+    let json = options.json;
     let prompt = options
         .prompt
         .clone()
@@ -1837,29 +2038,80 @@ fn run_one_shot_standalone(options: RunOptions, runtime: &AgentLibreRuntimeConfi
         generated_requests = output.generated_requests,
         "runtime turn finished"
     );
+    let run_id = output.run_id.clone();
+    let session_id = chat.session_id().clone();
+    let evidence_path = summary
+        .artifact_root
+        .join("runs")
+        .join(run_id.as_str())
+        .join("runtime-resolution.json");
     match output.status {
-        ChatTurnStatus::Answered { answer } => println!("{answer}"),
+        ChatTurnStatus::Answered { answer } => {
+            if json {
+                print_json(&RunSuccess {
+                    status: "succeeded",
+                    session_id: session_id.as_str().to_owned(),
+                    run_id: run_id.as_str().to_owned(),
+                    answer,
+                    runtime_resolution: evidence_path,
+                })?;
+            } else {
+                println!("{answer}");
+            }
+        }
         ChatTurnStatus::Incomplete { partial, reason } => {
-            println!("{partial}");
-            bail!("turn output is incomplete: {}", reason.as_str());
+            if !json {
+                println!("{partial}");
+            }
+            return Err(run_failure_from_evidence_path(
+                &session_id,
+                &run_id,
+                Some("incomplete_output".to_owned()),
+                format!("turn output is incomplete: {}", reason.as_str()),
+                evidence_path,
+            ));
         }
         ChatTurnStatus::Stopped { reason } => {
-            println!("stopped=true reason={}", reason.as_str());
+            if json {
+                print_json(&serde_json::json!({
+                    "status": "stopped",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "reason": reason.as_str(),
+                    "runtime_resolution": evidence_path,
+                }))?;
+            } else {
+                println!("stopped=true reason={}", reason.as_str());
+            }
         }
         ChatTurnStatus::Failed { message } => {
-            if let Some(cpu) =
+            let message = if let Some(cpu) =
                 cpu_fallback_for_failed_turn(summary.automatic_runtime_plan.as_ref(), &message)
             {
-                bail!(
+                format!(
                     "GPU inference failed: {message}\nA benchmarked CPU fallback is available (profile {}, context {}, expected speed {}), but non-interactive `agl run` never switches devices automatically. Select the CPU runtime explicitly and retry.",
-                    cpu.profile_id,
-                    cpu.runtime.context_tokens,
-                    cpu.expected_speed
-                );
-            }
-            bail!("turn failed: {message}")
+                    cpu.profile_id, cpu.runtime.context_tokens, cpu.expected_speed
+                )
+            } else {
+                message
+            };
+            return Err(run_failure_from_evidence_path(
+                &session_id,
+                &run_id,
+                Some("chat_turn_failed".to_owned()),
+                message,
+                evidence_path,
+            ));
         }
-        ChatTurnStatus::Cancelled => bail!("turn cancelled"),
+        ChatTurnStatus::Cancelled => {
+            return Err(run_failure_from_evidence_path(
+                &session_id,
+                &run_id,
+                Some("turn_cancelled".to_owned()),
+                "turn cancelled".to_owned(),
+                evidence_path,
+            ));
+        }
     }
     Ok(())
 }
@@ -1908,7 +2160,7 @@ fn run_daemon_status(
         .enable_all()
         .build()
         .context("failed to build daemon status runtime")?;
-    match async_runtime.block_on(AgentLibreClient::connect(&socket_path)) {
+    match async_runtime.block_on(runtime::connect_daemon(&socket_path)) {
         Ok(client) => {
             let inspection = client.hello().and_then(|hello| {
                 async_runtime
@@ -1924,7 +2176,32 @@ fn run_daemon_status(
                     println!("daemon_instance_id={}", hello.daemon_instance_id);
                     println!("protocol_version={}", hello.protocol_version);
                     println!("product_version={}", hello.product_version);
-                    println!("worker_build_id={}", status.worker_build_id);
+                    println!(
+                        "runtime_kind={}",
+                        runtime_generation_kind_label(hello.daemon_runtime.kind)
+                    );
+                    println!(
+                        "runtime_generation_id={}",
+                        hello.daemon_runtime.generation_id
+                    );
+                    println!(
+                        "runtime_builtin_catalog_digest={}",
+                        hello.daemon_runtime.builtin_catalog_digest
+                    );
+                    println!(
+                        "runtime_executable_digest={}",
+                        hello.daemon_runtime.executable_digest
+                    );
+                    println!("worker_build_id={}", hello.worker_build_id);
+                    println!(
+                        "native_bundle_id={}",
+                        hello.native_bundle_id.as_deref().unwrap_or("none")
+                    );
+                    println!(
+                        "composite_worker_build_id={}",
+                        hello.composite_worker_build_id.as_deref().unwrap_or("none")
+                    );
+                    println!("inference_worker_build_id={}", status.worker_build_id);
                     println!(
                         "worker_state={}",
                         inference_worker_state_label(status.worker_state)
@@ -2043,6 +2320,13 @@ fn inference_worker_state_label(state: ProtocolInferenceWorkerState) -> &'static
         ProtocolInferenceWorkerState::Ready => "ready",
         ProtocolInferenceWorkerState::Busy => "busy",
         ProtocolInferenceWorkerState::CoolingDown => "cooling_down",
+    }
+}
+
+fn runtime_generation_kind_label(kind: RuntimeGenerationKind) -> &'static str {
+    match kind {
+        RuntimeGenerationKind::Sealed => "sealed",
+        RuntimeGenerationKind::Development => "development",
     }
 }
 
@@ -2544,6 +2828,7 @@ mod tests {
                     duration_ms: 1,
                     input_tokens: 4,
                     output_tokens: 4,
+                    resource_admission: None,
                 },
             })
         }
@@ -2734,7 +3019,7 @@ tool_call_format = "gemma_function_call"
         let unavailable: std::result::Result<(), ClientError> =
             Err(ClientError::DaemonUnavailable("absent".to_owned()));
         let incompatible: std::result::Result<(), ClientError> = Err(ClientError::SchemaMismatch {
-            expected: "agentlibre.event.v6alpha",
+            expected: "agentlibre.event.v8alpha",
         });
         assert_eq!(
             classify_daemon_connection(&available),
@@ -2810,10 +3095,12 @@ tool_call_format = "gemma_function_call"
                 .read_line(&mut line)
                 .unwrap();
             let request: agl_protocol::DaemonRequest = serde_json::from_str(&line).unwrap();
-            assert!(matches!(
-                request.kind,
-                agl_protocol::DaemonRequestKind::Hello(_)
-            ));
+            let client_runtime = match &request.kind {
+                agl_protocol::DaemonRequestKind::Hello(hello) => {
+                    hello.client_runtime.clone().unwrap()
+                }
+                other => panic!("expected Hello, got {other:?}"),
+            };
             serde_json::to_writer(
                 &mut stream,
                 &agl_protocol::DaemonEvent::new(
@@ -2822,6 +3109,10 @@ tool_call_format = "gemma_function_call"
                         protocol_version: agl_protocol::PROTOCOL_VERSION.to_owned(),
                         product_version: "test".to_owned(),
                         daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
+                        daemon_runtime: client_runtime,
+                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
+                        native_bundle_id: None,
+                        composite_worker_build_id: None,
                         capabilities: Vec::new(),
                     }),
                 ),
@@ -3132,6 +3423,108 @@ memory:
             chat_options.inference.workspace_root,
             Some(PathBuf::from("/tmp/workspace"))
         );
+    }
+
+    #[test]
+    fn daemon_run_failure_exposes_canonical_admission_and_durable_ids() {
+        let root = std::env::temp_dir().join(format!("agl-cli-run-failure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(&root),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        };
+        let run_id = RunId::generate();
+        let session_id = SessionId::generate();
+        let path = daemon_runtime_resolution_path(&runtime, &session_id, &run_id);
+        assert_eq!(
+            path,
+            runtime
+                .paths
+                .sessions_root()
+                .join(session_id.as_str())
+                .join("runs")
+                .join(run_id.as_str())
+                .join("runtime-resolution.json")
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "attempt_id": "attempt_fixture",
+                "artifacts": { "root": "function:gemma4-31b-64k@1.0.0" },
+                "admission": {
+                    "status": "rejected",
+                    "error": {
+                        "code": "accelerator_capacity_exceeded",
+                        "details": {
+                            "selected_profile_id": "gemma4-31b-64k-reviewed",
+                            "required_bytes": 23488102400_u64
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = daemon_run_failure(
+            &runtime,
+            &session_id,
+            &run_id,
+            Some("chat_turn_failed".to_owned()),
+            "model request failed".to_owned(),
+        );
+        let failure = error.downcast_ref::<RunCommandFailure>().unwrap();
+        assert_eq!(failure.diagnostic.code, "accelerator_capacity_exceeded");
+        assert_eq!(
+            failure.diagnostic.context.attempt_id.as_deref(),
+            Some("attempt_fixture")
+        );
+        assert_eq!(failure.diagnostic.context.evidence_path, path);
+        assert_eq!(
+            failure
+                .diagnostic
+                .context
+                .runtime_resolution
+                .as_ref()
+                .unwrap()["admission"]["error"]["details"]["selected_profile_id"],
+            "gemma4-31b-64k-reviewed"
+        );
+        let rendered = failure.to_string();
+        assert!(rendered.contains(run_id.as_str()));
+        assert!(rendered.contains(session_id.as_str()));
+        assert!(rendered.contains("attempt_fixture"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_run_failure_types_missing_canonical_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "agl-cli-run-missing-evidence-{}",
+            std::process::id()
+        ));
+        let runtime = AgentLibreRuntimeConfig {
+            paths: AgentLibrePaths::from_agl_home(&root),
+            logging: AgentLibreLoggingConfig::default(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig::default(),
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        };
+        let error = daemon_run_failure(
+            &runtime,
+            &SessionId::generate(),
+            &RunId::generate(),
+            Some("chat_turn_failed".to_owned()),
+            "model request failed".to_owned(),
+        );
+        let failure = error.downcast_ref::<RunCommandFailure>().unwrap();
+        assert_eq!(failure.diagnostic.code, "runtime_resolution_unavailable");
+        assert!(failure.diagnostic.context.evidence_error.is_some());
     }
 
     #[test]

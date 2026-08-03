@@ -31,6 +31,7 @@ pub(crate) enum CliCommand {
     Skill(SkillCommand),
     Process(ProcessCommand),
     Trace(TraceCommand),
+    RuntimeIdentity,
     DaemonStatus(DaemonStatusOptions),
     Serve(ServeOptions),
     Run(RunOptions),
@@ -763,6 +764,7 @@ pub(crate) struct RunOptions {
     pub(crate) skills: Vec<String>,
     pub(crate) memory: bool,
     pub(crate) prompt: Option<String>,
+    pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

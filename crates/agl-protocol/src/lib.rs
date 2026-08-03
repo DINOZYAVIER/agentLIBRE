@@ -17,9 +17,9 @@ pub use agl_process::{
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
-pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v7alpha";
-pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v7alpha";
-pub const PROTOCOL_VERSION: &str = "v7alpha";
+pub const REQUEST_SCHEMA: &str = "agentlibre.daemon.request.v8alpha";
+pub const EVENT_SCHEMA: &str = "agentlibre.daemon.event.v8alpha";
+pub const PROTOCOL_VERSION: &str = "v8alpha";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DaemonRequest {
@@ -41,7 +41,7 @@ impl DaemonRequest {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != REQUEST_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon request schema does not match protocol v7alpha",
+                "daemon request schema does not match protocol v8alpha",
             ));
         }
         self.kind.validate_surface()?;
@@ -93,7 +93,7 @@ impl<'de> Deserialize<'de> for DaemonRequest {
 pub enum DaemonRequestKind {
     Hello(HelloRequest),
     SessionOpen(SessionOpenRequest),
-    SetupSmokeSessionOpen(SetupSmokeSessionOpenRequest),
+    SetupSmokeSessionOpen(Box<SetupSmokeSessionOpenRequest>),
     SessionClear(SessionClearRequest),
     SessionFinish(SessionFinishRequest),
     SessionStatus(SessionStatusRequest),
@@ -152,7 +152,7 @@ impl DaemonEvent {
     pub fn validate(&self) -> Result<(), SurfaceValidationError> {
         if self.schema != EVENT_SCHEMA {
             return Err(SurfaceValidationError::new(
-                "daemon event schema does not match protocol v7alpha",
+                "daemon event schema does not match protocol v8alpha",
             ));
         }
         validate_safe_metadata(&self.safe_metadata)?;
@@ -279,6 +279,24 @@ pub struct HelloRequest {
     pub client_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accepted_protocol_versions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_runtime: Option<RuntimeGenerationIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGenerationKind {
+    Sealed,
+    Development,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeGenerationIdentity {
+    pub kind: RuntimeGenerationKind,
+    pub generation_id: String,
+    pub builtin_catalog_digest: String,
+    pub executable_digest: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -287,6 +305,12 @@ pub struct HelloEvent {
     pub protocol_version: String,
     pub product_version: String,
     pub daemon_instance_id: DaemonInstanceId,
+    pub daemon_runtime: RuntimeGenerationIdentity,
+    pub worker_build_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composite_worker_build_id: Option<String>,
     pub capabilities: Vec<DaemonCapability>,
 }
 
@@ -427,7 +451,7 @@ pub struct ModelUnloadEvent {
     pub outcome: ModelUnloadOutcome,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonCapability {
     SessionOpen,
@@ -496,6 +520,9 @@ pub struct SetupSmokeRuntimePlan {
     pub profile_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_device_identity: Option<agl_model::LlamaDeviceInfo>,
+    pub model: agl_model::RuntimePlanModelIdentity,
     pub runtime: agl_config::InferenceRuntimeConfig,
     pub smoke_timeout_seconds: u64,
     pub expected_speed: String,
@@ -1065,6 +1092,8 @@ pub struct ProtocolError {
     pub code: ProtocolErrorCode,
     pub message: String,
     pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<ProtocolErrorDetails>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub safe_metadata: BTreeMap<String, String>,
 }
@@ -1075,15 +1104,31 @@ impl ProtocolError {
             code,
             message: message.into(),
             retryable,
+            details: None,
             safe_metadata: BTreeMap::new(),
         }
     }
+
+    pub fn with_details(mut self, details: ProtocolErrorDetails) -> Self {
+        self.details = Some(Box::new(details));
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProtocolErrorDetails {
+    RuntimeIdentityMismatch {
+        client: RuntimeGenerationIdentity,
+        daemon: RuntimeGenerationIdentity,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolErrorCode {
     UnsupportedProtocolVersion,
+    RuntimeIdentityMismatch,
     InvalidRequest,
     Unauthorized,
     NotFound,
@@ -1170,6 +1215,15 @@ mod tests {
         ExecutionRequestId::parse(EXECUTION_REQUEST_ID).unwrap()
     }
 
+    fn runtime_identity(fill: char) -> RuntimeGenerationIdentity {
+        RuntimeGenerationIdentity {
+            kind: RuntimeGenerationKind::Sealed,
+            generation_id: format!("sha256:{}", fill.to_string().repeat(64)),
+            builtin_catalog_digest: format!("sha256:{}", fill.to_string().repeat(64)),
+            executable_digest: format!("sha256:{}", fill.to_string().repeat(64)),
+        }
+    }
+
     #[test]
     fn run_submit_request_round_trips_as_jsonl_shape() {
         let request = DaemonRequest::new(
@@ -1184,7 +1238,7 @@ mod tests {
 
         let json = serde_json::to_string(&request).unwrap();
 
-        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v7alpha\""));
+        assert!(json.contains("\"schema\":\"agentlibre.daemon.request.v8alpha\""));
         assert!(json.contains(&format!("\"request_id\":\"{REQUEST_ID}\"")));
         assert!(json.contains("\"kind\":\"run_submit\""));
         let decoded: DaemonRequest = serde_json::from_str(&json).unwrap();
@@ -1207,6 +1261,18 @@ mod tests {
             runtime_plan: SetupSmokeRuntimePlan {
                 profile_id: "gpu-64k".to_owned(),
                 selected_device: Some("pci:0000:03:00.0".to_owned()),
+                selected_device_identity: Some(agl_model::LlamaDeviceInfo {
+                    name: "pci:0000:03:00.0".to_owned(),
+                    description: "test GPU".to_owned(),
+                    kind: agl_model::LlamaDeviceKind::DiscreteGpu,
+                    pci_device_id: Some("1002:744c".to_owned()),
+                    pci_subsystem_id: Some("1da2:471e".to_owned()),
+                    free_memory_bytes: 20_000_000_000,
+                    total_memory_bytes: 24_000_000_000,
+                    usable: true,
+                    supports_gpu_offload: true,
+                }),
+                model: test_runtime_plan_model_identity("gemma4-12b"),
                 runtime: agl_config::InferenceRuntimeConfig {
                     gpu_layers: 65,
                     context_tokens: 65_536,
@@ -1230,11 +1296,32 @@ mod tests {
         }
     }
 
+    fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
+        serde_json::from_value(serde_json::json!({
+            "provenance": {
+                "reference": format!("model:{id}@=1.0.0"),
+                "source_id": "test",
+                "source_tier": "workspace",
+                "source_kind": "directory",
+                "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "weights": [{
+                "role": "main",
+                "model_id": id,
+                "filename": format!("{id}.gguf"),
+                "byte_size": 18,
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "required": true
+            }]
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn setup_smoke_session_request_is_typed_bounded_and_exact() {
         let request = DaemonRequest::new(
             request_id(),
-            DaemonRequestKind::SetupSmokeSessionOpen(setup_smoke_request()),
+            DaemonRequestKind::SetupSmokeSessionOpen(Box::new(setup_smoke_request())),
         );
         request.validate().unwrap();
         let value = serde_json::to_value(&request).unwrap();
@@ -1259,7 +1346,7 @@ mod tests {
         assert!(
             DaemonRequest::new(
                 request_id(),
-                DaemonRequestKind::SetupSmokeSessionOpen(relative)
+                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(relative))
             )
             .validate()
             .is_err()
@@ -1270,7 +1357,7 @@ mod tests {
         assert!(
             DaemonRequest::new(
                 request_id(),
-                DaemonRequestKind::SetupSmokeSessionOpen(unbounded)
+                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(unbounded))
             )
             .validate()
             .is_err()
@@ -1285,6 +1372,14 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 product_version: "1.0.0-alpha.6".to_string(),
                 daemon_instance_id: DaemonInstanceId::generate(),
+                daemon_runtime: runtime_identity('a'),
+                worker_build_id: format!("sha256:{}", "b".repeat(64)),
+                native_bundle_id: Some(format!("sha256:{}", "c".repeat(64))),
+                composite_worker_build_id: Some(format!(
+                    "sha256:{}+sha256:{}",
+                    "b".repeat(64),
+                    "c".repeat(64)
+                )),
                 capabilities: vec![
                     DaemonCapability::SessionOpen,
                     DaemonCapability::RunSubmit,
@@ -1298,6 +1393,10 @@ mod tests {
         assert_eq!(value["schema"], EVENT_SCHEMA);
         assert_eq!(value["kind"], "hello");
         assert_eq!(value["payload"]["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(
+            value["payload"]["daemon_runtime"]["generation_id"],
+            format!("sha256:{}", "a".repeat(64))
+        );
         assert_eq!(value["payload"]["capabilities"][1], "run_submit");
         assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
     }
@@ -1449,6 +1548,38 @@ mod tests {
         assert_eq!(value["kind"], "error");
         assert_eq!(value["payload"]["code"], "unsupported_protocol_version");
         assert_eq!(value["payload"]["retryable"], false);
+    }
+
+    #[test]
+    fn runtime_mismatch_error_round_trips_both_typed_identities() {
+        let client = runtime_identity('c');
+        let daemon = runtime_identity('d');
+        let event = DaemonEvent::new(
+            Some(request_id()),
+            DaemonEventKind::Error(
+                ProtocolError::new(
+                    ProtocolErrorCode::RuntimeIdentityMismatch,
+                    "runtime identities do not match",
+                    false,
+                )
+                .with_details(ProtocolErrorDetails::RuntimeIdentityMismatch {
+                    client: client.clone(),
+                    daemon: daemon.clone(),
+                }),
+            ),
+        );
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["payload"]["code"], "runtime_identity_mismatch");
+        assert_eq!(
+            value["payload"]["details"]["kind"],
+            "runtime_identity_mismatch"
+        );
+        assert_eq!(
+            value["payload"]["details"]["client"]["generation_id"],
+            client.generation_id
+        );
+        assert_eq!(serde_json::from_value::<DaemonEvent>(value).unwrap(), event);
     }
 
     #[test]
