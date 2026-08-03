@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use agl_client::AgentLibreClient;
 use agl_config::{
     InferencePresetRuntimeConfig, ModelId, load_inference_preset_from_str,
     load_model_bindings_or_empty, model_bindings_path,
@@ -114,7 +113,7 @@ fn run_unload(options: ModelUnloadOptions, runtime: &AgentLibreRuntimeConfig) ->
         .build()
         .context("failed to build model unload runtime")?;
     let client = async_runtime
-        .block_on(AgentLibreClient::connect(&socket_path))
+        .block_on(crate::runtime::connect_daemon(&socket_path))
         .with_context(|| {
             format!(
                 "agentLIBRE daemon is unavailable at {}; start the user daemon before unloading resident models",

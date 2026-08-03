@@ -679,6 +679,7 @@ impl<R: ModelRuntime> Worker<R> {
                                 duration_ms: elapsed_millis(started),
                                 input_tokens: generation.input_tokens,
                                 output_tokens: generation.output_tokens,
+                                resource_admission: generation.resource_admission,
                             },
                         };
                         match evidence.succeed(&response, log) {
@@ -1627,6 +1628,7 @@ fn resource_admission_error(error: &RuntimeFailure) -> Option<ModelManagerError>
         .then(|| ModelManagerError::ResourceAdmission {
             code: error.code().to_string(),
             message: error.message().to_string(),
+            details: error.resource_admission_details().cloned().map(Box::new),
         })
 }
 

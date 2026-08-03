@@ -69,6 +69,12 @@ create_native_bundle_fixture() {
   chmod 0555 "$base"
 }
 
+create_runtime_manifest_fixture() {
+  local generation="$1"
+  printf '{}\n' >"$generation/runtime-manifest.json"
+  chmod 0444 "$generation/runtime-manifest.json"
+}
+
 runtime_root="$tmp_dir/runtime"
 runtime_generation="$runtime_root/libexec/agentlibre/generations/generation-test"
 mkdir -p "$tmp_dir/bin" "$runtime_root/bin" "$runtime_generation"
@@ -82,6 +88,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl-process-launcher"
 create_worker_fixture "$runtime_generation/agl-inference-worker"
 create_native_bundle_fixture "$runtime_generation"
+create_runtime_manifest_fixture "$runtime_generation"
 chmod 0555 \
   "$runtime_generation/agl" \
   "$runtime_generation/agl-process-launcher" \
@@ -116,7 +123,7 @@ daemon_output="$(env -u VK_DRIVER_FILES -u VK_ICD_FILENAMES PATH="$tmp_dir/bin:$
   --dry-run \
   --unit agl-test.service \
   --cwd "$tmp_dir/workspace" \
-  --config "$tmp_dir/config/local.toml" \
+  --function "gemma4-31b-32k" \
   --socket "$tmp_dir/state/daemon/agl.sock" \
   --workspace-root "$tmp_dir/workspace" \
   --max-output-tokens 512 \
@@ -131,6 +138,7 @@ require_output_contains "$daemon_output" "resolved binary: $runtime_generation/a
 require_output_contains "$daemon_output" "process launcher: $runtime_generation/agl-process-launcher"
 require_output_contains "$daemon_output" "private inference worker: $runtime_generation/agl-inference-worker"
 require_output_contains "$daemon_output" "native inference bundle: $runtime_generation/agl-inference-native"
+require_output_contains "$daemon_output" "runtime manifest: $runtime_generation/runtime-manifest.json"
 require_output_contains "$daemon_output" "unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.service"
 require_output_contains "$daemon_output" "socket unit file: ${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user/agl-test.socket"
 require_output_contains "$daemon_output" "WorkingDirectory=$tmp_dir/workspace"
@@ -142,7 +150,8 @@ require_output_contains "$daemon_output" \
   "UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"
 require_output_contains "$daemon_output" "UMask=0077"
 require_output_contains "$daemon_output" "Requires=agl-test.socket"
-require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --config \"$tmp_dir/config/local.toml\" --workspace-root \"$tmp_dir/workspace\" --max-output-tokens 512 --tool-mode execute"
+require_output_contains "$daemon_output" "function profile: gemma4-31b-32k (embedded; local inference config disabled)"
+require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --workspace-root \"$tmp_dir/workspace\" --function \"gemma4-31b-32k\" --max-output-tokens 512 --tool-mode execute"
 require_output_contains "$daemon_output" "ListenStream=$tmp_dir/state/daemon/agl.sock"
 require_output_contains "$daemon_output" "FileDescriptorName=agentlibre"
 require_output_contains "$daemon_output" "SocketMode=0600"
@@ -154,6 +163,23 @@ require_output_contains "$daemon_output" "WantedBy=sockets.target"
 if [[ -e "$tmp_dir/state" || -L "$tmp_dir/state" ]]; then
   ci_fail "daemon dry-run created or replaced the socket parent"
 fi
+
+conflicting_profile_status=0
+env -u VK_DRIVER_FILES -u VK_ICD_FILENAMES PATH="$tmp_dir/bin:$PATH" \
+  "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
+  --dry-run \
+  --unit agl-conflicting-profile.service \
+  --cwd "$tmp_dir/workspace" \
+  --config "$tmp_dir/config/local.toml" \
+  --function gemma4-31b-32k \
+  --socket "$tmp_dir/state/daemon/agl-conflicting.sock" \
+  --workspace-root "$tmp_dir/workspace" \
+  >"$tmp_dir/conflicting-profile.out" \
+  2>"$tmp_dir/conflicting-profile.err" || conflicting_profile_status=$?
+[[ "$conflicting_profile_status" -eq 2 ]] ||
+  ci_fail "daemon installer accepted conflicting --function and --config"
+rg -F -- "--function owns its inference profile" "$tmp_dir/conflicting-profile.err" >/dev/null ||
+  ci_fail "daemon installer omitted the conflicting profile diagnostic"
 
 vulkan_manifest="$tmp_dir/vulkan/%n/icd.d/driver.json"
 fallback_manifest="$tmp_dir/vulkan/icd.d/fallback.json"
@@ -317,6 +343,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl-process-launcher"
 create_worker_fixture "$umask_runtime_generation/agl-inference-worker"
 create_native_bundle_fixture "$umask_runtime_generation"
+create_runtime_manifest_fixture "$umask_runtime_generation"
 chmod 0555 \
   "$umask_runtime_generation/agl" \
   "$umask_runtime_generation/agl-process-launcher" \
@@ -428,6 +455,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' \
 create_worker_fixture \
   "$install_root/libexec/agentlibre/generations/generation-test/agl-inference-worker"
 create_native_bundle_fixture \
+  "$install_root/libexec/agentlibre/generations/generation-test"
+create_runtime_manifest_fixture \
   "$install_root/libexec/agentlibre/generations/generation-test"
 chmod 0555 \
   "$install_root/libexec/agentlibre/generations/generation-test/agl" \

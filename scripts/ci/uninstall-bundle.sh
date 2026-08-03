@@ -66,7 +66,7 @@ write_executable() {
   chmod 0555 "$path"
 }
 
-seed_obsolete_generation() {
+seed_legacy_generation() {
   local root="$1"
   local name="$2"
   local generation="$root/libexec/agentlibre/generations/$name"
@@ -97,6 +97,8 @@ seed_current_generation() {
     : >"$generation/agl-inference-native/sha256-$digest/$library"
     chmod 0555 "$generation/agl-inference-native/sha256-$digest/$library"
   done
+  printf '{}\n' >"$generation/runtime-manifest.json"
+  chmod 0444 "$generation/runtime-manifest.json"
   chmod 0555 \
     "$generation/agl-inference-native/sha256-$digest" \
     "$generation/agl-inference-native" \
@@ -155,27 +157,21 @@ assert_surface_present() {
 }
 
 obsolete_root="$tmp_dir/obsolete"
-seed_obsolete_generation "$obsolete_root" generation-olda
-seed_obsolete_generation "$obsolete_root" generation-oldb
+seed_legacy_generation "$obsolete_root" generation-olda
+seed_legacy_generation "$obsolete_root" generation-oldb
 seed_surface "$obsolete_root" generation-oldb
-preview="$(run_uninstaller "$obsolete_root")"
-[[ "$preview" == *"generations: 2 (current=0 obsolete=2)"* ]] ||
-  ci_fail "obsolete preview omitted its exact generation counts: $preview"
-[[ "$preview" == *"preview only; rerun with --apply"* ]] ||
-  ci_fail "uninstaller did not default to preview: $preview"
+obsolete_status=0
+run_uninstaller "$obsolete_root" --apply \
+  >"$tmp_dir/obsolete.out" 2>"$tmp_dir/obsolete.err" || obsolete_status=$?
+[[ "$obsolete_status" -eq 1 ]] ||
+  ci_fail "uninstaller accepted an obsolete pre-manifest alpha layout"
+grep -F "not the exact sealed-manifest alpha layout" "$tmp_dir/obsolete.err" >/dev/null ||
+  ci_fail "obsolete layout rejection omitted its reason"
 assert_surface_present "$obsolete_root"
-run_uninstaller "$obsolete_root" --apply >"$tmp_dir/obsolete-apply.out"
-[[ ! -e "$obsolete_root/libexec/agentlibre" &&
-  ! -e "$obsolete_root/bin/agl" &&
-  ! -e "$obsolete_root/bin/agl-process-launcher" &&
-  ! -e "$obsolete_root/.agentlibre-runtime.lock" ]] ||
-  ci_fail "obsolete managed runtime was not removed"
-[[ -d "$obsolete_root/bin" && -d "$obsolete_root/libexec" ]] ||
-  ci_fail "uninstaller removed shared install ancestors"
 
 current_root="$tmp_dir/current"
 seed_current_generation "$current_root" generation-current
-seed_obsolete_generation "$current_root" generation-old
+seed_current_generation "$current_root" generation-old
 seed_surface "$current_root" generation-current
 mkdir -p "$current_root/config-preserved"
 run_uninstaller "$current_root" --apply >"$tmp_dir/current-apply.out"
@@ -183,7 +179,7 @@ run_uninstaller "$current_root" --apply >"$tmp_dir/current-apply.out"
   ci_fail "current uninstall removed the wrong scope"
 
 active_unit_root="$tmp_dir/active-unit"
-seed_obsolete_generation "$active_unit_root" generation-old
+seed_current_generation "$active_unit_root" generation-old
 seed_surface "$active_unit_root" generation-old
 seed_standard_units "$active_unit_root"
 printf active >"$fake_systemd_state/agentlibre-daemon.socket"
@@ -210,7 +206,7 @@ grep -F -- "stop agentlibre-daemon.socket agentlibre-daemon.service" \
   ci_fail "automatic uninstall did not stop only the exact standard unit pair"
 
 stop_failure_root="$tmp_dir/stop-failure"
-seed_obsolete_generation "$stop_failure_root" generation-old
+seed_current_generation "$stop_failure_root" generation-old
 seed_surface "$stop_failure_root" generation-old
 seed_standard_units "$stop_failure_root"
 printf active >"$fake_systemd_state/agentlibre-daemon.socket"
@@ -224,7 +220,7 @@ printf inactive >"$fake_systemd_state/agentlibre-daemon.socket"
 printf inactive >"$fake_systemd_state/agentlibre-daemon.service"
 
 query_failure_root="$tmp_dir/query-failure"
-seed_obsolete_generation "$query_failure_root" generation-old
+seed_current_generation "$query_failure_root" generation-old
 seed_surface "$query_failure_root" generation-old
 seed_standard_units "$query_failure_root"
 printf active >"$fake_systemd_state/agentlibre-daemon.socket"
@@ -238,7 +234,7 @@ printf inactive >"$fake_systemd_state/agentlibre-daemon.socket"
 printf inactive >"$fake_systemd_state/agentlibre-daemon.service"
 
 locked_root="$tmp_dir/locked"
-seed_obsolete_generation "$locked_root" generation-old
+seed_current_generation "$locked_root" generation-old
 seed_surface "$locked_root" generation-old
 exec {held_lock_fd}<>"$locked_root/.agentlibre-runtime.lock"
 flock --exclusive "$held_lock_fd"
@@ -253,7 +249,7 @@ grep -F "another runtime bundle operation holds" "$tmp_dir/locked.err" >/dev/nul
 assert_surface_present "$locked_root"
 
 live_root="$tmp_dir/live-process"
-seed_obsolete_generation "$live_root" generation-live
+seed_current_generation "$live_root" generation-live
 printf '%s\n' \
   '#include <unistd.h>' \
   'int main(void) { sleep(30); return 0; }' \
@@ -289,8 +285,8 @@ live_pid=""
 
 escape_root="$tmp_dir/escape"
 escape_target="$tmp_dir/escape-target"
-seed_obsolete_generation "$escape_root" generation-old
-seed_obsolete_generation "$escape_target" generation-outside
+seed_current_generation "$escape_root" generation-old
+seed_current_generation "$escape_target" generation-outside
 seed_surface "$escape_root" generation-old
 rm -f "$escape_root/libexec/agentlibre/current"
 ln -s -- "$escape_target/libexec/agentlibre/generations/generation-outside" \
@@ -303,7 +299,7 @@ run_uninstaller "$escape_root" --apply \
   ci_fail "escaping current pointer mutated its external target"
 
 hardlink_root="$tmp_dir/hardlink"
-seed_obsolete_generation "$hardlink_root" generation-old
+seed_current_generation "$hardlink_root" generation-old
 seed_surface "$hardlink_root" generation-old
 ln "$hardlink_root/libexec/agentlibre/generations/generation-old/agl" \
   "$tmp_dir/hardlink-alias"
@@ -314,7 +310,7 @@ run_uninstaller "$hardlink_root" --apply \
 assert_surface_present "$hardlink_root"
 
 writable_root="$tmp_dir/writable-ancestor"
-seed_obsolete_generation "$writable_root" generation-old
+seed_current_generation "$writable_root" generation-old
 seed_surface "$writable_root" generation-old
 chmod 0775 "$writable_root/libexec"
 writable_status=0
@@ -325,7 +321,7 @@ assert_surface_present "$writable_root"
 
 symlink_root="$tmp_dir/symlink-root"
 symlink_outside="$tmp_dir/symlink-outside"
-seed_obsolete_generation "$symlink_outside" generation-old
+seed_current_generation "$symlink_outside" generation-old
 seed_surface "$symlink_outside" generation-old
 ln -s -- "$symlink_outside" "$symlink_root"
 symlink_status=0

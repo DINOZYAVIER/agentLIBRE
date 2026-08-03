@@ -111,6 +111,8 @@ mod help {
     pub(super) const REPO_INSTALL_HOOKS: &str = cli_help!("repo/install-hooks");
     pub(super) const REPO_STATUS: &str = cli_help!("repo/status");
     pub(super) const REPO_VERIFY_TASKS: &str = cli_help!("repo/verify-tasks");
+    pub(super) const RUNTIME: &str = cli_help!("runtime");
+    pub(super) const RUNTIME_IDENTITY: &str = cli_help!("runtime/identity");
     pub(super) const RUN: &str = cli_help!("run");
     pub(super) const SERVE: &str = cli_help!("serve");
     pub(super) const SKILL: &str = cli_help!("skill");
@@ -271,6 +273,12 @@ enum Commands {
         #[command(subcommand)]
         command: TraceCommands,
     },
+    /// Inspect the exact executing runtime.
+    #[command(long_about = help::RUNTIME)]
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommands,
+    },
     /// Run the local agent runtime daemon in the foreground.
     #[command(long_about = help::SERVE)]
     Serve(ServeArgs),
@@ -308,6 +316,13 @@ enum TraceCommands {
     /// Validate and replay a semantic trace without executing effects.
     #[command(long_about = help::TRACE_REPLAY)]
     Replay(TraceReplayArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommands {
+    /// Print the verified runtime identity as JSON.
+    #[command(long_about = help::RUNTIME_IDENTITY)]
+    Identity,
 }
 
 #[derive(Debug, Args)]
@@ -1746,6 +1761,10 @@ struct CommonRunArgs {
     /// Inject explicit user memory into the model context.
     #[arg(long)]
     memory: bool,
+
+    /// Print a machine-readable success or nested error envelope.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2005,6 +2024,9 @@ impl Cli {
                     json: args.json,
                 }),
             }),
+            Some(Commands::Runtime { command }) => match command {
+                RuntimeCommands::Identity => CliCommand::RuntimeIdentity,
+            },
             Some(Commands::Serve(args)) => CliCommand::Serve(serve_options_from_args(args)?),
             Some(Commands::Status(args)) => {
                 CliCommand::Repo(RepoCommand::Status(repo_status_options(args)))
@@ -2855,6 +2877,7 @@ fn run_options_from_common(common: CommonRunArgs) -> Result<RunOptions> {
         skills: validate_skill_ids(common.skills)?,
         memory: common.memory,
         prompt: None,
+        json: common.json,
     })
 }
 
@@ -2875,6 +2898,7 @@ fn run_options_from_inference_common(common: CommonInferenceArgs) -> Result<RunO
         skills: validate_skill_ids(common.skills)?,
         memory: common.memory,
         prompt: None,
+        json: false,
     })
 }
 
@@ -3055,6 +3079,11 @@ enum PublicCompletionCommands {
     Trace {
         #[command(subcommand)]
         command: TraceCommands,
+    },
+    /// Inspect the exact executing runtime.
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommands,
     },
     /// Run the local agent runtime daemon in the foreground.
     Serve(ServeArgs),

@@ -30,6 +30,7 @@ fn agl_help_lists_public_commands() {
     assert_contains(&stdout, "--resume");
     assert_contains(&stdout, "--no-input-history");
     assert_contains(&stdout, "process");
+    assert_contains(&stdout, "runtime");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
     assert_contains(&stdout, "function");
@@ -77,12 +78,35 @@ fn version_output_uses_public_alias() {
 }
 
 #[test]
+fn runtime_identity_query_is_machine_readable_and_explicitly_development() {
+    let output = run_agl(&["runtime", "identity"]);
+
+    assert_success_no_stderr(&output);
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("runtime identity must be JSON");
+    assert_eq!(value["schema"], "agentlibre.runtime-identity/v1");
+    assert_eq!(value["kind"], "development");
+    assert_eq!(
+        value["builtin_catalog_digest"],
+        agl_assets::BUILTIN_ARTIFACT_CATALOG_DIGEST
+    );
+    assert!(
+        value["generation_id"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("sha256:"))
+    );
+    assert!(value.get("manifest").is_none());
+}
+
+#[test]
 fn command_help_exits_successfully_for_public_commands() {
     for args in [
         &["completion", "--help"][..],
         &["config", "--help"][..],
         &["config", "paths", "--help"][..],
         &["config", "init", "--help"][..],
+        &["runtime", "--help"][..],
+        &["runtime", "identity", "--help"][..],
         &["artifact", "--help"][..],
         &["artifact", "list", "--help"][..],
         &["artifact", "inspect", "--help"][..],
@@ -2125,10 +2149,20 @@ fn daemon_status_reports_worker_and_accelerator_state_without_private_payloads()
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
     assert_contains(&stdout, "state=running");
-    assert_contains(&stdout, "protocol_version=v7alpha");
+    assert_contains(&stdout, "protocol_version=v8alpha");
     assert_contains(&stdout, "product_version=");
     assert_contains(&stdout, "daemon_instance_id=");
-    assert_contains(&stdout, "worker_build_id=sha256:test-worker");
+    assert_contains(&stdout, "runtime_kind=development");
+    assert_contains(&stdout, "runtime_generation_id=sha256:");
+    assert_contains(&stdout, "runtime_builtin_catalog_digest=sha256:");
+    assert_contains(&stdout, "runtime_executable_digest=sha256:");
+    assert_contains(
+        &stdout,
+        &format!("worker_build_id=sha256:{}", "d".repeat(64)),
+    );
+    assert_contains(&stdout, "native_bundle_id=none");
+    assert_contains(&stdout, "composite_worker_build_id=none");
+    assert_contains(&stdout, "inference_worker_build_id=sha256:test-worker");
     assert_contains(&stdout, "worker_state=cooling_down");
     assert_contains(&stdout, "worker_pid=none");
     assert_contains(&stdout, "worker_launch_generation=none");
@@ -2409,7 +2443,8 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
         "function id=gemma4-12b source=builtin path=builtin:function/gemma4-12b/FUNCTION.md valid=true",
     );
     assert_contains(&list_stdout, "function id=gemma4-26b source=builtin");
-    assert_contains(&list_stdout, "function id=gemma4-31b source=builtin");
+    assert_contains(&list_stdout, "function id=gemma4-31b-32k source=builtin");
+    assert_contains(&list_stdout, "function id=gemma4-31b-64k source=builtin");
 
     let status = run_agl(&["--home", &home_arg, "function", "status", "gemma4-12b"]);
     assert_success_no_stderr(&status);
@@ -2460,18 +2495,17 @@ fn builtin_function_commands_expose_packaged_gemma4_functions() {
     assert!(!e2b_show_stdout.contains("multimodal_projector_id"));
     assert!(!e2b_show_stdout.contains("[runtime.mtp]"));
 
-    let thirty_one_b_show = run_agl(&["--home", &home_arg, "function", "show", "gemma4-31b"]);
-    assert_success_no_stderr(&thirty_one_b_show);
-    let thirty_one_b_show_stdout = stdout(&thirty_one_b_show);
-    assert_contains(
-        &thirty_one_b_show_stdout,
-        "function.runtime.max_capability_calls=32",
-    );
-    assert_contains(
-        &thirty_one_b_show_stdout,
-        "function.runtime.max_output_tokens=4096",
-    );
-    assert_contains(&thirty_one_b_show_stdout, "max_context_tokens = 65536");
+    for (function_id, context_tokens) in [("gemma4-31b-32k", 32_768), ("gemma4-31b-64k", 65_536)] {
+        let show = run_agl(&["--home", &home_arg, "function", "show", function_id]);
+        assert_success_no_stderr(&show);
+        let stdout = stdout(&show);
+        assert_contains(&stdout, "function.runtime.max_capability_calls=32");
+        assert_contains(&stdout, "function.runtime.max_output_tokens=4096");
+        assert_contains(&stdout, &format!("max_context_tokens = {context_tokens}"));
+        assert_contains(&stdout, "device = \"vulkan0\"");
+    }
+    let ambiguous = run_agl(&["--home", &home_arg, "function", "show", "gemma4-31b"]);
+    assert!(!ambiguous.status.success());
 }
 
 #[test]
@@ -2612,7 +2646,10 @@ where
         let mut reader = BufReader::new(stream.try_clone().unwrap());
 
         let hello = read_fake_daemon_request(&mut reader);
-        assert!(matches!(hello.kind, DaemonRequestKind::Hello(_)));
+        let client_runtime = match &hello.kind {
+            DaemonRequestKind::Hello(request) => request.client_runtime.clone().unwrap(),
+            other => panic!("expected Hello, got {other:?}"),
+        };
         write_fake_daemon_event(
             &mut stream,
             &DaemonEvent::new(
@@ -2621,6 +2658,10 @@ where
                     protocol_version: PROTOCOL_VERSION.to_string(),
                     product_version: env!("CARGO_PKG_VERSION").to_string(),
                     daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
+                    daemon_runtime: client_runtime,
+                    worker_build_id: format!("sha256:{}", "d".repeat(64)),
+                    native_bundle_id: None,
+                    composite_worker_build_id: None,
                     capabilities: Vec::new(),
                 }),
             ),
@@ -2703,7 +2744,10 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
         let mut reader = BufReader::new(stream.try_clone().unwrap());
 
         let hello = read_fake_daemon_request(&mut reader);
-        assert!(matches!(hello.kind, DaemonRequestKind::Hello(_)));
+        let client_runtime = match &hello.kind {
+            DaemonRequestKind::Hello(request) => request.client_runtime.clone().unwrap(),
+            other => panic!("expected Hello, got {other:?}"),
+        };
         write_fake_daemon_event(
             &mut stream,
             &DaemonEvent::new(
@@ -2712,6 +2756,10 @@ fn run_agl_in_with_hf_home_and_fake_inventory(
                     protocol_version: PROTOCOL_VERSION.to_string(),
                     product_version: env!("CARGO_PKG_VERSION").to_string(),
                     daemon_instance_id: agl_ids::DaemonInstanceId::generate(),
+                    daemon_runtime: client_runtime,
+                    worker_build_id: format!("sha256:{}", "d".repeat(64)),
+                    native_bundle_id: None,
+                    composite_worker_build_id: None,
                     capabilities: vec![DaemonCapability::InferenceInventory],
                 }),
             ),

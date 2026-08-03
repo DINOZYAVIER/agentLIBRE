@@ -889,6 +889,7 @@ fn automatic_profiles_require_a_32k_context_floor() {
         max_context_tokens: MIN_AUTO_CONTEXT_TOKENS,
         max_batch_size: 128,
         max_ubatch_size: 64,
+        device: None,
         flash_attention: RuntimeSwitch::On,
         cache_type_k: KvCacheType::Q8_0,
         cache_type_v: KvCacheType::Q8_0,

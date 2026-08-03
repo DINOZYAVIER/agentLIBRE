@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use agl_artifact::{ArtifactPackageRef, ArtifactSourceTier};
+use agl_artifact::ArtifactSourceTier;
 use agl_config::{
     ModelConfig, ResolvedInferenceConfig, bind_inference_preset,
     bind_inference_preset_with_bindings, load_inference_preset_from_str,
@@ -13,18 +13,19 @@ use agl_config::{
 };
 use agl_content::Content;
 use agl_extension::{
-    EffectId, ExtensionId, HookEvent, HookId, OperationKind, SensitiveInput, SkillId,
-    ToolGrantProvenance, ToolId, render_canonical_json,
+    EffectDeclaration, EffectId, ExtensionId, ExtensionSource, ExtensionTrust, HookEvent, HookId,
+    OperationKind, SensitiveInput, SkillId, ToolGrantProvenance, ToolId, render_canonical_json,
 };
 use agl_function::{
     FunctionToolMode, RuntimeDelegationPlan, RuntimeFunction, RuntimeIdentityValidation,
     RuntimeSubagentSpec,
 };
-use agl_ids::{AttemptId, RequestId, RunId, SessionId};
+use agl_ids::{AttemptId, RequestId, RunId, SessionId, TurnId};
 use agl_inference::evidence::InferenceArtifactRoot;
 use agl_inference::{
-    InferenceCancellation, InferenceDeviceInfo, InferenceDeviceKind, InferenceOutputSink,
-    InferenceRequest, InferenceResponse,
+    ContextKey, InferenceCancellation, InferenceDeviceInfo, InferenceDeviceKind,
+    InferenceOutputSink, InferenceRequest, InferenceResponse, ModelKey, ModelManagerError,
+    ResourceAdmissionDetails,
 };
 use agl_kernel::ToolCatalog;
 use agl_kernel::{
@@ -32,13 +33,13 @@ use agl_kernel::{
 };
 use agl_memory::{MemoryEntry, MemoryRepository, MemoryScope, MemorySearchQuery};
 use agl_model::{
-    HostResources, LlamaDeviceInfo, LlamaDeviceKind, ModelCatalog, RuntimePlanSet, RuntimePlanner,
+    HostResources, LlamaDeviceInfo, LlamaDeviceKind, RuntimePlanSet, RuntimePlanner,
     hugging_face_cache_dir,
 };
 use agl_oven::render_model_request;
 use agl_runtime::{
-    AgentLibrePaths, AgentLibreRuntimeConfig, RenderedRuntimeFeatureContext,
-    RuntimeFeatureRenderOptions, render_runtime_feature_context,
+    AgentLibrePaths, AgentLibreRuntimeConfig, ArtifactComposition, RenderedRuntimeFeatureContext,
+    ResolvedRuntimeBundle, RuntimeFeatureRenderOptions, render_runtime_feature_context,
 };
 use agl_skill::{
     RegisteredSkill, SkillContextEvidence, SkillFolderCreateSituation, SkillFolderPrepareOptions,
@@ -72,10 +73,12 @@ pub struct InferenceSession {
     memory_context: Option<String>,
     function_ref: Option<String>,
     function_profile_required: bool,
+    runtime_bundle: Option<ResolvedRuntimeBundle>,
     runtime_function: Option<RuntimeFunction>,
     function_context: Option<String>,
     function_skills: Vec<String>,
     function_extensions: Vec<ExtensionId>,
+    extension_bindings: BTreeMap<String, RuntimeExtensionProviderBinding>,
     runtime_identity: Option<RuntimeIdentityEvidence>,
     runtime_identity_validation: Option<RuntimeIdentityValidation>,
     skill_context: Option<String>,
@@ -140,6 +143,105 @@ struct RuntimeIdentityFunction {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeExtensionProviderBinding {
+    artifact_reference: String,
+    artifact_version: String,
+    package_digest: String,
+    source_tier: ArtifactSourceTier,
+    source_id: String,
+    implementation: String,
+    declaration_digest: String,
+    provider_version: String,
+    runtime_generation_id: String,
+    runtime_executable_digest: String,
+    tools: Vec<String>,
+    effects: Vec<EffectDeclaration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionWorkspaceIdentity {
+    root: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_tree: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionFunctionPolicy {
+    reference: String,
+    max_output_tokens: Option<u32>,
+    max_capability_calls: Option<u32>,
+    tool_mode: Option<FunctionToolMode>,
+    tool_policy: Option<FunctionToolPolicy>,
+    delegation: Option<agl_function::FunctionDelegationBudget>,
+    runtime_identity_validation: Option<RuntimeIdentityValidation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionSkillIdentity {
+    id: String,
+    node_key: String,
+    package_digest: String,
+    source_tier: ArtifactSourceTier,
+    source_id: String,
+    trust: SkillTrustState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionAdmissionPhase {
+    status: String,
+    fallback_allowed: bool,
+    model_load_started: bool,
+    tool_effect_started: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<RuntimeResolutionAdmissionError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant: Option<ResourceAdmissionDetails>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionAdmissionError {
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<ResourceAdmissionDetails>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeResolutionRecord<'a> {
+    schema: &'static str,
+    run_id: &'a RunId,
+    session_id: &'a SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<&'a TurnId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt_id: Option<&'a AttemptId>,
+    target_workspace: RuntimeResolutionWorkspaceIdentity,
+    client_runtime: &'a agl_runtime::CurrentRuntimeIdentity,
+    daemon_runtime: &'a agl_runtime::CurrentRuntimeIdentity,
+    artifacts: agl_runtime::RuntimeBundleIdentity,
+    function_policy: RuntimeResolutionFunctionPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_plan: Option<&'a RuntimePlanSet>,
+    effective_inference_config: &'a ResolvedInferenceConfig,
+    extension_bindings: &'a BTreeMap<String, RuntimeExtensionProviderBinding>,
+    skills: Vec<RuntimeResolutionSkillIdentity>,
+    admission: RuntimeResolutionAdmissionPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reuse_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_reuse_key: Option<String>,
+}
+
 impl InferenceSession {
     pub fn new(
         options: InferenceOptions,
@@ -159,21 +261,38 @@ impl InferenceSession {
         let workspace_root = runtime.resolve_workspace_root(options.workspace_root.as_deref())?;
         let function_profile_required =
             options.config.is_none() && env::var_os(CONFIG_ENV).is_none();
-        let runtime_function = resolve_session_function(
+        let (artifact_composition, mut runtime_bundle) = resolve_session_bundle(
             options.function_ref.as_deref(),
             &runtime.paths,
             &workspace_root,
             function_profile_required,
+            &options.skills,
         )?;
+        let runtime_function = runtime_bundle
+            .as_ref()
+            .map(|bundle| bundle.function.clone());
+        let extension_bindings = runtime_bundle
+            .as_ref()
+            .map(bind_runtime_extensions)
+            .transpose()?
+            .unwrap_or_default();
         let function_config_path = runtime_function
             .as_ref()
             .and_then(|function| function.inference_config_path.as_deref());
         let function_embedded_config = runtime_function
             .as_ref()
             .and_then(|function| function.inference_config_toml.as_deref());
-        let use_function_embedded_config = options.config.is_none()
-            && env::var_os(CONFIG_ENV).is_none()
-            && function_embedded_config.is_some();
+        let external_config_requested =
+            options.config.is_some() || env::var_os(CONFIG_ENV).is_some();
+        ensure!(
+            function_embedded_config.is_none() || !external_config_requested,
+            "Function `{}` owns an embedded inference profile; --config and {CONFIG_ENV} cannot override it",
+            runtime_function
+                .as_ref()
+                .map(|function| function.reference.as_str())
+                .unwrap_or("<unresolved>")
+        );
+        let use_function_embedded_config = function_embedded_config.is_some();
         ensure!(
             options.model_bindings_path.is_none() || options.model_bindings_override.is_none(),
             "model bindings path and inline model bindings override are mutually exclusive"
@@ -183,7 +302,13 @@ impl InferenceSession {
                 .validate()
                 .context("invalid inline model bindings override")?;
         }
-        let config_path = Self::resolve_config_path(&options, runtime, function_config_path);
+        let config_path = if use_function_embedded_config {
+            function_config_path
+                .expect("embedded Function config has a diagnostic path")
+                .to_path_buf()
+        } else {
+            Self::resolve_config_path(&options, runtime, function_config_path)
+        };
 
         tracing::info!(
             target: "agentlibre::app",
@@ -210,6 +335,12 @@ impl InferenceSession {
                     config_path.display()
                 )
             })?;
+            extend_runtime_bundle_skills(
+                &mut runtime_bundle,
+                artifact_composition.as_ref(),
+                &workspace_root,
+                &preset.prompt.skills,
+            )?;
             let bindings_path = options
                 .model_bindings_path
                 .clone()
@@ -229,15 +360,22 @@ impl InferenceSession {
             })?;
             match &bound.runtime {
                 agl_config::InferencePresetRuntimeConfig::Auto(_) => {
-                    let catalog = ModelCatalog::from_builtin_resolved()?;
-                    let package = catalog
-                        .package_for_model(&bound.backend.model_id)
+                    let package = runtime_bundle
+                        .as_ref()
+                        .and_then(|bundle| bundle.model.as_ref())
+                        .map(|model| &model.package)
                         .with_context(|| {
                             format!(
-                                "automatic runtime model `{}` is not in the embedded catalog; use mode = \"fixed\" for custom models",
+                                "automatic runtime model `{}` has no exact Model artifact in the admitted Function graph",
                                 bound.backend.model_id
                             )
                         })?;
+                    ensure!(
+                        package.artifact(&bound.backend.model_id).is_some(),
+                        "automatic runtime model `{}` is not declared by exact artifact `{}`",
+                        bound.backend.model_id,
+                        package.id
+                    );
                     let devices = inference_client
                         .device_inventory()
                         .context("failed to inspect isolated inference worker devices")?
@@ -306,6 +444,12 @@ impl InferenceSession {
             })?;
             (config, None)
         };
+        extend_runtime_bundle_skills(
+            &mut runtime_bundle,
+            artifact_composition.as_ref(),
+            &workspace_root,
+            &config.prompt.skills,
+        )?;
         let model_config = config.model.clone();
         let system_prompt = crate::prompt::resolve_system_prompt(config.prompt.system);
         let tool_mode = options.tool_mode;
@@ -348,6 +492,7 @@ impl InferenceSession {
             authority_ceiling: None,
             delegation_enabled: !delegation_children.is_empty(),
             allow_dynamic_grants: true,
+            runtime_bundle: runtime_bundle.as_ref(),
         })?;
         let runtime_identity = runtime_function.as_ref().map(|function| {
             build_runtime_identity(
@@ -381,6 +526,7 @@ impl InferenceSession {
             artifact_root: &artifact_root,
             run_id: None,
             store_root: &store_root,
+            runtime_bundle: runtime_bundle.as_ref(),
         })?;
         Ok(Self {
             inference_client,
@@ -399,6 +545,7 @@ impl InferenceSession {
             function_context,
             function_skills,
             function_extensions,
+            extension_bindings,
             runtime_identity,
             runtime_identity_validation,
             skill_context: skill_context.context,
@@ -426,6 +573,7 @@ impl InferenceSession {
             allow_dynamic_grants: true,
             tool_policy_override: None,
             automatic_runtime_plan,
+            runtime_bundle,
         })
     }
 
@@ -473,6 +621,7 @@ impl InferenceSession {
             authority_ceiling: Some(&authority_ceiling),
             delegation_enabled: !delegation_children.is_empty(),
             allow_dynamic_grants: false,
+            runtime_bundle: None,
         })?;
         let memory_enabled = spec
             .memory
@@ -489,6 +638,7 @@ impl InferenceSession {
             artifact_root: &artifact_root,
             run_id: None,
             store_root: &store_root,
+            runtime_bundle: None,
         })?;
         let runtime_features = build_runtime_feature_context(
             &workspace_root,
@@ -517,10 +667,12 @@ impl InferenceSession {
             memory_context,
             function_ref: None,
             function_profile_required: false,
+            runtime_bundle: None,
             runtime_function: None,
             function_context: None,
             function_skills,
             function_extensions,
+            extension_bindings: BTreeMap::new(),
             runtime_identity: None,
             runtime_identity_validation: None,
             skill_context: skill_context.context,
@@ -742,6 +894,16 @@ impl InferenceSession {
                 "inference request session does not match its managed context"
             );
         }
+        self.write_runtime_resolution(
+            &request.run_id,
+            Some(&request.turn_id),
+            Some(&attempt_id),
+            None,
+            None,
+        )?;
+        let evidence_run_id = request.run_id.clone();
+        let evidence_turn_id = request.turn_id.clone();
+        let evidence_attempt_id = attempt_id.clone();
         if let Some(evidence) = &self.runtime_feature_evidence {
             write_runtime_feature_context_evidence(&self.artifact_root, &request.run_id, evidence)?;
         }
@@ -761,7 +923,7 @@ impl InferenceSession {
                 effective_capabilities: Some(effective_capabilities),
             },
         )?;
-        self.inference_client.generate(ChatInferenceJob {
+        let result = self.inference_client.generate(ChatInferenceJob {
             config: self.inference_config.clone(),
             artifact_root: InferenceArtifactRoot::new(self.artifact_root.clone()),
             content_store_root: self.store_root.clone(),
@@ -771,7 +933,34 @@ impl InferenceSession {
             cancellation: control.cancellation,
             deadline: control.deadline,
             output_sink: control.output_sink,
-        })
+        });
+        match &result {
+            Ok(response) => {
+                if let Some(grant) = response.metadata.resource_admission.as_ref() {
+                    self.write_runtime_resolution(
+                        &evidence_run_id,
+                        Some(&evidence_turn_id),
+                        Some(&evidence_attempt_id),
+                        None,
+                        Some(grant),
+                    )?;
+                }
+            }
+            Err(error) => {
+                if let Some(manager_error) = error.downcast_ref::<ModelManagerError>()
+                    && manager_error.resource_admission_details().is_some()
+                {
+                    self.write_runtime_resolution(
+                        &evidence_run_id,
+                        Some(&evidence_turn_id),
+                        Some(&evidence_attempt_id),
+                        Some(manager_error),
+                        None,
+                    )?;
+                }
+            }
+        }
+        result
     }
 
     pub(crate) fn session_id(&self) -> &SessionId {
@@ -844,9 +1033,9 @@ impl InferenceSession {
     pub(crate) fn select_operation_mode(&mut self, mode: ToolAccessMode) -> Result<()> {
         let previous = self.tool_mode;
         self.tool_mode = mode;
-        if let Err(error) = self.refresh_runtime_context(None) {
+        if let Err(error) = self.refresh_runtime_context(None, None) {
             self.tool_mode = previous;
-            self.refresh_runtime_context(None)
+            self.refresh_runtime_context(None, None)
                 .context("failed to restore runtime context after mode rejection")?;
             return Err(error).context("selected operation mode is not admitted");
         }
@@ -855,9 +1044,9 @@ impl InferenceSession {
 
     pub(crate) fn select_skills(&mut self, skill_ids: Vec<String>) -> Result<()> {
         let previous = std::mem::replace(&mut self.option_skills, skill_ids);
-        if let Err(error) = self.refresh_runtime_context(None) {
+        if let Err(error) = self.refresh_runtime_context(None, None) {
             self.option_skills = previous;
-            self.refresh_runtime_context(None)
+            self.refresh_runtime_context(None, None)
                 .context("failed to restore runtime context after skill rejection")?;
             return Err(error).context("selected skills are not admitted");
         }
@@ -879,25 +1068,32 @@ impl InferenceSession {
         workspace_root: &std::path::Path,
     ) -> Result<()> {
         self.workspace_root = workspace_root.to_path_buf();
-        self.refresh_runtime_context(None)
+        self.refresh_runtime_context(None, None)
     }
 
-    pub(crate) fn refresh_runtime_context(&mut self, run_id: Option<&RunId>) -> Result<()> {
-        if let Some(reference) = &self.function_ref {
-            let function = resolve_session_function(
-                Some(reference),
+    pub(crate) fn refresh_runtime_context(
+        &mut self,
+        run_id: Option<&RunId>,
+        turn_id: Option<&TurnId>,
+    ) -> Result<()> {
+        if let Some(reference) = self.function_ref.clone() {
+            let mut selected_skills = self.config_skills.clone();
+            selected_skills.extend(self.option_skills.iter().cloned());
+            let (_, bundle) = resolve_session_bundle(
+                Some(&reference),
                 &self.runtime_paths,
                 &self.workspace_root,
                 self.function_profile_required,
-            )?
-            .expect("function ref is set");
+                &selected_skills,
+            )?;
+            let bundle = bundle.expect("function ref produces a runtime bundle");
+            let function = bundle.function.clone();
             self.function_context = Some(function.context.clone());
             self.function_skills = function.skills.clone();
             self.function_extensions = runtime_function_extensions(&function)?;
+            self.extension_bindings = bind_runtime_extensions(&bundle)?;
             self.runtime_function = Some(function);
-        }
-        if let (Some(run_id), Some(function)) = (run_id, self.runtime_function.as_ref()) {
-            write_function_evidence(&self.artifact_root, run_id, function)?;
+            self.runtime_bundle = Some(bundle);
         }
         let delegation_enabled = self.delegation_available(run_id)?;
         let skill_context = resolve_skill_context(SkillContextRequest {
@@ -921,6 +1117,7 @@ impl InferenceSession {
             authority_ceiling: self.authority_ceiling.as_ref(),
             delegation_enabled,
             allow_dynamic_grants: self.allow_dynamic_grants,
+            runtime_bundle: self.runtime_bundle.as_ref(),
         })?;
         self.runtime_identity = self.runtime_function.as_ref().map(|function| {
             build_runtime_identity(
@@ -932,16 +1129,6 @@ impl InferenceSession {
         });
         self.runtime_identity_validation =
             effective_runtime_identity_validation(self.runtime_function.as_ref());
-        if let Some(run_id) = run_id
-            && (self.runtime_identity.is_some() || self.runtime_identity_validation.is_some())
-        {
-            write_identity_evidence(
-                &self.artifact_root,
-                run_id,
-                self.runtime_identity.as_ref(),
-                self.runtime_identity_validation.as_ref(),
-            )?;
-        }
         self.skill_context = skill_context.context;
         self.skill_tool_routing = skill_context.tool_routing;
         let mut hook_batches = skill_context.hook_batches;
@@ -962,6 +1149,7 @@ impl InferenceSession {
             artifact_root: &self.artifact_root,
             run_id,
             store_root: &self.store_root,
+            runtime_bundle: self.runtime_bundle.as_ref(),
         })?;
         let runtime_features = build_runtime_feature_context(
             &self.workspace_root,
@@ -970,6 +1158,153 @@ impl InferenceSession {
         )?;
         self.runtime_feature_context = Some(runtime_features.content);
         self.runtime_feature_evidence = Some(runtime_features.evidence);
+        if let Some(run_id) = run_id {
+            self.write_runtime_resolution(run_id, turn_id, None, None, None)?;
+        }
+        Ok(())
+    }
+
+    fn write_runtime_resolution(
+        &self,
+        run_id: &RunId,
+        turn_id: Option<&TurnId>,
+        attempt_id: Option<&AttemptId>,
+        admission_error: Option<&ModelManagerError>,
+        admission_grant: Option<&ResourceAdmissionDetails>,
+    ) -> Result<()> {
+        ensure!(
+            admission_error.is_none() || admission_grant.is_none(),
+            "runtime resolution admission cannot be both granted and rejected"
+        );
+        let Some(bundle) = self.runtime_bundle.as_ref() else {
+            return Ok(());
+        };
+        let function = &bundle.function;
+        let canonical_root = self
+            .workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace_root.clone());
+        let workspace_git = agl_repo::git_source_provenance(&canonical_root).ok();
+        let selected_skills = selected_skill_ids(
+            &self.config_skills,
+            &self.function_skills,
+            &self.option_skills,
+        )?;
+        let skill_registry = composed_skill_registry(
+            &self.runtime_paths,
+            &self.workspace_root,
+            &self.trust_store_path,
+            &selected_skills,
+            Some(bundle),
+        )?;
+        let skills = selected_skills
+            .iter()
+            .map(|skill_id| {
+                let admitted = bundle.skills.get(skill_id.as_str()).with_context(|| {
+                    format!("selected Skill `{skill_id}` is absent from runtime evidence")
+                })?;
+                let node = bundle
+                    .graph
+                    .nodes
+                    .get(&admitted.node_key)
+                    .with_context(|| format!("selected Skill `{skill_id}` graph node is absent"))?;
+                let trust = skill_registry
+                    .get(skill_id)
+                    .context("selected Skill trust result is absent")?
+                    .trust;
+                Ok(RuntimeResolutionSkillIdentity {
+                    id: skill_id.as_str().to_owned(),
+                    node_key: admitted.node_key.clone(),
+                    package_digest: node.package_digest.to_string(),
+                    source_tier: node.candidate.tier,
+                    source_id: node.candidate.source_id.to_string(),
+                    trust,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let model_reuse_key = ModelKey::from_config(&self.inference_config)?;
+        let context_reuse_key =
+            ContextKey::for_conversation(&self.inference_config, self.session_id.as_str())?;
+        let admission_error = admission_error.map(|error| RuntimeResolutionAdmissionError {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+            details: error.resource_admission_details().cloned(),
+        });
+        let admission_details = admission_error
+            .as_ref()
+            .and_then(|error| error.details.as_ref())
+            .or(admission_grant);
+        let record = RuntimeResolutionRecord {
+            schema: "agentlibre.runtime-resolution/v1",
+            run_id,
+            session_id: &self.session_id,
+            turn_id,
+            attempt_id,
+            target_workspace: RuntimeResolutionWorkspaceIdentity {
+                root: canonical_root,
+                git_revision: workspace_git
+                    .as_ref()
+                    .map(|identity| identity.revision.clone()),
+                git_tree: workspace_git.map(|identity| identity.tree),
+            },
+            // First-party session creation has already required exact client /
+            // daemon identity equality at the v8 handshake boundary.
+            client_runtime: &bundle.runtime,
+            daemon_runtime: &bundle.runtime,
+            artifacts: bundle.identity(),
+            function_policy: RuntimeResolutionFunctionPolicy {
+                reference: bundle.graph.root.clone(),
+                max_output_tokens: function.max_output_tokens,
+                max_capability_calls: function.max_capability_calls,
+                tool_mode: function.tool_mode,
+                tool_policy: function.tool_policy.clone(),
+                delegation: function.delegation.clone(),
+                runtime_identity_validation: function.runtime_identity_validation.clone(),
+            },
+            model_plan: self.automatic_runtime_plan.as_ref(),
+            effective_inference_config: &self.inference_config,
+            extension_bindings: &self.extension_bindings,
+            skills,
+            admission: RuntimeResolutionAdmissionPhase {
+                status: if admission_error.is_some() {
+                    "rejected".to_owned()
+                } else if admission_grant.is_some() {
+                    "granted".to_owned()
+                } else {
+                    "pre_effect_admitted".to_owned()
+                },
+                fallback_allowed: admission_details.is_some_and(|details| details.fallback_allowed),
+                model_load_started: admission_grant.is_some()
+                    || admission_details.is_some_and(|details| details.model_load_started),
+                tool_effect_started: admission_details
+                    .is_some_and(|details| details.tool_effect_started),
+                error: admission_error,
+                grant: admission_grant.cloned(),
+            },
+            model_reuse_key: Some(model_reuse_key.digest().to_owned()),
+            context_reuse_key: Some(context_reuse_key.digest().to_owned()),
+        };
+        let run_dir = InferenceArtifactRoot::new(self.artifact_root.clone()).run_dir(run_id);
+        std::fs::create_dir_all(&run_dir).with_context(|| {
+            format!(
+                "failed to create runtime resolution directory {}",
+                run_dir.display()
+            )
+        })?;
+        write_function_content_evidence(&run_dir, function)?;
+        let path = run_dir.join("runtime-resolution.json");
+        let temporary = run_dir.join("runtime-resolution.json.tmp");
+        let mut bytes = serde_json::to_vec_pretty(&record)
+            .context("failed to serialize canonical runtime resolution")?;
+        bytes.push(b'\n');
+        std::fs::write(&temporary, bytes).with_context(|| {
+            format!(
+                "failed to write temporary runtime resolution {}",
+                temporary.display()
+            )
+        })?;
+        std::fs::rename(&temporary, &path)
+            .with_context(|| format!("failed to commit runtime resolution {}", path.display()))?;
         Ok(())
     }
 
@@ -1056,52 +1391,44 @@ fn agent_event_stream_path(artifact_root: &std::path::Path, run_id: &RunId) -> P
         .join("events.jsonl")
 }
 
-fn resolve_session_function(
+fn resolve_session_bundle(
     reference: Option<&str>,
     paths: &AgentLibrePaths,
     workspace_root: &Path,
     require_profile: bool,
-) -> Result<Option<RuntimeFunction>> {
-    reference
-        .map(|reference| {
-            agl_runtime::resolve_composed_runtime_function(
-                paths,
-                workspace_root,
-                reference,
-                require_profile,
-            )
-            .with_context(|| format!("failed to resolve function `{reference}`"))
-        })
-        .transpose()
+    additional_skills: &[String],
+) -> Result<(Option<ArtifactComposition>, Option<ResolvedRuntimeBundle>)> {
+    let Some(reference) = reference else {
+        return Ok((None, None));
+    };
+    let composition = agl_runtime::compose_artifacts(paths, workspace_root)?;
+    let bundle = composition
+        .resolve_runtime_bundle(
+            workspace_root,
+            &paths.config_dir,
+            reference,
+            require_profile,
+            additional_skills,
+        )
+        .with_context(|| format!("failed to resolve function `{reference}`"))?;
+    Ok((Some(composition), Some(bundle)))
 }
 
-fn write_function_evidence(
-    artifact_root: &std::path::Path,
-    run_id: &RunId,
-    function: &RuntimeFunction,
+fn extend_runtime_bundle_skills(
+    bundle: &mut Option<ResolvedRuntimeBundle>,
+    composition: Option<&ArtifactComposition>,
+    workspace_root: &Path,
+    selected_skills: &[String],
 ) -> Result<()> {
-    let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
-    std::fs::create_dir_all(&run_dir).with_context(|| {
-        format!(
-            "failed to create function evidence directory {}",
-            run_dir.display()
-        )
-    })?;
+    let Some(current) = bundle.take() else {
+        return Ok(());
+    };
+    let composition = composition.context("runtime bundle has no artifact composition")?;
+    *bundle = Some(current.with_selected_skills(composition, workspace_root, selected_skills)?);
+    Ok(())
+}
 
-    let resolution_path = run_dir.join("function-resolution.json");
-    let resolution_bytes = serde_json::to_vec_pretty(function).with_context(|| {
-        format!(
-            "failed to serialize function resolution evidence {}",
-            resolution_path.display()
-        )
-    })?;
-    std::fs::write(&resolution_path, resolution_bytes).with_context(|| {
-        format!(
-            "failed to write function resolution evidence {}",
-            resolution_path.display()
-        )
-    })?;
-
+fn write_function_content_evidence(run_dir: &Path, function: &RuntimeFunction) -> Result<()> {
     let context_path = run_dir.join("function-context.md");
     std::fs::write(&context_path, function.context.as_bytes()).with_context(|| {
         format!(
@@ -1182,37 +1509,6 @@ fn add_identity_hook_batch(
         }
     } else {
         hook_batches.push(TurnHookBatch::new(HookEvent::ArtifactWrite).with_required_hook(hook_id));
-    }
-    Ok(())
-}
-
-fn write_identity_evidence(
-    artifact_root: &std::path::Path,
-    run_id: &RunId,
-    identity: Option<&RuntimeIdentityEvidence>,
-    validation: Option<&RuntimeIdentityValidation>,
-) -> Result<()> {
-    let run_dir = InferenceArtifactRoot::new(artifact_root.to_path_buf()).run_dir(run_id);
-    std::fs::create_dir_all(&run_dir).with_context(|| {
-        format!(
-            "failed to create runtime identity evidence directory {}",
-            run_dir.display()
-        )
-    })?;
-    if let Some(identity) = identity {
-        let path = run_dir.join("runtime-identity.json");
-        let bytes = serde_json::to_vec_pretty(identity)
-            .with_context(|| format!("failed to serialize runtime identity {}", path.display()))?;
-        std::fs::write(&path, bytes)
-            .with_context(|| format!("failed to write runtime identity {}", path.display()))?;
-    }
-    if let Some(validation) = validation {
-        let path = run_dir.join("identity-validation.json");
-        let bytes = serde_json::to_vec_pretty(validation).with_context(|| {
-            format!("failed to serialize identity validation {}", path.display())
-        })?;
-        std::fs::write(&path, bytes)
-            .with_context(|| format!("failed to write identity validation {}", path.display()))?;
     }
     Ok(())
 }
@@ -1470,6 +1766,7 @@ struct MemoryContextRequest<'a> {
     artifact_root: &'a std::path::Path,
     run_id: Option<&'a RunId>,
     store_root: &'a std::path::Path,
+    runtime_bundle: Option<&'a ResolvedRuntimeBundle>,
 }
 
 struct SkillContextRequest<'a> {
@@ -1489,6 +1786,7 @@ struct SkillContextRequest<'a> {
     authority_ceiling: Option<&'a BTreeSet<ToolId>>,
     delegation_enabled: bool,
     allow_dynamic_grants: bool,
+    runtime_bundle: Option<&'a ResolvedRuntimeBundle>,
 }
 
 fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<String>> {
@@ -1502,6 +1800,7 @@ fn resolve_memory_context(request: MemoryContextRequest<'_>) -> Result<Option<St
         request.workspace_root,
         request.runtime_paths,
         request.trust_store_path,
+        request.runtime_bundle,
     )?;
     let store = AglStore::open_at(request.store_root).context("failed to open memory store")?;
     let memory = MemoryRepository::new(&store);
@@ -1526,6 +1825,7 @@ fn ensure_memory_context_allowed_for_skills(
     workspace_root: &std::path::Path,
     runtime_paths: &AgentLibrePaths,
     trust_store_path: &std::path::Path,
+    runtime_bundle: Option<&ResolvedRuntimeBundle>,
 ) -> Result<()> {
     let selected_skills = selected_skill_ids(config_skills, function_skills, option_skills)?;
     if selected_skills.is_empty() {
@@ -1536,6 +1836,7 @@ fn ensure_memory_context_allowed_for_skills(
         workspace_root,
         trust_store_path,
         &selected_skills,
+        runtime_bundle,
     )
     .context("failed to load skill registry for memory context")?;
     for skill_id in selected_skills {
@@ -1561,31 +1862,46 @@ fn composed_skill_registry(
     workspace_root: &Path,
     trust_store_path: &Path,
     selected_skills: &[SkillId],
+    runtime_bundle: Option<&ResolvedRuntimeBundle>,
 ) -> Result<SkillRegistry> {
-    let composition = agl_runtime::compose_artifacts(runtime_paths, workspace_root)?;
     let trusted_workspace = trusted_workspace_registry(workspace_root, trust_store_path)
         .context("failed to load workspace Skill trust")?;
     let mut registry = SkillRegistry::new();
     for skill_id in selected_skills {
-        let reference = ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
-        let graph = composition.resolve(&reference)?;
-        let node = graph
-            .nodes
-            .get(&graph.root)
-            .context("resolved Skill graph has no root candidate")?;
-        let payload = composition
-            .registry
-            .lookup(&node.candidate.type_id)?
-            .validate_payload(node.candidate.view(), &node.envelope)?;
-        let mut harness = *payload
-            .downcast::<SkillHarness>()
-            .map_err(|_| anyhow::anyhow!("Skill adapter returned an unexpected payload"))?;
-        harness.source = match node.candidate.tier {
-            ArtifactSourceTier::Builtin => SkillSource::Core,
-            ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
-            ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+        let (harness, tier) = if let Some(bundle) = runtime_bundle {
+            let skill = bundle.skills.get(skill_id.as_str()).with_context(|| {
+                format!("selected Skill `{skill_id}` is absent from the admitted runtime bundle")
+            })?;
+            let node = bundle
+                .graph
+                .nodes
+                .get(&skill.node_key)
+                .context("admitted Skill node is absent from the runtime graph")?;
+            (skill.harness.clone(), node.candidate.tier)
+        } else {
+            let composition = agl_runtime::compose_artifacts(runtime_paths, workspace_root)?;
+            let reference =
+                agl_artifact::ArtifactPackageRef::parse(&format!("skill:{}@*", skill_id.as_str()))?;
+            let graph = composition.resolve(&reference)?;
+            let node = graph
+                .nodes
+                .get(&graph.root)
+                .context("resolved Skill graph has no root candidate")?;
+            let payload = composition
+                .registry
+                .lookup(&node.candidate.type_id)?
+                .validate_payload(node.candidate.view(), &node.envelope)?;
+            let mut harness = *payload
+                .downcast::<SkillHarness>()
+                .map_err(|_| anyhow::anyhow!("Skill adapter returned an unexpected payload"))?;
+            harness.source = match node.candidate.tier {
+                ArtifactSourceTier::Builtin => SkillSource::Core,
+                ArtifactSourceTier::User | ArtifactSourceTier::System => SkillSource::Community,
+                ArtifactSourceTier::Explicit | ArtifactSourceTier::Workspace => SkillSource::Local,
+            };
+            (harness, node.candidate.tier)
         };
-        let trust = if node.candidate.tier == ArtifactSourceTier::Builtin {
+        let trust = if tier == ArtifactSourceTier::Builtin {
             SkillTrustState::TrustedByBinary
         } else if trusted_workspace.get(&harness.id).is_some_and(|trusted| {
             trusted.harness.artifact == harness.artifact
@@ -1633,6 +1949,7 @@ fn resolve_skill_context(request: SkillContextRequest<'_>) -> Result<ResolvedSki
         request.workspace_root,
         request.trust_store_path,
         &selected_skills,
+        request.runtime_bundle,
     )
     .context("failed to load skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
@@ -1826,6 +2143,7 @@ pub(crate) fn resolve_subagent_effective_capabilities(
         workspace_root,
         trust_store_path,
         &selected_skills,
+        None,
     )
     .context("failed to load subagent skill registry")?;
     let tool_catalog = crate::tools::chat_extension_catalog()?;
@@ -2410,6 +2728,80 @@ fn runtime_function_extensions(function: &RuntimeFunction) -> Result<Vec<Extensi
         .iter()
         .map(|id| ExtensionId::new(id).map_err(Into::into))
         .collect()
+}
+
+fn bind_runtime_extensions(
+    bundle: &ResolvedRuntimeBundle,
+) -> Result<BTreeMap<String, RuntimeExtensionProviderBinding>> {
+    let providers = crate::tools::chat_tool_provider_declarations()
+        .into_iter()
+        .map(|provider| (provider.id.as_str().to_owned(), provider))
+        .collect::<BTreeMap<_, _>>();
+    let mut bindings = BTreeMap::new();
+    for (extension_id, extension) in &bundle.extensions {
+        let node = bundle
+            .graph
+            .nodes
+            .get(&extension.node_key)
+            .context("selected Extension node is absent from the runtime graph")?;
+        ensure!(
+            node.candidate.tier == ArtifactSourceTier::Builtin
+                && node.candidate.kind == agl_artifact::ArtifactSourceKind::Embedded,
+            "Extension `{extension_id}` from source `{}` ({:?}) cannot bind to a builtin provider; no Tool effect occurred",
+            node.candidate.source_id,
+            node.candidate.tier
+        );
+        let expected_implementation = match extension_id.as_str() {
+            "core.workspace" => "builtin:agl-core-tools/fs",
+            "core.process" => "builtin:agl-core-tools/process",
+            _ => {
+                bail!(
+                    "Extension `{extension_id}` has no exact executable provider in this runtime; no Tool effect occurred"
+                )
+            }
+        };
+        ensure!(
+            extension.manifest.implementation == expected_implementation,
+            "Extension `{extension_id}` implementation `{}` does not match provider `{expected_implementation}`; no Tool effect occurred",
+            extension.manifest.implementation
+        );
+        let provider = providers.get(extension_id).with_context(|| {
+            format!(
+                "Extension `{extension_id}` has no registered executable provider; no Tool effect occurred"
+            )
+        })?;
+        ensure!(
+            provider.source == ExtensionSource::Builtin
+                && provider.trust == ExtensionTrust::TrustedByBinary,
+            "Extension `{extension_id}` provider is not trusted by the active binary; no Tool effect occurred"
+        );
+        let mut tools = provider
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        tools.sort();
+        let mut effects = provider.effects.clone();
+        effects.sort_by(|left, right| left.id.cmp(&right.id));
+        bindings.insert(
+            extension_id.clone(),
+            RuntimeExtensionProviderBinding {
+                artifact_reference: node.key(),
+                artifact_version: extension.manifest.artifact.version.to_string(),
+                package_digest: node.package_digest.to_string(),
+                source_tier: node.candidate.tier,
+                source_id: node.candidate.source_id.to_string(),
+                implementation: extension.manifest.implementation.clone(),
+                declaration_digest: provider.digest().to_string(),
+                provider_version: provider.version.clone(),
+                runtime_generation_id: bundle.runtime.generation_id.clone(),
+                runtime_executable_digest: bundle.runtime.executable_digest.clone(),
+                tools,
+                effects,
+            },
+        );
+    }
+    Ok(bindings)
 }
 
 fn extensions_for_tools(tools: &BTreeSet<ToolId>) -> Result<Vec<ExtensionId>> {

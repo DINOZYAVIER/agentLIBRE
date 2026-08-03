@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use agl_artifact::{ArtifactEnvelope, InMemoryPackageView, compute_package_digest};
 use sha2::{Digest, Sha256};
 
 const BUILTIN_SKILL_PACKS: &[&str] = &["agl"];
@@ -51,6 +52,7 @@ struct ArtifactPackage {
     id: String,
     version: String,
     entrypoint: String,
+    requires: Vec<String>,
     files: Vec<(String, usize)>,
     digest: String,
 }
@@ -94,6 +96,10 @@ fn main() {
     );
     validate_unique_asset_ids(&assets);
     validate_unique_package_ids(&packages);
+    validate_builtin_catalog_baseline(
+        &packages,
+        &assets_root.join("builtin-catalog-baseline.toml"),
+    );
     write_registry(&assets, &packages);
 }
 
@@ -128,17 +134,8 @@ fn add_extensions(
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", manifest_path.display()));
         let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
             .unwrap_or_else(|error| panic!("failed to parse {}: {error}", manifest_path.display()));
-        let artifact_id = manifest
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| panic!("extension {id} has no artifact id"));
-        let version = manifest
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_else(|| panic!("extension {id} has no artifact version"));
-        if artifact_id != id {
-            panic!("extension directory {id} does not match artifact id {artifact_id}");
-        }
+        let envelope = extension_envelope(&manifest, &manifest_path);
+        validate_envelope(&envelope, "extension", id, &manifest_path);
         let asset_index = assets.len();
         assets.push(asset(
             &format!("extension:{id}/EXTENSION.json"),
@@ -148,11 +145,12 @@ fn add_extensions(
         ));
         let files = vec![("EXTENSION.json".to_string(), asset_index)];
         packages.push(ArtifactPackage {
-            type_id: "extension".to_string(),
-            id: id.to_string(),
-            version: version.to_string(),
+            type_id: envelope.type_id.to_string(),
+            id: envelope.id.to_string(),
+            version: envelope.version.to_string(),
             entrypoint: "EXTENSION.json".to_string(),
-            digest: package_tree_hash(assets, &files),
+            requires: envelope.requires.iter().map(ToString::to_string).collect(),
+            digest: package_tree_digest(assets, &files),
             files,
         });
     }
@@ -184,19 +182,17 @@ fn add_models(
             .unwrap_or_else(|err| panic!("failed to parse {}: {err}", descriptor.display()));
         let artifact = document
             .get("artifact")
-            .and_then(toml::Value::as_table)
+            .cloned()
             .unwrap_or_else(|| panic!("model {id} has no artifact table"));
-        let artifact_id = artifact
-            .get("id")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_else(|| panic!("model {id} has no artifact id"));
-        let version = artifact
-            .get("version")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_else(|| panic!("model {id} has no artifact version"));
-        if artifact_id != id {
-            panic!("model directory {id} does not match artifact id {artifact_id}");
-        }
+        let envelope = artifact
+            .try_into::<ArtifactEnvelope>()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to parse artifact envelope from {}: {error}",
+                    descriptor.display()
+                )
+            });
+        validate_envelope(&envelope, "model", id, &descriptor);
         let descriptor_index = assets.len();
         assets.push(asset(
             &format!("model:{id}/MODEL.toml"),
@@ -221,12 +217,13 @@ fn add_models(
                 &evidence_indices,
             ));
         }
-        let digest = package_tree_hash(assets, &files);
+        let digest = package_tree_digest(assets, &files);
         packages.push(ArtifactPackage {
-            type_id: "model".to_string(),
-            id: id.to_string(),
-            version: version.to_string(),
+            type_id: envelope.type_id.to_string(),
+            id: envelope.id.to_string(),
+            version: envelope.version.to_string(),
             entrypoint: "MODEL.toml".to_string(),
+            requires: envelope.requires.iter().map(ToString::to_string).collect(),
             files,
             digest,
         });
@@ -293,6 +290,8 @@ fn add_skills(
             if !skill_md.is_file() {
                 panic!("builtin skill {} is missing SKILL.md", skill_dir.display());
             }
+            let envelope = markdown_envelope(&skill_md);
+            validate_envelope(&envelope, "skill", name, &skill_md);
             let id = name.to_string();
             let skill_asset_index = assets.len();
             assets.push(asset(&id, AssetKind::Skill, repo_root, &skill_md));
@@ -327,12 +326,13 @@ fn add_skills(
                 &reference_asset_indices,
             ));
             files.extend(package_resource_files(assets, &skill_dir, &asset_indices));
-            let digest = package_tree_hash(assets, &files);
+            let digest = package_tree_digest(assets, &files);
             packages.push(ArtifactPackage {
-                type_id: "skill".to_string(),
+                type_id: envelope.type_id.to_string(),
                 id,
-                version: "1.0.0".to_string(),
+                version: envelope.version.to_string(),
                 entrypoint: "SKILL.md".to_string(),
+                requires: envelope.requires.iter().map(ToString::to_string).collect(),
                 files,
                 digest,
             });
@@ -381,6 +381,8 @@ fn add_functions(
                 panic!("builtin function {} is missing {}", id, required.display());
             }
         }
+        let envelope = markdown_envelope(&function_md);
+        validate_envelope(&envelope, "function", id, &function_md);
         let inference_text = fs::read_to_string(&inference_config).unwrap_or_else(|error| {
             panic!(
                 "failed to read builtin function inference preset {}: {error}",
@@ -425,12 +427,13 @@ fn add_functions(
             ("SYSTEM.md".to_string(), system_prompt_asset_index),
             ("inference.toml".to_string(), inference_config_asset_index),
         ];
-        let digest = package_tree_hash(assets, &files);
+        let digest = package_tree_digest(assets, &files);
         packages.push(ArtifactPackage {
-            type_id: "function".to_string(),
-            id: id.to_string(),
-            version: "1.0.0".to_string(),
+            type_id: envelope.type_id.to_string(),
+            id: envelope.id.to_string(),
+            version: envelope.version.to_string(),
             entrypoint: "FUNCTION.md".to_string(),
+            requires: envelope.requires.iter().map(ToString::to_string).collect(),
             files,
             digest,
         });
@@ -502,19 +505,205 @@ fn package_resource_files(
         .collect()
 }
 
-fn package_tree_hash(assets: &[Asset], files: &[(String, usize)]) -> String {
-    let mut hasher = Sha256::new();
-    for (path, index) in files {
+fn package_tree_digest(assets: &[Asset], files: &[(String, usize)]) -> String {
+    let view = InMemoryPackageView::new(files.iter().map(|(path, index)| {
         let asset = &assets[*index];
-        hasher.update(path.as_bytes());
-        hasher.update([0]);
-        let bytes = fs::read(&asset.absolute_path).unwrap_or_else(|err| {
-            panic!("failed to read {}: {err}", asset.absolute_path.display())
+        let path = path
+            .parse()
+            .unwrap_or_else(|error| panic!("invalid builtin package path {path:?}: {error}"));
+        let bytes = fs::read(&asset.absolute_path).unwrap_or_else(|error| {
+            panic!("failed to read {}: {error}", asset.absolute_path.display())
         });
-        hasher.update(bytes);
-        hasher.update([0]);
+        (path, bytes)
+    }))
+    .unwrap_or_else(|error| panic!("invalid builtin package tree: {error}"));
+    compute_package_digest(&view)
+        .unwrap_or_else(|error| panic!("failed to digest builtin package tree: {error}"))
+        .to_string()
+}
+
+fn markdown_envelope(path: &Path) -> ArtifactEnvelope {
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let frontmatter = split_frontmatter(&text).unwrap_or_else(|| {
+        panic!(
+            "builtin artifact entrypoint {} has no terminated YAML frontmatter",
+            path.display()
+        )
+    });
+    let document = serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    let artifact = document
+        .get("artifact")
+        .cloned()
+        .unwrap_or_else(|| panic!("{} has no artifact envelope", path.display()));
+    serde_yaml::from_value::<ArtifactEnvelope>(artifact).unwrap_or_else(|error| {
+        panic!(
+            "failed to parse artifact envelope from {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn split_frontmatter(text: &str) -> Option<&str> {
+    if let Some(rest) = text.strip_prefix("---\n") {
+        return rest
+            .split_once("\n---\n")
+            .map(|(frontmatter, _)| frontmatter);
     }
-    hex(&hasher.finalize())
+    text.strip_prefix("---\r\n")?
+        .split_once("\r\n---\r\n")
+        .map(|(frontmatter, _)| frontmatter)
+}
+
+fn extension_envelope(document: &serde_json::Value, path: &Path) -> ArtifactEnvelope {
+    let object = document
+        .as_object()
+        .unwrap_or_else(|| panic!("{} must contain a JSON object", path.display()));
+    let mut envelope = serde_json::Map::new();
+    for field in [
+        "schema",
+        "type",
+        "id",
+        "version",
+        "payload_schema",
+        "agl",
+        "requires",
+    ] {
+        envelope.insert(
+            field.to_string(),
+            object
+                .get(field)
+                .unwrap_or_else(|| panic!("{} has no {field} field", path.display()))
+                .clone(),
+        );
+    }
+    serde_json::from_value::<ArtifactEnvelope>(serde_json::Value::Object(envelope)).unwrap_or_else(
+        |error| {
+            panic!(
+                "failed to parse artifact envelope from {}: {error}",
+                path.display()
+            )
+        },
+    )
+}
+
+fn validate_envelope(envelope: &ArtifactEnvelope, type_id: &str, id: &str, path: &Path) {
+    envelope
+        .validate()
+        .unwrap_or_else(|error| panic!("invalid artifact envelope in {}: {error}", path.display()));
+    if envelope.type_id.as_str() != type_id {
+        panic!(
+            "builtin package {} has artifact type {}; expected {type_id}",
+            path.display(),
+            envelope.type_id
+        );
+    }
+    if envelope.id.as_str() != id {
+        panic!(
+            "builtin package directory {id} does not match artifact id {} in {}",
+            envelope.id,
+            path.display()
+        );
+    }
+}
+
+fn exact_reference(package: &ArtifactPackage) -> String {
+    format!("{}:{}@{}", package.type_id, package.id, package.version)
+}
+
+fn builtin_catalog_digest(packages: &[ArtifactPackage]) -> String {
+    let mut packages = packages.iter().collect::<Vec<_>>();
+    packages.sort_by_key(|package| exact_reference(package));
+    let mut hasher = Sha256::new();
+    hasher.update(b"agentlibre.builtin-catalog.v1\0");
+    for package in packages {
+        hash_catalog_field(&mut hasher, exact_reference(package).as_bytes());
+        hash_catalog_field(&mut hasher, package.digest.as_bytes());
+        hash_catalog_field(&mut hasher, package.entrypoint.as_bytes());
+        let mut requires = package.requires.iter().collect::<Vec<_>>();
+        requires.sort();
+        hasher.update((requires.len() as u64).to_be_bytes());
+        for requirement in requires {
+            hash_catalog_field(&mut hasher, requirement.as_bytes());
+        }
+    }
+    format!("sha256:{}", hex(&hasher.finalize()))
+}
+
+fn hash_catalog_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn validate_builtin_catalog_baseline(packages: &[ArtifactPackage], path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+    let text = fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read immutable builtin catalog baseline {}: {error}",
+            path.display()
+        )
+    });
+    let document = toml::from_str::<toml::Value>(&text)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    let schema = document
+        .get("schema")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default();
+    if schema != "agentlibre.builtin-catalog-baseline/v1" {
+        panic!(
+            "{} schema must be agentlibre.builtin-catalog-baseline/v1",
+            path.display()
+        );
+    }
+    let entries = document
+        .get("packages")
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{} must contain [[packages]] entries", path.display()));
+    let mut baseline = std::collections::BTreeMap::new();
+    for entry in entries {
+        let table = entry
+            .as_table()
+            .unwrap_or_else(|| panic!("{} package entry must be a table", path.display()));
+        let reference = table
+            .get("reference")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("{} package entry has no reference", path.display()));
+        let digest = table
+            .get("digest")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("{} package {reference} has no digest", path.display()));
+        if baseline
+            .insert(reference.to_string(), digest.to_string())
+            .is_some()
+        {
+            panic!("{} contains duplicate package {reference}", path.display());
+        }
+    }
+
+    let expected = packages
+        .iter()
+        .map(|package| (exact_reference(package), package.digest.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if baseline != expected {
+        panic!(
+            "immutable builtin catalog baseline differs from embedded packages; change an envelope version for every changed payload and update {} intentionally\n{}",
+            path.display(),
+            render_builtin_catalog_baseline(&expected)
+        );
+    }
+}
+
+fn render_builtin_catalog_baseline(
+    packages: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut output = String::from("schema = \"agentlibre.builtin-catalog-baseline/v1\"\n");
+    for (reference, digest) in packages {
+        output.push_str(&format!(
+            "\n[[packages]]\nreference = {reference:?}\ndigest = {digest:?}\n"
+        ));
+    }
+    output
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -654,20 +843,29 @@ fn write_registry(assets: &[Asset], packages: &[ArtifactPackage]) {
             ));
         }
         output.push_str("];\n");
+        output.push_str(&format!("static PACKAGE_{index}_REQUIRES: &[&str] = &[\n"));
+        for requirement in &package.requires {
+            output.push_str(&format!("    {},\n", rust_string(requirement)));
+        }
+        output.push_str("];\n");
     }
 
     output.push_str("pub static BUILTIN_ARTIFACT_PACKAGES: &[BuiltinArtifactPackage] = &[\n");
     for (index, package) in packages.iter().enumerate() {
         output.push_str(&format!(
-            "    BuiltinArtifactPackage {{ type_id: {}, id: {}, version: {}, entrypoint: {}, files: PACKAGE_{index}_FILES, digest: \"sha256:{}\" }},\n",
+            "    BuiltinArtifactPackage {{ type_id: {}, id: {}, version: {}, entrypoint: {}, requires: PACKAGE_{index}_REQUIRES, files: PACKAGE_{index}_FILES, digest: {} }},\n",
             rust_string(&package.type_id),
             rust_string(&package.id),
             rust_string(&package.version),
             rust_string(&package.entrypoint),
-            package.digest,
+            rust_string(&package.digest),
         ));
     }
     output.push_str("];\n");
+    output.push_str(&format!(
+        "pub const BUILTIN_ARTIFACT_CATALOG_DIGEST: &str = {};\n",
+        rust_string(&builtin_catalog_digest(packages))
+    ));
 
     fs::write(&destination, output)
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", destination.display()));

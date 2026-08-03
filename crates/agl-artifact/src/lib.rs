@@ -1440,6 +1440,23 @@ impl ArtifactCandidate {
     pub fn view(&self) -> &dyn ArtifactPackageView {
         self.view.as_ref()
     }
+
+    /// Captures one immutable package-byte view for resolution and every later
+    /// typed projection derived from the selected candidate.
+    pub fn snapshot(&self) -> Result<Self, ArtifactError> {
+        let files = self
+            .view
+            .files()?
+            .into_iter()
+            .map(|path| {
+                let bytes = self.view.read_file(&path)?;
+                Ok((path, bytes))
+            })
+            .collect::<Result<Vec<_>, ArtifactError>>()?;
+        let mut candidate = self.clone();
+        candidate.view = Arc::new(InMemoryPackageView::new(files)?);
+        Ok(candidate)
+    }
 }
 
 pub trait ArtifactSource: Send + Sync {
@@ -1739,6 +1756,24 @@ impl StaticArtifactSource {
             candidates,
         })
     }
+
+    fn matching_candidates(&self, type_id: &ArtifactTypeId) -> Vec<ArtifactCandidate> {
+        let mut candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| &candidate.type_id == type_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            (&left.package_id, &left.version, &left.source_id, left.kind).cmp(&(
+                &right.package_id,
+                &right.version,
+                &right.source_id,
+                right.kind,
+            ))
+        });
+        candidates
+    }
 }
 
 impl ArtifactSource for StaticArtifactSource {
@@ -1758,21 +1793,21 @@ impl ArtifactSource for StaticArtifactSource {
         &self,
         type_id: &ArtifactTypeId,
     ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
-        let mut candidates = self
-            .candidates
+        let candidates = self.matching_candidates(type_id);
+        if let Some(error) = candidates
             .iter()
-            .filter(|candidate| &candidate.type_id == type_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            (&left.package_id, &left.version, &left.source_id, left.kind).cmp(&(
-                &right.package_id,
-                &right.version,
-                &right.source_id,
-                right.kind,
-            ))
-        });
+            .find_map(ArtifactCandidate::discovery_error)
+        {
+            return Err(error.clone());
+        }
         Ok(candidates)
+    }
+
+    fn inventory_candidates(
+        &self,
+        type_id: &ArtifactTypeId,
+    ) -> Result<Vec<ArtifactCandidate>, ArtifactError> {
+        Ok(self.matching_candidates(type_id))
     }
 }
 
@@ -2662,12 +2697,29 @@ impl ArtifactResolver {
         &self,
         root: &ArtifactPackageRef,
     ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        self.resolve_with_selection(root, CandidateSelection::Global)
+    }
+
+    pub fn resolve_with_explicit_root(
+        &self,
+        root: &ArtifactPackageRef,
+        source_id: &ArtifactSourceId,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        self.resolve_with_selection(root, CandidateSelection::ExplicitRoot(source_id))
+    }
+
+    fn resolve_with_selection(
+        &self,
+        root: &ArtifactPackageRef,
+        selection: CandidateSelection<'_>,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
         let mut nodes = BTreeMap::new();
         let mut stack = Vec::new();
         let root_key = self.visit(
             &root.type_id,
             &root.package_id,
             std::slice::from_ref(&root.version_req),
+            selection,
             &mut stack,
             &mut nodes,
         )?;
@@ -2700,11 +2752,26 @@ impl ArtifactResolver {
         Ok(graph)
     }
 
+    pub fn resolve_and_validate_with_explicit_root(
+        &self,
+        root: &ArtifactPackageRef,
+        source_id: &ArtifactSourceId,
+        lock: Option<&ArtifactLock>,
+    ) -> Result<ResolvedArtifactGraph, ArtifactError> {
+        let graph = self.resolve_with_explicit_root(root, source_id)?;
+        if let Some(lock) = lock {
+            graph.verify_lock(lock)?;
+        }
+        graph.validate_payloads(&self.registry)?;
+        Ok(graph)
+    }
+
     fn visit(
         &self,
         type_id: &ArtifactTypeId,
         package_id: &ArtifactPackageId,
         constraints: &[ArtifactVersionReq],
+        selection: CandidateSelection<'_>,
         stack: &mut Vec<String>,
         nodes: &mut BTreeMap<String, ResolvedArtifact>,
     ) -> Result<String, ArtifactError> {
@@ -2728,7 +2795,9 @@ impl ArtifactResolver {
             return Ok(existing.key());
         }
 
-        let candidate = self.select_candidate(type_id, package_id, constraints)?;
+        let candidate = self
+            .select_candidate(type_id, package_id, constraints, selection)?
+            .snapshot()?;
         let adapter = self.registry.lookup(type_id)?;
         let envelope = adapter.extract_envelope(candidate.view())?;
         envelope.validate()?;
@@ -2760,6 +2829,7 @@ impl ArtifactResolver {
                     requirement.type_id(),
                     requirement.package_id(),
                     std::slice::from_ref(&requirement.reference().version_req),
+                    selection.for_dependency(),
                     stack,
                     nodes,
                 )
@@ -2789,12 +2859,10 @@ impl ArtifactResolver {
         type_id: &ArtifactTypeId,
         package_id: &ArtifactPackageId,
         constraints: &[ArtifactVersionReq],
+        selection: CandidateSelection<'_>,
     ) -> Result<ArtifactCandidate, ArtifactError> {
         let mut sources = self.sources.clone();
         sources.sort_by_key(|source| (source.tier(), source.id().clone()));
-        let explicit = sources
-            .iter()
-            .any(|source| source.tier() == ArtifactSourceTier::Explicit);
         let tiers = [
             ArtifactSourceTier::Explicit,
             ArtifactSourceTier::Workspace,
@@ -2804,11 +2872,30 @@ impl ArtifactResolver {
         ];
         let mut available = BTreeSet::new();
         for tier in tiers {
-            if explicit && tier != ArtifactSourceTier::Explicit {
-                break;
+            match selection {
+                CandidateSelection::Global
+                    if sources
+                        .iter()
+                        .any(|source| source.tier() == ArtifactSourceTier::Explicit)
+                        && tier != ArtifactSourceTier::Explicit =>
+                {
+                    break;
+                }
+                CandidateSelection::ExplicitRoot(_) if tier != ArtifactSourceTier::Explicit => {
+                    break;
+                }
+                CandidateSelection::Ordinary if tier == ArtifactSourceTier::Explicit => continue,
+                CandidateSelection::Global
+                | CandidateSelection::ExplicitRoot(_)
+                | CandidateSelection::Ordinary => {}
             }
             let mut candidates = Vec::new();
             for source in sources.iter().filter(|source| source.tier() == tier) {
+                if let CandidateSelection::ExplicitRoot(source_id) = selection
+                    && source.id() != source_id
+                {
+                    continue;
+                }
                 for candidate in source.candidates(type_id)? {
                     if &candidate.package_id != package_id {
                         continue;
@@ -2860,6 +2947,22 @@ impl ArtifactResolver {
                 requirements: constraints.iter().map(ToString::to_string).collect(),
                 available: available.into_iter().collect(),
             })
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CandidateSelection<'a> {
+    Global,
+    ExplicitRoot(&'a ArtifactSourceId),
+    Ordinary,
+}
+
+impl CandidateSelection<'_> {
+    fn for_dependency(self) -> Self {
+        match self {
+            Self::ExplicitRoot(_) => Self::Ordinary,
+            other => other,
         }
     }
 }

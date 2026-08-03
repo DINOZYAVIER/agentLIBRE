@@ -358,6 +358,7 @@ mod tests {
                     duration_ms: 1,
                     input_tokens: 5,
                     output_tokens: 3,
+                    resource_admission: None,
                 },
             })
         }

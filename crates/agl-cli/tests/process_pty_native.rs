@@ -7,6 +7,7 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use agl_chat::{ChatInferenceJob, InferenceClient, InferenceClientHandle, InferenceOptions};
@@ -83,11 +84,12 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
     write_runtime_config(&paths, &workspace, &target_dir);
     let runtime = AgentLibreRuntimeConfig::from_paths(paths.clone()).unwrap();
 
-    let state = agl_daemon::SharedDaemonState::open(
+    let state = agl_daemon::SharedDaemonState::open_with_runtime_identity(
         runtime.clone(),
         InferenceOptions::default(),
         InferenceClientHandle::new(NoInference),
         WorkerRuntimeStatusHandle::default(),
+        agl_binary_runtime_identity(),
     )
     .unwrap();
     let process = state.process_handle().unwrap();
@@ -420,6 +422,25 @@ fn write_runtime_config(paths: &AgentLibrePaths, workspace: &Path, runtime_root:
         ),
     )
     .unwrap();
+}
+
+fn agl_binary_runtime_identity() -> agl_runtime::CurrentRuntimeIdentity {
+    static IDENTITY: OnceLock<agl_runtime::CurrentRuntimeIdentity> = OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let output = Command::new(env!("CARGO_BIN_EXE_agl"))
+                .args(["runtime", "identity"])
+                .output()
+                .expect("failed to inspect the test agl runtime identity");
+            assert!(
+                output.status.success(),
+                "test agl runtime identity failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(&output.stdout)
+                .expect("test agl returned an invalid runtime identity")
+        })
+        .clone()
 }
 
 fn test_target_dir() -> PathBuf {

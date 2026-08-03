@@ -398,7 +398,7 @@ mod tests {
             .provenance
             .as_ref()
             .expect("resolved catalog package carries common provenance");
-        assert_eq!(provenance.reference.to_string(), "model:gemma4-e4b@^1.0.0");
+        assert_eq!(provenance.reference.to_string(), "model:gemma4-e4b@=1.0.0");
         assert_eq!(provenance.source_id.as_str(), "builtin");
         assert!(provenance.package_digest.as_str().starts_with("sha256:"));
         assert_eq!(package.id.as_str(), "gemma4-e4b");
@@ -590,15 +590,6 @@ mod tests {
                 17_165_189_120,
                 "evidence/20260723-five-gemma4-rx7900xtx.md",
             ),
-            (
-                "gemma4-31b",
-                "cpu-40gb-32768",
-                32_768,
-                "gpu-rx7900xtx-65536",
-                65_536,
-                23_488_102_400,
-                "evidence/20260727-gemma4-31b-64k-rx7900xtx.md",
-            ),
         ];
 
         for (
@@ -640,6 +631,47 @@ mod tests {
             assert_eq!(gpu.ubatch_size, 256);
             assert_eq!(gpu.threads, 8);
             assert_eq!(gpu.benchmark_evidence, benchmark_evidence);
+        }
+
+        let thirty_one_b = catalog
+            .package(&ModelPackageId::new("gemma4-31b").unwrap())
+            .unwrap();
+        assert_eq!(thirty_one_b.profiles.len(), 3);
+        let cpu = &thirty_one_b.profiles[0];
+        assert_eq!(cpu.id, "cpu-40gb-32768");
+        assert_eq!(cpu.device, ProfileDevice::Cpu);
+        assert_eq!(cpu.context_tokens, 32_768);
+        let gpu_profiles = thirty_one_b
+            .profiles
+            .iter()
+            .filter(|profile| profile.device == ProfileDevice::Gpu)
+            .collect::<Vec<_>>();
+        assert_eq!(gpu_profiles.len(), 2);
+        for (profile, id, context, required_vram, evidence) in [
+            (
+                gpu_profiles[0],
+                "gpu-rx7900xtx-32768",
+                32_768,
+                22_041_067_520,
+                "evidence/20260723-five-gemma4-rx7900xtx.md",
+            ),
+            (
+                gpu_profiles[1],
+                "gpu-rx7900xtx-65536",
+                65_536,
+                23_488_102_400,
+                "evidence/20260727-gemma4-31b-64k-rx7900xtx.md",
+            ),
+        ] {
+            assert_eq!(profile.id, id);
+            assert_eq!(profile.context_tokens, context);
+            assert_eq!(profile.required_vram_bytes, required_vram);
+            assert_eq!(profile.gpu_layers, 999);
+            assert_eq!(profile.pci_device_id.as_deref(), Some("1002:744c"));
+            assert_eq!(profile.pci_subsystem_id.as_deref(), Some("1da2:471e"));
+            assert_eq!(profile.batch_size, 512);
+            assert_eq!(profile.ubatch_size, 256);
+            assert_eq!(profile.benchmark_evidence, evidence);
         }
     }
 }

@@ -722,7 +722,7 @@ async fn run_interactive_async(
         .socket_path
         .clone()
         .unwrap_or_else(|| agl_daemon::default_socket_path(&runtime.paths));
-    let connection = AgentLibreClient::connect(&socket_path).await;
+    let connection = crate::runtime::connect_daemon(&socket_path).await;
     let authority = inference_authority_decision(
         InferenceAuthoritySurface::Interactive,
         classify_daemon_connection(&connection),
@@ -6953,11 +6953,11 @@ mod tests {
         let incompatible = interactive_connect_error(
             socket,
             ClientError::SchemaMismatch {
-                expected: "agentlibre.event.v6alpha",
+                expected: "agentlibre.event.v8alpha",
             },
         );
         assert!(incompatible.to_string().contains("incompatible protocol"));
-        assert!(format!("{incompatible:#}").contains("v6alpha"));
+        assert!(format!("{incompatible:#}").contains("v8alpha"));
     }
 
     #[test]

@@ -192,6 +192,7 @@ validate_generation() {
   local entry_count=0
   local has_worker=0
   local has_native=0
+  local has_manifest=0
   local has_gc_roots=0
   [[ -d "$generation" && ! -L "$generation" &&
     "$(stat -c '%a' -- "$generation")" == 555 &&
@@ -206,6 +207,7 @@ validate_generation() {
       agl | agl-process-launcher) ;;
       agl-inference-worker) has_worker=1 ;;
       agl-inference-native) has_native=1 ;;
+      runtime-manifest.json) has_manifest=1 ;;
       .nix-gc-roots) has_gc_roots=1 ;;
       *)
         shopt -u nullglob
@@ -217,21 +219,23 @@ validate_generation() {
   shopt -u nullglob
   require_exact_executable "$generation/agl" "agl"
   require_exact_executable "$generation/agl-process-launcher" "process launcher"
-  if (( entry_count == 2 && has_worker == 0 && has_native == 0 && has_gc_roots == 0 )); then
-    printf 'obsolete-two-binary\n'
-    return 0
-  fi
-  (( has_worker == 1 && has_native == 1 && (entry_count == 4 || entry_count == 5) )) ||
-    fail "runtime generation is neither an exact current nor obsolete alpha layout: $generation"
-  if (( (entry_count == 5) != (has_gc_roots == 1) )); then
+  (( has_worker == 1 && has_native == 1 && has_manifest == 1 &&
+    (entry_count == 5 || entry_count == 6) )) ||
+    fail "runtime generation is not the exact sealed-manifest alpha layout: $generation"
+  if (( (entry_count == 6) != (has_gc_roots == 1) )); then
     fail "runtime generation has an inconsistent Nix GC-root layout: $generation"
   fi
+  [[ -f "$generation/runtime-manifest.json" && ! -L "$generation/runtime-manifest.json" &&
+    "$(stat -c '%a' -- "$generation/runtime-manifest.json")" == 444 &&
+    "$(stat -c '%u' -- "$generation/runtime-manifest.json")" == "$current_uid" &&
+    "$(stat -c '%h' -- "$generation/runtime-manifest.json")" == 1 ]] ||
+    fail "runtime manifest is not an immutable owned single-link file: $generation/runtime-manifest.json"
   require_exact_executable "$generation/agl-inference-worker" "inference worker"
   validate_native_bundle "$generation/agl-inference-native"
   if (( has_gc_roots == 1 )); then
     validate_nix_gc_roots "$generation/.nix-gc-roots"
   fi
-  printf 'current\n'
+  printf 'sealed\n'
 }
 
 require_managed_directory "$cargo_root" "install root"
@@ -282,15 +286,13 @@ for runtime_entry in "${runtime_entries[@]}"; do
 done
 
 generation_paths=()
-obsolete_count=0
-current_count=0
+sealed_count=0
 shopt -s nullglob
 for generation in "$generations_dir"/* "$generations_dir"/.[!.]* "$generations_dir"/..?*; do
   layout="$(validate_generation "$generation")"
   generation_paths+=("$generation")
   case "$layout" in
-    obsolete-two-binary) obsolete_count=$((obsolete_count + 1)) ;;
-    current) current_count=$((current_count + 1)) ;;
+    sealed) sealed_count=$((sealed_count + 1)) ;;
     *) fail "runtime generation returned an unknown layout: $generation" ;;
   esac
 done
@@ -475,7 +477,7 @@ scan_runtime_processes initial_runtime_processes
 echo "agentLIBRE managed runtime uninstall plan"
 echo "  root: $cargo_root"
 echo "  current generation: $current_generation"
-echo "  generations: ${#generation_paths[@]} (current=$current_count obsolete=$obsolete_count)"
+echo "  generations: ${#generation_paths[@]} (sealed=$sealed_count)"
 echo "  remove: $installed_agl"
 echo "  remove: $installed_launcher"
 echo "  remove: $current_link"

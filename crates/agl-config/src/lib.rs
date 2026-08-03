@@ -11,10 +11,10 @@ pub use bindings::{
     resolve_inference_preset, resolve_inference_preset_with_bindings, write_model_bindings,
 };
 pub use inference::{
-    AutoRuntimePolicy, BackendKind, FixedRuntimePreset, InferenceBackendConfig, InferencePreset,
-    InferencePresetBackendConfig, InferencePresetRuntimeConfig, InferenceRuntimeConfig,
-    KvCacheType, MIN_AUTO_CONTEXT_TOKENS, MtpPresetConfig, MtpProbability, MtpRuntimeConfig,
-    ResolvedInferenceConfig, RuntimeSwitch, StructuredDecodingMode,
+    AutoRuntimeDevice, AutoRuntimePolicy, BackendKind, FixedRuntimePreset, InferenceBackendConfig,
+    InferencePreset, InferencePresetBackendConfig, InferencePresetRuntimeConfig,
+    InferenceRuntimeConfig, KvCacheType, MIN_AUTO_CONTEXT_TOKENS, MtpPresetConfig, MtpProbability,
+    MtpRuntimeConfig, ResolvedInferenceConfig, RuntimeSwitch, StructuredDecodingMode,
 };
 pub use load::{
     load_inference_preset, load_inference_preset_from_str, load_local_inference_config,

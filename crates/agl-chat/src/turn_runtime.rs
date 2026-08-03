@@ -513,7 +513,8 @@ impl ChatTurnRuntime {
             self.active_effective_capabilities.is_none(),
             "cannot refresh runtime context during an active turn"
         );
-        self.session.refresh_runtime_context(Some(run_id))?;
+        self.session
+            .refresh_runtime_context(Some(run_id), Some(turn_id))?;
         self.reconcile_process_grants()?;
         self.session
             .freeze_delegation_authority(persisted_delegation_authority);
@@ -695,7 +696,7 @@ impl ChatTurnRuntime {
             self.active_effective_capabilities.is_none(),
             "cannot reload runtime context during an active turn"
         );
-        self.session.refresh_runtime_context(None)?;
+        self.session.refresh_runtime_context(None, None)?;
         self.rebuild_tool_runtime()
     }
 
@@ -704,7 +705,7 @@ impl ChatTurnRuntime {
             self.active_effective_capabilities.is_none(),
             "cannot refresh runtime context during an active turn"
         );
-        self.session.refresh_runtime_context(Some(run_id))?;
+        self.session.refresh_runtime_context(Some(run_id), None)?;
         self.rebuild_tool_runtime()
     }
 

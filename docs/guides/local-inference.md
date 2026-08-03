@@ -21,7 +21,9 @@ The conservative default is `gemma4-e4b`, a Gemma 4 E4B QAT Q4 main model plus
 its required projector. `--model gemma4-e2b` selects the text-and-tools
 official QAT E2B package without a projector; `gemma4-12b`, `gemma4-26b`, and
 `gemma4-31b` select larger pinned packages, with 31B using the official QAT
-Q4_0 artifact. E2B, E4B, 26B, and 31B have a 32K maximum context; 12B has 64K.
+Q4_0 artifact. E2B, E4B, and 26B have a 32K profile; 12B has 64K. The 31B
+package has separate reviewed 32K and 64K GPU profiles selected by the
+`gemma4-31b-32k` and `gemma4-31b-64k` Functions.
 The plan reports cache hits, bytes to download, the measured runtime profile,
 numeric context/batch/thread/offload values, binding/default changes, and the
 required smoke before it writes.

@@ -395,8 +395,38 @@ fn directory_inventory_preserves_invalid_envelope_but_resolution_stays_fail_clos
         Some(ArtifactError::AdapterEnvelope { .. })
     ));
 
-    let resolver = ArtifactResolver::new(registry, vec![source]);
     let reference: ArtifactPackageRef = "function:broken@*".parse().unwrap();
+    let resolver = ArtifactResolver::new(registry.clone(), vec![source]);
+    assert!(matches!(
+        resolver.resolve(&reference),
+        Err(ArtifactError::AdapterEnvelope { .. })
+    ));
+
+    let frozen = Arc::new(
+        StaticArtifactSource::new(
+            "workspace".parse().unwrap(),
+            ArtifactSourceTier::Workspace,
+            ArtifactSourceKind::Directory,
+            inventory
+                .iter()
+                .map(ArtifactCandidate::snapshot)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        frozen
+            .inventory_candidates(&ArtifactTypeId::function())
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        frozen.candidates(&ArtifactTypeId::function()),
+        Err(ArtifactError::AdapterEnvelope { .. })
+    ));
+    let resolver = ArtifactResolver::new(registry, vec![frozen]);
     assert!(matches!(
         resolver.resolve(&reference),
         Err(ArtifactError::AdapterEnvelope { .. })
@@ -708,6 +738,128 @@ fn explicit_sources_do_not_fall_through() {
         resolver.resolve(&root),
         Err(ArtifactError::IncompatibleVersion { .. })
     ));
+}
+
+#[test]
+fn root_scoped_explicit_source_resolves_dependencies_from_ordinary_tiers() {
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([
+            LifecycleAdapter {
+                descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+            },
+            LifecycleAdapter {
+                descriptor: descriptor(ArtifactTypeId::skill(), SKILL_ROOT, "SKILL.md"),
+            },
+        ])
+        .unwrap(),
+    );
+    let explicit_id: ArtifactSourceId = "explicit".parse().unwrap();
+    let explicit = StaticArtifactSource::new(
+        explicit_id.clone(),
+        ArtifactSourceTier::Explicit,
+        ArtifactSourceKind::Directory,
+        vec![candidate_for(
+            "explicit",
+            ArtifactSourceTier::Explicit,
+            "1.0.0",
+            "function",
+            "example",
+            &["skill:dependency@^1.0"],
+            true,
+        )],
+    )
+    .unwrap();
+    let user = StaticArtifactSource::new(
+        "user".parse().unwrap(),
+        ArtifactSourceTier::User,
+        ArtifactSourceKind::Directory,
+        vec![
+            candidate_for(
+                "user",
+                ArtifactSourceTier::User,
+                "1.0.0",
+                "function",
+                "example",
+                &[],
+                true,
+            ),
+            candidate_for(
+                "user",
+                ArtifactSourceTier::User,
+                "1.0.0",
+                "skill",
+                "dependency",
+                &[],
+                true,
+            ),
+        ],
+    )
+    .unwrap();
+    let resolver = ArtifactResolver::new(registry, vec![Arc::new(explicit), Arc::new(user)]);
+    let root: ArtifactPackageRef = "function:example@^1.0".parse().unwrap();
+
+    let graph = resolver
+        .resolve_and_validate_with_explicit_root(&root, &explicit_id, None)
+        .unwrap();
+
+    assert_eq!(
+        graph.nodes[&graph.root].candidate.source_id.as_str(),
+        "explicit"
+    );
+    let dependency = graph
+        .nodes
+        .values()
+        .find(|node| node.candidate.type_id == ArtifactTypeId::skill())
+        .unwrap();
+    assert_eq!(dependency.candidate.source_id.as_str(), "user");
+}
+
+#[test]
+fn resolved_candidates_retain_the_admitted_package_bytes() {
+    let root = temp_dir("candidate-snapshot");
+    fs::write(
+        root.join("artifact.json"),
+        serde_json::to_vec(&envelope_for("function", "example", "1.0.0", &[])).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.join("payload.txt"), "before").unwrap();
+    let candidate = ArtifactCandidate::new(
+        ArtifactTypeId::function(),
+        "example".parse().unwrap(),
+        version("1.0.0"),
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        Arc::new(DirectoryPackageView::new(&root).unwrap()),
+    );
+    let source = StaticArtifactSource::new(
+        "workspace".parse().unwrap(),
+        ArtifactSourceTier::Workspace,
+        ArtifactSourceKind::Directory,
+        vec![candidate],
+    )
+    .unwrap();
+    let registry = Arc::new(
+        ArtifactAdapterRegistry::new([LifecycleAdapter {
+            descriptor: descriptor(ArtifactTypeId::function(), FUNCTION_ROOT, "FUNCTION.md"),
+        }])
+        .unwrap(),
+    );
+    let resolver = ArtifactResolver::new(registry.clone(), vec![Arc::new(source)]);
+    let reference: ArtifactPackageRef = "function:example@1.0.0".parse().unwrap();
+    let graph = resolver.resolve_and_validate(&reference, None).unwrap();
+
+    fs::write(root.join("payload.txt"), "after").unwrap();
+    let node = &graph.nodes[&graph.root];
+    let payload = registry
+        .lookup(&node.candidate.type_id)
+        .unwrap()
+        .validate_payload(node.candidate.view(), &node.envelope)
+        .unwrap()
+        .downcast::<String>()
+        .unwrap();
+    assert_eq!(*payload, "before");
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

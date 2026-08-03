@@ -32,6 +32,10 @@ pub enum ClientError {
         code: ProtocolErrorCode,
         retryable: bool,
     },
+    RuntimeIdentityMismatch {
+        client: Box<RuntimeGenerationIdentity>,
+        daemon: Box<RuntimeGenerationIdentity>,
+    },
     SchemaMismatch {
         expected: &'static str,
     },
@@ -80,6 +84,18 @@ impl Display for ClientError {
                     "daemon request failed with {code:?} (retryable={retryable})"
                 )
             }
+            Self::RuntimeIdentityMismatch { client, daemon } => write!(
+                formatter,
+                "client runtime {:?} generation {} catalog {} executable {} does not match daemon {:?} generation {} catalog {} executable {}",
+                client.kind,
+                client.generation_id,
+                client.builtin_catalog_digest,
+                client.executable_digest,
+                daemon.kind,
+                daemon.generation_id,
+                daemon.builtin_catalog_digest,
+                daemon.executable_digest
+            ),
             Self::SchemaMismatch { expected } => {
                 write!(formatter, "daemon schema does not match {expected}")
             }
@@ -160,6 +176,20 @@ pub struct AgentLibreClient {
 
 impl AgentLibreClient {
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, ClientError> {
+        Self::connect_with_runtime(socket_path, None).await
+    }
+
+    pub async fn connect_first_party(
+        socket_path: impl AsRef<Path>,
+        runtime: RuntimeGenerationIdentity,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_runtime(socket_path, Some(runtime)).await
+    }
+
+    async fn connect_with_runtime(
+        socket_path: impl AsRef<Path>,
+        runtime: Option<RuntimeGenerationIdentity>,
+    ) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(socket_path).await.map_err(|error| {
             if matches!(
                 error.kind(),
@@ -170,7 +200,8 @@ impl AgentLibreClient {
                 ClientError::Io(error.to_string())
             }
         })?;
-        Self::from_stream(stream).await
+        verify_peer(&stream)?;
+        Self::from_verified_stream_with_runtime(stream, runtime).await
     }
 
     pub async fn from_stream(stream: UnixStream) -> Result<Self, ClientError> {
@@ -182,9 +213,25 @@ impl AgentLibreClient {
         Self::from_verified_stream_with_timeout(stream, HANDSHAKE_TIMEOUT).await
     }
 
+    async fn from_verified_stream_with_runtime(
+        stream: UnixStream,
+        runtime: Option<RuntimeGenerationIdentity>,
+    ) -> Result<Self, ClientError> {
+        Self::from_verified_stream_with_timeout_and_runtime(stream, HANDSHAKE_TIMEOUT, runtime)
+            .await
+    }
+
     async fn from_verified_stream_with_timeout(
         stream: UnixStream,
         handshake_timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        Self::from_verified_stream_with_timeout_and_runtime(stream, handshake_timeout, None).await
+    }
+
+    async fn from_verified_stream_with_timeout_and_runtime(
+        stream: UnixStream,
+        handshake_timeout: Duration,
+        runtime: Option<RuntimeGenerationIdentity>,
     ) -> Result<Self, ClientError> {
         let (sender, receiver) = mpsc::channel(OUTBOUND_CAPACITY);
         tokio::spawn(connection_task(stream, receiver, sender.downgrade()));
@@ -198,6 +245,7 @@ impl AgentLibreClient {
             client.request(DaemonRequestKind::Hello(HelloRequest {
                 client_name: Some("agl-client".to_owned()),
                 accepted_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+                client_runtime: runtime.clone(),
             })),
         )
         .await
@@ -209,6 +257,14 @@ impl AgentLibreClient {
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(ClientError::SchemaMismatch {
                 expected: PROTOCOL_VERSION,
+            });
+        }
+        if let Some(client_runtime) = runtime
+            && hello.daemon_runtime != client_runtime
+        {
+            return Err(ClientError::RuntimeIdentityMismatch {
+                client: Box::new(client_runtime),
+                daemon: Box::new(hello.daemon_runtime),
             });
         }
         *client
@@ -257,7 +313,7 @@ impl AgentLibreClient {
         request: SetupSmokeSessionOpenRequest,
     ) -> Result<SessionOpenedEvent, ClientError> {
         match self
-            .request(DaemonRequestKind::SetupSmokeSessionOpen(request))
+            .request(DaemonRequestKind::SetupSmokeSessionOpen(Box::new(request)))
             .await?
         {
             DaemonEventKind::SessionOpened(event) => Ok(event),
@@ -1840,6 +1896,16 @@ fn fail_route(route: Route, error: ClientError) {
 }
 
 fn protocol_error(error: ProtocolError) -> ClientError {
+    if let (
+        ProtocolErrorCode::RuntimeIdentityMismatch,
+        Some(ProtocolErrorDetails::RuntimeIdentityMismatch { client, daemon }),
+    ) = (error.code, error.details.map(|details| *details))
+    {
+        return ClientError::RuntimeIdentityMismatch {
+            client: Box::new(client),
+            daemon: Box::new(daemon),
+        };
+    }
     ClientError::Protocol {
         code: error.code,
         retryable: error.retryable,
@@ -1913,6 +1979,16 @@ mod tests {
 
     use super::*;
 
+    fn runtime_identity(fill: char) -> RuntimeGenerationIdentity {
+        let digest = fill.to_string().repeat(64);
+        RuntimeGenerationIdentity {
+            kind: RuntimeGenerationKind::Development,
+            generation_id: format!("sha256:{digest}"),
+            builtin_catalog_digest: format!("sha256:{digest}"),
+            executable_digest: format!("sha256:{digest}"),
+        }
+    }
+
     async fn handshake(
         server: UnixStream,
         daemon_instance_id: agl_ids::DaemonInstanceId,
@@ -1932,6 +2008,10 @@ mod tests {
                         protocol_version: PROTOCOL_VERSION.to_owned(),
                         product_version: "test".to_owned(),
                         daemon_instance_id,
+                        daemon_runtime: runtime_identity('a'),
+                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
+                        native_bundle_id: None,
+                        composite_worker_build_id: None,
                         capabilities: Vec::new(),
                     }),
                 ))
@@ -1958,6 +2038,8 @@ mod tests {
             runtime_plan: SetupSmokeRuntimePlan {
                 profile_id: "cpu-test".to_owned(),
                 selected_device: None,
+                selected_device_identity: None,
+                model: test_runtime_plan_model_identity("gemma4-12b"),
                 runtime: agl_config::InferenceRuntimeConfig {
                     gpu_layers: 0,
                     context_tokens: 4_096,
@@ -1979,6 +2061,27 @@ mod tests {
             },
             max_output_tokens: 32,
         }
+    }
+
+    fn test_runtime_plan_model_identity(id: &str) -> agl_model::RuntimePlanModelIdentity {
+        serde_json::from_value(serde_json::json!({
+            "provenance": {
+                "reference": format!("model:{id}@=1.0.0"),
+                "source_id": "test",
+                "source_tier": "workspace",
+                "source_kind": "directory",
+                "package_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "weights": [{
+                "role": "main",
+                "model_id": id,
+                "filename": format!("{id}.gguf"),
+                "byte_size": 18,
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "required": true
+            }]
+        }))
+        .unwrap()
     }
 
     async fn send_snapshot_transfer(
@@ -2038,6 +2141,57 @@ mod tests {
             verify_peer_identity(1001, 1000),
             Err(ClientError::IdentityMismatch(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn first_party_handshake_fails_closed_on_runtime_identity_mismatch() {
+        let (client_stream, server_stream) = UnixStream::pair().unwrap();
+        let daemon_instance_id = agl_ids::DaemonInstanceId::generate();
+        let server = tokio::spawn(handshake(server_stream, daemon_instance_id));
+        let client_runtime = runtime_identity('f');
+
+        let error = match AgentLibreClient::from_verified_stream_with_timeout_and_runtime(
+            client_stream,
+            HANDSHAKE_TIMEOUT,
+            Some(client_runtime.clone()),
+        )
+        .await
+        {
+            Ok(_) => panic!("mismatched first-party runtime unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ClientError::RuntimeIdentityMismatch {
+                client: Box::new(client_runtime),
+                daemon: Box::new(runtime_identity('a')),
+            }
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn typed_runtime_mismatch_protocol_error_preserves_both_identities() {
+        let client = runtime_identity('c');
+        let daemon = runtime_identity('d');
+        let error = ProtocolError::new(
+            ProtocolErrorCode::RuntimeIdentityMismatch,
+            "runtime mismatch",
+            false,
+        )
+        .with_details(ProtocolErrorDetails::RuntimeIdentityMismatch {
+            client: client.clone(),
+            daemon: daemon.clone(),
+        });
+
+        assert_eq!(
+            protocol_error(error),
+            ClientError::RuntimeIdentityMismatch {
+                client: Box::new(client),
+                daemon: Box::new(daemon),
+            }
+        );
     }
 
     #[tokio::test]
@@ -2278,7 +2432,7 @@ mod tests {
                 serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
             assert_eq!(
                 request.kind,
-                DaemonRequestKind::SetupSmokeSessionOpen(server_expected)
+                DaemonRequestKind::SetupSmokeSessionOpen(Box::new(server_expected))
             );
             server
                 .send(

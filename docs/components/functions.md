@@ -377,8 +377,13 @@ Current builtin model functions:
 - `gemma4-12b`: packaged Gemma4 12B QAT config with a 64K maximum context.
 - `gemma4-26b`: packaged Gemma4 26B-A4B QAT config with a 32K maximum
   context.
-- `gemma4-31b`: official Gemma4 31B QAT Q4_0 config with a 64K maximum
-  context, 32 capability calls per turn, and a 4096-token output budget.
+- `gemma4-31b-32k`: official Gemma4 31B QAT Q4_0 Vulkan0 config with an exact
+  32K context, 32 capability calls per turn, and a 4096-token output budget.
+- `gemma4-31b-64k`: the corresponding exact 64K Vulkan0 config with the same
+  Tool-call and output budgets.
+
+There is no `gemma4-31b` Function alias. Model weights retain the independent
+`gemma4-31b` Model package ID.
 
 ## Runtime Semantics
 

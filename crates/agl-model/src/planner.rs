@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 
-use crate::{CatalogRuntimeProfile, ModelPackage, ProfileDevice};
+use crate::{
+    CatalogRuntimeProfile, ModelArtifact, ModelPackage, ModelPackageProvenance, ProfileDevice,
+};
 
 pub const RECOMMENDED_MEMORY_FLOOR_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -162,9 +164,19 @@ pub struct ModelFit {
 pub struct RuntimePlan {
     pub profile_id: String,
     pub selected_device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_device_identity: Option<LlamaDeviceInfo>,
+    pub model: RuntimePlanModelIdentity,
     pub runtime: InferenceRuntimeConfig,
     pub smoke_timeout_seconds: u64,
     pub expected_speed: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimePlanModelIdentity {
+    pub provenance: ModelPackageProvenance,
+    pub weights: Vec<ModelArtifact>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -215,13 +227,27 @@ impl RuntimePlanner {
         allow_low_memory: bool,
     ) -> Result<RuntimePlan> {
         policy.validate()?;
-        let profile = select_cpu_profile(package, host, allow_low_memory).with_context(|| {
+        ensure!(
+            policy.device.is_none(),
+            "automatic runtime policy requires device `{}` and cannot produce a CPU plan",
+            policy
+                .device
+                .map(agl_config::AutoRuntimeDevice::runtime_name)
+                .unwrap_or_default()
+        );
+        let profile = select_cpu_profile(
+            package,
+            host,
+            allow_low_memory,
+            Some(policy.max_context_tokens),
+        )
+        .with_context(|| {
             format!(
-                "model `{}` has no benchmarked CPU profile that fits current memory",
-                package.id
+                "model `{}` has no benchmarked CPU profile for exact context {} that fits current memory",
+                package.id, policy.max_context_tokens
             )
         })?;
-        runtime_plan_from_profile(profile, None, host, policy)
+        runtime_plan_from_profile(package, profile, None, host, policy)
     }
 
     pub fn cpu_fallback_offer(
@@ -292,7 +318,9 @@ impl RuntimePlanner {
             };
         }
 
-        if let Some((profile, device)) = select_gpu_profile(package, host, allow_low_memory) {
+        if let Some((profile, device)) =
+            select_gpu_profile(package, host, allow_low_memory, None, None, true)
+        {
             return ModelFit {
                 kind: ModelFitKind::Fits,
                 reason: if allow_low_memory
@@ -312,7 +340,7 @@ impl RuntimePlanner {
             };
         }
 
-        if let Some(profile) = select_cpu_profile(package, host, allow_low_memory) {
+        if let Some(profile) = select_cpu_profile(package, host, allow_low_memory, None) {
             let kind = if profile.expected_speed == "slow" {
                 ModelFitKind::Slow
             } else {
@@ -352,22 +380,43 @@ impl RuntimePlanner {
         allow_low_memory: bool,
     ) -> Result<RuntimePlan> {
         policy.validate()?;
-        let fit = self.fit(package, host, 0, allow_low_memory);
         ensure!(
-            matches!(
-                fit.kind,
-                ModelFitKind::Recommended | ModelFitKind::Fits | ModelFitKind::Slow
-            ),
-            "model `{}` does not fit: {}",
-            package.id,
-            fit.reason
+            allow_low_memory || !host.below_recommended_floor(),
+            "model `{}` does not fit: detected memory is below the recommended 8 GB minimum",
+            package.id
         );
-        let profile = package
-            .profiles
-            .iter()
-            .find(|profile| Some(profile.id.as_str()) == fit.profile_id.as_deref())
-            .context("selected runtime profile disappeared from catalog")?;
-        runtime_plan_from_profile(profile, fit.selected_device, host, policy)
+        if let Some((profile, device)) = select_gpu_profile(
+            package,
+            host,
+            allow_low_memory,
+            Some(policy.max_context_tokens),
+            policy
+                .device
+                .map(agl_config::AutoRuntimeDevice::runtime_name),
+            policy.device.is_none(),
+        ) {
+            return runtime_plan_from_profile(package, profile, Some(device), host, policy);
+        }
+        if policy.device.is_none()
+            && let Some(profile) = select_cpu_profile(
+                package,
+                host,
+                allow_low_memory,
+                Some(policy.max_context_tokens),
+            )
+        {
+            return runtime_plan_from_profile(package, profile, None, host, policy);
+        }
+        let requested_device = policy
+            .device
+            .map(agl_config::AutoRuntimeDevice::runtime_name)
+            .unwrap_or("any benchmarked device");
+        bail!(
+            "model `{}` has no benchmarked profile for exact context {} on {} that fits current resources",
+            package.id,
+            policy.max_context_tokens,
+            requested_device
+        )
     }
 
     pub fn resolve_bound(
@@ -435,8 +484,9 @@ impl RuntimePlanner {
 }
 
 fn runtime_plan_from_profile(
+    package: &ModelPackage,
     profile: &CatalogRuntimeProfile,
-    selected_device: Option<String>,
+    selected_device: Option<&LlamaDeviceInfo>,
     host: &HostResources,
     policy: &agl_config::AutoRuntimePolicy,
 ) -> Result<RuntimePlan> {
@@ -448,8 +498,8 @@ fn runtime_plan_from_profile(
         MIN_AUTO_CONTEXT_TOKENS
     );
     ensure!(
-        policy.max_context_tokens >= profile.context_tokens,
-        "automatic context ceiling {} is below benchmarked profile `{}` context {}",
+        policy.max_context_tokens == profile.context_tokens,
+        "automatic context {} does not exactly match benchmarked profile `{}` context {}",
         policy.max_context_tokens,
         profile.id,
         profile.context_tokens
@@ -461,7 +511,7 @@ fn runtime_plan_from_profile(
             .threads
             .min(u32::try_from(host.cpu.physical_cores).unwrap_or(u32::MAX))
             .max(1),
-        device: selected_device.clone(),
+        device: selected_device.map(|device| device.name.clone()),
         batch_size: Some(profile.batch_size.min(policy.max_batch_size)),
         ubatch_size: Some(profile.ubatch_size.min(policy.max_ubatch_size)),
         flash_attention: Some(policy.flash_attention),
@@ -474,9 +524,26 @@ fn runtime_plan_from_profile(
         mtp: MtpRuntimeConfig::default(),
     };
     runtime.validate()?;
+    let provenance = package.provenance.clone().with_context(|| {
+        format!(
+            "model package `{}` has no admitted artifact provenance",
+            package.id
+        )
+    })?;
+    let weights = package.required_artifacts().cloned().collect::<Vec<_>>();
+    ensure!(
+        !weights.is_empty(),
+        "model package `{}` has no required weight binding",
+        package.id
+    );
     Ok(RuntimePlan {
         profile_id: profile.id.clone(),
-        selected_device,
+        selected_device: selected_device.map(|device| device.name.clone()),
+        selected_device_identity: selected_device.cloned(),
+        model: RuntimePlanModelIdentity {
+            provenance,
+            weights,
+        },
         runtime,
         smoke_timeout_seconds: profile.smoke_timeout_seconds,
         expected_speed: profile.expected_speed.clone(),
@@ -487,15 +554,20 @@ fn select_gpu_profile<'a>(
     package: &'a ModelPackage,
     host: &'a HostResources,
     allow_low_memory: bool,
+    context_tokens: Option<u32>,
+    device_name: Option<&str>,
+    enforce_dynamic_fit: bool,
 ) -> Option<(&'a CatalogRuntimeProfile, &'a LlamaDeviceInfo)> {
     for profile in package
         .profiles
         .iter()
         .filter(|profile| profile.device == ProfileDevice::Gpu)
+        .filter(|profile| context_tokens.is_none_or(|context| profile.context_tokens == context))
     {
         for device in host.devices.iter().filter(|device| {
             device.usable
                 && device.supports_gpu_offload
+                && device_name.is_none_or(|required| device.name == required)
                 && device.pci_device_id == profile.pci_device_id
                 && device.pci_subsystem_id == profile.pci_subsystem_id
                 && matches!(
@@ -511,7 +583,11 @@ fn select_gpu_profile<'a>(
                     >= profile
                         .required_available_ram_bytes
                         .saturating_add(profile.required_vram_bytes);
-            if vram_fits && (allow_low_memory || ram_fits) && unified_safe {
+            let physical_capacity_fits = device.total_memory_bytes >= profile.required_vram_bytes;
+            if physical_capacity_fits
+                && (!enforce_dynamic_fit
+                    || (vram_fits && (allow_low_memory || ram_fits) && unified_safe))
+            {
                 return Some((profile, device));
             }
         }
@@ -531,11 +607,13 @@ fn select_cpu_profile<'a>(
     package: &'a ModelPackage,
     host: &HostResources,
     allow_low_memory: bool,
+    context_tokens: Option<u32>,
 ) -> Option<&'a CatalogRuntimeProfile> {
     package
         .profiles
         .iter()
         .filter(|profile| profile.device == ProfileDevice::Cpu)
+        .filter(|profile| context_tokens.is_none_or(|context| profile.context_tokens == context))
         .find(|profile| {
             allow_low_memory
                 || (host.detected_total_memory_bytes >= profile.required_total_ram_bytes
@@ -586,12 +664,23 @@ mod tests {
     use agl_config::{KvCacheType, RuntimeSwitch};
 
     use super::*;
-    use crate::{CatalogCapability, ModelArtifact, ModelArtifactRole, ModelPackageId};
+    use crate::{
+        CatalogCapability, ModelArtifact, ModelArtifactRole, ModelPackageId, ModelPackageProvenance,
+    };
 
     fn package() -> ModelPackage {
         ModelPackage {
             id: ModelPackageId::new("gemma4-e4b").unwrap(),
-            provenance: None,
+            provenance: Some(ModelPackageProvenance {
+                reference: "model:gemma4-e4b@=1.0.0".parse().unwrap(),
+                source_id: "test".parse().unwrap(),
+                source_tier: agl_artifact::ArtifactSourceTier::Workspace,
+                source_kind: agl_artifact::ArtifactSourceKind::Directory,
+                package_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .parse()
+                        .unwrap(),
+            }),
             display_name: "Gemma 4 E4B".to_string(),
             capabilities: vec![CatalogCapability::Text],
             license: "apache-2.0".to_string(),
@@ -675,6 +764,7 @@ mod tests {
             max_context_tokens: 32768,
             max_batch_size: 128,
             max_ubatch_size: 64,
+            device: None,
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
@@ -725,6 +815,7 @@ mod tests {
             max_context_tokens: 32768,
             max_batch_size: 128,
             max_ubatch_size: 64,
+            device: None,
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
@@ -752,6 +843,7 @@ mod tests {
             max_context_tokens: 32768,
             max_batch_size: 128,
             max_ubatch_size: 64,
+            device: None,
             flash_attention: RuntimeSwitch::On,
             cache_type_k: KvCacheType::Q8_0,
             cache_type_v: KvCacheType::Q8_0,
@@ -792,6 +884,52 @@ mod tests {
         assert_eq!(plans.selected.runtime.gpu_layers, 43);
         assert_eq!(plans.cpu_fallback.as_ref().unwrap().profile_id, "cpu-8gb");
         assert_eq!(plans.cpu_fallback.as_ref().unwrap().runtime.gpu_layers, 0);
+    }
+
+    #[test]
+    fn explicit_auto_device_never_falls_back_to_cpu_or_another_context() {
+        let host = host(16_000_000_000, 12_000_000_000, 20_000_000_000);
+        let mut required_gpu = policy();
+        required_gpu.device = Some(agl_config::AutoRuntimeDevice::Vulkan0);
+
+        let unavailable = RuntimePlanner
+            .plan(&package_with_gpu_profile(), &host, &required_gpu, false)
+            .unwrap_err();
+        assert!(unavailable.to_string().contains("on Vulkan0"));
+
+        required_gpu.device = None;
+        required_gpu.max_context_tokens = 65_536;
+        let wrong_context = RuntimePlanner
+            .plan(&package_with_gpu_profile(), &host, &required_gpu, false)
+            .unwrap_err();
+        assert!(wrong_context.to_string().contains("exact context 65536"));
+    }
+
+    #[test]
+    fn explicit_device_defers_current_vram_pressure_to_atomic_admission() {
+        let mut host = host(16_000_000_000, 12_000_000_000, 20_000_000_000);
+        host.devices.push(LlamaDeviceInfo {
+            name: "Vulkan0".to_string(),
+            description: "pressured discrete fixture".to_string(),
+            kind: LlamaDeviceKind::DiscreteGpu,
+            pci_device_id: Some("1002:744c".to_string()),
+            pci_subsystem_id: Some("1da2:471e".to_string()),
+            free_memory_bytes: 3_000_000_000,
+            total_memory_bytes: 8_000_000_000,
+            usable: true,
+            supports_gpu_offload: true,
+        });
+        let mut required_gpu = policy();
+        required_gpu.device = Some(agl_config::AutoRuntimeDevice::Vulkan0);
+
+        let plans = RuntimePlanner
+            .plan_set(&package_with_gpu_profile(), &host, &required_gpu, false)
+            .unwrap();
+
+        assert_eq!(plans.selected.profile_id, "vulkan-5gb");
+        assert_eq!(plans.selected.selected_device.as_deref(), Some("Vulkan0"));
+        assert_eq!(plans.selected.runtime.context_tokens, 32_768);
+        assert!(plans.cpu_fallback.is_none());
     }
 
     #[test]

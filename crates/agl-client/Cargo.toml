@@ -18,3 +18,4 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 agl-config.workspace = true
+agl-model.workspace = true

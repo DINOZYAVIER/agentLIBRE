@@ -258,6 +258,8 @@ if [[ "$dry_run" -eq 1 ]]; then
     "$dry_stage_root/bin/agl-inference-worker"
   printf '+ copy selected %q/sha256-DIGEST to %q\n' \
     "$native_bundle_build_base" "$dry_stage_root/bin/agl-inference-native"
+  printf '+ seal runtime-manifest.json from final copied executable/native bytes and explicit Git source state\n'
+  printf '+ validate sealed runtime identity before and after atomic generation publication\n'
   printf '+ pin exact Nix runtime references below final generation .nix-gc-roots\n'
   printf '+ publish complete generation through %q\n' "$current_link"
   printf '+ reconcile an exact preserved agentlibre-daemon.service/socket pair after publication\n'
@@ -379,7 +381,11 @@ sync_path() {
 
 validate_generation() {
   local generation="$1"
+  local entry
   local executable
+  local name
+  local entry_count=0
+  local has_gc_roots=0
   [[ -d "$generation" && ! -L "$generation" &&
     "$(stat -c '%a' -- "$generation")" == 555 &&
     "$(stat -c '%u' -- "$generation")" == "$(id -u)" ]] ||
@@ -400,9 +406,32 @@ validate_generation() {
       "$(stat -c '%h' -- "$executable")" == 1 ]] ||
       fail "runtime generation executable is not an exact immutable single-link file: $executable"
   done
+  [[ -f "$generation/runtime-manifest.json" && ! -L "$generation/runtime-manifest.json" &&
+    "$(stat -c '%a' -- "$generation/runtime-manifest.json")" == 444 &&
+    "$(stat -c '%u' -- "$generation/runtime-manifest.json")" == "$(id -u)" &&
+    "$(stat -c '%h' -- "$generation/runtime-manifest.json")" == 1 ]] ||
+    fail "runtime generation has no exact sealed manifest: $generation"
+  shopt -s nullglob
+  for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
+    name="${entry##*/}"
+    case "$name" in
+      agl | agl-process-launcher | agl-inference-worker | agl-inference-native | runtime-manifest.json) ;;
+      .nix-gc-roots) has_gc_roots=1 ;;
+      *)
+        shopt -u nullglob
+        fail "runtime generation contains an unexpected entry: $entry"
+        ;;
+    esac
+    entry_count=$((entry_count + 1))
+  done
+  shopt -u nullglob
+  (( entry_count == 5 || (entry_count == 6 && has_gc_roots == 1) )) ||
+    fail "runtime generation does not have the exact manifest-bearing layout: $generation"
   validate_native_bundle \
     "$generation/agl-inference-native" \
     "$generation/agl-inference-worker"
+  "$generation/agl" runtime identity >/dev/null ||
+    fail "runtime generation manifest or component identity failed verification: $generation"
 }
 
 is_obsolete_two_binary_generation() {
@@ -447,10 +476,8 @@ reject_obsolete_two_binary_generation() {
   echo "  $installed_launcher" >&2
   echo "  $current_link" >&2
   echo "  $generation" >&2
-  echo "preview and remove the complete managed surface with:" >&2
-  printf '  %q --root %q\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
-  printf '  %q --root %q --apply\n' "$script_dir/uninstall-agl-cargo.sh" "$cargo_root" >&2
-  fail "then rerun the installer"
+  echo "the manifest-aware uninstaller intentionally rejects this obsolete alpha layout" >&2
+  fail "move or remove the listed obsolete artifacts, then rerun the installer"
 }
 
 validate_native_bundle() {
@@ -658,6 +685,8 @@ publish_current() {
   validate_generation "$generation"
   validate_nix_runtime_roots "$generation"
   atomic_symlink "generations/$(basename -- "$generation")" "$current_link"
+  validate_generation "$generation"
+  validate_nix_runtime_roots "$generation"
 }
 
 managed_link_kind() {
@@ -766,6 +795,35 @@ chmod 0555 \
   "$generation_staging/agl" \
   "$generation_staging/agl-process-launcher" \
   "$generation_staging/agl-inference-worker"
+
+runtime_source_state="unavailable"
+runtime_source_revision=""
+runtime_source_tree=""
+if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  runtime_source_revision="$(git -C "$repo_root" rev-parse --verify HEAD)" ||
+    fail "failed to resolve runtime source revision"
+  runtime_source_tree="$(git -C "$repo_root" rev-parse --verify 'HEAD^{tree}')" ||
+    fail "failed to resolve runtime source tree"
+  runtime_source_status="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)" ||
+    fail "failed to inspect runtime source state"
+  if [[ -n "$runtime_source_status" ]]; then
+    runtime_source_state="dirty"
+  else
+    runtime_source_state="clean"
+  fi
+fi
+runtime_seal_environment=(
+  "AGL_INTERNAL_SEAL_RUNTIME_MANIFEST=$generation_staging"
+  "AGL_INTERNAL_RUNTIME_SOURCE_STATE=$runtime_source_state"
+)
+if [[ "$runtime_source_state" != unavailable ]]; then
+  runtime_seal_environment+=(
+    "AGL_INTERNAL_RUNTIME_SOURCE_REVISION=$runtime_source_revision"
+    "AGL_INTERNAL_RUNTIME_SOURCE_TREE=$runtime_source_tree"
+  )
+fi
+run env "${runtime_seal_environment[@]}" "$generation_staging/agl"
+
 generation_nix_references=()
 collect_nix_runtime_references "$generation_staging" generation_nix_references
 if (( ${#generation_nix_references[@]} > 0 )); then
@@ -819,6 +877,7 @@ echo "installed agl: $installed_agl -> $resolved_agl"
 echo "installed process launcher: $installed_launcher -> $resolved_launcher"
 echo "installed private inference worker: $resolved_worker"
 run "$installed_agl" --version
+run "$installed_agl" runtime identity
 
 systemd_user_dir="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}/systemd/user"
 standard_service_unit="agentlibre-daemon.service"

@@ -186,7 +186,10 @@ mod tests {
     use std::time::Duration;
 
     use agl_ids::{DaemonInstanceId, RequestId};
-    use agl_protocol::{DaemonEvent, DaemonEventKind, DaemonRequest, HelloEvent, PROTOCOL_VERSION};
+    use agl_protocol::{
+        DaemonEvent, DaemonEventKind, DaemonRequest, HelloEvent, PROTOCOL_VERSION,
+        RuntimeGenerationIdentity, RuntimeGenerationKind,
+    };
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
     use super::*;
@@ -216,6 +219,15 @@ mod tests {
                         protocol_version: PROTOCOL_VERSION.to_owned(),
                         product_version: "runtime-boundary-test".to_owned(),
                         daemon_instance_id: DaemonInstanceId::generate(),
+                        daemon_runtime: RuntimeGenerationIdentity {
+                            kind: RuntimeGenerationKind::Development,
+                            generation_id: format!("sha256:{}", "a".repeat(64)),
+                            builtin_catalog_digest: format!("sha256:{}", "b".repeat(64)),
+                            executable_digest: format!("sha256:{}", "c".repeat(64)),
+                        },
+                        worker_build_id: format!("sha256:{}", "d".repeat(64)),
+                        native_bundle_id: None,
+                        composite_worker_build_id: None,
                         capabilities: Vec::new(),
                     }),
                 );

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::evidence::InferenceArtifactRoot;
-use crate::{InferenceOutputSink, InferenceRequest};
+use crate::{InferenceOutputSink, InferenceRequest, ResourceAdmissionDetails};
 
 const MAX_RESOLVED_IMAGES: usize = 8;
 const MAX_RESOLVED_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
@@ -831,6 +831,7 @@ pub enum ModelManagerError {
     ResourceAdmission {
         code: String,
         message: String,
+        details: Option<Box<ResourceAdmissionDetails>>,
     },
     LoadFailed {
         model_digest: String,
@@ -892,6 +893,13 @@ impl ModelManagerError {
             Self::ManagerUnavailable => "manager.unavailable",
         }
     }
+
+    pub fn resource_admission_details(&self) -> Option<&ResourceAdmissionDetails> {
+        match self {
+            Self::ResourceAdmission { details, .. } => details.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ModelManagerError {
@@ -912,7 +920,7 @@ impl fmt::Display for ModelManagerError {
             Self::ProfileInvalid { message } => {
                 write!(formatter, "invalid inference profile: {message}")
             }
-            Self::ResourceAdmission { code, message } => {
+            Self::ResourceAdmission { code, message, .. } => {
                 write!(
                     formatter,
                     "inference resource admission failed ({code}): {message}"

@@ -144,7 +144,7 @@ printf '%s\n' \
   '  printf '\''#include <stdio.h>\nint main(void) { puts("%s"); return 0; }\n'\'' "$label" >"$source_file"' \
   '  env "$nix_rpath_guard=1" "$compiler" "$source_file" -Wl,--dynamic-linker,"${FAKE_DYNAMIC_LINKER:?}" -Wl,-rpath,"\$ORIGIN/agl-inference-native/sha256-${FAKE_BUNDLE_DIGEST:?}" -o "$root/bin/$bin"' \
   'else' \
-  '  printf '\''#!/usr/bin/env bash\nif [[ "${AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE:-}" == "1" && "${FAKE_IDENTITY_FAIL:-}" == "1" ]]; then exit 43; fi\nprintf "%%s\\n" "%s"\n'\'' "$label" >"$root/bin/$bin"' \
+  '  printf '\''#!/usr/bin/env bash\nif [[ "${AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE:-}" == "1" && "${FAKE_IDENTITY_FAIL:-}" == "1" ]]; then exit 43; fi\nif [[ -n "${AGL_INTERNAL_SEAL_RUNTIME_MANIFEST:-}" ]]; then printf "{}\\n" >"$AGL_INTERNAL_SEAL_RUNTIME_MANIFEST/runtime-manifest.json"; chmod 0444 "$AGL_INTERNAL_SEAL_RUNTIME_MANIFEST/runtime-manifest.json"; exit 0; fi\nprintf "%%s\\n" "%s"\n'\'' "$label" >"$root/bin/$bin"' \
   '  chmod 0755 "$root/bin/$bin"' \
   'fi' \
   'alias_path="$CARGO_TARGET_DIR/fake-profile-alias-$bin"' \
@@ -267,6 +267,11 @@ assert_current_complete() {
     ci_fail "current generation has no launcher under $root"
   [[ -x "$generation/agl-inference-worker" ]] ||
     ci_fail "current generation has no private inference worker under $root"
+  [[ -f "$generation/runtime-manifest.json" &&
+    ! -L "$generation/runtime-manifest.json" &&
+    "$(stat -c '%a' -- "$generation/runtime-manifest.json")" == 444 &&
+    "$(stat -c '%h' -- "$generation/runtime-manifest.json")" == 1 ]] ||
+    ci_fail "current generation has no exact sealed runtime manifest under $root"
   for executable in \
     "$generation/agl" \
     "$generation/agl-process-launcher" \
@@ -460,9 +465,9 @@ run_fake_installer "$obsolete_root" FAKE_BUNDLE_LABEL=new \
 grep -F "agentLIBRE alpha installers do not migrate obsolete runtime generations" \
   "$tmp_dir/obsolete.err" >/dev/null ||
   ci_fail "obsolete managed-generation rejection was not actionable"
-grep -F "scripts/uninstall-agl-cargo.sh --root $obsolete_root --apply" \
+grep -F "manifest-aware uninstaller intentionally rejects this obsolete alpha layout" \
   "$tmp_dir/obsolete.err" >/dev/null ||
-  ci_fail "obsolete managed-generation rejection omitted the explicit uninstaller"
+  ci_fail "obsolete managed-generation rejection did not explain the direct cutover"
 for obsolete_artifact in \
   "$obsolete_root/bin/agl" \
   "$obsolete_root/bin/agl-process-launcher" \

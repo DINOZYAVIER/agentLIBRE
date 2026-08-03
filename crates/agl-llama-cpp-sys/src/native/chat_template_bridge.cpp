@@ -35,25 +35,25 @@ struct agl_llama_chat_message {
 };
 
 struct agl_llama_generation_plan {
-    char * prompt;
-    size_t prompt_len;
-    char * grammar;
-    size_t grammar_len;
+    char *  prompt;
+    size_t  prompt_len;
+    char *  grammar;
+    size_t  grammar_len;
     int32_t grammar_lazy;
     int32_t grammar_needs_prefill;
-    char * grammar_triggers_json;
-    size_t grammar_triggers_json_len;
-    char * grammar_prefill_tokens_json;
-    size_t grammar_prefill_tokens_json_len;
-    char * additional_stops_json;
-    size_t additional_stops_json_len;
-    char * preserved_tokens_json;
-    size_t preserved_tokens_json_len;
-    char * generation_prompt;
-    size_t generation_prompt_len;
+    char *  grammar_triggers_json;
+    size_t  grammar_triggers_json_len;
+    char *  grammar_prefill_tokens_json;
+    size_t  grammar_prefill_tokens_json_len;
+    char *  additional_stops_json;
+    size_t  additional_stops_json_len;
+    char *  preserved_tokens_json;
+    size_t  preserved_tokens_json_len;
+    char *  generation_prompt;
+    size_t  generation_prompt_len;
     int32_t format;
-    char * parser;
-    size_t parser_len;
+    char *  parser;
+    size_t  parser_len;
 };
 
 void agl_copy_cstr(char * dst, size_t dst_len, const std::string & src) {
@@ -77,25 +77,25 @@ void agl_reset_plan(agl_llama_generation_plan * plan) {
     if (plan == nullptr) {
         return;
     }
-    plan->prompt = nullptr;
-    plan->prompt_len = 0;
-    plan->grammar = nullptr;
-    plan->grammar_len = 0;
-    plan->grammar_lazy = 0;
-    plan->grammar_needs_prefill = 0;
-    plan->grammar_triggers_json = nullptr;
-    plan->grammar_triggers_json_len = 0;
-    plan->grammar_prefill_tokens_json = nullptr;
+    plan->prompt                          = nullptr;
+    plan->prompt_len                      = 0;
+    plan->grammar                         = nullptr;
+    plan->grammar_len                     = 0;
+    plan->grammar_lazy                    = 0;
+    plan->grammar_needs_prefill           = 0;
+    plan->grammar_triggers_json           = nullptr;
+    plan->grammar_triggers_json_len       = 0;
+    plan->grammar_prefill_tokens_json     = nullptr;
     plan->grammar_prefill_tokens_json_len = 0;
-    plan->additional_stops_json = nullptr;
-    plan->additional_stops_json_len = 0;
-    plan->preserved_tokens_json = nullptr;
-    plan->preserved_tokens_json_len = 0;
-    plan->generation_prompt = nullptr;
-    plan->generation_prompt_len = 0;
-    plan->format = 0;
-    plan->parser = nullptr;
-    plan->parser_len = 0;
+    plan->additional_stops_json           = nullptr;
+    plan->additional_stops_json_len       = 0;
+    plan->preserved_tokens_json           = nullptr;
+    plan->preserved_tokens_json_len       = 0;
+    plan->generation_prompt               = nullptr;
+    plan->generation_prompt_len           = 0;
+    plan->format                          = 0;
+    plan->parser                          = nullptr;
+    plan->parser_len                      = 0;
 }
 
 void agl_free_plan_fields(agl_llama_generation_plan * plan) {
@@ -172,16 +172,15 @@ extern "C" int32_t agl_llama_common_chat_apply_template(const llama_model *     
     }
 }
 
-extern "C" int32_t agl_llama_common_chat_build_generation_plan(
-        const llama_model *                 model,
-        const agl_llama_chat_message *      chat,
-        size_t                              n_msg,
-        const agl_llama_chat_tool *         tools,
-        size_t                              n_tools,
-        bool                                add_assistant,
-        agl_llama_generation_plan *         plan,
-        char *                              err,
-        size_t                              err_len) {
+extern "C" int32_t agl_llama_common_chat_build_generation_plan(const llama_model *            model,
+                                                               const agl_llama_chat_message * chat,
+                                                               size_t                         n_msg,
+                                                               const agl_llama_chat_tool *    tools,
+                                                               size_t                         n_tools,
+                                                               bool                           add_assistant,
+                                                               agl_llama_generation_plan *    plan,
+                                                               char *                         err,
+                                                               size_t                         err_len) {
     if (plan == nullptr) {
         agl_copy_cstr(err, err_len, "generation plan output is null");
         return -1;
@@ -242,53 +241,53 @@ extern "C" int32_t agl_llama_common_chat_build_generation_plan(
             inputs.tools.push_back(std::move(tool));
         }
 
-        common_chat_params params = common_chat_templates_apply(templates.get(), inputs);
+        common_chat_params     params   = common_chat_templates_apply(templates.get(), inputs);
         nlohmann::ordered_json triggers = nlohmann::ordered_json::array();
         for (const auto & trigger : params.grammar_triggers) {
             triggers.push_back({
-                {"type", static_cast<int32_t>(trigger.type)},
-                {"value", trigger.value},
-                {"token", static_cast<int32_t>(trigger.token)},
+                { "type",  static_cast<int32_t>(trigger.type)  },
+                { "value", trigger.value                       },
+                { "token", static_cast<int32_t>(trigger.token) },
             });
         }
         nlohmann::ordered_json prefill_tokens = nlohmann::ordered_json::array();
         if (!params.generation_prompt.empty()) {
-            const llama_vocab * vocab = llama_model_get_vocab(model);
-            const auto tokens = common_tokenize(vocab, params.generation_prompt, false, true);
+            const llama_vocab * vocab  = llama_model_get_vocab(model);
+            const auto          tokens = common_tokenize(vocab, params.generation_prompt, false, true);
             for (size_t i = 0; i < tokens.size(); ++i) {
                 const std::string piece = common_token_to_piece(vocab, tokens[i], true);
-                if (i == 0 && !piece.empty() && std::isspace(static_cast<unsigned char>(piece[0]))
-                        && !std::isspace(static_cast<unsigned char>(params.generation_prompt[0]))) {
+                if (i == 0 && !piece.empty() && std::isspace(static_cast<unsigned char>(piece[0])) &&
+                    !std::isspace(static_cast<unsigned char>(params.generation_prompt[0]))) {
                     continue;
                 }
                 prefill_tokens.push_back(tokens[i]);
             }
         }
 
-        const std::string triggers_json = triggers.dump();
-        const std::string prefill_tokens_json = prefill_tokens.dump();
+        const std::string triggers_json         = triggers.dump();
+        const std::string prefill_tokens_json   = prefill_tokens.dump();
         const std::string additional_stops_json = nlohmann::ordered_json(params.additional_stops).dump();
         const std::string preserved_tokens_json = nlohmann::ordered_json(params.preserved_tokens).dump();
 
-        plan->prompt                = agl_alloc_cstr(params.prompt);
-        plan->prompt_len            = params.prompt.size();
-        plan->grammar               = agl_alloc_cstr(params.grammar);
-        plan->grammar_len           = params.grammar.size();
-        plan->grammar_lazy          = params.grammar_lazy ? 1 : 0;
-        plan->grammar_needs_prefill = !params.grammar_lazy && !params.grammar.empty() && n_tools != 0 ? 1 : 0;
-        plan->grammar_triggers_json = agl_alloc_cstr(triggers_json);
-        plan->grammar_triggers_json_len = triggers_json.size();
-        plan->grammar_prefill_tokens_json = agl_alloc_cstr(prefill_tokens_json);
+        plan->prompt                          = agl_alloc_cstr(params.prompt);
+        plan->prompt_len                      = params.prompt.size();
+        plan->grammar                         = agl_alloc_cstr(params.grammar);
+        plan->grammar_len                     = params.grammar.size();
+        plan->grammar_lazy                    = params.grammar_lazy ? 1 : 0;
+        plan->grammar_needs_prefill           = !params.grammar_lazy && !params.grammar.empty() && n_tools != 0 ? 1 : 0;
+        plan->grammar_triggers_json           = agl_alloc_cstr(triggers_json);
+        plan->grammar_triggers_json_len       = triggers_json.size();
+        plan->grammar_prefill_tokens_json     = agl_alloc_cstr(prefill_tokens_json);
         plan->grammar_prefill_tokens_json_len = prefill_tokens_json.size();
-        plan->additional_stops_json = agl_alloc_cstr(additional_stops_json);
-        plan->additional_stops_json_len = additional_stops_json.size();
-        plan->preserved_tokens_json = agl_alloc_cstr(preserved_tokens_json);
-        plan->preserved_tokens_json_len = preserved_tokens_json.size();
-        plan->generation_prompt     = agl_alloc_cstr(params.generation_prompt);
-        plan->generation_prompt_len = params.generation_prompt.size();
-        plan->format                 = static_cast<int32_t>(params.format);
-        plan->parser                 = agl_alloc_cstr(params.parser);
-        plan->parser_len             = params.parser.size();
+        plan->additional_stops_json           = agl_alloc_cstr(additional_stops_json);
+        plan->additional_stops_json_len       = additional_stops_json.size();
+        plan->preserved_tokens_json           = agl_alloc_cstr(preserved_tokens_json);
+        plan->preserved_tokens_json_len       = preserved_tokens_json.size();
+        plan->generation_prompt               = agl_alloc_cstr(params.generation_prompt);
+        plan->generation_prompt_len           = params.generation_prompt.size();
+        plan->format                          = static_cast<int32_t>(params.format);
+        plan->parser                          = agl_alloc_cstr(params.parser);
+        plan->parser_len                      = params.parser.size();
         return 0;
     } catch (const std::exception & ex) {
         agl_free_plan_fields(plan);

@@ -52,6 +52,11 @@ fn trace_export_and_replay_arguments_are_explicit() {
     );
 }
 
+#[test]
+fn runtime_identity_is_one_explicit_query() {
+    assert_command(["agl", "runtime", "identity"], CliCommand::RuntimeIdentity);
+}
+
 fn assert_command(args: impl IntoIterator<Item = &'static str>, expected: CliCommand) {
     assert_eq!(parse_command(args), expected);
 }
@@ -167,6 +172,7 @@ fn parse_run_command_with_options() {
             skills: vec!["task-spec".to_string()],
             memory: false,
             prompt: Some("hello".to_string()),
+            json: false,
         }),
     );
 }
@@ -205,6 +211,18 @@ fn parse_run_command_with_memory_context() {
         CliCommand::Run(RunOptions {
             memory: true,
             prompt: Some("hello".to_string()),
+            ..RunOptions::default()
+        }),
+    );
+}
+
+#[test]
+fn parse_run_command_with_machine_readable_output() {
+    assert_command(
+        ["agl", "run", "--json", "--prompt", "hello"],
+        CliCommand::Run(RunOptions {
+            prompt: Some("hello".to_string()),
+            json: true,
             ..RunOptions::default()
         }),
     );
