@@ -553,6 +553,8 @@ dependencies = [
 name = "agl-pty"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-exec",
+ "libc",
  "serde",
  "serde_json",
 ]

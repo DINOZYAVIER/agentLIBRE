@@ -4,11 +4,11 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::{ProcessError, ProcessErrorCode, Result};
+use agl_exec::{ProcessError, ProcessErrorCode, Result};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-pub(super) fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
+pub fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
     let mut descriptors = [-1; 2];
     let result = unsafe {
         libc::socketpair(
@@ -31,11 +31,7 @@ pub(super) fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
     })
 }
 
-pub(super) fn send_json_with_fds<T: Serialize>(
-    fd: RawFd,
-    value: &T,
-    descriptors: &[RawFd],
-) -> Result<()> {
+pub fn send_json_with_fds<T: Serialize>(fd: RawFd, value: &T, descriptors: &[RawFd]) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(|error| {
         ProcessError::new(
             ProcessErrorCode::LauncherProtocol,
@@ -83,7 +79,7 @@ pub(super) fn send_json_with_fds<T: Serialize>(
     Ok(())
 }
 
-pub(super) fn receive_json_with_fds<T: DeserializeOwned>(
+pub fn receive_json_with_fds<T: DeserializeOwned>(
     fd: RawFd,
     maximum_descriptors: usize,
 ) -> Result<(T, Vec<OwnedFd>)> {

@@ -3799,7 +3799,11 @@ mod tests {
             assert!(!serde_json::to_string(request).unwrap().contains(SENTINEL));
             assert!(!format!("{startup:?}").contains(SENTINEL));
             assert_eq!(
-                startup.private_environment.value_for_test(SECRET_NAME),
+                startup
+                    .private_environment
+                    .exposed_values()
+                    .find(|(name, _)| *name == SECRET_NAME)
+                    .map(|(_, value)| value),
                 Some(SENTINEL)
             );
             probe_observed.fetch_add(1, Ordering::Relaxed);

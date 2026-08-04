@@ -7,6 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use agl_pty::wire;
 use sha2::{Digest as _, Sha256};
 
 use crate::terminal::environment::PrivateTerminalEnvironment;
@@ -16,7 +17,7 @@ use crate::{
 };
 
 use super::super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
-use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error, sandbox, wire};
+use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error, sandbox};
 
 static FORWARDED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
@@ -223,7 +224,7 @@ fn namespace_init(
             let control_path = request
                 .private_home
                 .join("agl-terminal/integration.controls.fifo");
-            let status = super::shell_integration::run_shell_integration_relay(
+            let status = agl_pty::run_shell_integration_relay(
                 socket,
                 terminal_slave,
                 &event_path,
@@ -510,7 +511,7 @@ impl EncodedEnvironmentValue {
             Err(error) => {
                 let mut encoded = error.into_vec();
                 if private {
-                    crate::terminal::environment::zeroize(&mut encoded);
+                    agl_pty::zeroize_private_bytes(&mut encoded);
                 }
                 return Err(ProcessError::new(
                     ProcessErrorCode::InvalidRequest,
@@ -1195,8 +1196,8 @@ mod tests {
                 .any(|window| window == expected.as_bytes()),
             "final exec child did not receive its private environment entry"
         );
-        crate::terminal::environment::zeroize(&mut output.stdout);
-        crate::terminal::environment::zeroize(&mut output.stderr);
+        agl_pty::zeroize_private_bytes(&mut output.stdout);
+        agl_pty::zeroize_private_bytes(&mut output.stderr);
     }
 
     #[test]
