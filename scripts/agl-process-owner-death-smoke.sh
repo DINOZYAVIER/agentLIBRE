@@ -15,7 +15,7 @@ command -v cargo >/dev/null 2>&1 || fail "cargo is required"
 cd "$repo_root"
 printf 'kernel=%s\n' "$(uname -srvm)"
 
-cargo build -p agl-process --bins --features native-test-fixtures
+cargo build -p agl-process-launcher --bins --features native-test-fixtures
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then
   target_dir="$repo_root/$target_dir"
@@ -33,7 +33,7 @@ if [[ "$doctor_status" -ne 0 ]]; then
 fi
 
 cargo test \
-  -p agl-process \
+  -p agl-process-launcher \
   --features native-test-fixtures \
   --test owner_death_native \
   native_owner_death_and_descendant_cleanup_smoke \

@@ -52,8 +52,8 @@
       {"name": "agl-terminal", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
       {"name": "agl-terminal-protocol", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
       {"name": "agl-terminal-client", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
-      {"name": "agl-process-launcher", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"},
-      {"name": "agl-terminald", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"},
+      {"name": "agl-process-launcher", "owner": "agl-terminal", "status": "in-tree-split", "kind": "binary", "category": "terminal"},
+      {"name": "agl-terminald", "owner": "agl-terminal", "status": "in-tree-split", "kind": "binary", "category": "terminal"},
       {"name": "agl-terminal-ui", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"}
     ]
   },

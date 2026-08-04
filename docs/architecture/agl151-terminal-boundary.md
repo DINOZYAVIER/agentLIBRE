@@ -32,7 +32,7 @@
 | agl-model | AI/ML |
 | agl-notes | Storage |
 | agl-oven | Tooling |
-| agl-process | Runtime (Extraction Target: agl-terminal) |
+| agl-process | Runtime (temporary consumer facade; removed in Step 04) |
 | agl-protocol | Communication |
 | agl-repo | Storage |
 | agl-runtime | Runtime |
@@ -57,9 +57,11 @@ These packages are still owned by the selected future `agl-terminal`
 repository. Their temporary workspace sources exist only to build the
 extraction seam before the Step 03 immutable Git cutover.
 
-**Binary Packages:**
+**In-tree split binary packages (Step 02):**
 - `agl-process-launcher`
 - `agl-terminald`
+
+**Selected binary package introduced in Step 05:**
 - `agl-terminal-ui`
 
 ### Classified-but-not-moved agentLIBRE Domains
@@ -94,6 +96,8 @@ The following are core agentLIBRE domains and are NOT candidates for terminal ex
 - **Strictness:** No compatibility aliases, no fallback mechanisms, and no duplicate ownership.
 
 ## Summary of State
-- **Current Facts:** 37 packages owned by `agentLIBRE`.
-- **Selected Target:** 8 packages for `agl-terminal` ownership: five in-tree
-  split packages and three not yet present.
+- **Current Facts:** 37 packages remain owned by `agentLIBRE`; `agl-process` is
+  now only the temporary Step 04 consumer facade.
+- **Selected Target:** 8 packages for `agl-terminal` ownership. Seven are
+  present as in-tree split packages; `agl-terminal-ui` is introduced in Step
+  05.

@@ -3,6 +3,7 @@ use agl_exec::{
     OpaqueOwnerId, ServiceGenerationId,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::TerminalId;
@@ -102,6 +103,27 @@ impl TerminalState {
     pub const fn is_final(self) -> bool {
         matches!(self, Self::Exited | Self::Failed | Self::OutcomeUnknown)
     }
+}
+
+/// Persistence-neutral terminal identity and observable shell metadata.
+/// Private environment values, integration tokens, commands, PTY bytes,
+/// leases, process IDs, and spool paths are deliberately excluded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalRecord {
+    pub terminal_id: TerminalId,
+    pub execution_id: ExecutionId,
+    pub topology_id: TerminalTopologyId,
+    pub owner: TerminalOwner,
+    pub authority_scope: OpaqueOwnerId,
+    pub profile: ExecutionProfile,
+    pub workspace_root: PathBuf,
+    pub shell_profile: crate::AdmittedShellProfile,
+    pub environment_digest: crate::environment::TerminalEnvironmentDigest,
+    pub command_sequence: u64,
+    pub prompt_state: crate::TerminalPromptState,
+    pub integration_health: crate::ShellIntegrationHealth,
+    pub cwd: PathBuf,
+    pub state: TerminalState,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

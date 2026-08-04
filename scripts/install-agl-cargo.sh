@@ -227,7 +227,7 @@ set_install_args() {
   local stage_root="$1"
   launcher_install_args=(
     install
-    --path "$repo_root/crates/agl-process"
+    --path "$repo_root/crates/agl-process-launcher"
     --bin agl-process-launcher
     "${install_options[@]}"
     --root "$stage_root"

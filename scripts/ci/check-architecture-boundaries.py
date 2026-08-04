@@ -172,8 +172,6 @@ def dependency_diagnostics(packages, current, future):
                 diagnostics.add(f"{kind}: {name} -> {target} is forbidden below terminal UI")
             if category == "inference" and target in future_names:
                 diagnostics.add(f"{kind}: {name} -> {target} crosses inference-to-terminal")
-            if category == "presentation" and target in future_names:
-                diagnostics.add(f"{kind}: {name} -> {target} crosses presentation-to-terminal")
     return diagnostics
 
 

@@ -24,7 +24,7 @@ for diagnostic in \
   fi
 done
 
-cargo build -p agl-process --bins --features native-test-fixtures
+cargo build -p agl-process-launcher --bins --features native-test-fixtures
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [[ "$target_dir" != /* ]]; then
   target_dir="$repo_root/$target_dir"
@@ -42,7 +42,7 @@ if [[ "$doctor_status" -ne 0 ]]; then
 fi
 
 cargo test \
-  -p agl-process \
+  -p agl-process-launcher \
   --features native-test-fixtures \
   --test linux_native \
   native_linux_sandbox_process_and_pty_smoke \
@@ -51,11 +51,9 @@ cargo test \
   --exact \
   --nocapture
 
-# The CLI crate depends on the production agl-process feature set. Rebuild the
-# stable sibling path without native fixtures so its build identity matches the
-# library linked into the CLI integration test; the fixture helper remains at
-# its already-built path.
-cargo build -p agl-process --bin agl-process-launcher
+# Rebuild the private launcher without native fixtures so its exact build
+# identity matches the production PTY library linked into the CLI test.
+cargo build -p agl-process-launcher --bin agl-process-launcher
 
 cargo test \
   -p agl-cli \

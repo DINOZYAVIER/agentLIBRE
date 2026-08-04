@@ -186,7 +186,7 @@ if [[ "${AGL_INIT_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
     cd "$repo_root"
     cargo build --locked --release \
       -p agl-cli \
-      -p agl-process \
+      -p agl-process-launcher \
       --bin agl \
       --bin agl-process-launcher
   )

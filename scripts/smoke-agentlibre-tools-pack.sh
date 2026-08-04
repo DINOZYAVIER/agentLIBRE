@@ -806,7 +806,7 @@ run_malformed_rejection_case() {
 cd "$repo_root"
 cargo build \
   -p agl-cli \
-  -p agl-process \
+  -p agl-process-launcher \
   --bin agl \
   --bin agl-process-launcher
 agl_bin="$(smoke_abs_path "$agl_bin")"

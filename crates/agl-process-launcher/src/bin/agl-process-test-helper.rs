@@ -233,11 +233,12 @@ mod linux {
         let sibling_file = Path::new(argument(arguments, 1, "sibling file")?);
         let runtime_file = Path::new(argument(arguments, 2, "runtime file")?);
         let port = parse_u16(arguments, 3, "TCP port")?;
-        fs::write(workspace_file, b"workspace-ok")?;
+        fs::write(workspace_file, b"workspace-ok")
+            .map_err(|error| format!("workspace write failed: {error}"))?;
         let home_file = Path::new(&env::var("HOME")?).join("home-write");
         let tmp_file = Path::new(&env::var("TMPDIR")?).join("tmp-write");
-        fs::write(&home_file, b"home-ok")?;
-        fs::write(&tmp_file, b"tmp-ok")?;
+        fs::write(&home_file, b"home-ok").map_err(|error| format!("HOME write failed: {error}"))?;
+        fs::write(&tmp_file, b"tmp-ok").map_err(|error| format!("TMPDIR write failed: {error}"))?;
 
         let sibling_read_denied = fs::read(sibling_file).is_err();
         let sibling_write_denied = OpenOptions::new().write(true).open(sibling_file).is_err();

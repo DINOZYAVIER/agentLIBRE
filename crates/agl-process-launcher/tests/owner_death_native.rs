@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agl_process::process_platform_diagnostics;
+use agl_terminald::process_platform_diagnostics;
 
 const LAUNCHER: &str = env!("CARGO_BIN_EXE_agl-process-launcher");
 const HELPER: &str = env!("CARGO_BIN_EXE_agl-process-test-helper");

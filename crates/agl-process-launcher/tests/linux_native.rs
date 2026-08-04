@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use agl_exec::{
     CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation, OpaqueOwnerId,
 };
-use agl_process::{
+use agl_terminald::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionCursor,
     ExecutionGrantLease, ExecutionId, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
     ExecutionProfile, ExecutionRequest, ExecutionRequestId, ExecutionState, FileOutputSpool,
@@ -74,7 +74,13 @@ fn sandbox_contract(harness: &Harness) {
     request.read_only_roots.push(harness.runtime_root.clone());
     let (status, output) = harness.run(request);
     assert_eq!(status.state, ExecutionState::Exited);
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "sandbox probe returned invalid JSON: {error}; status={status:?}; stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )
+    });
     for field in [
         "workspace_write",
         "home_write",
@@ -393,7 +399,7 @@ fn supervisor_concurrency_and_backpressure_contract(harness: &Harness) {
         .kill(
             &started.execution_id,
             &harness.owner,
-            agl_process::KillMode::Immediate,
+            agl_terminald::KillMode::Immediate,
         )
         .unwrap();
     assert_eq!(
@@ -445,7 +451,7 @@ fn executable_and_host_contract(harness: &Harness) {
     );
     request.authorization.host_process_execution = true;
     request.grant_lease = Some(ExecutionGrantLease {
-        origin: agl_process::ExecutionLeaseOrigin::ToolGrant,
+        origin: agl_terminald::ExecutionLeaseOrigin::ToolGrant,
         grant_id: "native-smoke-host-grant".to_owned(),
         duration: "one_turn".to_owned(),
         scope_digest: "sha256:native-smoke".to_owned(),
@@ -508,7 +514,7 @@ fn termination_and_quota_contract(harness: &Harness) {
     let (status, _) = harness.run(exit);
     assert!(matches!(
         status.exit,
-        Some(agl_process::ExecutionExit::Code { code: 17 })
+        Some(agl_terminald::ExecutionExit::Code { code: 17 })
     ));
 }
 
@@ -606,7 +612,10 @@ impl Harness {
             io,
             terminal_size: (io == ExecutionIo::Pty).then_some(TerminalSize::default()),
             profile: ExecutionProfile::Workspace,
-            authorization: ExecutionAuthorization::default(),
+            authorization: ExecutionAuthorization {
+                workspace_write: true,
+                ..ExecutionAuthorization::default()
+            },
             grant_lease: None,
             limits: ExecutionLimits {
                 timeout_ms: Some(5_000),
@@ -616,14 +625,14 @@ impl Harness {
         }
     }
 
-    fn run(&self, request: ExecutionRequest) -> (agl_process::ExecutionStatus, CapturedOutput) {
+    fn run(&self, request: ExecutionRequest) -> (agl_terminald::ExecutionStatus, CapturedOutput) {
         let started = self.handle.start(request).unwrap();
         let status = self.wait(&started.execution_id);
         let output = self.output(&started.execution_id);
         (status, output)
     }
 
-    fn wait(&self, execution_id: &ExecutionId) -> agl_process::ExecutionStatus {
+    fn wait(&self, execution_id: &ExecutionId) -> agl_terminald::ExecutionStatus {
         self.handle
             .wait(
                 execution_id,

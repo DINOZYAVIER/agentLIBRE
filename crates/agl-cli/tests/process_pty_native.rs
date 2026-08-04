@@ -347,7 +347,11 @@ impl PtyChild {
     }
 
     fn wait_for(&mut self, needle: &[u8]) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A development binary has no sealed manifest, so its first daemon
+        // connection hashes the large unstripped executable before opening the
+        // socket. Keep the native PTY assertion bounded without assuming a
+        // warm page cache.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !contains(&self.output, needle) {
             self.read_available();
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -357,7 +361,12 @@ impl PtyChild {
                     String::from_utf8_lossy(&self.output)
                 );
             }
-            assert!(Instant::now() < deadline, "timed out waiting for PTY bytes");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {:?}; output={}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&self.output),
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }

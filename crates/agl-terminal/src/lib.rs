@@ -4,6 +4,7 @@ pub mod environment;
 pub mod history;
 mod identity;
 mod lifecycle;
+mod repository;
 mod shell_integration;
 mod shell_materialization;
 mod shell_profile;
@@ -13,8 +14,12 @@ pub use agl_exec::{
 };
 pub use identity::{ParseTerminalIdentityError, TerminalId, TerminalRequestId, TerminalStreamId};
 pub use lifecycle::{
-    TerminalDescriptor, TerminalDomainError, TerminalOperation, TerminalOwner, TerminalState,
-    TerminalTopologyId, validate_terminal_transition,
+    TerminalDescriptor, TerminalDomainError, TerminalOperation, TerminalOwner, TerminalRecord,
+    TerminalState, TerminalTopologyId, validate_terminal_transition,
+};
+pub use repository::{
+    InMemoryTerminalRepository, StoredTerminalRecord, TerminalRepository, TerminalReservation,
+    terminal_slot_key, validate_terminal_replacement, validate_terminal_reservation,
 };
 
 pub use command::{

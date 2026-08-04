@@ -25,7 +25,7 @@ output="$(
     --skip-llama-build
 )"
 
-launcher_command="--path $AGL_CI_REPO_ROOT/crates/agl-process --bin agl-process-launcher"
+launcher_command="--path $AGL_CI_REPO_ROOT/crates/agl-process-launcher --bin agl-process-launcher"
 worker_command="--path $AGL_CI_REPO_ROOT/crates/agl-inference-worker --bin agl-inference-worker"
 agl_command="--path $AGL_CI_REPO_ROOT/crates/agl-cli --bin agl"
 stage_root="$install_root/libexec/agentlibre/generations/.staging.DRY-RUN/.cargo-root"
