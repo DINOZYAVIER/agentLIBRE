@@ -1,15 +1,12 @@
 mod launcher;
 mod sandbox;
-mod shell_integration;
-mod wire;
 
-pub(crate) use sandbox::standard_runtime_roots;
 #[cfg(test)]
-pub(crate) use shell_integration::run_shell_integration_relay;
-pub(crate) use shell_integration::{
+pub(crate) use agl_pty::run_shell_integration_relay;
+pub(crate) use agl_pty::{
     ShellIntegrationReceive, ShellIntegrationSocketPair, create_shell_integration_transport,
     interrupt_terminal_foreground, notify_terminal_resize, receive_shell_integration_event,
-    send_shell_integration_control, terminal_foreground_process_group,
+    send_shell_integration_control, standard_runtime_roots, terminal_foreground_process_group,
 };
 
 const SANDBOX_HOME: &str = "/.agl-private/home";
@@ -29,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::terminal::environment::PrivateTerminalEnvironment;
 use crate::{ExecutionIo, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
+use agl_pty::wire;
 
 use super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
 

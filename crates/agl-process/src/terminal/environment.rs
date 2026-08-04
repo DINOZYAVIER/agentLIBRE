@@ -1,22 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{Ordering, compiler_fence};
 
+pub use agl_pty::PrivateEnvironmentValue as TerminalSecretValue;
+pub(crate) use agl_pty::PrivateLaunchEnvironment as PrivateTerminalEnvironment;
+pub use agl_pty::{
+    MAX_PRIVATE_ENVIRONMENT_BYTES as MAX_TERMINAL_ENVIRONMENT_BYTES,
+    MAX_PRIVATE_ENVIRONMENT_ENTRIES as MAX_TERMINAL_ENVIRONMENT_ENTRIES,
+    MAX_PRIVATE_ENVIRONMENT_NAME_BYTES as MAX_TERMINAL_ENVIRONMENT_NAME_BYTES,
+    MAX_PRIVATE_ENVIRONMENT_VALUE_BYTES as MAX_TERMINAL_ENVIRONMENT_VALUE_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{EnvironmentOverride, ProcessError, ProcessErrorCode, Result};
 
-pub const MAX_TERMINAL_ENVIRONMENT_ENTRIES: usize = 256;
-pub const MAX_TERMINAL_ENVIRONMENT_NAME_BYTES: usize = 128;
-pub const MAX_TERMINAL_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
-pub const MAX_TERMINAL_ENVIRONMENT_BYTES: usize = 64 * 1024;
-
 const RESERVED_PREFIXES: &[&str] = &["AGL_SHELL_INTEGRATION_", "AGL_TERMINAL_"];
 const RESERVED_NAMES: &[&str] = &["BASH_ENV", "ENV", "HISTFILE", "PROMPT_COMMAND", "ZDOTDIR"];
-const PRIVATE_ENVIRONMENT_MAGIC: &[u8; 8] = b"AGLENV1\0";
 
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -75,40 +75,6 @@ impl Debug for TerminalSecretReference {
     }
 }
 
-pub struct TerminalSecretValue(String);
-
-impl TerminalSecretValue {
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let mut value = value.into();
-        if let Err(error) = validate_value(&value) {
-            // SAFETY: the string is exclusively borrowed, and zero remains
-            // valid UTF-8 while preserving the allocation for normal drop.
-            zeroize(unsafe { value.as_mut_vec() });
-            return Err(error);
-        }
-        Ok(Self(value))
-    }
-
-    fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Debug for TerminalSecretValue {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter.write_str("TerminalSecretValue(<redacted>)")
-    }
-}
-
-impl Drop for TerminalSecretValue {
-    fn drop(&mut self) {
-        // SAFETY: the string is exclusively borrowed for the duration of its
-        // destructor and replacing its initialized bytes with zero preserves
-        // its UTF-8 validity and allocation layout.
-        zeroize(unsafe { self.0.as_mut_vec() });
-    }
-}
-
 pub trait TerminalSecretResolver: Send + Sync {
     fn resolve(&self, reference: &TerminalSecretReference) -> Result<TerminalSecretValue>;
 }
@@ -162,147 +128,6 @@ impl Debug for TerminalEnvironmentRequest {
             .field("agl_env_names", &self.agl_env.keys())
             .field("admitted_path_roots", &self.admitted_path_roots)
             .finish()
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct PrivateTerminalEnvironment {
-    values: BTreeMap<String, TerminalSecretValue>,
-}
-
-impl Debug for PrivateTerminalEnvironment {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PrivateTerminalEnvironment")
-            .field("names", &self.values.keys())
-            .finish_non_exhaustive()
-    }
-}
-
-impl PrivateTerminalEnvironment {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-
-    pub(crate) fn exposed_values(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.values
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.expose()))
-    }
-
-    pub(crate) fn write_launch_transport(&self, writer: &mut impl Write) -> Result<()> {
-        writer
-            .write_all(PRIVATE_ENVIRONMENT_MAGIC)
-            .and_then(|()| writer.write_all(&(self.values.len() as u32).to_be_bytes()))
-            .map_err(private_environment_io)?;
-        for (name, value) in &self.values {
-            let name_length =
-                u16::try_from(name.len()).map_err(|_| private_environment_invalid())?;
-            let value_length =
-                u32::try_from(value.expose().len()).map_err(|_| private_environment_invalid())?;
-            writer
-                .write_all(&name_length.to_be_bytes())
-                .and_then(|()| writer.write_all(&value_length.to_be_bytes()))
-                .and_then(|()| writer.write_all(name.as_bytes()))
-                .and_then(|()| writer.write_all(value.expose().as_bytes()))
-                .map_err(private_environment_io)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn read_launch_transport(reader: &mut impl Read) -> Result<Self> {
-        let mut magic = [0u8; PRIVATE_ENVIRONMENT_MAGIC.len()];
-        read_private_environment_exact(reader, &mut magic)?;
-        if &magic != PRIVATE_ENVIRONMENT_MAGIC {
-            return Err(private_environment_invalid());
-        }
-        let mut count = [0u8; 4];
-        read_private_environment_exact(reader, &mut count)?;
-        let count = usize::try_from(u32::from_be_bytes(count))
-            .map_err(|_| private_environment_invalid())?;
-        if count > MAX_TERMINAL_ENVIRONMENT_ENTRIES {
-            return Err(private_environment_invalid());
-        }
-
-        let mut values = BTreeMap::new();
-        let mut total_bytes = 0usize;
-        for _ in 0..count {
-            let mut name_length = [0u8; 2];
-            let mut value_length = [0u8; 4];
-            read_private_environment_exact(reader, &mut name_length)?;
-            read_private_environment_exact(reader, &mut value_length)?;
-            let name_length = usize::from(u16::from_be_bytes(name_length));
-            let value_length = usize::try_from(u32::from_be_bytes(value_length))
-                .map_err(|_| private_environment_invalid())?;
-            if name_length == 0
-                || name_length > MAX_TERMINAL_ENVIRONMENT_NAME_BYTES
-                || value_length > MAX_TERMINAL_ENVIRONMENT_VALUE_BYTES
-            {
-                return Err(private_environment_invalid());
-            }
-            total_bytes = total_bytes
-                .checked_add(name_length)
-                .and_then(|total| total.checked_add(value_length))
-                .and_then(|total| total.checked_add(2))
-                .ok_or_else(private_environment_invalid)?;
-            if total_bytes > MAX_TERMINAL_ENVIRONMENT_BYTES {
-                return Err(private_environment_invalid());
-            }
-
-            let mut name = vec![0u8; name_length];
-            read_private_environment_exact(reader, &mut name)?;
-            let name = String::from_utf8(name).map_err(|_| private_environment_invalid())?;
-            validate_user_name(&name).map_err(|_| private_environment_invalid())?;
-
-            let mut value = vec![0u8; value_length];
-            if let Err(error) = read_private_environment_exact(reader, &mut value) {
-                zeroize(&mut value);
-                return Err(error);
-            }
-            let value = match String::from_utf8(value) {
-                Ok(value) => value,
-                Err(error) => {
-                    let mut value = error.into_bytes();
-                    zeroize(&mut value);
-                    return Err(private_environment_invalid());
-                }
-            };
-            let value =
-                TerminalSecretValue::new(value).map_err(|_| private_environment_invalid())?;
-            if values.insert(name, value).is_some() {
-                return Err(private_environment_invalid());
-            }
-        }
-
-        let mut trailing = [0u8; 1];
-        match reader.read(&mut trailing) {
-            Ok(0) => Ok(Self { values }),
-            Ok(_) => Err(private_environment_invalid()),
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                Self::read_trailing_after_interrupt(reader, values)
-            }
-            Err(_) => Err(private_environment_invalid()),
-        }
-    }
-
-    fn read_trailing_after_interrupt(
-        reader: &mut impl Read,
-        values: BTreeMap<String, TerminalSecretValue>,
-    ) -> Result<Self> {
-        let mut trailing = [0u8; 1];
-        loop {
-            match reader.read(&mut trailing) {
-                Ok(0) => return Ok(Self { values }),
-                Ok(_) => return Err(private_environment_invalid()),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => return Err(private_environment_invalid()),
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn value_for_test(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(TerminalSecretValue::expose)
     }
 }
 
@@ -433,9 +258,7 @@ impl TerminalEnvironmentAdmission {
         }
         Ok(ResolvedTerminalEnvironment {
             public_values,
-            private_values: PrivateTerminalEnvironment {
-                values: private_values,
-            },
+            private_values: PrivateTerminalEnvironment::new(private_values)?,
             names,
             digest,
             secret_names,
@@ -723,30 +546,6 @@ fn environment_too_large() -> ProcessError {
     )
 }
 
-fn read_private_environment_exact(reader: &mut impl Read, buffer: &mut [u8]) -> Result<()> {
-    reader.read_exact(buffer).map_err(private_environment_io)
-}
-
-fn private_environment_io(_error: std::io::Error) -> ProcessError {
-    private_environment_invalid()
-}
-
-fn private_environment_invalid() -> ProcessError {
-    ProcessError::new(
-        ProcessErrorCode::LauncherProtocol,
-        "private terminal environment transport is invalid",
-    )
-}
-
-pub(crate) fn zeroize(bytes: &mut [u8]) {
-    for byte in bytes {
-        // Volatile stores plus a compiler fence keep best-effort clearing from
-        // being optimized away before the backing allocation is released.
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-    compiler_fence(Ordering::SeqCst);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,13 +585,25 @@ mod tests {
         let (values, private) = resolved.into_launch_parts();
         assert_eq!(values.values["LANG"], "C.UTF-8");
         assert!(!values.values.contains_key("TOKEN"));
-        assert_eq!(private.value_for_test("TOKEN"), Some("do-not-log-me"));
+        assert_eq!(
+            private
+                .exposed_values()
+                .find(|(name, _)| *name == "TOKEN")
+                .map(|(_, value)| value),
+            Some("do-not-log-me")
+        );
 
         let mut encoded = Vec::new();
         private.write_launch_transport(&mut encoded).unwrap();
         let decoded =
             PrivateTerminalEnvironment::read_launch_transport(&mut encoded.as_slice()).unwrap();
-        assert_eq!(decoded.value_for_test("TOKEN"), Some("do-not-log-me"));
+        assert_eq!(
+            decoded
+                .exposed_values()
+                .find(|(name, _)| *name == "TOKEN")
+                .map(|(_, value)| value),
+            Some("do-not-log-me")
+        );
 
         struct RotatedSecrets;
         impl TerminalSecretResolver for RotatedSecrets {

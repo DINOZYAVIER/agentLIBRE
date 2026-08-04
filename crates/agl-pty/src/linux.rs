@@ -7,26 +7,26 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _}
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::{ProcessError, ProcessErrorCode, Result};
+use agl_exec::{ProcessError, ProcessErrorCode, Result};
 
 const EVENT_PACKET: u8 = b'E';
 const CONTROL_PACKET: u8 = b'C';
 const CONTROL_DELIVERED_PACKET: &[u8] = b"A";
 const RELAY_POLL_MS: libc::c_int = 50;
 
-pub(crate) struct ShellIntegrationSocketPair {
+pub struct ShellIntegrationSocketPair {
     pub supervisor: OwnedFd,
     pub relay: OwnedFd,
     pub event_guard: OwnedFd,
 }
 
-pub(crate) enum ShellIntegrationReceive {
+pub enum ShellIntegrationReceive {
     Empty,
     Event(Vec<u8>),
     Closed,
 }
 
-pub(crate) fn create_shell_integration_transport(
+pub fn create_shell_integration_transport(
     event_path: &Path,
     control_path: &Path,
 ) -> Result<ShellIntegrationSocketPair> {
@@ -81,7 +81,7 @@ pub(crate) fn create_shell_integration_transport(
     })
 }
 
-pub(crate) fn receive_shell_integration_event(
+pub fn receive_shell_integration_event(
     socket: &OwnedFd,
     maximum_frame_bytes: usize,
 ) -> Result<ShellIntegrationReceive> {
@@ -143,7 +143,7 @@ pub(crate) fn receive_shell_integration_event(
 /// Sends one typed control only after the launcher-owned relay has copied the
 /// entire frame into the shell-private control FIFO. This delivery barrier is
 /// what makes `ArmTypedCommand` observable before the PTY input transaction.
-pub(crate) fn send_shell_integration_control(
+pub fn send_shell_integration_control(
     socket: &OwnedFd,
     frame: &[u8],
     timeout: Duration,
@@ -203,11 +203,11 @@ pub(crate) fn send_shell_integration_control(
     }
 }
 
-pub(crate) fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
+pub fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
     signal_terminal_foreground(terminal, libc::SIGINT, "interrupt")
 }
 
-pub(crate) fn notify_terminal_resize(terminal: &OwnedFd) -> Result<()> {
+pub fn notify_terminal_resize(terminal: &OwnedFd) -> Result<()> {
     signal_terminal_foreground(terminal, libc::SIGWINCH, "redraw")
 }
 
@@ -223,7 +223,7 @@ fn signal_terminal_foreground(terminal: &OwnedFd, signal: libc::c_int, action: &
     Ok(())
 }
 
-pub(crate) fn terminal_foreground_process_group(
+pub fn terminal_foreground_process_group(
     terminal: &OwnedFd,
     shell_process_group: i32,
 ) -> Result<Option<i32>> {
@@ -252,7 +252,7 @@ fn read_terminal_foreground_process_group(terminal: &OwnedFd) -> Result<i32> {
 /// Runs inside the launcher's PID namespace as a sibling of the managed shell.
 /// The relay is the only process that owns the shell-side SOCK_SEQPACKET end;
 /// the shell and every ordinary exec child inherit no integration descriptor.
-pub(crate) fn run_shell_integration_relay(
+pub fn run_shell_integration_relay(
     socket: OwnedFd,
     terminal_slave: RawFd,
     event_path: &Path,

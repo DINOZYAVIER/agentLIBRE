@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+mod linux;
+mod private_environment;
+#[cfg(target_os = "linux")]
+mod runtime_roots;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod wire;
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    ShellIntegrationReceive, ShellIntegrationSocketPair, create_shell_integration_transport,
+    interrupt_terminal_foreground, notify_terminal_resize, receive_shell_integration_event,
+    run_shell_integration_relay, send_shell_integration_control, terminal_foreground_process_group,
+};
+pub use private_environment::{
+    MAX_PRIVATE_ENVIRONMENT_BYTES, MAX_PRIVATE_ENVIRONMENT_ENTRIES,
+    MAX_PRIVATE_ENVIRONMENT_NAME_BYTES, MAX_PRIVATE_ENVIRONMENT_VALUE_BYTES,
+    PrivateEnvironmentValue, PrivateLaunchEnvironment, zeroize_private_bytes,
+};
+#[cfg(target_os = "linux")]
+pub use runtime_roots::{STANDARD_RUNTIME_ROOTS, standard_runtime_roots};
+
 /// Portable capability report for the platform-specific process launcher.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -9,62 +9,12 @@ use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::{ExecutionProfile, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
+use agl_pty::STANDARD_RUNTIME_ROOTS;
 
 use super::super::LauncherRequest;
 use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error};
 
-const STANDARD_RUNTIME_ROOTS: &[&str] = &[
-    "/bin",
-    "/usr/bin",
-    "/usr/lib",
-    "/usr/lib64",
-    "/lib",
-    "/lib64",
-    "/nix/store",
-    "/run/current-system/sw",
-];
 const PRIVATE_DEVICE_PATHS: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
-
-pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
-    let mut roots = BTreeSet::new();
-    for candidate in STANDARD_RUNTIME_ROOTS {
-        let candidate = Path::new(candidate);
-        match fs::metadata(candidate) {
-            Ok(metadata) => {
-                if !metadata.is_dir() {
-                    return Err(ProcessError::new(
-                        ProcessErrorCode::SandboxUnavailable,
-                        format!(
-                            "standard Linux runtime root {} is not a directory",
-                            candidate.display()
-                        ),
-                    ));
-                }
-                let canonical = candidate.canonicalize().map_err(|error| {
-                    sandbox_io(
-                        &format!(
-                            "standard Linux runtime root {} cannot be canonicalized",
-                            candidate.display()
-                        ),
-                        error,
-                    )
-                })?;
-                roots.insert(canonical);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(sandbox_io(
-                    &format!(
-                        "standard Linux runtime root {} cannot be inspected",
-                        candidate.display()
-                    ),
-                    error,
-                ));
-            }
-        }
-    }
-    Ok(roots.into_iter().collect())
-}
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
 const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
@@ -1107,19 +1057,5 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn standard_runtime_roots_are_existing_canonical_directories_without_alias_duplicates() {
-        let roots = standard_runtime_roots().unwrap();
-        assert!(!roots.is_empty());
-        assert!(roots.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(roots.iter().all(|root| {
-            root.is_absolute()
-                && root.is_dir()
-                && root
-                    .canonicalize()
-                    .is_ok_and(|canonical| canonical == *root)
-        }));
     }
 }
