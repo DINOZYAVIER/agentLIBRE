@@ -1,12 +1,13 @@
 # Build
 
 For development builds, use `scripts/build-llama-cpp.sh` for llama.cpp and
-build the CLI together with its required sibling process launcher:
+build the CLI together with its required, separately packaged sibling process
+launcher:
 
 ```sh
 cargo build \
   -p agl-cli \
-  -p agl-process \
+  -p agl-process-launcher \
   --bin agl \
   --bin agl-process-launcher
 ```

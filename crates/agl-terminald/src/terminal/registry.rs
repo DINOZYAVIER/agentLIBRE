@@ -10,7 +10,7 @@ use agl_exec::{ExecutionCorrelation, ExecutionId, ExecutionRequestId, OpaqueOwne
 pub use agl_terminal::TerminalOwner;
 use agl_terminal::{
     AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult, TerminalId,
-    TerminalTopologyId, human_terminal_command_submission,
+    TerminalRecord, TerminalState, TerminalTopologyId, human_terminal_command_submission,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -18,9 +18,6 @@ use crate::terminal::environment::{
     TerminalEnvironmentDigest, TerminalEnvironmentRequest, TerminalSecretResolver,
 };
 use crate::terminal::history::TerminalHistorySeed;
-use crate::terminal::repository::{
-    StoredTerminalRecord, TerminalRepository, TerminalReservation, terminal_slot_key,
-};
 use crate::terminal::shell::{
     AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, CommandBoundary,
     HostStartupPolicy, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES, ManagedShellStartup,
@@ -34,45 +31,14 @@ use crate::{
     ProcessErrorCode, ProcessHandle, Result, ShellIntegrationReadResult, TerminalSize,
     WRITABLE_INPUT_LEASE_HEARTBEAT,
 };
+use agl_terminal::{
+    StoredTerminalRecord, TerminalRepository, TerminalReservation, terminal_slot_key,
+};
 
 const AGENT_TERMINAL_DRIVE_INTERVAL: Duration = Duration::from_millis(5);
 const AGENT_TERMINAL_PROMPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_TERMINAL_INTEGRATION_READ_BYTES: usize = MAX_SHELL_INTEGRATION_FRAME_BYTES;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TerminalState {
-    Starting,
-    Running,
-    Stopping,
-    Exited,
-    Failed,
-    OutcomeUnknown,
-}
-
-impl TerminalState {
-    pub fn is_live(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::Stopping)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalRecord {
-    pub terminal_id: TerminalId,
-    pub execution_id: ExecutionId,
-    pub topology_id: TerminalTopologyId,
-    pub owner: TerminalOwner,
-    pub authority_scope: OpaqueOwnerId,
-    pub profile: ExecutionProfile,
-    pub workspace_root: PathBuf,
-    pub shell_profile: AdmittedShellProfile,
-    pub environment_digest: TerminalEnvironmentDigest,
-    pub command_sequence: u64,
-    pub prompt_state: TerminalPromptState,
-    pub integration_health: ShellIntegrationHealth,
-    pub cwd: PathBuf,
-    pub state: TerminalState,
-}
 
 pub struct TerminalEnsureRequest {
     pub topology_id: TerminalTopologyId,
@@ -1430,7 +1396,10 @@ impl TerminalRegistry {
                     "terminal with outcome_unknown cannot release its topology slot",
                 ));
             }
-            TerminalState::Starting | TerminalState::Running | TerminalState::Stopping => {}
+            TerminalState::Reserved
+            | TerminalState::Starting
+            | TerminalState::Running
+            | TerminalState::Stopping => {}
         }
         let owns_driver = self
             .lock()?
@@ -1451,12 +1420,13 @@ impl TerminalRegistry {
                 ProcessErrorCode::StateConflict,
                 "terminal with outcome_unknown cannot release its topology slot",
             )),
-            TerminalState::Starting | TerminalState::Running | TerminalState::Stopping => {
-                Err(ProcessError::new(
-                    ProcessErrorCode::StateConflict,
-                    "live terminal cannot release its topology slot",
-                ))
-            }
+            TerminalState::Reserved
+            | TerminalState::Starting
+            | TerminalState::Running
+            | TerminalState::Stopping => Err(ProcessError::new(
+                ProcessErrorCode::StateConflict,
+                "live terminal cannot release its topology slot",
+            )),
         }
     }
 

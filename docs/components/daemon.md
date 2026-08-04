@@ -17,8 +17,12 @@ the peer UID, enforces bounded protocol v7alpha frames/streams, and supports
 systemd user socket activation. A manual bind requires an absolute canonical
 parent owned by the daemon UID with mode `0700`, rejects symlinked or public
 custom parents, and verifies the bound socket is owned with mode `0600`.
-`agl-app` owns the presentation-neutral command catalog and session projection,
-while `agl-process` remains the sole OS process/PTY owner. This is also the
+`agl-app` owns the presentation-neutral command catalog and session projection.
+The in-tree `agl-terminald` runtime owns terminal supervision and composition,
+and `agl-pty` owns the OS process/PTY implementation. During the staged H02/H04
+cutover, daemon consumers still reach that implementation through the thin
+`agl-process` facade; the facade contains no second runtime implementation.
+The exact `agl-terminal-protocol`/`agl-terminal-client` boundary is also the
 boundary a future native GUI will use.
 
 Semantic prompt submission also crosses `agl-app`: `RunSubmit` is admitted

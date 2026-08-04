@@ -10,9 +10,7 @@ agl-exec.workspace = true
 agl-terminal.workspace = true
 agl-terminal-protocol.workspace = true
 futures-util.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

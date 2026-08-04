@@ -72,7 +72,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["requires an immutable pinned git revision"],
       "add_packages": [
-        { "name": "agl-terminald", "source": null }
+        { "name": "agl-terminal-ui", "source": null }
       ],
       "dependencies": []
     },

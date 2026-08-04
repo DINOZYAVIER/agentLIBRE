@@ -44,7 +44,7 @@ ci_section "Building release runtime bundle"
 ci_run cargo build --locked --release \
   -p agl-cli \
   -p agl-inference-worker \
-  -p agl-process \
+  -p agl-process-launcher \
   --bin agl \
   --bin agl-inference-worker \
   --bin agl-process-launcher

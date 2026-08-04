@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest as _, Sha256};
 
 const BUILD_ID_DOMAIN: &[u8] = b"agl-pty-launcher-build-identity-v1\0";
-const BUILD_INPUTS: [&str; 8] = [
+const BUILD_INPUTS: [&str; 9] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates/agl-exec/Cargo.toml",
@@ -12,7 +12,8 @@ const BUILD_INPUTS: [&str; 8] = [
     "crates/agl-pty/Cargo.toml",
     "crates/agl-pty/build.rs",
     "crates/agl-pty/src",
-    "crates/agl-process/Cargo.toml",
+    "crates/agl-process-launcher/Cargo.toml",
+    "crates/agl-process-launcher/src",
 ];
 const BUILD_ENV_INPUTS: [&str; 6] = [
     "TARGET",

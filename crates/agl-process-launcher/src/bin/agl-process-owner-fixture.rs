@@ -14,7 +14,7 @@ mod linux {
         CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
         ExecutionOwner, OpaqueOwnerId,
     };
-    use agl_process::{
+    use agl_terminald::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
         ExecutionProfile, ExecutionRequest, ExecutionRequestId, FileOutputSpool,
         InMemoryExecutionRepository, ProcessSupervisor, ProcessSupervisorOptions,
@@ -111,7 +111,10 @@ mod linux {
             io: ExecutionIo::Pipes,
             terminal_size: None,
             profile: ExecutionProfile::Workspace,
-            authorization: ExecutionAuthorization::default(),
+            authorization: ExecutionAuthorization {
+                workspace_write: true,
+                ..ExecutionAuthorization::default()
+            },
             grant_lease: None,
             limits: ExecutionLimits {
                 timeout_ms: None,

@@ -482,6 +482,7 @@ fn parse_shell_kind(value: &str) -> StoreResult<AdmittedShellKind> {
 
 fn terminal_state(state: TerminalState) -> &'static str {
     match state {
+        TerminalState::Reserved => "reserved",
         TerminalState::Starting => "starting",
         TerminalState::Running => "running",
         TerminalState::Stopping => "stopping",
@@ -493,6 +494,7 @@ fn terminal_state(state: TerminalState) -> &'static str {
 
 fn parse_terminal_state(value: &str) -> StoreResult<TerminalState> {
     match value {
+        "reserved" => Ok(TerminalState::Reserved),
         "starting" => Ok(TerminalState::Starting),
         "running" => Ok(TerminalState::Running),
         "stopping" => Ok(TerminalState::Stopping),

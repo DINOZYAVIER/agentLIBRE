@@ -540,8 +540,8 @@ name = "agl-process-launcher"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-exec",
- "agl-process",
  "agl-pty",
+ "agl-terminald",
  "libc",
  "serde_json",
  "sha2 0.11.0",
@@ -710,6 +710,7 @@ dependencies = [
  "agl-terminal",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -721,7 +722,9 @@ dependencies = [
  "agl-exec",
  "agl-pty",
  "agl-terminal",
+ "agl-terminal-client",
  "agl-terminal-protocol",
+ "futures-util",
  "libc",
  "serde",
  "serde_json",

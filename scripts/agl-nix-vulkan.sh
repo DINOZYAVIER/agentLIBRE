@@ -87,7 +87,7 @@ build_local() {
   cargo build \
     -p agl-cli \
     -p agl-inference-worker \
-    -p agl-process \
+    -p agl-process-launcher \
     --bin agl \
     --bin agl-inference-worker \
     --bin agl-process-launcher

@@ -561,7 +561,8 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 )),
                 cwd BLOB NOT NULL CHECK (typeof(cwd) = 'blob'),
                 state TEXT NOT NULL CHECK (state IN (
-                    'starting', 'running', 'stopping', 'exited', 'failed', 'outcome_unknown'
+                    'reserved', 'starting', 'running', 'stopping', 'exited', 'failed',
+                    'outcome_unknown'
                 )),
                 slot_key TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,

@@ -2,12 +2,11 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::sync::Mutex;
 
-use agl_exec::ExecutionId;
-use agl_terminal::TerminalId;
+use agl_exec::{ExecutionId, ProcessError, ProcessErrorCode, Result};
 
-use super::registry::{TerminalRecord, TerminalState};
-use super::shell::{ShellIntegrationHealth, TerminalPromptState};
-use crate::{ProcessError, ProcessErrorCode, Result};
+use crate::{
+    ShellIntegrationHealth, TerminalId, TerminalPromptState, TerminalRecord, TerminalState,
+};
 
 /// Persistence-neutral terminal identity and metadata. It deliberately
 /// contains no environment values, integration token, command text, PTY
@@ -55,13 +54,14 @@ impl StoredTerminalRecord {
                 "persistent terminal owner must match the stored topology",
             ));
         }
-        if self.record.owner.is_agent() && self.record.profile != crate::ExecutionProfile::Workspace
+        if self.record.owner.is_agent()
+            && self.record.profile != agl_exec::ExecutionProfile::Workspace
         {
             return Err(invalid_record(
                 "only a Human terminal may retain the Host profile",
             ));
         }
-        if self.record.profile == crate::ExecutionProfile::Workspace
+        if self.record.profile == agl_exec::ExecutionProfile::Workspace
             && !self.record.cwd.starts_with(&self.record.workspace_root)
         {
             return Err(invalid_record(
@@ -105,7 +105,7 @@ impl StoredTerminalRecord {
 /// Canonical typed IDs make each colon-delimited form unambiguous.
 pub fn terminal_slot_key(record: &TerminalRecord) -> Result<String> {
     if record.owner.previous_owner().is_some()
-        && record.profile == crate::ExecutionProfile::Workspace
+        && record.profile == agl_exec::ExecutionProfile::Workspace
     {
         return Ok(format!("promoted:workspace:{}", record.terminal_id));
     }
@@ -117,17 +117,17 @@ pub fn terminal_slot_key(record: &TerminalRecord) -> Result<String> {
         (
             agl_exec::CallerOwnerKind::Persistent,
             agl_exec::CallerRole::Human,
-            crate::ExecutionProfile::Workspace,
+            agl_exec::ExecutionProfile::Workspace,
         ) => Ok(format!("human:workspace:{}", record.topology_id.as_str())),
         (
             agl_exec::CallerOwnerKind::Persistent,
             agl_exec::CallerRole::Human,
-            crate::ExecutionProfile::Host,
+            agl_exec::ExecutionProfile::Host,
         ) => Ok(format!("human:host:{}", record.topology_id.as_str())),
         (
             agl_exec::CallerOwnerKind::Persistent,
             agl_exec::CallerRole::Agent,
-            crate::ExecutionProfile::Workspace,
+            agl_exec::ExecutionProfile::Workspace,
         ) => Ok(format!(
             "persistent-agent:workspace:{}",
             record.topology_id.as_str()
@@ -135,7 +135,7 @@ pub fn terminal_slot_key(record: &TerminalRecord) -> Result<String> {
         (
             agl_exec::CallerOwnerKind::Ephemeral,
             agl_exec::CallerRole::Agent,
-            crate::ExecutionProfile::Workspace,
+            agl_exec::ExecutionProfile::Workspace,
         ) => Ok(format!(
             "ephemeral-agent:workspace:{}",
             record.owner.caller().owner_id()
@@ -516,13 +516,18 @@ fn invalid_record(message: impl Into<String>) -> ProcessError {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::test_support::{RunId, SessionId};
-    use agl_exec::{CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, OpaqueOwnerId};
-    use agl_terminal::{TerminalId, TerminalOwner, TerminalTopologyId};
+    use agl_exec::{
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionProfile,
+        ExecutionRequestId, OpaqueOwnerId, ShellProfileSnapshot,
+    };
 
     use super::*;
-    use crate::terminal::shell::{AdmittedShellKind, AdmittedShellProfile};
-    use crate::{ExecutionProfile, ShellProfileSnapshot};
+    use crate::{
+        AdmittedShellKind, AdmittedShellProfile, TerminalId, TerminalOwner, TerminalTopologyId,
+    };
+
+    type RunId = ExecutionRequestId;
+    type SessionId = ExecutionRequestId;
 
     fn opaque(value: &str) -> OpaqueOwnerId {
         OpaqueOwnerId::new(value).unwrap()
@@ -711,7 +716,7 @@ mod tests {
         );
 
         let mut invalid_promoted = stored_terminal();
-        invalid_promoted.record.profile = crate::ExecutionProfile::Host;
+        invalid_promoted.record.profile = ExecutionProfile::Host;
         let previous = owner(
             RunId::generate().as_str(),
             CallerOwnerKind::Ephemeral,
@@ -767,7 +772,7 @@ mod tests {
         );
 
         let mut host = stored_terminal();
-        host.record.profile = crate::ExecutionProfile::Host;
+        host.record.profile = ExecutionProfile::Host;
         host.record.cwd = PathBuf::from("/outside");
         host.slot_key = terminal_slot_key(&host.record).unwrap();
         host.validate().unwrap();

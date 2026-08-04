@@ -1,15 +1,22 @@
 use std::fmt::{self, Display, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use agl_exec::{ProcessBytes, TerminalSize};
+use agl_exec::{
+    AuthorityFingerprint, ExecutionCursor, ExecutionId, ExecutionReadResult, ExecutionStatus,
+    InputLease, KillMode, ProcessBytes, TerminalSize,
+};
 use agl_terminal::{TerminalDescriptor, TerminalId, TerminalStreamId};
 use agl_terminal_protocol::{
-    ProtocolValidationError, ServiceIdentity, TerminalAdmission, TerminalEventBatch,
-    TerminalFailure, TerminalRequest, TerminalRequestKind, TerminalResponse, TerminalResponseKind,
+    ExecutionAdmission, ProtocolValidationError, ServiceIdentity, TerminalAdmission,
+    TerminalEventBatch, TerminalFailure, TerminalRequest, TerminalRequestKind, TerminalResponse,
+    TerminalResponseKind,
 };
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use thiserror::Error;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -28,6 +35,87 @@ pub trait TerminalTransport: Send + Sync {
         request: TerminalRequest,
         cancellation: CancellationToken,
     ) -> BoxFuture<'a, Result<TerminalResponse, TransportError>>;
+}
+
+#[derive(Clone, Debug)]
+pub struct UnixTerminalTransport {
+    socket_path: PathBuf,
+}
+
+impl UnixTerminalTransport {
+    pub fn new(socket_path: PathBuf) -> Result<Self, TransportError> {
+        if !socket_path.is_absolute() {
+            return Err(TransportError::InvalidFrame(
+                "terminal socket path must be absolute".to_owned(),
+            ));
+        }
+        Ok(Self { socket_path })
+    }
+}
+
+impl TerminalTransport for UnixTerminalTransport {
+    fn exchange<'a>(
+        &'a self,
+        request: TerminalRequest,
+        cancellation: CancellationToken,
+    ) -> BoxFuture<'a, Result<TerminalResponse, TransportError>> {
+        async move {
+            let encoded = serde_json::to_vec(&request)
+                .map_err(|error| TransportError::InvalidFrame(error.to_string()))?;
+            if encoded.len() > agl_terminal_protocol::MAX_TERMINAL_FRAME_BYTES {
+                return Err(TransportError::InvalidFrame(
+                    "terminal request frame exceeds the protocol bound".to_owned(),
+                ));
+            }
+            let frame_length = u32::try_from(encoded.len()).map_err(|_| {
+                TransportError::InvalidFrame("terminal request frame is too large".to_owned())
+            })?;
+            let mut stream = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(TransportError::Cancelled),
+                result = UnixStream::connect(&self.socket_path) => result.map_err(|error| {
+                    TransportError::Unavailable(error.to_string())
+                })?,
+            };
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(TransportError::Cancelled),
+                result = async {
+                    stream.write_all(&frame_length.to_be_bytes()).await?;
+                    stream.write_all(&encoded).await?;
+                    stream.flush().await?;
+                    Ok::<(), std::io::Error>(())
+                } => result.map_err(|error| TransportError::Unavailable(error.to_string()))?,
+            }
+            let mut length = [0u8; 4];
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(TransportError::Cancelled),
+                result = stream.read_exact(&mut length) => result.map_err(|error| {
+                    TransportError::Unavailable(error.to_string())
+                })?,
+            };
+            let length = usize::try_from(u32::from_be_bytes(length)).map_err(|_| {
+                TransportError::InvalidFrame("terminal response length is invalid".to_owned())
+            })?;
+            if length > agl_terminal_protocol::MAX_TERMINAL_FRAME_BYTES {
+                return Err(TransportError::InvalidFrame(
+                    "terminal response frame exceeds the protocol bound".to_owned(),
+                ));
+            }
+            let mut response = vec![0u8; length];
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(TransportError::Cancelled),
+                result = stream.read_exact(&mut response) => result.map_err(|error| {
+                    TransportError::Unavailable(error.to_string())
+                })?,
+            };
+            serde_json::from_slice(&response)
+                .map_err(|error| TransportError::InvalidFrame(error.to_string()))
+        }
+        .boxed()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -58,6 +146,7 @@ impl Display for TerminalFailureDisplay {
 pub struct TerminalClient<T> {
     transport: T,
     expected_service: ServiceIdentity,
+    authority_fingerprint: Option<AuthorityFingerprint>,
 }
 
 impl<T> TerminalClient<T>
@@ -69,7 +158,18 @@ where
         Ok(Self {
             transport,
             expected_service,
+            authority_fingerprint: None,
         })
+    }
+
+    pub fn authorized(
+        transport: T,
+        expected_service: ServiceIdentity,
+        authority_fingerprint: AuthorityFingerprint,
+    ) -> Result<Self, ClientError> {
+        let mut client = Self::new(transport, expected_service)?;
+        client.authority_fingerprint = Some(authority_fingerprint);
+        Ok(client)
     }
 
     pub fn expected_service(&self) -> &ServiceIdentity {
@@ -81,6 +181,162 @@ where
             TerminalResponseKind::Hello => Ok(()),
             _ => Err(ClientError::UnexpectedResponse),
         }
+    }
+
+    pub async fn start_execution(
+        &self,
+        admission: ExecutionAdmission,
+        cancellation: CancellationToken,
+    ) -> Result<ExecutionStatus, ClientError> {
+        match self
+            .call(
+                TerminalRequestKind::StartExecution {
+                    admission: Box::new(admission),
+                },
+                cancellation,
+            )
+            .await?
+        {
+            TerminalResponseKind::Execution { status } => Ok(status),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn inspect_execution(
+        &self,
+        execution_id: ExecutionId,
+        cancellation: CancellationToken,
+    ) -> Result<ExecutionStatus, ClientError> {
+        match self
+            .call(
+                TerminalRequestKind::InspectExecution { execution_id },
+                cancellation,
+            )
+            .await?
+        {
+            TerminalResponseKind::Execution { status } => Ok(status),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn read_execution(
+        &self,
+        execution_id: ExecutionId,
+        cursor: ExecutionCursor,
+        maximum_bytes: u32,
+        cancellation: CancellationToken,
+    ) -> Result<ExecutionReadResult, ClientError> {
+        match self
+            .call(
+                TerminalRequestKind::ReadExecution {
+                    execution_id,
+                    cursor,
+                    maximum_bytes,
+                },
+                cancellation,
+            )
+            .await?
+        {
+            TerminalResponseKind::ExecutionRead { read } => Ok(read),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn attach_execution(
+        &self,
+        execution_id: ExecutionId,
+        writable: bool,
+        cancellation: CancellationToken,
+    ) -> Result<ExecutionAttachment, ClientError> {
+        match self
+            .call(
+                TerminalRequestKind::AttachExecution {
+                    execution_id,
+                    writable,
+                },
+                cancellation,
+            )
+            .await?
+        {
+            TerminalResponseKind::ExecutionAttached { status, lease } => {
+                Ok(ExecutionAttachment { status, lease })
+            }
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn detach_execution(
+        &self,
+        execution_id: ExecutionId,
+        lease: InputLease,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::DetachExecution {
+                execution_id,
+                lease,
+            },
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn write_execution(
+        &self,
+        execution_id: ExecutionId,
+        lease: InputLease,
+        bytes: ProcessBytes,
+        eof: bool,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::WriteExecution {
+                execution_id,
+                lease,
+                bytes,
+                eof,
+            },
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn resize_execution(
+        &self,
+        execution_id: ExecutionId,
+        size: TerminalSize,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::ResizeExecution { execution_id, size },
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn interrupt_execution(
+        &self,
+        execution_id: ExecutionId,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::InterruptExecution { execution_id },
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn terminate_execution(
+        &self,
+        execution_id: ExecutionId,
+        mode: KillMode,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::TerminateExecution { execution_id, mode },
+            cancellation,
+        )
+        .await
     }
 
     pub async fn ensure(
@@ -190,6 +446,58 @@ where
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_command(
+        &self,
+        terminal_id: TerminalId,
+        topology_id: agl_terminal::TerminalTopologyId,
+        stream_id: TerminalStreamId,
+        expected_command_sequence: u64,
+        expected_prompt_generation: u64,
+        command: String,
+        cancellation: CancellationToken,
+    ) -> Result<CommandAccepted, ClientError> {
+        match self
+            .call(
+                TerminalRequestKind::SubmitCommand {
+                    terminal_id,
+                    topology_id,
+                    stream_id,
+                    expected_command_sequence,
+                    expected_prompt_generation,
+                    command,
+                },
+                cancellation,
+            )
+            .await?
+        {
+            TerminalResponseKind::CommandAccepted {
+                command_sequence,
+                output_after_sequence,
+            } => Ok(CommandAccepted {
+                command_sequence,
+                output_after_sequence,
+            }),
+            _ => Err(ClientError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn cancel_command(
+        &self,
+        terminal_id: TerminalId,
+        command_sequence: u64,
+        cancellation: CancellationToken,
+    ) -> Result<(), ClientError> {
+        self.expect_ack(
+            TerminalRequestKind::CancelCommand {
+                terminal_id,
+                command_sequence,
+            },
+            cancellation,
+        )
+        .await
+    }
+
     pub async fn resize(
         &self,
         terminal_id: TerminalId,
@@ -240,7 +548,16 @@ where
         if cancellation.is_cancelled() {
             return Err(ClientError::Cancelled);
         }
-        let request = TerminalRequest::new(self.expected_service.clone(), request)?;
+        let authority_fingerprint = if matches!(request, TerminalRequestKind::Hello) {
+            None
+        } else {
+            self.authority_fingerprint.clone()
+        };
+        let request = TerminalRequest::new(
+            self.expected_service.clone(),
+            authority_fingerprint,
+            request,
+        )?;
         let request_id = request.request_id.clone();
         let response = self
             .transport
@@ -269,6 +586,18 @@ pub struct TerminalAttachment {
     pub stream_id: TerminalStreamId,
     pub next_sequence: u64,
     pub writable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionAttachment {
+    pub status: ExecutionStatus,
+    pub lease: InputLease,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandAccepted {
+    pub command_sequence: u64,
+    pub output_after_sequence: u64,
 }
 
 pub trait EmbeddedTerminalService: Send + Sync {
@@ -318,6 +647,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -374,6 +704,26 @@ mod tests {
             *service.seen.lock().unwrap(),
             vec![TerminalRequestKind::Hello]
         );
+    }
+
+    #[tokio::test]
+    async fn non_handshake_calls_require_explicit_authority() {
+        let identity = service_identity();
+        let service = Arc::new(EchoService {
+            identity: identity.clone(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let client =
+            TerminalClient::new(EmbeddedTransport::new(service.clone()), identity).unwrap();
+        assert!(matches!(
+            client
+                .inspect(TerminalId::generate(), CancellationToken::new())
+                .await,
+            Err(ClientError::Protocol(
+                ProtocolValidationError::MissingAuthority
+            ))
+        ));
+        assert!(service.seen.lock().unwrap().is_empty());
     }
 
     struct BlockingService;
@@ -448,5 +798,47 @@ mod tests {
             client.hello(CancellationToken::new()).await,
             Err(ClientError::Remote(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn unix_transport_uses_the_same_bounded_request_response_frames() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!(
+            "agl-terminal-client-{}-{}",
+            std::process::id(),
+            agl_terminal::TerminalRequestId::generate()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("terminald.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let identity = service_identity();
+        let server_identity = identity.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut frame = vec![0u8; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut frame).await.unwrap();
+            let request = TerminalRequest::decode_json(&frame).unwrap();
+            let response = TerminalResponse {
+                schema: TERMINAL_RESPONSE_SCHEMA.to_owned(),
+                request_id: request.request_id,
+                service: server_identity,
+                response: TerminalResponseKind::Hello,
+            };
+            let frame = serde_json::to_vec(&response).unwrap();
+            stream
+                .write_all(&(frame.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&frame).await.unwrap();
+        });
+        let client =
+            TerminalClient::new(UnixTerminalTransport::new(socket).unwrap(), identity).unwrap();
+        client.hello(CancellationToken::new()).await.unwrap();
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

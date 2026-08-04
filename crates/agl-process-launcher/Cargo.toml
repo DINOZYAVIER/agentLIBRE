@@ -8,7 +8,7 @@ repository.workspace = true
 [features]
 native-test-fixtures = [
     "dep:agl-exec",
-    "dep:agl-process",
+    "dep:agl-terminald",
     "dep:libc",
     "dep:serde_json",
     "agl-pty/native-test-fixtures",
@@ -16,7 +16,7 @@ native-test-fixtures = [
 
 [dependencies]
 agl-exec = { workspace = true, optional = true }
-agl-process = { workspace = true, optional = true }
+agl-terminald = { workspace = true, optional = true }
 agl-pty.workspace = true
 libc = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
