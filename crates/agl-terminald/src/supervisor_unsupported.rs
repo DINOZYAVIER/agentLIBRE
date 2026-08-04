@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use agl_exec::ExecutionRequestId;
+use agl_exec::OpaqueOwnerId;
 use agl_exec::{ExecutionId, WriterLeaseId};
-use agl_ids::RunId;
 
 use crate::terminal::shell::ManagedShellStartup;
 use crate::{
@@ -19,6 +19,7 @@ pub struct ProcessHandle {
     _private: (),
 }
 
+/// Fail-closed portable surface for the terminal service supervisor.
 pub struct ProcessSupervisor {
     _private: (),
 }
@@ -286,7 +287,11 @@ impl ProcessHandle {
         unsupported()
     }
 
-    pub fn expire_run_grants(&self, _creating_run_id: &RunId, _duration: &str) -> Result<usize> {
+    pub fn expire_correlation_group_grants(
+        &self,
+        _correlation_group_id: &OpaqueOwnerId,
+        _duration: &str,
+    ) -> Result<usize> {
         unsupported()
     }
 

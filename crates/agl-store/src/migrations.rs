@@ -433,12 +433,16 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
 
             CREATE TABLE executions (
                 id TEXT PRIMARY KEY,
-                owner_kind TEXT NOT NULL CHECK (owner_kind IN ('session', 'run')),
-                owner_session_id TEXT,
-                owner_run_id TEXT,
-                root_run_id TEXT NOT NULL,
-                creating_run_id TEXT NOT NULL,
-                creating_step_id TEXT NOT NULL,
+                owner_namespace TEXT NOT NULL,
+                owner_namespace_version INTEGER NOT NULL CHECK (owner_namespace_version > 0),
+                owner_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL CHECK (owner_kind IN ('persistent', 'ephemeral', 'service')),
+                owner_role TEXT NOT NULL CHECK (owner_role IN ('human', 'agent', 'service')),
+                authority_scope TEXT NOT NULL,
+                correlation_namespace TEXT NOT NULL,
+                correlation_namespace_version INTEGER NOT NULL CHECK (correlation_namespace_version > 0),
+                correlation_group_id TEXT NOT NULL,
+                correlation_operation_id TEXT NOT NULL,
                 execution_kind TEXT NOT NULL CHECK (execution_kind IN ('argv', 'shell')),
                 state TEXT NOT NULL CHECK (state IN (
                     'admitting', 'starting', 'running', 'exited', 'signalled',
@@ -474,10 +478,6 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 retention_deadline_ms INTEGER,
                 cleanup_state TEXT NOT NULL DEFAULT 'live'
                     CHECK (cleanup_state IN ('live', 'tombstoned', 'cleaned')),
-                CHECK (
-                    (owner_kind = 'session' AND owner_session_id IS NOT NULL AND owner_run_id IS NULL) OR
-                    (owner_kind = 'run' AND owner_session_id IS NULL AND owner_run_id IS NOT NULL)
-                ),
                 CHECK ((terminal_columns IS NULL) = (terminal_rows IS NULL)),
                 CHECK (
                     (exit_kind IS NULL AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NULL) OR
@@ -486,12 +486,11 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                     (exit_kind = 'error' AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NOT NULL)
                 )
             );
-            CREATE INDEX executions_owner_session_idx
-                ON executions(owner_session_id, state, created_at_ms);
-            CREATE INDEX executions_owner_run_idx
-                ON executions(owner_run_id, state, created_at_ms);
-            CREATE INDEX executions_root_run_idx
-                ON executions(root_run_id, state, created_at_ms);
+            CREATE INDEX executions_owner_idx
+                ON executions(owner_namespace, owner_namespace_version, owner_id, state, created_at_ms);
+            CREATE INDEX executions_correlation_group_idx
+                ON executions(correlation_namespace, correlation_namespace_version,
+                              correlation_group_id, state, created_at_ms);
             CREATE INDEX executions_supervisor_idx
                 ON executions(supervisor_id, state);
             CREATE INDEX executions_retention_idx
@@ -535,14 +534,9 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
             CREATE TABLE terminal_sessions (
                 terminal_id TEXT PRIMARY KEY,
                 execution_id TEXT NOT NULL UNIQUE,
-                session_id TEXT NOT NULL,
-                owner_kind TEXT NOT NULL CHECK (owner_kind IN (
-                    'human', 'main_agent', 'subagent', 'session_promoted'
-                )),
-                owner_session_id TEXT,
-                owner_root_run_id TEXT,
-                owner_run_id TEXT,
-                previous_owner_run_id TEXT,
+                topology_id TEXT NOT NULL,
+                owner_json TEXT NOT NULL,
+                authority_scope TEXT NOT NULL,
                 profile TEXT NOT NULL CHECK (profile IN ('workspace', 'host')),
                 workspace_root BLOB NOT NULL CHECK (typeof(workspace_root) = 'blob'),
                 shell_kind TEXT NOT NULL CHECK (shell_kind IN ('bash', 'zsh')),
@@ -572,20 +566,6 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
                 slot_key TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
                 active_slot INTEGER NOT NULL CHECK (active_slot IN (0, 1)),
-                CHECK (
-                    (owner_kind IN ('human', 'main_agent') AND
-                        owner_session_id IS NOT NULL AND owner_session_id = session_id AND
-                        owner_root_run_id IS NULL AND
-                        owner_run_id IS NULL AND previous_owner_run_id IS NULL) OR
-                    (owner_kind = 'subagent' AND owner_session_id IS NULL AND
-                        owner_root_run_id IS NOT NULL AND owner_run_id IS NOT NULL AND
-                        previous_owner_run_id IS NULL) OR
-                    (owner_kind = 'session_promoted' AND
-                        owner_session_id IS NOT NULL AND owner_session_id = session_id AND
-                        owner_root_run_id IS NULL AND
-                        owner_run_id IS NULL AND previous_owner_run_id IS NOT NULL)
-                ),
-                CHECK (owner_kind = 'human' OR profile = 'workspace'),
                 CHECK (
                     (integration_health = 'awaiting_first_prompt' AND prompt_kind = 'unknown') OR
                     (integration_health = 'degraded' AND prompt_kind = 'degraded') OR

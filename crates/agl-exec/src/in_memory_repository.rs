@@ -1,154 +1,19 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use agl_exec::{ExecutionId, WriterLeaseId};
-
 use crate::{
-    CommittedOutputFrame, ExecutionListFilter, ExecutionOutputChunk, ExecutionPrivateCommand,
-    ExecutionRequest, ExecutionState, ExecutionStatus, ExecutionTerminalUpdate, InputLease,
-    ProcessError, ProcessErrorCode, Result, TerminalSize,
+    CommittedOutputFrame, ExecutionId, ExecutionListFilter, ExecutionOutputChunk,
+    ExecutionPrivateCommand, ExecutionRepository, ExecutionRequest, ExecutionState,
+    ExecutionStatus, ExecutionTerminalUpdate, InputLease, ProcessError, ProcessErrorCode, Result,
+    TerminalSize, WriterLeaseId,
 };
-
-/// Persistence-neutral durable execution metadata used by `ProcessSupervisor`.
-/// Implementations fence transitions so state is monotonic and output sequence
-/// metadata cannot be published before its private spool frame is durable.
-pub trait ExecutionRepository: Send + Sync {
-    fn admit(
-        &self,
-        status: &ExecutionStatus,
-        request: &ExecutionRequest,
-        supervisor_id: &str,
-    ) -> Result<()>;
-
-    fn mark_running(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        started_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn append_lifecycle(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        sequence: u64,
-        kind: &str,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn append_indexed_chunk(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        chunk: &ExecutionOutputChunk,
-        spool_offset: u64,
-        byte_length: u64,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn update_terminal_size(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        sequence: u64,
-        terminal_size: TerminalSize,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn bind_input_lease(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        lease: &InputLease,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn release_input_lease(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        lease: &InputLease,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn renew_input_lease(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        lease: &InputLease,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn accept_input(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        lease: &InputLease,
-        byte_length: u64,
-        eof: bool,
-        occurred_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn mark_terminal(
-        &self,
-        execution_id: &ExecutionId,
-        supervisor_id: &str,
-        sequence: u64,
-        update: &ExecutionTerminalUpdate,
-    ) -> Result<()>;
-
-    fn status(&self, execution_id: &ExecutionId) -> Result<ExecutionStatus>;
-
-    fn private_command(
-        &self,
-        execution_id: &ExecutionId,
-        maximum_bytes: usize,
-    ) -> Result<ExecutionPrivateCommand>;
-
-    fn list(&self, filter: &ExecutionListFilter) -> Result<Vec<ExecutionStatus>>;
-
-    fn committed_output_frames(
-        &self,
-        execution_id: &ExecutionId,
-    ) -> Result<Vec<CommittedOutputFrame>>;
-
-    /// Marks live rows from any previous owner as unknown before this owner can
-    /// admit work. Returns the affected execution identities.
-    fn recover_prior_owners(
-        &self,
-        current_supervisor_id: &str,
-        recovered_at_unix_ms: i64,
-    ) -> Result<Vec<ExecutionId>>;
-
-    fn output_retention_candidates(
-        &self,
-        now_unix_ms: i64,
-        limit: usize,
-    ) -> Result<Vec<ExecutionId>>;
-
-    fn tombstone_output(
-        &self,
-        execution_id: &ExecutionId,
-        tombstoned_at_unix_ms: i64,
-    ) -> Result<()>;
-
-    fn mark_output_expired(
-        &self,
-        execution_id: &ExecutionId,
-        expired_at_unix_ms: i64,
-    ) -> Result<()>;
-}
 
 #[derive(Default)]
 pub struct InMemoryExecutionRepository {
     inner: Mutex<InMemoryState>,
-    #[cfg(test)]
     fail_output_after_commit: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
     fail_terminal_after_commit: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
     fail_running_after_commit: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
     fail_lifecycle_after_commit: std::sync::atomic::AtomicBool,
 }
 
@@ -171,8 +36,8 @@ impl InMemoryExecutionRepository {
         Self::default()
     }
 
-    #[cfg(test)]
-    pub(crate) fn admitted_request(&self, execution_id: &ExecutionId) -> Result<ExecutionRequest> {
+    #[doc(hidden)]
+    pub fn admitted_request(&self, execution_id: &ExecutionId) -> Result<ExecutionRequest> {
         self.inner
             .lock()
             .map_err(|_| {
@@ -192,26 +57,26 @@ impl InMemoryExecutionRepository {
             })
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_output_after_commit(&self) {
+    #[doc(hidden)]
+    pub fn fail_next_output_after_commit(&self) {
         self.fail_output_after_commit
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_terminal_after_commit(&self) {
+    #[doc(hidden)]
+    pub fn fail_next_terminal_after_commit(&self) {
         self.fail_terminal_after_commit
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_running_after_commit(&self) {
+    #[doc(hidden)]
+    pub fn fail_next_running_after_commit(&self) {
         self.fail_running_after_commit
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_lifecycle_after_commit(&self) {
+    #[doc(hidden)]
+    pub fn fail_next_lifecycle_after_commit(&self) {
         self.fail_lifecycle_after_commit
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -313,7 +178,6 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             record.status.started_at_unix_ms = Some(started_at_unix_ms);
             Ok(())
         })?;
-        #[cfg(test)]
         if self
             .fail_running_after_commit
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -339,7 +203,6 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             record.status.last_sequence = sequence;
             Ok(())
         })?;
-        #[cfg(test)]
         if self
             .fail_lifecycle_after_commit
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -379,7 +242,6 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             record.status.retained_bytes = record.status.retained_bytes.saturating_add(byte_length);
             Ok(())
         })?;
-        #[cfg(test)]
         if self
             .fail_output_after_commit
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -520,7 +382,6 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             record.writer_lease_id = None;
             Ok(())
         })?;
-        #[cfg(test)]
         if self
             .fail_terminal_after_commit
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -589,18 +450,16 @@ impl ExecutionRepository for InMemoryExecutionRepository {
             .map(|record| &record.status)
             .filter(|status| filter.include_finished || !status.state.is_terminal())
             .filter(|status| {
-                filter.session_id.as_ref().is_none_or(|expected| {
-                    matches!(
-                        &status.owner,
-                        crate::ExecutionOwner::Session { session_id, .. } if session_id == expected
-                    )
-                })
+                filter
+                    .owner
+                    .as_ref()
+                    .is_none_or(|expected| status.owner.may_access(expected))
             })
             .filter(|status| {
                 filter
-                    .root_run_id
+                    .authority_scope
                     .as_ref()
-                    .is_none_or(|expected| status.owner.root_run_id() == expected)
+                    .is_none_or(|expected| status.owner.authority_scope() == expected)
             })
             .cloned()
             .collect())

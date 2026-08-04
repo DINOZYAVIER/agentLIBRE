@@ -648,18 +648,24 @@ fn process_operator_commands_render_stable_table_json_and_raw_output() {
         ExecutionReadResult, ExecutionState, ExecutionStatus, KillMode, ProcessBytes,
     };
     use agl_protocol::{
-        DaemonEventKind, DaemonRequestKind, ExecutionKillAcceptedEvent, ExecutionListEvent,
-        ExecutionPrivateCommand, ExecutionReadEvent, ExecutionStatusEvent,
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, DaemonEventKind,
+        DaemonRequestKind, ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionPrivateCommand,
+        ExecutionReadEvent, ExecutionStatusEvent, OpaqueOwnerId,
     };
 
     let execution_id = ExecutionId::generate();
     let run_id = agl_ids::RunId::generate();
     let status = ExecutionStatus {
         execution_id: execution_id.clone(),
-        owner: ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id,
-        },
+        owner: ExecutionOwner::new(
+            CallerOwner::new(
+                CallerNamespace::new("agentlibre", 1).unwrap(),
+                OpaqueOwnerId::new(run_id.as_str()).unwrap(),
+                CallerOwnerKind::Ephemeral,
+                CallerRole::Agent,
+            ),
+            OpaqueOwnerId::new(run_id.as_str()).unwrap(),
+        ),
         state: ExecutionState::Running,
         profile: ExecutionProfile::Workspace,
         io: ExecutionIo::Pty,

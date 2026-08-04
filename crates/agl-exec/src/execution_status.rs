@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use agl_exec::{ExecutionExit, ExecutionId, ExecutionState};
-use agl_ids::{RunId, SessionId};
+use crate::{
+    ExecutionExit, ExecutionId, ExecutionIo, ExecutionOwner, ExecutionProfile, ExecutionState,
+    OpaqueOwnerId, TerminalSize,
+};
 use serde::{Deserialize, Serialize};
-
-use crate::{ExecutionIo, ExecutionOwner, ExecutionProfile, TerminalSize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,9 +31,7 @@ pub struct ExecutionStatus {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionListFilter {
-    pub session_id: Option<SessionId>,
-    pub root_run_id: Option<RunId>,
+    pub owner: Option<ExecutionOwner>,
+    pub authority_scope: Option<OpaqueOwnerId>,
     pub include_finished: bool,
 }
-
-pub use agl_exec::ShellIntegrationReadResult;

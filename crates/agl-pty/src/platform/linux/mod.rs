@@ -1,14 +1,6 @@
 mod launcher;
 mod sandbox;
 
-#[cfg(test)]
-pub(crate) use agl_pty::run_shell_integration_relay;
-pub(crate) use agl_pty::{
-    ShellIntegrationReceive, ShellIntegrationSocketPair, create_shell_integration_transport,
-    interrupt_terminal_foreground, notify_terminal_resize, receive_shell_integration_event,
-    send_shell_integration_control, standard_runtime_roots, terminal_foreground_process_group,
-};
-
 const SANDBOX_HOME: &str = "/.agl-private/home";
 const SANDBOX_TMP: &str = "/tmp";
 
@@ -24,9 +16,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::terminal::environment::PrivateTerminalEnvironment;
-use crate::{ExecutionIo, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
-use agl_pty::wire;
+use crate::{PrivateLaunchEnvironment, ProcessPlatformDiagnostics, wire};
+use agl_exec::{ExecutionIo, ProcessError, ProcessErrorCode, Result};
 
 use super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
 
@@ -39,7 +30,8 @@ const PRE_EXEC_RELEASE_FD_ENV: &str = "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_FD";
 #[cfg(feature = "native-test-fixtures")]
 const PRE_EXEC_RELEASE_WRITER_FD_ENV: &str = "AGL_PROCESS_TEST_PRE_EXEC_RELEASE_WRITER_FD";
 
-pub(crate) struct LaunchedProcess {
+#[doc(hidden)]
+pub struct LaunchedProcess {
     pub child: Child,
     pub stdin: Option<OwnedFd>,
     pub stdout: Option<OwnedFd>,
@@ -50,7 +42,7 @@ pub(crate) struct LaunchedProcess {
 pub(crate) fn launch(
     launcher_path: &Path,
     request: &LauncherRequest,
-    private_environment: Option<PrivateTerminalEnvironment>,
+    private_environment: Option<PrivateLaunchEnvironment>,
     shell_integration_relay: Option<OwnedFd>,
     cancelled: &AtomicBool,
 ) -> Result<LaunchedProcess> {
@@ -192,7 +184,7 @@ pub(crate) fn launch(
 }
 
 pub(super) fn private_environment_transport(
-    private_environment: Option<PrivateTerminalEnvironment>,
+    private_environment: Option<PrivateLaunchEnvironment>,
 ) -> Result<Option<OwnedFd>> {
     let Some(private_environment) = private_environment else {
         return Ok(None);
@@ -277,7 +269,7 @@ fn wait_for_launcher_response(
     }
 }
 
-fn open_program(request: &crate::ExecutionRequest) -> Result<OwnedFd> {
+fn open_program(request: &agl_exec::ExecutionRequest) -> Result<OwnedFd> {
     let mut options = OpenOptions::new();
     options.read(true);
     let mut flags = libc::O_CLOEXEC | libc::O_NOFOLLOW;
@@ -289,7 +281,7 @@ fn open_program(request: &crate::ExecutionRequest) -> Result<OwnedFd> {
         .open(&request.program)
         .map_err(|error| {
             ProcessError::new(
-                if request.profile == crate::ExecutionProfile::Workspace {
+                if request.profile == agl_exec::ExecutionProfile::Workspace {
                     ProcessErrorCode::SandboxExecutableUnavailable
                 } else {
                     ProcessErrorCode::SpawnFailed

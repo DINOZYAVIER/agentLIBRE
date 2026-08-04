@@ -107,6 +107,7 @@ dependencies = [
  "agl-content",
  "agl-core-tools",
  "agl-events",
+ "agl-exec",
  "agl-extension",
  "agl-function",
  "agl-host-tools",
@@ -218,12 +219,14 @@ name = "agl-core-tools"
 version = "1.0.0-alpha.12"
 dependencies = [
  "agl-cron",
+ "agl-exec",
  "agl-extension",
  "agl-ids",
  "agl-kernel",
  "agl-memory",
  "agl-notes",
  "agl-process",
+ "agl-pty",
  "agl-repo",
  "agl-store",
  "anyhow",
@@ -254,12 +257,14 @@ dependencies = [
  "agl-content",
  "agl-cron",
  "agl-events",
+ "agl-exec",
  "agl-function",
  "agl-ids",
  "agl-inference",
  "agl-model",
  "agl-process",
  "agl-protocol",
+ "agl-pty",
  "agl-runtime",
  "agl-session",
  "agl-skill",
@@ -527,12 +532,17 @@ dependencies = [
 name = "agl-process"
 version = "1.0.0-alpha.12"
 dependencies = [
+ "agl-terminald",
+]
+
+[[package]]
+name = "agl-process-launcher"
+version = "1.0.0-alpha.12"
+dependencies = [
  "agl-exec",
- "agl-ids",
+ "agl-process",
  "agl-pty",
- "agl-terminal",
  "libc",
- "serde",
  "serde_json",
  "sha2 0.11.0",
 ]
@@ -563,6 +573,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -701,6 +712,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "agl-terminald"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-exec",
+ "agl-pty",
+ "agl-terminal",
+ "agl-terminal-protocol",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

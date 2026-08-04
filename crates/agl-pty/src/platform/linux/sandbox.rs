@@ -8,8 +8,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::{ExecutionProfile, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics, Result};
-use agl_pty::STANDARD_RUNTIME_ROOTS;
+use crate::{ProcessPlatformDiagnostics, STANDARD_RUNTIME_ROOTS};
+use agl_exec::{ExecutionProfile, ProcessError, ProcessErrorCode, Result};
 
 use super::super::LauncherRequest;
 use super::{SANDBOX_HOME, SANDBOX_TMP, last_os_error};
@@ -958,27 +958,24 @@ fn write_probe(path: &Path, value: &[u8]) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::test_support::{RunId, StepId};
     use agl_exec::ExecutionId;
-    use agl_ids::{RunId, StepId};
 
     use super::*;
-    use crate::{
+    use agl_exec::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
-        ExecutionOwner, ExecutionRequest,
+        ExecutionRequest,
     };
 
     fn launcher_request(workspace_root: PathBuf, program: PathBuf) -> LauncherRequest {
+        let run_id = RunId::generate();
         LauncherRequest {
             protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
             build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
             execution_id: ExecutionId::generate(),
             request: ExecutionRequest {
-                owner: ExecutionOwner::Run {
-                    run_id: RunId::generate(),
-                    root_run_id: RunId::generate(),
-                },
-                creating_run_id: RunId::generate(),
-                creating_step_id: StepId::generate(),
+                owner: crate::test_support::run_owner(&run_id, &run_id),
+                correlation: crate::test_support::correlation(&run_id, &StepId::generate()),
                 kind: ExecutionKind::Argv,
                 argv0: program.display().to_string(),
                 program,

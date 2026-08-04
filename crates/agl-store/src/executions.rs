@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use agl_exec::{ExecutionId, WriterLeaseId};
-use agl_ids::{RunId, SessionId, StepId};
+use agl_exec::{
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, OpaqueOwnerId,
+    WriterLeaseId,
+};
+use agl_ids::{RunId, StepId};
 use agl_process::{
     CommittedOutputFrame, ExecutionChannel, ExecutionExit, ExecutionIo, ExecutionKind,
     ExecutionListFilter, ExecutionOutputChunk, ExecutionOwner, ExecutionPrivateCommand,
@@ -17,8 +20,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{AglStore, Result as StoreResult, StoreError};
 
-const EXECUTION_COLUMNS: &str = "id, owner_kind, owner_session_id, owner_run_id,
-    root_run_id, state, profile, io, cwd, terminal_columns, terminal_rows, exit_kind,
+const EXECUTION_COLUMNS: &str = "id, owner_namespace, owner_namespace_version, owner_id,
+    owner_kind, owner_role, authority_scope, state, profile, io, cwd, terminal_columns, terminal_rows, exit_kind,
     exit_code, exit_signal, exit_error_code, error_code, started_at_ms, finished_at_ms,
     first_retained_sequence, last_sequence, retained_bytes, discarded_output_bytes,
     output_truncated, output_expired";
@@ -72,8 +75,6 @@ impl ExecutionRepository for AglExecutionRepository {
                 "execution admission identity and supervisor owner must be nonempty",
             ));
         }
-        let (owner_kind, owner_session_id, owner_run_id, root_run_id) =
-            owner_columns(&request.owner);
         let (columns, rows) = terminal_columns(request.terminal_size);
         let grant_lease_json = request
             .grant_lease
@@ -101,20 +102,26 @@ impl ExecutionRepository for AglExecutionRepository {
             store.transaction(|tx| {
                 tx.execute(
                     "INSERT INTO executions
-                     (id, owner_kind, owner_session_id, owner_run_id, root_run_id,
-                      creating_run_id, creating_step_id, execution_kind, state, profile, io, cwd,
+                     (id, owner_namespace, owner_namespace_version, owner_id, owner_kind,
+                      owner_role, authority_scope, correlation_namespace,
+                      correlation_namespace_version, correlation_group_id,
+                      correlation_operation_id, execution_kind, state, profile, io, cwd,
                       terminal_columns, terminal_rows, supervisor_id, created_at_ms, updated_at_ms,
                       grant_lease_json, invocation_json, spool_ref, accepted_input_bytes)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                             ?13, ?14, ?15, ?16, ?16, ?17, ?18, ?19, ?20)",
+                             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?20, ?21, ?22, ?23, ?24)",
                     params![
                         status.execution_id.as_str(),
-                        owner_kind,
-                        owner_session_id,
-                        owner_run_id,
-                        root_run_id,
-                        request.creating_run_id.as_str(),
-                        request.creating_step_id.as_str(),
+                        request.owner.caller().namespace().name(),
+                        request.owner.caller().namespace().version(),
+                        request.owner.caller().owner_id().as_str(),
+                        owner_kind(request.owner.caller().owner_kind()),
+                        owner_role(request.owner.caller().role()),
+                        request.owner.authority_scope().as_str(),
+                        request.correlation.namespace().name(),
+                        request.correlation.namespace().version(),
+                        request.correlation.group_id().as_str(),
+                        request.correlation.operation_id().as_str(),
                         execution_kind(request.kind),
                         execution_state(status.state),
                         execution_profile(status.profile),
@@ -569,18 +576,16 @@ impl ExecutionRepository for AglExecutionRepository {
                 .into_iter()
                 .filter(|status| filter.include_finished || !status.state.is_terminal())
                 .filter(|status| {
-                    filter.session_id.as_ref().is_none_or(|expected| {
-                        matches!(
-                            &status.owner,
-                            ExecutionOwner::Session { session_id, .. } if session_id == expected
-                        )
-                    })
+                    filter
+                        .owner
+                        .as_ref()
+                        .is_none_or(|expected| status.owner.may_access(expected))
                 })
                 .filter(|status| {
                     filter
-                        .root_run_id
+                        .authority_scope
                         .as_ref()
-                        .is_none_or(|expected| status.owner.root_run_id() == expected)
+                        .is_none_or(|expected| status.owner.authority_scope() == expected)
                 })
                 .collect())
         })
@@ -648,7 +653,9 @@ impl ExecutionRepository for AglExecutionRepository {
         self.with_store(|store| {
             store.transaction(|tx| {
                 let mut statement = tx.prepare(
-                    "SELECT id, last_sequence, creating_run_id, creating_step_id FROM executions
+                    "SELECT id, last_sequence, correlation_namespace,
+                            correlation_namespace_version, correlation_group_id,
+                            correlation_operation_id FROM executions
                      WHERE state IN ('starting', 'running') AND supervisor_id != ?1
                      ORDER BY created_at_ms",
                 )?;
@@ -657,17 +664,16 @@ impl ExecutionRepository for AglExecutionRepository {
                         row.get::<_, String>(0)?,
                         row.get::<_, u64>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 })?;
                 let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(statement);
                 let mut recovered = Vec::with_capacity(candidates.len());
-                for (raw_id, last_sequence, raw_run_id, raw_step_id) in candidates {
+                for (raw_id, last_sequence, namespace, namespace_version, raw_run_id, raw_step_id) in candidates {
                     let execution_id = parse_execution_id(&raw_id, "executions.id")?;
-                    let creating_run_id = parse_run_id(&raw_run_id, "executions.creating_run_id")?;
-                    let creating_step_id =
-                        parse_step_id(&raw_step_id, "executions.creating_step_id")?;
                     let sequence =
                         last_sequence
                             .checked_add(1)
@@ -700,6 +706,15 @@ impl ExecutionRepository for AglExecutionRepository {
                         sequence,
                         "owner_lost",
                         recovered_at_unix_ms,
+                    )?;
+                    if namespace != "agentlibre" || namespace_version != 1 {
+                        recovered.push(execution_id);
+                        continue;
+                    }
+                    let creating_run_id = parse_run_id(&raw_run_id, "executions.correlation_group_id")?;
+                    let creating_step_id = parse_step_id(
+                        &raw_step_id,
+                        "executions.correlation_operation_id",
                     )?;
                     let step_changed = tx.execute(
                         "UPDATE run_steps
@@ -859,10 +874,12 @@ impl<'a> From<&'a ExecutionRequest> for PrivateInvocation<'a> {
 
 struct RawExecutionRow {
     id: String,
+    owner_namespace: String,
+    owner_namespace_version: u32,
+    owner_id: String,
     owner_kind: String,
-    owner_session_id: Option<String>,
-    owner_run_id: Option<String>,
-    root_run_id: String,
+    owner_role: String,
+    authority_scope: String,
     state: String,
     profile: String,
     io: String,
@@ -887,69 +904,61 @@ struct RawExecutionRow {
 fn read_execution_row(row: &Row<'_>) -> rusqlite::Result<RawExecutionRow> {
     Ok(RawExecutionRow {
         id: row.get(0)?,
-        owner_kind: row.get(1)?,
-        owner_session_id: row.get(2)?,
-        owner_run_id: row.get(3)?,
-        root_run_id: row.get(4)?,
-        state: row.get(5)?,
-        profile: row.get(6)?,
-        io: row.get(7)?,
-        cwd: row.get(8)?,
-        terminal_columns: row.get(9)?,
-        terminal_rows: row.get(10)?,
-        exit_kind: row.get(11)?,
-        exit_code: row.get(12)?,
-        exit_signal: row.get(13)?,
-        exit_error_code: row.get(14)?,
-        error_code: row.get(15)?,
-        started_at_ms: row.get(16)?,
-        finished_at_ms: row.get(17)?,
-        first_retained_sequence: row.get(18)?,
-        last_sequence: row.get(19)?,
-        retained_bytes: row.get(20)?,
-        discarded_output_bytes: row.get(21)?,
-        output_truncated: row.get(22)?,
-        output_expired: row.get(23)?,
+        owner_namespace: row.get(1)?,
+        owner_namespace_version: row.get(2)?,
+        owner_id: row.get(3)?,
+        owner_kind: row.get(4)?,
+        owner_role: row.get(5)?,
+        authority_scope: row.get(6)?,
+        state: row.get(7)?,
+        profile: row.get(8)?,
+        io: row.get(9)?,
+        cwd: row.get(10)?,
+        terminal_columns: row.get(11)?,
+        terminal_rows: row.get(12)?,
+        exit_kind: row.get(13)?,
+        exit_code: row.get(14)?,
+        exit_signal: row.get(15)?,
+        exit_error_code: row.get(16)?,
+        error_code: row.get(17)?,
+        started_at_ms: row.get(18)?,
+        finished_at_ms: row.get(19)?,
+        first_retained_sequence: row.get(20)?,
+        last_sequence: row.get(21)?,
+        retained_bytes: row.get(22)?,
+        discarded_output_bytes: row.get(23)?,
+        output_truncated: row.get(24)?,
+        output_expired: row.get(25)?,
     })
 }
 
 fn decode_execution_row(raw: RawExecutionRow) -> StoreResult<ExecutionStatus> {
-    let root_run_id = parse_run_id(&raw.root_run_id, "executions.root_run_id")?;
-    let owner = match raw.owner_kind.as_str() {
-        "session" => ExecutionOwner::Session {
-            session_id: parse_session_id(
-                raw.owner_session_id.as_deref().ok_or_else(|| {
-                    invalid_store_value(
-                        "executions.owner_session_id",
-                        "null",
-                        "session owner requires a session ID",
-                    )
-                })?,
-                "executions.owner_session_id",
-            )?,
-            root_run_id,
-        },
-        "run" => ExecutionOwner::Run {
-            run_id: parse_run_id(
-                raw.owner_run_id.as_deref().ok_or_else(|| {
-                    invalid_store_value(
-                        "executions.owner_run_id",
-                        "null",
-                        "run owner requires a run ID",
-                    )
-                })?,
-                "executions.owner_run_id",
-            )?,
-            root_run_id,
-        },
-        value => {
-            return Err(invalid_store_value(
-                "executions.owner_kind",
-                value,
-                "unknown execution owner kind",
-            ));
-        }
-    };
+    let namespace = CallerNamespace::new(raw.owner_namespace, raw.owner_namespace_version)
+        .map_err(|_| {
+            invalid_store_value(
+                "executions.owner_namespace",
+                "invalid",
+                "invalid caller namespace",
+            )
+        })?;
+    let owner_id = OpaqueOwnerId::new(raw.owner_id)
+        .map_err(|_| invalid_store_value("executions.owner_id", "invalid", "invalid owner ID"))?;
+    let authority_scope = OpaqueOwnerId::new(raw.authority_scope).map_err(|_| {
+        invalid_store_value(
+            "executions.authority_scope",
+            "invalid",
+            "invalid authority scope",
+        )
+    })?;
+    let owner = ExecutionOwner::new(
+        CallerOwner::new(
+            namespace,
+            owner_id,
+            parse_owner_kind(&raw.owner_kind)?,
+            parse_owner_role(&raw.owner_role)?,
+        ),
+        authority_scope,
+    );
     let terminal_size = match (raw.terminal_columns, raw.terminal_rows) {
         (Some(columns), Some(rows)) => Some(TerminalSize { columns, rows }),
         (None, None) => None,
@@ -1077,21 +1086,45 @@ fn require_fenced_change(changed: usize, execution_id: &ExecutionId) -> StoreRes
     }
 }
 
-fn owner_columns(owner: &ExecutionOwner) -> (&'static str, Option<&str>, Option<&str>, &str) {
-    match owner {
-        ExecutionOwner::Session {
-            session_id,
-            root_run_id,
-        } => (
-            "session",
-            Some(session_id.as_str()),
-            None,
-            root_run_id.as_str(),
-        ),
-        ExecutionOwner::Run {
-            run_id,
-            root_run_id,
-        } => ("run", None, Some(run_id.as_str()), root_run_id.as_str()),
+fn owner_kind(value: CallerOwnerKind) -> &'static str {
+    match value {
+        CallerOwnerKind::Persistent => "persistent",
+        CallerOwnerKind::Ephemeral => "ephemeral",
+        CallerOwnerKind::Service => "service",
+    }
+}
+
+fn owner_role(value: CallerRole) -> &'static str {
+    match value {
+        CallerRole::Human => "human",
+        CallerRole::Agent => "agent",
+        CallerRole::Service => "service",
+    }
+}
+
+fn parse_owner_kind(value: &str) -> StoreResult<CallerOwnerKind> {
+    match value {
+        "persistent" => Ok(CallerOwnerKind::Persistent),
+        "ephemeral" => Ok(CallerOwnerKind::Ephemeral),
+        "service" => Ok(CallerOwnerKind::Service),
+        value => Err(invalid_store_value(
+            "executions.owner_kind",
+            value,
+            "unknown execution owner kind",
+        )),
+    }
+}
+
+fn parse_owner_role(value: &str) -> StoreResult<CallerRole> {
+    match value {
+        "human" => Ok(CallerRole::Human),
+        "agent" => Ok(CallerRole::Agent),
+        "service" => Ok(CallerRole::Service),
+        value => Err(invalid_store_value(
+            "executions.owner_role",
+            value,
+            "unknown execution owner role",
+        )),
     }
 }
 
@@ -1232,10 +1265,6 @@ fn parse_execution_id(value: &str, field: &'static str) -> StoreResult<Execution
 
 fn parse_run_id(value: &str, field: &'static str) -> StoreResult<RunId> {
     RunId::parse(value).map_err(|_| invalid_store_value(field, value, "invalid run ID"))
-}
-
-fn parse_session_id(value: &str, field: &'static str) -> StoreResult<SessionId> {
-    SessionId::parse(value).map_err(|_| invalid_store_value(field, value, "invalid session ID"))
 }
 
 #[allow(dead_code)]

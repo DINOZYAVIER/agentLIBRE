@@ -698,10 +698,10 @@ impl ChatService {
             return Ok(0);
         }
         self.turn_runtime
-            .terminate_process_owner(&agl_process::ExecutionOwner::Session {
-                session_id: self.session_id.clone(),
-                root_run_id: RunId::generate(),
-            })
+            .terminate_process_owner(&crate::execution_owner::session_owner(
+                &self.session_id,
+                &RunId::generate(),
+            ))
     }
 
     fn expire_session_permission_grants(&self) -> Result<usize> {

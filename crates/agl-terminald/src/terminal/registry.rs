@@ -6,13 +6,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agl_exec::{ExecutionId, ExecutionRequestId};
-use agl_ids::{RunId, SessionId, StepId};
+use agl_exec::{ExecutionCorrelation, ExecutionId, ExecutionRequestId, OpaqueOwnerId};
+pub use agl_terminal::TerminalOwner;
 use agl_terminal::{
     AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult, TerminalId,
-    human_terminal_command_submission,
+    TerminalTopologyId, human_terminal_command_submission,
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::terminal::environment::{
@@ -41,40 +40,6 @@ const AGENT_TERMINAL_PROMPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_TERMINAL_INTEGRATION_READ_BYTES: usize = MAX_SHELL_INTEGRATION_FRAME_BYTES;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum TerminalOwner {
-    Human {
-        session_id: SessionId,
-    },
-    MainAgent {
-        session_id: SessionId,
-    },
-    Subagent {
-        root_run_id: RunId,
-        owner_run_id: RunId,
-    },
-    SessionPromoted {
-        session_id: SessionId,
-        previous_owner_run_id: RunId,
-    },
-}
-
-impl TerminalOwner {
-    pub fn human_session_id(&self) -> Option<&SessionId> {
-        match self {
-            Self::Human { session_id } | Self::SessionPromoted { session_id, .. } => {
-                Some(session_id)
-            }
-            Self::MainAgent { .. } | Self::Subagent { .. } => None,
-        }
-    }
-
-    pub fn is_agent(&self) -> bool {
-        matches!(self, Self::MainAgent { .. } | Self::Subagent { .. })
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalState {
     Starting,
@@ -95,8 +60,9 @@ impl TerminalState {
 pub struct TerminalRecord {
     pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
-    pub session_id: SessionId,
+    pub topology_id: TerminalTopologyId,
     pub owner: TerminalOwner,
+    pub authority_scope: OpaqueOwnerId,
     pub profile: ExecutionProfile,
     pub workspace_root: PathBuf,
     pub shell_profile: AdmittedShellProfile,
@@ -109,11 +75,10 @@ pub struct TerminalRecord {
 }
 
 pub struct TerminalEnsureRequest {
-    pub session_id: SessionId,
+    pub topology_id: TerminalTopologyId,
     pub owner: TerminalOwner,
-    pub root_run_id: RunId,
-    pub creating_run_id: RunId,
-    pub creating_step_id: StepId,
+    pub authority_scope: OpaqueOwnerId,
+    pub correlation: ExecutionCorrelation,
     pub context: ExecutionContextSnapshot,
     pub profile: ExecutionProfile,
     pub shell: AdmittedShellProfile,
@@ -131,11 +96,10 @@ impl Debug for TerminalEnsureRequest {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TerminalEnsureRequest")
-            .field("session_id", &self.session_id)
+            .field("topology_id", &self.topology_id)
             .field("owner", &self.owner)
-            .field("root_run_id", &self.root_run_id)
-            .field("creating_run_id", &self.creating_run_id)
-            .field("creating_step_id", &self.creating_step_id)
+            .field("authority_scope", &self.authority_scope)
+            .field("correlation", &self.correlation)
             .field("context_revision", &self.context.revision)
             .field("profile", &self.profile)
             .field("shell", &self.shell)
@@ -151,6 +115,7 @@ impl Debug for TerminalEnsureRequest {
     }
 }
 
+/// Sole-owner terminal lifecycle registry used by `agl-terminald`.
 pub struct TerminalRegistry {
     starter: Arc<dyn TerminalExecutionStarter>,
     secrets: Arc<dyn TerminalSecretResolver>,
@@ -162,7 +127,7 @@ pub struct TerminalRegistry {
 struct RegistryState {
     slots: BTreeMap<TerminalSlot, TerminalId>,
     terminals: BTreeMap<TerminalId, TerminalEntry>,
-    retired_subagents: BTreeSet<RunId>,
+    retired_owners: BTreeSet<OpaqueOwnerId>,
 }
 
 struct TerminalEntry {
@@ -245,10 +210,10 @@ enum AgentDriveAction {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum TerminalSlot {
-    HumanWorkspace(SessionId),
-    HumanHost(SessionId),
-    MainAgent(SessionId),
-    Subagent(RunId),
+    HumanWorkspace(TerminalTopologyId),
+    HumanHost(TerminalTopologyId),
+    PersistentAgent(TerminalTopologyId),
+    EphemeralAgent(OpaqueOwnerId),
     Promoted(TerminalId),
 }
 
@@ -437,8 +402,10 @@ impl TerminalRegistry {
         let slot = terminal_slot(&request)?;
         let fingerprint = terminal_fingerprint(&request, &environment_digest);
         let mut state = self.lock()?;
-        if let TerminalOwner::Subagent { owner_run_id, .. } = &request.owner
-            && state.retired_subagents.contains(owner_run_id)
+        if request.owner.is_ephemeral()
+            && state
+                .retired_owners
+                .contains(request.owner.caller().owner_id())
         {
             return Err(ProcessError::new(
                 ProcessErrorCode::ExecutionNotOwned,
@@ -466,8 +433,9 @@ impl TerminalRegistry {
         let record = TerminalRecord {
             terminal_id: terminal_id.clone(),
             execution_id: execution_id.clone(),
-            session_id: request.session_id.clone(),
+            topology_id: request.topology_id.clone(),
             owner: request.owner.clone(),
+            authority_scope: request.authority_scope.clone(),
             profile: request.profile,
             workspace_root: request.context.workspace_root.clone(),
             shell_profile: request.shell.clone(),
@@ -512,8 +480,7 @@ impl TerminalRegistry {
         let execution_owner = execution_owner(&request);
         let execution_request = ExecutionRequest {
             owner: execution_owner,
-            creating_run_id: request.creating_run_id.clone(),
-            creating_step_id: request.creating_step_id.clone(),
+            correlation: request.correlation.clone(),
             kind: ExecutionKind::Shell,
             program: request.shell.snapshot.program.clone(),
             argv0: request.shell.snapshot.program.display().to_string(),
@@ -642,7 +609,7 @@ impl TerminalRegistry {
     /// `cancel_human_command_admission` if that write fails.
     pub fn admit_human_command(
         &self,
-        session_id: &SessionId,
+        topology_id: &TerminalTopologyId,
         terminal_id: &TerminalId,
         expected_command_sequence: u64,
         expected_prompt_generation: u64,
@@ -655,7 +622,7 @@ impl TerminalRegistry {
             .terminals
             .get_mut(terminal_id)
             .ok_or_else(|| terminal_not_found(terminal_id))?;
-        if entry.record.owner.human_session_id() != Some(session_id) {
+        if &entry.record.topology_id != topology_id {
             return Err(ProcessError::new(
                 ProcessErrorCode::ExecutionNotOwned,
                 "Human terminal command requires the terminal's owning session",
@@ -772,7 +739,7 @@ impl TerminalRegistry {
                 .get(terminal_id)
                 .ok_or_else(|| terminal_not_found(terminal_id))?;
             if entry.record.execution_id != *execution_id
-                || entry.record.owner.human_session_id().is_none()
+                || !entry.record.owner.accepts_human_control()
             {
                 return Err(ProcessError::new(
                     ProcessErrorCode::ExecutionNotOwned,
@@ -834,7 +801,7 @@ impl TerminalRegistry {
             let mut state = self.lock()?;
             let terminal_id = state.terminals.iter().find_map(|(terminal_id, entry)| {
                 (entry.record.execution_id == *execution_id
-                    && entry.record.owner.human_session_id().is_some())
+                    && entry.record.owner.accepts_human_control())
                 .then(|| terminal_id.clone())
             });
             let Some(terminal_id) = terminal_id else {
@@ -1357,12 +1324,12 @@ impl TerminalRegistry {
             .ok_or_else(|| terminal_not_found(terminal_id))
     }
 
-    pub fn list_session(&self, session_id: &SessionId) -> Result<Vec<TerminalRecord>> {
+    pub fn list_topology(&self, topology_id: &TerminalTopologyId) -> Result<Vec<TerminalRecord>> {
         Ok(self
             .lock()?
             .terminals
             .values()
-            .filter(|entry| &entry.record.session_id == session_id)
+            .filter(|entry| &entry.record.topology_id == topology_id)
             .map(|entry| entry.record.clone())
             .collect())
     }
@@ -2097,41 +2064,32 @@ impl TerminalRegistry {
             .notice)
     }
 
-    pub fn promote_subagent(
+    pub fn promote_ephemeral_owner(
         &self,
         terminal_id: &TerminalId,
-        session_id: &SessionId,
+        topology_id: &TerminalTopologyId,
+        promoted_caller: agl_exec::CallerOwner,
     ) -> Result<TerminalRecord> {
         let quiesce_deadline = Instant::now() + AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT;
         loop {
             let mut state = self.lock()?;
-            let (
-                previous_owner_run_id,
-                root_run_id,
-                execution_id,
-                interrupt_foreground,
-                driver_busy,
-            ) = {
+            let (previous_owner, authority_scope, execution_id, interrupt_foreground, driver_busy) = {
                 let entry = state
                     .terminals
                     .get(terminal_id)
                     .ok_or_else(|| terminal_not_found(terminal_id))?;
-                if &entry.record.session_id != session_id || !entry.record.state.is_live() {
+                if &entry.record.topology_id != topology_id || !entry.record.state.is_live() {
                     return Err(ProcessError::new(
                         ProcessErrorCode::StateConflict,
                         "only a live subagent terminal in this session can be promoted",
                     ));
                 }
-                let TerminalOwner::Subagent {
-                    root_run_id,
-                    owner_run_id,
-                } = &entry.record.owner
-                else {
+                if !entry.record.owner.is_ephemeral() {
                     return Err(ProcessError::new(
                         ProcessErrorCode::StateConflict,
-                        "only a subagent terminal can be promoted",
+                        "only an ephemeral terminal owner can be promoted",
                     ));
-                };
+                }
                 if entry.integration.is_none() {
                     return Err(ProcessError::new(
                         ProcessErrorCode::StateConflict,
@@ -2139,8 +2097,8 @@ impl TerminalRegistry {
                     ));
                 }
                 (
-                    owner_run_id.clone(),
-                    root_run_id.clone(),
+                    entry.record.owner.caller().clone(),
+                    entry.record.authority_scope.clone(),
                     entry.record.execution_id.clone(),
                     entry.commands.active_is_submitted(),
                     entry.command_driver_busy,
@@ -2160,17 +2118,12 @@ impl TerminalRegistry {
 
             self.starter.handoff_managed_terminal(
                 &execution_id,
-                ExecutionOwner::Session {
-                    session_id: session_id.clone(),
-                    root_run_id,
-                },
+                ExecutionOwner::new(promoted_caller.clone(), authority_scope),
                 interrupt_foreground,
             )?;
 
-            let promoted_owner = TerminalOwner::SessionPromoted {
-                session_id: session_id.clone(),
-                previous_owner_run_id: previous_owner_run_id.clone(),
-            };
+            let promoted_owner =
+                TerminalOwner::promoted(promoted_caller.clone(), previous_owner.clone());
             let promoted_slot = TerminalSlot::Promoted(terminal_id.clone());
             let mut promoted_record = state
                 .terminals
@@ -2188,8 +2141,8 @@ impl TerminalRegistry {
                 true,
             ) {
                 state
-                    .retired_subagents
-                    .insert(previous_owner_run_id.clone());
+                    .retired_owners
+                    .insert(previous_owner.owner_id().clone());
                 mark_terminal_outcome_unknown(
                     &mut state,
                     terminal_id,
@@ -2198,8 +2151,8 @@ impl TerminalRegistry {
                 return Err(error);
             }
             state
-                .retired_subagents
-                .insert(previous_owner_run_id.clone());
+                .retired_owners
+                .insert(previous_owner.owner_id().clone());
             let entry = state
                 .terminals
                 .get_mut(terminal_id)
@@ -2269,21 +2222,17 @@ impl TerminalRegistry {
         Ok(())
     }
 
-    pub fn terminate_subagent(&self, owner_run_id: &RunId) -> Result<usize> {
+    pub fn terminate_ephemeral_owner(&self, owner_id: &OpaqueOwnerId) -> Result<usize> {
         let ids = {
             let mut state = self.lock()?;
-            state.retired_subagents.insert(owner_run_id.clone());
+            state.retired_owners.insert(owner_id.clone());
             state
                 .terminals
                 .iter()
                 .filter(|(_, entry)| {
-                    matches!(
-                        &entry.record.owner,
-                        TerminalOwner::Subagent {
-                            owner_run_id: owner,
-                            ..
-                        } if owner == owner_run_id
-                    ) && entry.record.state.is_live()
+                    entry.record.owner.is_ephemeral()
+                        && entry.record.owner.caller().owner_id() == owner_id
+                        && entry.record.state.is_live()
                 })
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>()
@@ -2294,13 +2243,13 @@ impl TerminalRegistry {
         Ok(ids.len())
     }
 
-    pub fn terminate_session(&self, session_id: &SessionId) -> Result<usize> {
+    pub fn terminate_topology(&self, topology_id: &TerminalTopologyId) -> Result<usize> {
         let ids = self
             .lock()?
             .terminals
             .iter()
             .filter(|(_, entry)| {
-                &entry.record.session_id == session_id && entry.record.state.is_live()
+                &entry.record.topology_id == topology_id && entry.record.state.is_live()
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -2363,14 +2312,10 @@ fn insert_stored_terminal(state: &mut RegistryState, stored: StoredTerminalRecor
             format!("terminal topology slot is occupied by both `{existing}` and `{terminal_id}`"),
         ));
     }
-    if let TerminalOwner::SessionPromoted {
-        previous_owner_run_id,
-        ..
-    } = &stored.record.owner
-    {
+    if let Some(previous_owner) = stored.record.owner.previous_owner() {
         state
-            .retired_subagents
-            .insert(previous_owner_run_id.clone());
+            .retired_owners
+            .insert(previous_owner.owner_id().clone());
     }
     if stored.active_slot {
         state.slots.insert(slot.clone(), terminal_id.clone());
@@ -2530,22 +2475,36 @@ fn mark_terminal_outcome_unknown(
 }
 
 fn terminal_slot_for_record(record: &TerminalRecord) -> Result<TerminalSlot> {
-    match (&record.owner, record.profile) {
-        (TerminalOwner::Human { session_id }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::HumanWorkspace(session_id.clone()))
-        }
-        (TerminalOwner::Human { session_id }, ExecutionProfile::Host) => {
-            Ok(TerminalSlot::HumanHost(session_id.clone()))
-        }
-        (TerminalOwner::MainAgent { session_id }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::MainAgent(session_id.clone()))
-        }
-        (TerminalOwner::Subagent { owner_run_id, .. }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::Subagent(owner_run_id.clone()))
-        }
-        (TerminalOwner::SessionPromoted { .. }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::Promoted(record.terminal_id.clone()))
-        }
+    if record.owner.previous_owner().is_some() && record.profile == ExecutionProfile::Workspace {
+        return Ok(TerminalSlot::Promoted(record.terminal_id.clone()));
+    }
+    match (
+        record.owner.caller().owner_kind(),
+        record.owner.caller().role(),
+        record.profile,
+    ) {
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::HumanWorkspace(record.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            ExecutionProfile::Host,
+        ) => Ok(TerminalSlot::HumanHost(record.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::PersistentAgent(record.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Ephemeral,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::EphemeralAgent(
+            record.owner.caller().owner_id().clone(),
+        )),
         _ => Err(ProcessError::new(
             ProcessErrorCode::StoreCorrupt,
             "stored terminal owner and profile do not map to a runtime topology slot",
@@ -2600,38 +2559,46 @@ fn validate_ensure_request(request: &TerminalEnsureRequest) -> Result<()> {
         ));
     }
 
-    match (&request.owner, request.profile) {
-        (TerminalOwner::Human { session_id }, _)
-        | (TerminalOwner::MainAgent { session_id }, ExecutionProfile::Workspace)
-            if session_id == &request.session_id => {}
-        (TerminalOwner::MainAgent { .. }, ExecutionProfile::Host)
-        | (TerminalOwner::Subagent { .. }, ExecutionProfile::Host) => {
+    if request.owner.previous_owner().is_some() {
+        return Err(ProcessError::new(
+            ProcessErrorCode::StateConflict,
+            "promoted terminals are created only by promotion, never ensure",
+        ));
+    }
+    let caller = request.owner.caller();
+    match (caller.owner_kind(), caller.role(), request.profile) {
+        (agl_exec::CallerOwnerKind::Persistent, agl_exec::CallerRole::Human, _)
+        | (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) if caller.owner_id().as_str() == request.topology_id.as_str() => {}
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Host,
+        )
+        | (
+            agl_exec::CallerOwnerKind::Ephemeral,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Host,
+        ) => {
             return Err(ProcessError::new(
                 ProcessErrorCode::HostAuthorityRequired,
-                "persistent agent terminals are workspace-confined",
+                "agent terminal owners are workspace-confined",
             ));
         }
-        (TerminalOwner::Subagent { .. }, ExecutionProfile::Workspace) => {}
-        (TerminalOwner::SessionPromoted { .. }, _) => {
-            return Err(ProcessError::new(
-                ProcessErrorCode::StateConflict,
-                "promoted terminals are created only by promotion, never ensure",
-            ));
-        }
+        (
+            agl_exec::CallerOwnerKind::Ephemeral,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) => {}
         _ => {
             return Err(ProcessError::new(
                 ProcessErrorCode::StateConflict,
-                "terminal owner does not belong to the requested durable session",
+                "terminal owner does not belong to the requested topology",
             ));
         }
-    }
-    if let TerminalOwner::Subagent { root_run_id, .. } = &request.owner
-        && root_run_id != &request.root_run_id
-    {
-        return Err(ProcessError::new(
-            ProcessErrorCode::StateConflict,
-            "subagent terminal root owner must match its admitted root run",
-        ));
     }
 
     let sources_user_rc = matches!(request.host_startup, HostStartupPolicy::SourceUserRc { .. });
@@ -2649,7 +2616,8 @@ fn validate_ensure_request(request: &TerminalEnsureRequest) -> Result<()> {
             }
         }
         ExecutionProfile::Host => {
-            if !matches!(request.owner, TerminalOwner::Human { .. })
+            if !request.owner.is_human()
+                || !request.owner.is_persistent()
                 || !request.authorization.host_process_execution
                 || request.authorization.shell_login_startup != sources_user_rc
                 || !request.grant_lease.as_ref().is_some_and(|lease| {
@@ -2667,19 +2635,33 @@ fn validate_ensure_request(request: &TerminalEnsureRequest) -> Result<()> {
 }
 
 fn terminal_slot(request: &TerminalEnsureRequest) -> Result<TerminalSlot> {
-    match (&request.owner, request.profile) {
-        (TerminalOwner::Human { .. }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::HumanWorkspace(request.session_id.clone()))
-        }
-        (TerminalOwner::Human { .. }, ExecutionProfile::Host) => {
-            Ok(TerminalSlot::HumanHost(request.session_id.clone()))
-        }
-        (TerminalOwner::MainAgent { .. }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::MainAgent(request.session_id.clone()))
-        }
-        (TerminalOwner::Subagent { owner_run_id, .. }, ExecutionProfile::Workspace) => {
-            Ok(TerminalSlot::Subagent(owner_run_id.clone()))
-        }
+    match (
+        request.owner.caller().owner_kind(),
+        request.owner.caller().role(),
+        request.profile,
+    ) {
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::HumanWorkspace(request.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            ExecutionProfile::Host,
+        ) => Ok(TerminalSlot::HumanHost(request.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::PersistentAgent(request.topology_id.clone())),
+        (
+            agl_exec::CallerOwnerKind::Ephemeral,
+            agl_exec::CallerRole::Agent,
+            ExecutionProfile::Workspace,
+        ) => Ok(TerminalSlot::EphemeralAgent(
+            request.owner.caller().owner_id().clone(),
+        )),
         _ => Err(ProcessError::new(
             ProcessErrorCode::StateConflict,
             "terminal request does not map to an admitted topology slot",
@@ -2688,22 +2670,10 @@ fn terminal_slot(request: &TerminalEnsureRequest) -> Result<TerminalSlot> {
 }
 
 fn execution_owner(request: &TerminalEnsureRequest) -> ExecutionOwner {
-    match &request.owner {
-        TerminalOwner::Human { .. } | TerminalOwner::MainAgent { .. } => ExecutionOwner::Session {
-            session_id: request.session_id.clone(),
-            root_run_id: request.root_run_id.clone(),
-        },
-        TerminalOwner::Subagent {
-            root_run_id,
-            owner_run_id,
-        } => ExecutionOwner::Run {
-            run_id: owner_run_id.clone(),
-            root_run_id: root_run_id.clone(),
-        },
-        TerminalOwner::SessionPromoted { .. } => {
-            unreachable!("promoted owner was rejected during terminal validation")
-        }
-    }
+    ExecutionOwner::new(
+        request.owner.caller().clone(),
+        request.authority_scope.clone(),
+    )
 }
 
 fn terminal_fingerprint(
@@ -2712,7 +2682,7 @@ fn terminal_fingerprint(
 ) -> String {
     let mut digest = Sha256::new();
     digest.update(b"agentlibre.terminal-admission.v1\0");
-    update_field(&mut digest, request.session_id.as_str());
+    update_field(&mut digest, request.topology_id.as_str());
     update_field(&mut digest, &format!("{:?}", request.owner));
     update_field(&mut digest, &format!("{:?}", request.profile));
     update_path(&mut digest, &request.context.workspace_root);
@@ -3004,11 +2974,53 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use agl_exec::WriterLeaseId;
+    use crate::test_support::{RunId, SessionId, StepId};
+    use agl_exec::{CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, WriterLeaseId};
 
     use super::*;
     use crate::terminal::environment::TerminalSecretValue;
     use agl_terminal::MAX_AGENT_TERMINAL_COMMAND_BYTES;
+
+    fn opaque(value: &str) -> OpaqueOwnerId {
+        OpaqueOwnerId::new(value).unwrap()
+    }
+
+    fn topology(session_id: &SessionId) -> TerminalTopologyId {
+        TerminalTopologyId::new(opaque(session_id.as_str()))
+    }
+
+    fn caller(value: &str, kind: CallerOwnerKind, role: CallerRole) -> CallerOwner {
+        CallerOwner::new(
+            CallerNamespace::new("agentlibre", 1).unwrap(),
+            opaque(value),
+            kind,
+            role,
+        )
+    }
+
+    fn human_owner(session_id: &SessionId) -> TerminalOwner {
+        TerminalOwner::new(caller(
+            session_id.as_str(),
+            CallerOwnerKind::Persistent,
+            CallerRole::Human,
+        ))
+    }
+
+    fn persistent_agent_owner(session_id: &SessionId) -> TerminalOwner {
+        TerminalOwner::new(caller(
+            session_id.as_str(),
+            CallerOwnerKind::Persistent,
+            CallerRole::Agent,
+        ))
+    }
+
+    fn ephemeral_agent_owner(run_id: &RunId) -> TerminalOwner {
+        TerminalOwner::new(caller(
+            run_id.as_str(),
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        ))
+    }
 
     struct NoSecrets;
 
@@ -3653,11 +3665,14 @@ mod tests {
             runtime_root.to_string_lossy().into_owned(),
         );
         TerminalEnsureRequest {
-            session_id: session_id.clone(),
-            owner: TerminalOwner::Human { session_id },
-            root_run_id: RunId::generate(),
-            creating_run_id: RunId::generate(),
-            creating_step_id: StepId::generate(),
+            topology_id: topology(&session_id),
+            owner: human_owner(&session_id),
+            authority_scope: opaque(RunId::generate().as_str()),
+            correlation: ExecutionCorrelation::new(
+                CallerNamespace::new("agentlibre", 1).unwrap(),
+                opaque(RunId::generate().as_str()),
+                opaque(StepId::generate().as_str()),
+            ),
             context,
             profile: ExecutionProfile::Workspace,
             shell,
@@ -3682,7 +3697,7 @@ mod tests {
         shell: AdmittedShellProfile,
     ) -> TerminalEnsureRequest {
         let mut request = ensure_request(session_id.clone(), context, shell);
-        request.owner = TerminalOwner::MainAgent { session_id };
+        request.owner = persistent_agent_owner(&session_id);
         request
     }
 
@@ -3692,8 +3707,9 @@ mod tests {
         let record = TerminalRecord {
             terminal_id: TerminalId::generate(),
             execution_id: ExecutionId::generate(),
-            session_id: request.session_id.clone(),
+            topology_id: request.topology_id.clone(),
             owner: request.owner.clone(),
+            authority_scope: request.authority_scope.clone(),
             profile: request.profile,
             workspace_root: request.context.workspace_root.clone(),
             shell_profile: request.shell.clone(),
@@ -4132,51 +4148,57 @@ mod tests {
         let session_id = SessionId::generate();
         let owner_run_id = RunId::generate();
         let mut request = ensure_request(session_id.clone(), context.clone(), shell.clone());
-        request.owner = TerminalOwner::Subagent {
-            root_run_id: request.root_run_id.clone(),
-            owner_run_id: owner_run_id.clone(),
-        };
+        request.owner = ephemeral_agent_owner(&owner_run_id);
         let terminal = registry.ensure_terminal(request).unwrap();
         repository.fail_next_replace();
 
         let error = registry
-            .promote_subagent(&terminal.terminal_id, &session_id)
+            .promote_ephemeral_owner(
+                &terminal.terminal_id,
+                &TerminalTopologyId::new(opaque(session_id.as_str())),
+                persistent_agent_owner(&session_id).caller().clone(),
+            )
             .unwrap_err();
 
         assert_eq!(error.code(), ProcessErrorCode::StoreCorrupt);
         let conservative = registry.record(&terminal.terminal_id).unwrap();
         assert_eq!(conservative.state, TerminalState::OutcomeUnknown);
-        assert!(matches!(
-            conservative.owner,
-            TerminalOwner::SessionPromoted {
-                ref previous_owner_run_id,
-                ..
-            } if previous_owner_run_id == &owner_run_id
-        ));
+        assert_eq!(
+            conservative
+                .owner
+                .previous_owner()
+                .unwrap()
+                .owner_id()
+                .as_str(),
+            owner_run_id.as_str()
+        );
         assert!(
             registry.lock().unwrap().terminals[&terminal.terminal_id]
                 .integration
                 .is_none()
         );
-        assert!(matches!(
-            starter.status(&terminal.execution_id).unwrap().owner,
-            ExecutionOwner::Session { session_id: owner, .. } if owner == session_id
-        ));
-        assert!(matches!(
+        assert_eq!(
+            starter
+                .status(&terminal.execution_id)
+                .unwrap()
+                .owner
+                .caller()
+                .owner_id()
+                .as_str(),
+            session_id.as_str()
+        );
+        assert!(
             repository
                 .inner
                 .record(&terminal.terminal_id)
                 .unwrap()
                 .record
-                .owner,
-            TerminalOwner::Subagent { .. }
-        ));
+                .owner
+                .is_ephemeral()
+        );
 
         let mut replacement = ensure_request(session_id, context, shell);
-        replacement.owner = TerminalOwner::Subagent {
-            root_run_id: replacement.root_run_id.clone(),
-            owner_run_id,
-        };
+        replacement.owner = ephemeral_agent_owner(&owner_run_id);
         assert_eq!(
             registry.ensure_terminal(replacement).unwrap_err().code(),
             ProcessErrorCode::ExecutionNotOwned
@@ -4446,20 +4468,16 @@ mod tests {
             ))
             .unwrap();
         let mut main = ensure_request(session_id.clone(), context.clone(), shell.clone());
-        main.owner = TerminalOwner::MainAgent {
-            session_id: session_id.clone(),
-        };
+        main.owner = persistent_agent_owner(&session_id);
         let main = registry.ensure_terminal(main).unwrap();
         let owner_run_id = RunId::generate();
         let mut subagent = ensure_request(session_id.clone(), context.clone(), shell.clone());
-        subagent.owner = TerminalOwner::Subagent {
-            root_run_id: subagent.root_run_id.clone(),
-            owner_run_id: owner_run_id.clone(),
-        };
+        subagent.owner = ephemeral_agent_owner(&owner_run_id);
         let subagent = registry.ensure_terminal(subagent).unwrap();
         assert_ne!(human.terminal_id, main.terminal_id);
         assert_ne!(main.terminal_id, subagent.terminal_id);
-        assert_eq!(registry.list_session(&session_id).unwrap().len(), 3);
+        let topology_id = TerminalTopologyId::new(opaque(session_id.as_str()));
+        assert_eq!(registry.list_topology(&topology_id).unwrap().len(), 3);
 
         registry
             .poll_private_integration(&subagent.terminal_id, AGENT_TERMINAL_INTEGRATION_READ_BYTES)
@@ -4487,20 +4505,21 @@ mod tests {
         };
 
         let promoted = registry
-            .promote_subagent(&subagent.terminal_id, &session_id)
+            .promote_ephemeral_owner(
+                &subagent.terminal_id,
+                &topology_id,
+                persistent_agent_owner(&session_id).caller().clone(),
+            )
             .unwrap();
-        assert!(matches!(
-            promoted.owner,
-            TerminalOwner::SessionPromoted {
-                ref previous_owner_run_id,
-                ..
-            } if previous_owner_run_id == &owner_run_id
-        ));
+        assert_eq!(
+            promoted.owner.previous_owner().unwrap().owner_id().as_str(),
+            owner_run_id.as_str()
+        );
         let durable_promoted = repository.record(&subagent.terminal_id).unwrap();
         assert_eq!(durable_promoted.record, promoted);
         assert_eq!(
             durable_promoted.slot_key,
-            format!("session-promoted:workspace:{}", subagent.terminal_id)
+            format!("promoted:workspace:{}", subagent.terminal_id)
         );
         assert!(durable_promoted.active_slot);
         {
@@ -4529,16 +4548,24 @@ mod tests {
         );
         assert_eq!(starter.interrupts.load(Ordering::Relaxed), 1);
         assert_eq!(starter.kills.load(Ordering::Relaxed), 0);
-        assert!(matches!(
-            starter.status(&subagent.execution_id).unwrap().owner,
-            ExecutionOwner::Session { session_id: owner, .. } if owner == session_id
-        ));
-        assert_eq!(registry.terminate_subagent(&owner_run_id).unwrap(), 0);
+        assert_eq!(
+            starter
+                .status(&subagent.execution_id)
+                .unwrap()
+                .owner
+                .caller()
+                .owner_id()
+                .as_str(),
+            session_id.as_str()
+        );
+        assert_eq!(
+            registry
+                .terminate_ephemeral_owner(&opaque(owner_run_id.as_str()))
+                .unwrap(),
+            0
+        );
         let mut replacement = ensure_request(session_id.clone(), context, shell);
-        replacement.owner = TerminalOwner::Subagent {
-            root_run_id: replacement.root_run_id.clone(),
-            owner_run_id,
-        };
+        replacement.owner = ephemeral_agent_owner(&owner_run_id);
         assert_eq!(
             registry.ensure_terminal(replacement).unwrap_err().code(),
             ProcessErrorCode::ExecutionNotOwned
@@ -4725,7 +4752,9 @@ mod tests {
             .unwrap();
         assert_ne!(first.terminal_id, second.terminal_id);
         assert_ne!(first.execution_id, second.execution_id);
-        let records = registry.list_session(&session_id).unwrap();
+        let records = registry
+            .list_topology(&TerminalTopologyId::new(opaque(session_id.as_str())))
+            .unwrap();
         assert_eq!(records.len(), 2);
         assert!(records.iter().any(|record| {
             record.terminal_id == first.terminal_id && record.state == TerminalState::Failed
@@ -4914,7 +4943,7 @@ mod tests {
             .unwrap();
 
         let admission = registry
-            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .admit_human_command(&topology(&session_id), &terminal.terminal_id, 0, 1, "pwd")
             .unwrap();
         assert_eq!(admission.command_sequence, 1);
         assert_eq!(
@@ -4923,14 +4952,26 @@ mod tests {
         );
         assert_eq!(
             registry
-                .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "echo queued")
+                .admit_human_command(
+                    &topology(&session_id),
+                    &terminal.terminal_id,
+                    0,
+                    1,
+                    "echo queued"
+                )
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::StateConflict
         );
         assert_eq!(
             registry
-                .admit_human_command(&SessionId::generate(), &terminal.terminal_id, 0, 1, "pwd",)
+                .admit_human_command(
+                    &TerminalTopologyId::new(opaque(SessionId::generate().as_str())),
+                    &terminal.terminal_id,
+                    0,
+                    1,
+                    "pwd",
+                )
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::ExecutionNotOwned
@@ -4958,7 +4999,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             registry
-                .admit_human_command(&session_id, &terminal.terminal_id, 1, 1, "echo busy")
+                .admit_human_command(
+                    &topology(&session_id),
+                    &terminal.terminal_id,
+                    1,
+                    1,
+                    "echo busy"
+                )
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::StateConflict
@@ -5018,7 +5065,7 @@ mod tests {
         }));
         assert_eq!(
             registry
-                .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+                .admit_human_command(&topology(&session_id), &terminal.terminal_id, 0, 1, "pwd")
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::StateConflict
@@ -5140,7 +5187,7 @@ mod tests {
         };
         registry
             .admit_human_command(
-                &session_id,
+                &topology(&session_id),
                 &terminal.terminal_id,
                 1,
                 prompt_generation,
@@ -5230,7 +5277,7 @@ mod tests {
         );
         assert_eq!(
             registry
-                .admit_human_command(&session_id, &terminal.terminal_id, 0, 3, "pwd")
+                .admit_human_command(&topology(&session_id), &terminal.terminal_id, 0, 3, "pwd")
                 .unwrap_err()
                 .code(),
             ProcessErrorCode::StateConflict
@@ -5256,7 +5303,7 @@ mod tests {
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         registry
-            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .admit_human_command(&topology(&session_id), &terminal.terminal_id, 0, 1, "pwd")
             .unwrap();
         let transaction_id = registry.lock().unwrap().terminals[&terminal.terminal_id]
             .pending_human_command
@@ -5316,7 +5363,7 @@ mod tests {
             .poll_private_integration(&terminal.terminal_id, 4096)
             .unwrap();
         registry
-            .admit_human_command(&session_id, &terminal.terminal_id, 0, 1, "pwd")
+            .admit_human_command(&topology(&session_id), &terminal.terminal_id, 0, 1, "pwd")
             .unwrap();
         starter.close_integration(&terminal.execution_id);
 
@@ -5377,7 +5424,7 @@ mod tests {
         let typed = std::thread::spawn(move || {
             typed_barrier.wait();
             let admission = typed_registry.admit_human_command(
-                &typed_session_id,
+                &topology(&typed_session_id),
                 &typed_terminal_id,
                 0,
                 1,

@@ -7,13 +7,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agl_pty::wire;
+use crate::wire;
 use sha2::{Digest as _, Sha256};
 
-use crate::terminal::environment::PrivateTerminalEnvironment;
-use crate::{
-    ExecutionIo, ExecutionProfile, ProcessError, ProcessErrorCode, ProcessPlatformDiagnostics,
-    Result, TerminalSize,
+use crate::{PrivateLaunchEnvironment, ProcessPlatformDiagnostics};
+use agl_exec::{
+    ExecutionIo, ExecutionProfile, ProcessError, ProcessErrorCode, Result, TerminalSize,
 };
 
 use super::super::{LauncherDiagnosticsEnvelope, LauncherRequest, LauncherResponse};
@@ -224,12 +223,12 @@ fn namespace_init(
             let control_path = request
                 .private_home
                 .join("agl-terminal/integration.controls.fifo");
-            let status = agl_pty::run_shell_integration_relay(
+            let status = crate::run_shell_integration_relay(
                 socket,
                 terminal_slave,
                 &event_path,
                 &control_path,
-                crate::terminal::shell::MAX_SHELL_INTEGRATION_FRAME_BYTES,
+                crate::MAX_SHELL_INTEGRATION_FRAME_BYTES,
             );
             unsafe { libc::_exit(status) }
         }
@@ -336,9 +335,9 @@ fn exec_target(
     let private_environment = match private_environment {
         Some(descriptor) => {
             let mut file = File::from(descriptor);
-            PrivateTerminalEnvironment::read_launch_transport(&mut file)?
+            PrivateLaunchEnvironment::read_launch_transport(&mut file)?
         }
-        None => PrivateTerminalEnvironment::default(),
+        None => PrivateLaunchEnvironment::default(),
     };
     let environment = encode_environment(request, &private_environment)?;
     drop(private_environment);
@@ -433,7 +432,7 @@ fn clear_close_on_exec(descriptor: RawFd) -> Result<()> {
 
 fn encode_environment(
     request: &LauncherRequest,
-    private_environment: &PrivateTerminalEnvironment,
+    private_environment: &PrivateLaunchEnvironment,
 ) -> Result<Vec<EncodedEnvironmentValue>> {
     let mut values = request
         .request
@@ -511,7 +510,7 @@ impl EncodedEnvironmentValue {
             Err(error) => {
                 let mut encoded = error.into_vec();
                 if private {
-                    agl_pty::zeroize_private_bytes(&mut encoded);
+                    crate::zeroize_private_bytes(&mut encoded);
                 }
                 return Err(ProcessError::new(
                     ProcessErrorCode::InvalidRequest,
@@ -1022,15 +1021,13 @@ mod tests {
     use std::os::unix::process::CommandExt as _;
     use std::process::Command;
 
-    use agl_ids::{RunId, SessionId, StepId};
+    use crate::test_support::{RunId, SessionId, StepId};
 
     use super::*;
-    use crate::terminal::environment::{
-        TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalSecretReference,
-        TerminalSecretResolver, TerminalSecretValue,
-    };
-    use crate::{
-        EnvironmentOverride, ExecutionAuthorization, ExecutionKind, ExecutionLimits, ExecutionOwner,
+    use crate::{PrivateEnvironmentValue, PrivateLaunchEnvironment};
+    use agl_exec::{
+        EnvironmentOverride, ExecutionAuthorization, ExecutionKind, ExecutionLimits,
+        ExecutionRequest,
     };
 
     const SECRET_NAME: &str = "AGL_TEST_PRIVATE_EXEC_VALUE";
@@ -1127,24 +1124,12 @@ mod tests {
 
     #[test]
     fn final_exec_child_receives_private_environment_outside_the_launcher_dto() {
-        struct Secret;
-        impl TerminalSecretResolver for Secret {
-            fn resolve(&self, _reference: &TerminalSecretReference) -> Result<TerminalSecretValue> {
-                TerminalSecretValue::new(SENTINEL)
-            }
-        }
-
         let request = exec_request();
-
-        let mut environment = TerminalEnvironmentRequest::default();
-        environment.agl_env.insert(
+        let private = PrivateLaunchEnvironment::new(BTreeMap::from([(
             SECRET_NAME.to_owned(),
-            TerminalEnvironmentValue::Secret(
-                TerminalSecretReference::new("test:private-exec").unwrap(),
-            ),
-        );
-        let (public, private) = environment.resolve(&Secret).unwrap().into_launch_parts();
-        assert!(public.values.is_empty());
+            PrivateEnvironmentValue::new(SENTINEL).unwrap(),
+        )]))
+        .unwrap();
         assert!(!format!("{request:?} {private:?}").contains(SENTINEL));
         assert!(!serde_json::to_string(&request).unwrap().contains(SENTINEL));
         let private_descriptor = super::super::private_environment_transport(Some(private))
@@ -1196,8 +1181,8 @@ mod tests {
                 .any(|window| window == expected.as_bytes()),
             "final exec child did not receive its private environment entry"
         );
-        agl_pty::zeroize_private_bytes(&mut output.stdout);
-        agl_pty::zeroize_private_bytes(&mut output.stderr);
+        crate::zeroize_private_bytes(&mut output.stdout);
+        crate::zeroize_private_bytes(&mut output.stderr);
     }
 
     #[test]
@@ -1234,13 +1219,13 @@ mod tests {
             protocol_version: super::super::super::LAUNCHER_PROTOCOL_VERSION.to_owned(),
             build_id: super::super::super::LAUNCHER_BUILD_ID.to_owned(),
             execution_id: agl_exec::ExecutionId::generate(),
-            request: crate::ExecutionRequest {
-                owner: ExecutionOwner::Session {
-                    session_id: SessionId::generate(),
-                    root_run_id: run_id.clone(),
-                },
-                creating_run_id: run_id,
-                creating_step_id: StepId::generate(),
+            request: ExecutionRequest {
+                owner: crate::test_support::session_owner(
+                    &SessionId::generate(),
+                    &run_id,
+                    agl_exec::CallerRole::Human,
+                ),
+                correlation: crate::test_support::correlation(&run_id, &StepId::generate()),
                 kind: ExecutionKind::Argv,
                 argv0: program.display().to_string(),
                 program,

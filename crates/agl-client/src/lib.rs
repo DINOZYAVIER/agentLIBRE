@@ -2530,10 +2530,15 @@ mod tests {
             ));
             let status = ExecutionStatus {
                 execution_id: server_execution_id.clone(),
-                owner: ExecutionOwner::Session {
-                    session_id: agl_ids::SessionId::generate(),
-                    root_run_id: RunId::generate(),
-                },
+                owner: ExecutionOwner::new(
+                    CallerOwner::new(
+                        CallerNamespace::new("agentlibre", 1).unwrap(),
+                        OpaqueOwnerId::new(agl_ids::SessionId::generate().as_str()).unwrap(),
+                        CallerOwnerKind::Persistent,
+                        CallerRole::Human,
+                    ),
+                    OpaqueOwnerId::new(RunId::generate().as_str()).unwrap(),
+                ),
                 state: ExecutionState::Running,
                 profile: ExecutionProfile::Workspace,
                 io: ExecutionIo::Pty,

@@ -5,6 +5,7 @@ pub mod history;
 mod identity;
 mod lifecycle;
 mod shell_integration;
+mod shell_materialization;
 mod shell_profile;
 
 pub use agl_exec::{
@@ -12,8 +13,8 @@ pub use agl_exec::{
 };
 pub use identity::{ParseTerminalIdentityError, TerminalId, TerminalRequestId, TerminalStreamId};
 pub use lifecycle::{
-    TerminalDescriptor, TerminalDomainError, TerminalOperation, TerminalState,
-    validate_terminal_transition,
+    TerminalDescriptor, TerminalDomainError, TerminalOperation, TerminalOwner, TerminalState,
+    TerminalTopologyId, validate_terminal_transition,
 };
 
 pub use command::{
@@ -30,6 +31,9 @@ pub use shell_integration::{
     ShellExit, ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth,
     ShellIntegrationNotice, ShellIntegrationState, ShellIntegrationToken, TerminalPromptState,
     TypedCommandAbortReason, TypedCommandTransactionId,
+};
+pub use shell_materialization::{
+    ManagedShellIntegrationTransport, ManagedShellStartup, MaterializedManagedShell,
 };
 pub use shell_profile::{
     AdmittedShellKind, AdmittedShellProfile, HostStartupPolicy, ManagedShellLaunchPlan,

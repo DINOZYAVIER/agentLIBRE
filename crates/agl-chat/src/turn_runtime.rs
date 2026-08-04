@@ -121,10 +121,7 @@ impl ChatProcessExecutionContext {
                     "process invocation session does not match its owning chat session"
                 );
                 Ok((
-                    agl_process::ExecutionOwner::Session {
-                        session_id: session_id.clone(),
-                        root_run_id: run.root_run_id,
-                    },
+                    crate::execution_owner::session_owner(session_id, &run.root_run_id),
                     session_id.clone(),
                 ))
             }
@@ -143,10 +140,7 @@ impl ChatProcessExecutionContext {
                     )
                 })?;
                 Ok((
-                    agl_process::ExecutionOwner::Run {
-                        run_id: scope.run_id().clone(),
-                        root_run_id: run.root_run_id,
-                    },
+                    crate::execution_owner::run_owner(scope.run_id(), &run.root_run_id),
                     durable_session_id,
                 ))
             }

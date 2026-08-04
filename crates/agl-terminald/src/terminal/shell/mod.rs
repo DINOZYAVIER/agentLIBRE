@@ -1,195 +1,32 @@
-use std::fmt::{self, Debug, Formatter};
-use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
-use std::os::fd::OwnedFd;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
-
-use crate::platform::LaunchDirectories;
-use crate::terminal::environment::PrivateTerminalEnvironment;
-use crate::terminal::history::TerminalHistorySeed;
-use crate::{ExecutionProfile, ExecutionRequest, ProcessError, ProcessErrorCode, Result};
-
 pub(crate) use agl_terminal::ShellIntegrationToken;
 pub use agl_terminal::{
     AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, CommandBoundary,
-    HostStartupPolicy, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES, ShellExit,
-    ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth, ShellIntegrationNotice,
-    ShellIntegrationState, ShellStartupPaths, TerminalPromptState, TypedCommandAbortReason,
-    TypedCommandTransactionId,
+    HostStartupPolicy, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES,
+    ManagedShellIntegrationTransport, ManagedShellStartup, ShellExit, ShellIntegrationControl,
+    ShellIntegrationEvent, ShellIntegrationHealth, ShellIntegrationNotice, ShellIntegrationState,
+    ShellStartupPaths, TerminalPromptState, TypedCommandAbortReason, TypedCommandTransactionId,
 };
-
-const PRIVATE_HOME_IN_SANDBOX: &str = "/.agl-private/home";
-
-/// Private materialization input consumed only inside `ProcessSupervisor`
-/// after it has allocated the execution-private home. Debug never renders the
-/// history seed, whose exact commands may contain secrets.
-pub(crate) struct ManagedShellStartup {
-    pub shell: AdmittedShellProfile,
-    pub host_startup: HostStartupPolicy,
-    pub history_seed: TerminalHistorySeed,
-    pub integration_token: ShellIntegrationToken,
-    pub private_environment: PrivateTerminalEnvironment,
-}
-
-pub(crate) struct ManagedShellIntegrationTransport {
-    pub supervisor_socket: OwnedFd,
-    pub relay_socket: Option<OwnedFd>,
-    pub event_fifo_guard: OwnedFd,
-    pub event_fifo_path: PathBuf,
-    pub control_fifo_path: PathBuf,
-}
-
-impl Debug for ManagedShellStartup {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ManagedShellStartup")
-            .field("shell", &self.shell)
-            .field("host_startup", &self.host_startup)
-            .field("history_seed", &self.history_seed)
-            .field("integration_token", &self.integration_token)
-            .field("private_environment", &self.private_environment)
-            .finish()
-    }
-}
-
-impl ManagedShellStartup {
-    pub(crate) fn materialize(
-        self,
-        request: &mut ExecutionRequest,
-        directories: &LaunchDirectories,
-    ) -> Result<(ManagedShellIntegrationTransport, PrivateTerminalEnvironment)> {
-        // Reject a non-conforming adapter before creating any private runtime state.
-        self.shell.validate()?;
-        self.host_startup.validate(request.profile)?;
-        let private = directories.private_home.join("agl-terminal");
-        ensure_private_directory(&private)?;
-
-        let visible_home = if request.profile == ExecutionProfile::Workspace {
-            PathBuf::from(PRIVATE_HOME_IN_SANDBOX).join("agl-terminal")
-        } else {
-            private.clone()
-        };
-        let seed_host = private.join("history.seed");
-        let seed_visible = visible_home.join("history.seed");
-        let event_host = private.join("integration.events.fifo");
-        let event_visible = visible_home.join("integration.events.fifo");
-        let control_host = private.join("integration.controls.fifo");
-        let control_visible = visible_home.join("integration.controls.fifo");
-        let integration =
-            crate::platform::create_shell_integration_transport(&event_host, &control_host)?;
-        let plan = self.shell.render_startup(
-            &self.host_startup,
-            &self.history_seed,
-            &ShellStartupPaths {
-                startup_directory: visible_home,
-                history_seed: seed_visible,
-                event_fifo: event_visible,
-                control_fifo: control_visible,
-            },
-            &self.integration_token,
-            request.profile,
-        )?;
-        write_private_file(&private.join(plan.startup_name), plan.startup.as_bytes())?;
-        write_private_file(&seed_host, &plan.history)?;
-
-        request.args = plan.args;
-        request.environment.values.extend(plan.environment);
-        request
-            .environment
-            .values
-            .insert("HISTFILE".to_owned(), "/dev/null".to_owned());
-        request.validate()?;
-        Ok((
-            ManagedShellIntegrationTransport {
-                supervisor_socket: integration.supervisor,
-                relay_socket: Some(integration.relay),
-                event_fifo_guard: integration.event_guard,
-                event_fifo_path: event_host,
-                control_fifo_path: control_host,
-            },
-            self.private_environment,
-        ))
-    }
-}
-
-fn ensure_private_directory(path: &Path) -> Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .map_err(|error| shell_io("failed to protect managed shell directory", error))?,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(shell_io("failed to create managed shell directory", error));
-        }
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| shell_io("failed to inspect managed shell directory", error))?;
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
-    {
-        return Err(ProcessError::new(
-            ProcessErrorCode::InvalidRequest,
-            "managed shell directory must be owned, private, and not a symlink",
-        ));
-    }
-    Ok(())
-}
-
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| shell_io("failed to create managed shell file", error))?;
-    validate_private_file(&file)?;
-    file.write_all(bytes)
-        .map_err(|error| shell_io("failed to write managed shell file", error))?;
-    file.sync_all()
-        .map_err(|error| shell_io("failed to sync managed shell file", error))
-}
-
-fn validate_private_file(file: &File) -> Result<()> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| shell_io("failed to inspect managed shell file", error))?;
-    if !metadata.is_file()
-        || metadata.mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1
-    {
-        return Err(ProcessError::new(
-            ProcessErrorCode::InvalidRequest,
-            "managed shell files must be owned private regular files",
-        ));
-    }
-    Ok(())
-}
-
-fn shell_io(context: &str, error: std::io::Error) -> ProcessError {
-    ProcessError::new(ProcessErrorCode::Internal, format!("{context}: {error}"))
-}
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::fs::File;
+    use std::fs::{self, File, OpenOptions};
     use std::io::Write as _;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
-    use std::os::unix::fs::FileTypeExt as _;
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _};
     use std::os::unix::process::CommandExt as _;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use agl_ids::{RunId, SessionId, StepId};
+    use crate::test_support::{RunId, SessionId, StepId};
 
     use super::*;
+    use crate::terminal::environment::PrivateTerminalEnvironment;
+    use crate::terminal::history::TerminalHistorySeed;
     use crate::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
-        ExecutionOwner, ExecutionProfile, ShellProfileSnapshot,
+        ExecutionProfile, ExecutionRequest, ShellProfileSnapshot,
     };
 
     fn snapshot(kind: AdmittedShellKind) -> AdmittedShellProfile {
@@ -213,13 +50,15 @@ mod tests {
     }
 
     fn request(workspace: &Path, shell: &AdmittedShellProfile) -> ExecutionRequest {
+        let root_run_id = RunId::generate();
+        let creating_run_id = RunId::generate();
         ExecutionRequest {
-            owner: ExecutionOwner::Session {
-                session_id: SessionId::generate(),
-                root_run_id: RunId::generate(),
-            },
-            creating_run_id: RunId::generate(),
-            creating_step_id: StepId::generate(),
+            owner: crate::test_support::session_owner(
+                &SessionId::generate(),
+                &root_run_id,
+                agl_exec::CallerRole::Human,
+            ),
+            correlation: crate::test_support::correlation(&creating_run_id, &StepId::generate()),
             kind: ExecutionKind::Shell,
             program: shell.snapshot.program.clone(),
             argv0: shell.snapshot.program.display().to_string(),
@@ -256,17 +95,10 @@ mod tests {
         let workspace = base.join("workspace");
         let execution_root = base.join("execution");
         let private_home = execution_root.join("home");
-        let private_tmp = execution_root.join("tmp");
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&private_home).unwrap();
-        fs::create_dir_all(&private_tmp).unwrap();
         fs::set_permissions(&private_home, fs::Permissions::from_mode(0o700)).unwrap();
         let workspace = workspace.canonicalize().unwrap();
-        let directories = LaunchDirectories {
-            execution_root,
-            private_home: private_home.clone(),
-            private_tmp,
-        };
         let shell = snapshot(AdmittedShellKind::Bash);
         let startup = ManagedShellStartup {
             shell: shell.clone(),
@@ -280,9 +112,11 @@ mod tests {
             private_environment: PrivateTerminalEnvironment::default(),
         };
         let mut request = request(&workspace, &shell);
-        let (integration_transport, private_environment) =
-            startup.materialize(&mut request, &directories).unwrap();
-        assert!(private_environment.is_empty());
+        let materialized = startup.materialize(request.profile, &private_home).unwrap();
+        request.args = materialized.args;
+        request.environment.values.extend(materialized.environment);
+        request.validate().unwrap();
+        assert!(materialized.private_environment.is_empty());
 
         assert_eq!(request.args[0], "--noprofile");
         assert_eq!(request.args[1], "--rcfile");
@@ -311,7 +145,7 @@ mod tests {
         assert!(rc.contains("history -r '/.agl-private/home/agl-terminal/history.seed'"));
         assert!(rc.contains("'/.agl-private/home/agl-terminal/integration.events.fifo'"));
         assert!(rc.contains("'/.agl-private/home/agl-terminal/integration.controls.fifo'"));
-        drop(integration_transport);
+        drop(materialized.transport);
         fs::remove_dir_all(base).unwrap();
     }
 
@@ -341,6 +175,15 @@ mod tests {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
 
+    fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)
+    }
+
     fn run_native_shell_integration(kind: AdmittedShellKind, executable: &Path) {
         let root = std::env::temp_dir().join(format!(
             "agl-native-managed-shell-{kind:?}-{}-{}",
@@ -353,8 +196,7 @@ mod tests {
         let event_fifo = root.join("integration.events.fifo");
         let control_fifo = root.join("integration.controls.fifo");
         let transport =
-            crate::platform::create_shell_integration_transport(&event_fifo, &control_fifo)
-                .unwrap();
+            agl_pty::create_shell_integration_transport(&event_fifo, &control_fifo).unwrap();
         let token = ShellIntegrationToken::generate().unwrap();
         let seed = root.join("history.seed");
         write_private_file(&seed, b"").unwrap();
@@ -381,7 +223,7 @@ mod tests {
         let relay_event_fifo = event_fifo.clone();
         let relay_control_fifo = control_fifo.clone();
         let relay = std::thread::spawn(move || {
-            crate::platform::run_shell_integration_relay(
+            agl_pty::run_shell_integration_relay(
                 transport.relay,
                 relay_slave.as_raw_fd(),
                 &relay_event_fifo,
@@ -395,20 +237,20 @@ mod tests {
             let mut events = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                match crate::platform::receive_shell_integration_event(
+                match agl_pty::receive_shell_integration_event(
                     &transport.supervisor,
                     MAX_SHELL_INTEGRATION_FRAME_BYTES,
                 )
                 .unwrap()
                 {
-                    crate::platform::ShellIntegrationReceive::Empty => {
+                    agl_pty::ShellIntegrationReceive::Empty => {
                         if Instant::now() >= deadline {
                             panic!("managed {kind:?} integration monitor timed out");
                         }
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    crate::platform::ShellIntegrationReceive::Closed => break,
-                    crate::platform::ShellIntegrationReceive::Event(frame) => {
+                    agl_pty::ShellIntegrationReceive::Closed => break,
+                    agl_pty::ShellIntegrationReceive::Event(frame) => {
                         let batch = integration.push_packet(&frame);
                         assert_eq!(batch.notice, None, "{kind:?} emitted an invalid frame");
                         if let Some(ShellIntegrationEvent::PromptReady {
@@ -424,7 +266,7 @@ mod tests {
                                     prompt_generation: (!input_pending).then_some(*sequence),
                                 })
                                 .unwrap();
-                            crate::platform::send_shell_integration_control(
+                            agl_pty::send_shell_integration_control(
                                 &transport.supervisor,
                                 &control,
                                 Duration::from_secs(1),
@@ -477,7 +319,7 @@ mod tests {
         master.flush().unwrap();
         let foreground_deadline = Instant::now() + Duration::from_secs(5);
         let observed_foreground = loop {
-            match crate::platform::terminal_foreground_process_group(
+            match agl_pty::terminal_foreground_process_group(
                 &terminal_observer,
                 shell_process_group,
             ) {
@@ -497,7 +339,7 @@ mod tests {
         assert_ne!(observed_foreground, shell_process_group);
         let prompt_deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match crate::platform::terminal_foreground_process_group(
+            match agl_pty::terminal_foreground_process_group(
                 &terminal_observer,
                 shell_process_group,
             ) {

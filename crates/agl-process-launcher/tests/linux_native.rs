@@ -1,5 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "native-test-fixtures"))]
 
+// End-to-end contract for the separately packaged private launcher.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::net::TcpListener;
@@ -7,17 +9,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agl_ids::{RunId, StepId};
-use agl_process::ExecutionId;
+use agl_exec::{
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation, OpaqueOwnerId,
+};
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionCursor,
-    ExecutionGrantLease, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
+    ExecutionGrantLease, ExecutionId, ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner,
     ExecutionProfile, ExecutionRequest, ExecutionRequestId, ExecutionState, FileOutputSpool,
     InMemoryExecutionRepository, InputLease, ProcessBytes, ProcessErrorCode, ProcessHandle,
     ProcessSupervisor, ProcessSupervisorOptions, TerminalSize, process_platform_diagnostics,
 };
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+
+type RunId = ExecutionRequestId;
+type StepId = ExecutionRequestId;
 
 const LAUNCHER: &str = env!("CARGO_BIN_EXE_agl-process-launcher");
 const HELPER: &str = env!("CARGO_BIN_EXE_agl-process-test-helper");
@@ -560,24 +566,30 @@ impl Harness {
             workspace,
             runtime_root,
             helper,
-            owner: ExecutionOwner::Run {
-                run_id: root_run_id.clone(),
-                root_run_id,
-            },
+            owner: ExecutionOwner::new(
+                CallerOwner::new(
+                    CallerNamespace::new("agentlibre", 1).unwrap(),
+                    OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+                    CallerOwnerKind::Ephemeral,
+                    CallerRole::Agent,
+                ),
+                OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+            ),
             handle,
             supervisor,
         }
     }
 
     fn request(&self, args: Vec<String>, io: ExecutionIo) -> ExecutionRequest {
-        let creating_run_id = match &self.owner {
-            ExecutionOwner::Run { run_id, .. } => run_id.clone(),
-            ExecutionOwner::Session { root_run_id, .. } => root_run_id.clone(),
-        };
+        let creating_run_id = self.owner.caller().owner_id().as_str();
+        let creating_step_id = StepId::generate();
         ExecutionRequest {
             owner: self.owner.clone(),
-            creating_run_id,
-            creating_step_id: StepId::generate(),
+            correlation: ExecutionCorrelation::new(
+                CallerNamespace::new("agentlibre", 1).unwrap(),
+                OpaqueOwnerId::new(creating_run_id).unwrap(),
+                OpaqueOwnerId::new(creating_step_id.as_str()).unwrap(),
+            ),
             kind: ExecutionKind::Argv,
             program: self.helper.clone(),
             argv0: self.helper.display().to_string(),

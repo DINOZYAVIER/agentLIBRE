@@ -94,15 +94,24 @@ fn cli_attach_detach_reattach_and_kill_real_daemon_owned_pty() {
     .unwrap();
     let process = state.process_handle().unwrap();
     let run_id = RunId::generate();
-    let owner = ExecutionOwner::Run {
-        run_id: run_id.clone(),
-        root_run_id: run_id.clone(),
-    };
+    let owner = ExecutionOwner::new(
+        agl_protocol::CallerOwner::new(
+            agl_protocol::CallerNamespace::new("agentlibre", 1).unwrap(),
+            agl_protocol::OpaqueOwnerId::new(run_id.as_str()).unwrap(),
+            agl_protocol::CallerOwnerKind::Ephemeral,
+            agl_protocol::CallerRole::Agent,
+        ),
+        agl_protocol::OpaqueOwnerId::new(run_id.as_str()).unwrap(),
+    );
+    let step_id = StepId::generate();
     let started = process
         .start(ExecutionRequest {
             owner,
-            creating_run_id: run_id,
-            creating_step_id: StepId::generate(),
+            correlation: agl_process::ExecutionCorrelation::new(
+                agl_protocol::CallerNamespace::new("agentlibre", 1).unwrap(),
+                agl_protocol::OpaqueOwnerId::new(run_id.as_str()).unwrap(),
+                agl_protocol::OpaqueOwnerId::new(step_id.as_str()).unwrap(),
+            ),
             kind: ExecutionKind::Argv,
             argv0: helper.display().to_string(),
             program: helper.canonicalize().unwrap(),

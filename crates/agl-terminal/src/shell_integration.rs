@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use agl_exec::{ProcessError, ProcessErrorCode, Result};
 
 pub const SHELL_INTEGRATION_VERSION: u8 = 2;
-pub const MAX_SHELL_INTEGRATION_FRAME_BYTES: usize = 80 * 1024;
+pub use agl_pty::MAX_SHELL_INTEGRATION_FRAME_BYTES;
 pub const MAX_SHELL_INTEGRATION_COMMAND_BYTES: usize = 64 * 1024;
 pub const MAX_SHELL_INTEGRATION_PATH_BYTES: usize = 4 * 1024;
 
