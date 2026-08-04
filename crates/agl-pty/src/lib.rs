@@ -1,7 +1,67 @@
 use serde::{Deserialize, Serialize};
 
+pub const MAX_SHELL_INTEGRATION_FRAME_BYTES: usize = 80 * 1024;
+
+#[cfg(test)]
+mod test_support {
+    use agl_exec::{
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
+        ExecutionOwner, ExecutionRequestId, OpaqueOwnerId,
+    };
+
+    pub(crate) type RunId = ExecutionRequestId;
+    pub(crate) type SessionId = ExecutionRequestId;
+    pub(crate) type StepId = ExecutionRequestId;
+
+    fn namespace() -> CallerNamespace {
+        CallerNamespace::new("terminal-test", 1).expect("static caller namespace is valid")
+    }
+
+    fn opaque(value: &str) -> OpaqueOwnerId {
+        OpaqueOwnerId::new(value).expect("generated test IDs fit the opaque owner contract")
+    }
+
+    pub(crate) fn session_owner(
+        session_id: &SessionId,
+        authority_id: &RunId,
+        role: CallerRole,
+    ) -> ExecutionOwner {
+        ExecutionOwner::new(
+            CallerOwner::new(
+                namespace(),
+                opaque(session_id.as_str()),
+                CallerOwnerKind::Persistent,
+                role,
+            ),
+            opaque(authority_id.as_str()),
+        )
+    }
+
+    pub(crate) fn run_owner(run_id: &RunId, authority_id: &RunId) -> ExecutionOwner {
+        ExecutionOwner::new(
+            CallerOwner::new(
+                namespace(),
+                opaque(run_id.as_str()),
+                CallerOwnerKind::Ephemeral,
+                CallerRole::Agent,
+            ),
+            opaque(authority_id.as_str()),
+        )
+    }
+
+    pub(crate) fn correlation(run_id: &RunId, step_id: &StepId) -> ExecutionCorrelation {
+        ExecutionCorrelation::new(
+            namespace(),
+            opaque(run_id.as_str()),
+            opaque(step_id.as_str()),
+        )
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux;
+#[doc(hidden)]
+pub mod platform;
 mod private_environment;
 #[cfg(target_os = "linux")]
 mod runtime_roots;
@@ -14,6 +74,11 @@ pub use linux::{
     ShellIntegrationReceive, ShellIntegrationSocketPair, create_shell_integration_transport,
     interrupt_terminal_foreground, notify_terminal_resize, receive_shell_integration_event,
     run_shell_integration_relay, send_shell_integration_control, terminal_foreground_process_group,
+};
+#[doc(hidden)]
+pub use platform::{
+    LaunchDirectories, LaunchedProcess, diagnostics, launch, launcher_main,
+    verify_launcher_binary_identity,
 };
 pub use private_environment::{
     MAX_PRIVATE_ENVIRONMENT_BYTES, MAX_PRIVATE_ENVIRONMENT_ENTRIES,

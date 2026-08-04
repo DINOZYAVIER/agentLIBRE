@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use agl_exec::ExecutionId;
 use agl_terminal::TerminalId;
 
-use super::registry::{TerminalOwner, TerminalRecord, TerminalState};
+use super::registry::{TerminalRecord, TerminalState};
 use super::shell::{ShellIntegrationHealth, TerminalPromptState};
 use crate::{ProcessError, ProcessErrorCode, Result};
 
@@ -48,27 +48,14 @@ impl StoredTerminalRecord {
         self.record.shell_profile.validate().map_err(|_| {
             invalid_record("stored terminal shell profile violates its admitted contract")
         })?;
-        match &self.record.owner {
-            TerminalOwner::Human { session_id }
-            | TerminalOwner::MainAgent { session_id }
-            | TerminalOwner::SessionPromoted { session_id, .. }
-                if session_id != &self.record.session_id =>
-            {
-                return Err(invalid_record(
-                    "terminal owner session must match the stored durable session",
-                ));
-            }
-            TerminalOwner::Human { .. }
-            | TerminalOwner::MainAgent { .. }
-            | TerminalOwner::Subagent { .. }
-            | TerminalOwner::SessionPromoted { .. } => {}
+        if self.record.owner.is_persistent()
+            && self.record.owner.caller().owner_id().as_str() != self.record.topology_id.as_str()
+        {
+            return Err(invalid_record(
+                "persistent terminal owner must match the stored topology",
+            ));
         }
-        if matches!(
-            self.record.owner,
-            TerminalOwner::MainAgent { .. }
-                | TerminalOwner::Subagent { .. }
-                | TerminalOwner::SessionPromoted { .. }
-        ) && self.record.profile != crate::ExecutionProfile::Workspace
+        if self.record.owner.is_agent() && self.record.profile != crate::ExecutionProfile::Workspace
         {
             return Err(invalid_record(
                 "only a Human terminal may retain the Host profile",
@@ -117,22 +104,42 @@ impl StoredTerminalRecord {
 /// Derives the only admitted durable topology key for a terminal record.
 /// Canonical typed IDs make each colon-delimited form unambiguous.
 pub fn terminal_slot_key(record: &TerminalRecord) -> Result<String> {
-    match (&record.owner, record.profile) {
-        (TerminalOwner::Human { session_id }, crate::ExecutionProfile::Workspace) => {
-            Ok(format!("human:workspace:{session_id}"))
-        }
-        (TerminalOwner::Human { session_id }, crate::ExecutionProfile::Host) => {
-            Ok(format!("human:host:{session_id}"))
-        }
-        (TerminalOwner::MainAgent { session_id }, crate::ExecutionProfile::Workspace) => {
-            Ok(format!("main-agent:workspace:{session_id}"))
-        }
-        (TerminalOwner::Subagent { owner_run_id, .. }, crate::ExecutionProfile::Workspace) => {
-            Ok(format!("subagent:workspace:{owner_run_id}"))
-        }
-        (TerminalOwner::SessionPromoted { .. }, crate::ExecutionProfile::Workspace) => {
-            Ok(format!("session-promoted:workspace:{}", record.terminal_id))
-        }
+    if record.owner.previous_owner().is_some()
+        && record.profile == crate::ExecutionProfile::Workspace
+    {
+        return Ok(format!("promoted:workspace:{}", record.terminal_id));
+    }
+    match (
+        record.owner.caller().owner_kind(),
+        record.owner.caller().role(),
+        record.profile,
+    ) {
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            crate::ExecutionProfile::Workspace,
+        ) => Ok(format!("human:workspace:{}", record.topology_id.as_str())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Human,
+            crate::ExecutionProfile::Host,
+        ) => Ok(format!("human:host:{}", record.topology_id.as_str())),
+        (
+            agl_exec::CallerOwnerKind::Persistent,
+            agl_exec::CallerRole::Agent,
+            crate::ExecutionProfile::Workspace,
+        ) => Ok(format!(
+            "persistent-agent:workspace:{}",
+            record.topology_id.as_str()
+        )),
+        (
+            agl_exec::CallerOwnerKind::Ephemeral,
+            agl_exec::CallerRole::Agent,
+            crate::ExecutionProfile::Workspace,
+        ) => Ok(format!(
+            "ephemeral-agent:workspace:{}",
+            record.owner.caller().owner_id()
+        )),
         _ => Err(invalid_record(
             "terminal owner and profile do not map to an admitted topology slot",
         )),
@@ -151,6 +158,7 @@ pub enum TerminalReservation {
 /// `recover_for_new_owner` is called once when a new process owner opens the
 /// store and atomically converts every previously-live record to
 /// `outcome_unknown`; it never relaunches or claims to reattach a PTY.
+/// Persistence port implemented by the terminal service data owner.
 pub trait TerminalRepository: Send + Sync {
     fn reserve(&self, record: &StoredTerminalRecord) -> Result<TerminalReservation>;
 
@@ -314,7 +322,8 @@ pub fn validate_terminal_replacement(
     replacement.validate()?;
     if previous.record.terminal_id != replacement.record.terminal_id
         || previous.record.execution_id != replacement.record.execution_id
-        || previous.record.session_id != replacement.record.session_id
+        || previous.record.topology_id != replacement.record.topology_id
+        || previous.record.authority_scope != replacement.record.authority_scope
         || previous.record.profile != replacement.record.profile
         || previous.record.workspace_root != replacement.record.workspace_root
         || previous.record.shell_profile != replacement.record.shell_profile
@@ -366,23 +375,17 @@ fn validate_owner_transition(
     if previous.owner == replacement.owner {
         return Ok(false);
     }
-    match (&previous.owner, &replacement.owner) {
-        (
-            TerminalOwner::Subagent {
-                owner_run_id: previous_owner,
-                ..
-            },
-            TerminalOwner::SessionPromoted {
-                session_id,
-                previous_owner_run_id,
-            },
-        ) if session_id == &previous.session_id && previous_owner == previous_owner_run_id => {
-            Ok(true)
-        }
-        _ => Err(ProcessError::new(
+    if previous.owner.is_ephemeral()
+        && replacement.owner.is_persistent()
+        && replacement.owner.is_agent()
+        && replacement.owner.previous_owner() == Some(previous.owner.caller())
+    {
+        Ok(true)
+    } else {
+        Err(ProcessError::new(
             ProcessErrorCode::StateConflict,
-            "stored terminal owner may change only through exact subagent promotion",
-        )),
+            "stored terminal owner may change only through exact ephemeral-owner promotion",
+        ))
     }
 }
 
@@ -513,12 +516,26 @@ fn invalid_record(message: impl Into<String>) -> ProcessError {
 mod tests {
     use std::path::PathBuf;
 
-    use agl_ids::{RunId, SessionId};
-    use agl_terminal::TerminalId;
+    use crate::test_support::{RunId, SessionId};
+    use agl_exec::{CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, OpaqueOwnerId};
+    use agl_terminal::{TerminalId, TerminalOwner, TerminalTopologyId};
 
     use super::*;
     use crate::terminal::shell::{AdmittedShellKind, AdmittedShellProfile};
     use crate::{ExecutionProfile, ShellProfileSnapshot};
+
+    fn opaque(value: &str) -> OpaqueOwnerId {
+        OpaqueOwnerId::new(value).unwrap()
+    }
+
+    fn owner(value: &str, kind: CallerOwnerKind, role: CallerRole) -> CallerOwner {
+        CallerOwner::new(
+            CallerNamespace::new("agentlibre", 1).unwrap(),
+            opaque(value),
+            kind,
+            role,
+        )
+    }
 
     fn stored_terminal() -> StoredTerminalRecord {
         let session_id = SessionId::generate();
@@ -526,8 +543,13 @@ mod tests {
             record: TerminalRecord {
                 terminal_id: TerminalId::generate(),
                 execution_id: ExecutionId::generate(),
-                session_id: session_id.clone(),
-                owner: TerminalOwner::Human { session_id },
+                topology_id: TerminalTopologyId::new(opaque(session_id.as_str())),
+                owner: TerminalOwner::new(owner(
+                    session_id.as_str(),
+                    CallerOwnerKind::Persistent,
+                    CallerRole::Human,
+                )),
+                authority_scope: opaque(RunId::generate().as_str()),
                 profile: ExecutionProfile::Workspace,
                 workspace_root: PathBuf::from("/workspace"),
                 shell_profile: AdmittedShellProfile {
@@ -615,22 +637,23 @@ mod tests {
     fn only_exact_subagent_promotion_can_change_lifecycle_owner() {
         let repository = InMemoryTerminalRepository::new();
         let mut record = stored_terminal();
-        let session_id = record.record.session_id.clone();
-        let root_run_id = RunId::generate();
+        let session_id = record.record.topology_id.as_str().to_owned();
         let owner_run_id = RunId::generate();
-        record.record.owner = TerminalOwner::Subagent {
-            root_run_id,
-            owner_run_id: owner_run_id.clone(),
-        };
+        let previous = owner(
+            owner_run_id.as_str(),
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        );
+        record.record.owner = TerminalOwner::new(previous.clone());
         record.slot_key = terminal_slot_key(&record.record).unwrap();
         repository.reserve(&record).unwrap();
         record.record.state = TerminalState::Running;
         repository.replace(&record).unwrap();
 
-        record.record.owner = TerminalOwner::SessionPromoted {
-            session_id,
-            previous_owner_run_id: owner_run_id,
-        };
+        record.record.owner = TerminalOwner::promoted(
+            owner(&session_id, CallerOwnerKind::Persistent, CallerRole::Agent),
+            previous,
+        );
         record.slot_key = terminal_slot_key(&record.record).unwrap();
         repository.replace(&record).unwrap();
     }
@@ -689,10 +712,19 @@ mod tests {
 
         let mut invalid_promoted = stored_terminal();
         invalid_promoted.record.profile = crate::ExecutionProfile::Host;
-        invalid_promoted.record.owner = TerminalOwner::SessionPromoted {
-            session_id: invalid_promoted.record.session_id.clone(),
-            previous_owner_run_id: RunId::generate(),
-        };
+        let previous = owner(
+            RunId::generate().as_str(),
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        );
+        invalid_promoted.record.owner = TerminalOwner::promoted(
+            owner(
+                invalid_promoted.record.topology_id.as_str(),
+                CallerOwnerKind::Persistent,
+                CallerRole::Agent,
+            ),
+            previous,
+        );
         assert_eq!(
             invalid_promoted.validate().unwrap_err().code(),
             ProcessErrorCode::StoreCorrupt

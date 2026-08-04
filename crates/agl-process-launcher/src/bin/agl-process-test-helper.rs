@@ -1,3 +1,4 @@
+// Native launcher fixture; never installed with the private launcher.
 #[cfg(target_os = "linux")]
 mod linux {
     use std::env;

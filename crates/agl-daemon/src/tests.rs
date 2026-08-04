@@ -3025,6 +3025,10 @@ async fn human_terminal_monitor_reuses_one_reader_and_syncs_private_boundaries()
 fn application_execution_actions_reject_cross_session_ids() {
     use std::collections::BTreeMap;
 
+    use agl_exec::{
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
+        OpaqueOwnerId,
+    };
     use agl_process::ExecutionRepository as _;
 
     let test = TestRuntime::new();
@@ -3047,13 +3051,22 @@ fn application_execution_actions_reject_cross_session_ids() {
         .unwrap();
     let root_run_id = RunId::generate();
     let execution_id = ExecutionId::generate();
+    let creating_step_id = agl_ids::StepId::generate();
     let request = agl_process::ExecutionRequest {
-        owner: agl_process::ExecutionOwner::Session {
-            session_id: owner_session_id,
-            root_run_id: root_run_id.clone(),
-        },
-        creating_run_id: root_run_id,
-        creating_step_id: agl_ids::StepId::generate(),
+        owner: agl_process::ExecutionOwner::new(
+            CallerOwner::new(
+                CallerNamespace::new("agentlibre", 1).unwrap(),
+                OpaqueOwnerId::new(owner_session_id.as_str()).unwrap(),
+                CallerOwnerKind::Persistent,
+                CallerRole::Human,
+            ),
+            OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+        ),
+        correlation: ExecutionCorrelation::new(
+            CallerNamespace::new("agentlibre", 1).unwrap(),
+            OpaqueOwnerId::new(root_run_id.as_str()).unwrap(),
+            OpaqueOwnerId::new(creating_step_id.as_str()).unwrap(),
+        ),
         kind: agl_process::ExecutionKind::Argv,
         argv0: program.display().to_string(),
         program,

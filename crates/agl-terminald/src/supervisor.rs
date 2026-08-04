@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use agl_exec::{ExecutionId, ExecutionRequestId, WriterLeaseId};
+use agl_exec::{CallerOwnerKind, CallerRole, ExecutionId, ExecutionRequestId, WriterLeaseId};
 
-use crate::platform::{self, LaunchDirectories, LaunchedProcess};
 use crate::terminal::shell::{
     MAX_SHELL_INTEGRATION_FRAME_BYTES, ManagedShellIntegrationTransport, ManagedShellStartup,
 };
@@ -23,6 +22,7 @@ use crate::{
     ProcessErrorCode, ProcessSupervisorOptions, Result, ShellIntegrationReadResult, TerminalSize,
     WRITABLE_INPUT_LEASE_TTL,
 };
+use agl_pty::{self as platform, LaunchDirectories, LaunchedProcess};
 
 const MAX_BUFFERED_SHELL_INTEGRATION_BYTES: usize = 256 * 1024;
 const SHELL_INTEGRATION_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
@@ -156,8 +156,8 @@ enum Command {
         reason: TerminationReason,
         reply: Reply<usize>,
     },
-    TerminateRunGrants {
-        creating_run_id: agl_ids::RunId,
+    TerminateCorrelationGroupGrants {
+        correlation_group_id: agl_exec::OpaqueOwnerId,
         duration: String,
         reason: TerminationReason,
         reply: Reply<usize>,
@@ -341,7 +341,7 @@ impl ProcessSupervisor {
             next_retention_scan: Instant::now(),
         };
         let thread = thread::Builder::new()
-            .name("agl-process-reactor".to_owned())
+            .name("agl-terminald-reactor".to_owned())
             .spawn(move || reactor.run(receiver))
             .map_err(|error| {
                 ProcessError::new(
@@ -728,9 +728,9 @@ impl ProcessHandle {
         })
     }
 
-    pub fn expire_run_grants(
+    pub fn expire_correlation_group_grants(
         &self,
-        creating_run_id: &agl_ids::RunId,
+        correlation_group_id: &agl_exec::OpaqueOwnerId,
         duration: &str,
     ) -> Result<usize> {
         if duration.trim().is_empty() {
@@ -739,8 +739,8 @@ impl ProcessHandle {
                 "grant expiry requires a nonempty duration",
             ));
         }
-        self.request(|reply| Command::TerminateRunGrants {
-            creating_run_id: creating_run_id.clone(),
+        self.request(|reply| Command::TerminateCorrelationGroupGrants {
+            correlation_group_id: correlation_group_id.clone(),
             duration: duration.to_owned(),
             reason: TerminationReason::GrantExpired,
             reply,
@@ -1256,8 +1256,8 @@ impl Reactor {
                     .collect::<Vec<_>>();
                 let _ = reply.send(self.terminate_ids(ids, reason));
             }
-            Command::TerminateRunGrants {
-                creating_run_id,
+            Command::TerminateCorrelationGroupGrants {
+                correlation_group_id,
                 duration,
                 reason,
                 reply,
@@ -1266,7 +1266,7 @@ impl Reactor {
                     .active
                     .iter()
                     .filter(|(_, execution)| {
-                        execution.request.creating_run_id == creating_run_id
+                        execution.request.correlation.group_id() == &correlation_group_id
                             && execution.request.grant_lease.as_ref().is_some_and(|lease| {
                                 lease.is_capability_grant() && lease.duration == duration
                             })
@@ -1352,19 +1352,22 @@ impl Reactor {
         }
         let explicitly_reserved = reserved_execution_id.is_some();
         let execution_id = reserved_execution_id.unwrap_or_else(ExecutionId::generate);
-        let (directories, mut shell_integration, private_environment) =
-            if let Some(startup) = managed_startup {
-                let directories = self.execution_directories(&execution_id)?;
-                let (transport, private_environment) =
-                    startup.materialize(&mut request, &directories)?;
-                (
-                    Some(directories),
-                    Some(transport),
-                    Some(private_environment),
-                )
-            } else {
-                (None, None, None)
-            };
+        let (directories, mut shell_integration, private_environment) = if let Some(startup) =
+            managed_startup
+        {
+            let directories = self.execution_directories(&execution_id)?;
+            let materialized = startup.materialize(request.profile, &directories.private_home)?;
+            request.args = materialized.args;
+            request.environment.values.extend(materialized.environment);
+            request.validate()?;
+            (
+                Some(directories),
+                Some(materialized.transport),
+                Some(materialized.private_environment),
+            )
+        } else {
+            (None, None, None)
+        };
         let now = unix_millis();
         let status = ExecutionStatus {
             execution_id: execution_id.clone(),
@@ -1685,7 +1688,7 @@ impl Reactor {
                     "managed shell process identity exceeds Linux pid_t",
                 )
             })?;
-            platform::terminal_foreground_process_group(terminal, shell_process_group)?
+            agl_pty::terminal_foreground_process_group(terminal, shell_process_group)?
         } else {
             None
         };
@@ -1759,7 +1762,7 @@ impl Reactor {
                 "managed shell integration channel is closed",
             )
         })?;
-        if let Err(error) = platform::send_shell_integration_control(
+        if let Err(error) = agl_pty::send_shell_integration_control(
             socket,
             &bytes,
             SHELL_INTEGRATION_CONTROL_TIMEOUT,
@@ -2071,7 +2074,7 @@ impl Reactor {
             ));
         }
         if dimensions_unchanged {
-            platform::notify_terminal_resize(terminal)?;
+            agl_pty::notify_terminal_resize(terminal)?;
         }
         self.repository.update_terminal_size(
             execution_id,
@@ -2101,7 +2104,7 @@ impl Reactor {
                     "foreground interruption requires one live PTY execution",
                 )
             })?;
-        platform::interrupt_terminal_foreground(terminal)
+        agl_pty::interrupt_terminal_foreground(terminal)
     }
 
     fn handoff_managed_terminal_owner(
@@ -2117,34 +2120,30 @@ impl Reactor {
                 "only a live managed terminal can change runtime owner",
             ));
         }
-        let ExecutionOwner::Session {
-            root_run_id: next_root_run_id,
-            ..
-        } = &owner
-        else {
+        if owner.caller().owner_kind() != CallerOwnerKind::Persistent
+            || owner.caller().role() != CallerRole::Agent
+        {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
                 "managed terminal promotion requires a session runtime owner",
             ));
-        };
+        }
         let execution = self.active.get(execution_id).ok_or_else(not_live)?;
-        let ExecutionOwner::Run {
-            root_run_id: current_root_run_id,
-            ..
-        } = &execution.request.owner
-        else {
+        if execution.request.owner.caller().owner_kind() != CallerOwnerKind::Ephemeral
+            || execution.request.owner.caller().role() != CallerRole::Agent
+        {
             return Err(ProcessError::new(
                 ProcessErrorCode::StateConflict,
                 "only a run-owned managed terminal can be promoted",
             ));
-        };
+        }
         if execution.termination.is_some() {
             return Err(ProcessError::new(
                 ProcessErrorCode::ExecutionNotLive,
                 "managed terminal teardown won the promotion race",
             ));
         }
-        if current_root_run_id != next_root_run_id {
+        if execution.request.owner.authority_scope() != owner.authority_scope() {
             return Err(ProcessError::new(
                 ProcessErrorCode::ExecutionNotOwned,
                 "managed terminal promotion cannot cross its root run boundary",
@@ -2175,7 +2174,7 @@ impl Reactor {
                     "managed terminal promotion requires one live PTY execution",
                 )
             })?;
-            platform::interrupt_terminal_foreground(terminal)?;
+            agl_pty::interrupt_terminal_foreground(terminal)?;
         }
         // Durable admission keeps its original owner in this bounded slice.
         // Runtime teardown and control authorization use this private owner;
@@ -2398,15 +2397,15 @@ impl Reactor {
             let Some(socket) = integration.socket.as_ref() else {
                 break;
             };
-            match platform::receive_shell_integration_event(
+            match agl_pty::receive_shell_integration_event(
                 socket,
                 MAX_SHELL_INTEGRATION_FRAME_BYTES,
             ) {
-                Ok(platform::ShellIntegrationReceive::Event(bytes)) => {
+                Ok(agl_pty::ShellIntegrationReceive::Event(bytes)) => {
                     integration.ingest(bytes, output_through_sequence);
                 }
-                Ok(platform::ShellIntegrationReceive::Empty) => break,
-                Ok(platform::ShellIntegrationReceive::Closed) | Err(_) => {
+                Ok(agl_pty::ShellIntegrationReceive::Empty) => break,
+                Ok(agl_pty::ShellIntegrationReceive::Closed) | Err(_) => {
                     integration.close(true);
                     break;
                 }
@@ -3227,6 +3226,25 @@ fn exit_status(code: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{RunId, SessionId};
+
+    fn test_run_owner(
+        run_id: &crate::test_support::RunId,
+        root_run_id: &crate::test_support::RunId,
+    ) -> ExecutionOwner {
+        crate::test_support::run_owner(run_id, root_run_id)
+    }
+
+    fn test_session_owner(
+        session_id: &crate::test_support::SessionId,
+        root_run_id: &crate::test_support::RunId,
+    ) -> ExecutionOwner {
+        crate::test_support::session_owner(session_id, root_run_id, CallerRole::Agent)
+    }
+
+    fn test_correlation(run_id: &crate::test_support::RunId) -> agl_exec::ExecutionCorrelation {
+        crate::test_support::correlation(run_id, &crate::test_support::StepId::generate())
+    }
 
     struct ManagedReactorFixture {
         reactor: Reactor,
@@ -3264,19 +3282,13 @@ mod tests {
             Arc::new(crate::InMemoryExecutionRepository::new());
         let spool: Arc<dyn OutputSpool> =
             Arc::new(crate::FileOutputSpool::new(root.join("spool")).unwrap());
-        let root_run_id = agl_ids::RunId::generate();
-        let run_owner = ExecutionOwner::Run {
-            run_id: agl_ids::RunId::generate(),
-            root_run_id: root_run_id.clone(),
-        };
-        let session_owner = ExecutionOwner::Session {
-            session_id: agl_ids::SessionId::generate(),
-            root_run_id,
-        };
+        let root_run_id = RunId::generate();
+        let run_owner = test_run_owner(&RunId::generate(), &root_run_id);
+        let session_owner = test_session_owner(&SessionId::generate(), &root_run_id);
+        let creating_run_id = RunId::generate();
         let request = ExecutionRequest {
             owner: run_owner.clone(),
-            creating_run_id: agl_ids::RunId::generate(),
-            creating_step_id: agl_ids::StepId::generate(),
+            correlation: test_correlation(&creating_run_id),
             kind: crate::ExecutionKind::Shell,
             program: std::path::PathBuf::from("/bin/sh"),
             argv0: "/bin/sh".to_owned(),
@@ -3418,14 +3430,10 @@ mod tests {
                 config_digest: "sha256:test-bash".to_owned(),
             },
         };
-        let root_run_id = agl_ids::RunId::generate();
+        let root_run_id = RunId::generate();
         let request = ExecutionRequest {
-            owner: ExecutionOwner::Session {
-                session_id: agl_ids::SessionId::generate(),
-                root_run_id: root_run_id.clone(),
-            },
-            creating_run_id: root_run_id,
-            creating_step_id: agl_ids::StepId::generate(),
+            owner: test_session_owner(&SessionId::generate(), &root_run_id),
+            correlation: test_correlation(&root_run_id),
             kind: crate::ExecutionKind::Shell,
             argv0: program.display().to_string(),
             program,
@@ -3931,7 +3939,7 @@ mod tests {
         let event_fifo_path = root.join("integration-events.fifo");
         let control_fifo_path = root.join("integration-control.fifo");
         let transport =
-            platform::create_shell_integration_transport(&event_fifo_path, &control_fifo_path)
+            agl_pty::create_shell_integration_transport(&event_fifo_path, &control_fifo_path)
                 .unwrap();
         drop(transport.relay);
         let mut integration = ActiveShellIntegration::new(ManagedShellIntegrationTransport {
@@ -3996,11 +4004,8 @@ mod tests {
         let repository_impl = Arc::new(crate::InMemoryExecutionRepository::new());
         let repository: Arc<dyn ExecutionRepository> = repository_impl.clone();
         let execution_id = ExecutionId::generate();
-        let run_id = agl_ids::RunId::generate();
-        let owner = crate::ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id.clone(),
-        };
+        let run_id = RunId::generate();
+        let owner = test_run_owner(&run_id, &run_id);
         let status = ExecutionStatus {
             execution_id: execution_id.clone(),
             owner: owner.clone(),
@@ -4022,8 +4027,7 @@ mod tests {
         };
         let request = ExecutionRequest {
             owner,
-            creating_run_id: run_id,
-            creating_step_id: agl_ids::StepId::generate(),
+            correlation: test_correlation(&run_id),
             kind: crate::ExecutionKind::Argv,
             program: std::path::PathBuf::from("/bin/echo"),
             argv0: "/bin/echo".to_owned(),
@@ -4139,11 +4143,8 @@ mod tests {
         let repository_impl = Arc::new(crate::InMemoryExecutionRepository::new());
         let repository: Arc<dyn ExecutionRepository> = repository_impl.clone();
         let execution_id = ExecutionId::generate();
-        let run_id = agl_ids::RunId::generate();
-        let owner = crate::ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id.clone(),
-        };
+        let run_id = RunId::generate();
+        let owner = test_run_owner(&run_id, &run_id);
         let status = ExecutionStatus {
             execution_id: execution_id.clone(),
             owner: owner.clone(),
@@ -4165,8 +4166,7 @@ mod tests {
         };
         let request = ExecutionRequest {
             owner,
-            creating_run_id: run_id,
-            creating_step_id: agl_ids::StepId::generate(),
+            correlation: test_correlation(&run_id),
             kind: crate::ExecutionKind::Argv,
             program: std::path::PathBuf::from("/bin/sleep"),
             argv0: "/bin/sleep".to_owned(),
@@ -4535,15 +4535,11 @@ mod tests {
             spool,
         )
         .unwrap();
-        let run_id = agl_ids::RunId::generate();
-        let owner = crate::ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id.clone(),
-        };
+        let run_id = RunId::generate();
+        let owner = test_run_owner(&run_id, &run_id);
         let request = ExecutionRequest {
             owner,
-            creating_run_id: run_id,
-            creating_step_id: agl_ids::StepId::generate(),
+            correlation: test_correlation(&run_id),
             kind: crate::ExecutionKind::Argv,
             argv0: executable.display().to_string(),
             program: executable.clone(),
@@ -4582,9 +4578,8 @@ mod tests {
         assert!(
             repository_impl
                 .list(&ExecutionListFilter {
-                    session_id: None,
-                    root_run_id: None,
                     include_finished: true,
+                    ..ExecutionListFilter::default()
                 })
                 .unwrap()
                 .is_empty(),
@@ -4598,9 +4593,8 @@ mod tests {
             .start_cancellable(request.clone(), None, || {
                 cancellation_repository
                     .list(&ExecutionListFilter {
-                        session_id: None,
-                        root_run_id: None,
                         include_finished: true,
+                        ..ExecutionListFilter::default()
                     })
                     .is_ok_and(|statuses| !statuses.is_empty())
                     || started.elapsed() >= Duration::from_secs(1)
@@ -4610,9 +4604,8 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2));
         let statuses = repository_impl
             .list(&ExecutionListFilter {
-                session_id: None,
-                root_run_id: None,
                 include_finished: true,
+                ..ExecutionListFilter::default()
             })
             .unwrap();
         assert_eq!(statuses.len(), 1);
@@ -4635,9 +4628,8 @@ mod tests {
         assert!(deadline_started.elapsed() < Duration::from_secs(2));
         let statuses = repository_impl
             .list(&ExecutionListFilter {
-                session_id: None,
-                root_run_id: None,
                 include_finished: true,
+                ..ExecutionListFilter::default()
             })
             .unwrap();
         assert_eq!(statuses.len(), 2);

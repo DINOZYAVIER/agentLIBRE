@@ -1,3 +1,4 @@
+// Native owner-death fixture; never installed with the private launcher.
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::BTreeMap;
@@ -9,12 +10,18 @@ mod linux {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    use agl_ids::{RunId, StepId};
+    use agl_exec::{
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation,
+        ExecutionOwner, OpaqueOwnerId,
+    };
     use agl_process::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
-        ExecutionOwner, ExecutionProfile, ExecutionRequest, FileOutputSpool,
+        ExecutionProfile, ExecutionRequest, ExecutionRequestId, FileOutputSpool,
         InMemoryExecutionRepository, ProcessSupervisor, ProcessSupervisorOptions,
     };
+
+    type RunId = ExecutionRequestId;
+    type StepId = ExecutionRequestId;
 
     static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -70,14 +77,24 @@ mod linux {
         let supervisor = ProcessSupervisor::start(options, repository, spool)?;
         let handle = supervisor.handle();
         let run_id = RunId::generate();
-        let owner = ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id.clone(),
-        };
+        let namespace = CallerNamespace::new("agentlibre", 1)?;
+        let opaque_run = OpaqueOwnerId::new(run_id.as_str())?;
+        let owner = ExecutionOwner::new(
+            CallerOwner::new(
+                namespace.clone(),
+                opaque_run.clone(),
+                CallerOwnerKind::Ephemeral,
+                CallerRole::Agent,
+            ),
+            opaque_run.clone(),
+        );
         let request = ExecutionRequest {
             owner: owner.clone(),
-            creating_run_id: run_id,
-            creating_step_id: StepId::generate(),
+            correlation: ExecutionCorrelation::new(
+                namespace,
+                opaque_run,
+                OpaqueOwnerId::new(StepId::generate().as_str())?,
+            ),
             kind: ExecutionKind::Argv,
             program: helper.clone(),
             argv0: helper.display().to_string(),

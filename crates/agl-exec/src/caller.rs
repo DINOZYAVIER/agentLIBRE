@@ -170,6 +170,75 @@ pub struct CallerOwner {
     role: CallerRole,
 }
 
+/// Runtime ownership admitted by a caller. `authority_scope` is opaque to the
+/// execution service and exists only to fence lifecycle-owner handoff; no
+/// authority is inferred from its text.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionOwner {
+    caller: CallerOwner,
+    authority_scope: OpaqueOwnerId,
+}
+
+impl ExecutionOwner {
+    pub fn new(caller: CallerOwner, authority_scope: OpaqueOwnerId) -> Self {
+        Self {
+            caller,
+            authority_scope,
+        }
+    }
+
+    pub fn caller(&self) -> &CallerOwner {
+        &self.caller
+    }
+
+    pub fn authority_scope(&self) -> &OpaqueOwnerId {
+        &self.authority_scope
+    }
+
+    pub fn may_access(&self, requester: &Self) -> bool {
+        self.caller.namespace == requester.caller.namespace
+            && self.caller.owner_id == requester.caller.owner_id
+            && self.caller.owner_kind == requester.caller.owner_kind
+    }
+}
+
+/// Opaque caller correlation retained for cancellation and recovery mapping.
+/// The execution service compares these values but never parses agent IDs.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCorrelation {
+    namespace: CallerNamespace,
+    group_id: OpaqueOwnerId,
+    operation_id: OpaqueOwnerId,
+}
+
+impl ExecutionCorrelation {
+    pub fn new(
+        namespace: CallerNamespace,
+        group_id: OpaqueOwnerId,
+        operation_id: OpaqueOwnerId,
+    ) -> Self {
+        Self {
+            namespace,
+            group_id,
+            operation_id,
+        }
+    }
+
+    pub fn namespace(&self) -> &CallerNamespace {
+        &self.namespace
+    }
+
+    pub fn group_id(&self) -> &OpaqueOwnerId {
+        &self.group_id
+    }
+
+    pub fn operation_id(&self) -> &OpaqueOwnerId {
+        &self.operation_id
+    }
+}
+
 impl CallerOwner {
     pub fn new(
         namespace: CallerNamespace,
@@ -331,6 +400,41 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn execution_owner_and_correlation_are_opaque_exact_and_strict() {
+        let namespace = CallerNamespace::new("agentlibre", 1).unwrap();
+        let caller = CallerOwner::new(
+            namespace.clone(),
+            OpaqueOwnerId::new("opaque-run").unwrap(),
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        );
+        let owner = ExecutionOwner::new(
+            caller.clone(),
+            OpaqueOwnerId::new("opaque-authority-scope").unwrap(),
+        );
+        let peer = ExecutionOwner::new(
+            caller,
+            OpaqueOwnerId::new("another-authority-scope").unwrap(),
+        );
+        assert!(owner.may_access(&peer));
+        assert_ne!(owner.authority_scope(), peer.authority_scope());
+
+        let correlation = ExecutionCorrelation::new(
+            namespace,
+            OpaqueOwnerId::new("opaque-group").unwrap(),
+            OpaqueOwnerId::new("opaque-operation").unwrap(),
+        );
+        let encoded = serde_json::to_value(&correlation).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ExecutionCorrelation>(encoded.clone()).unwrap(),
+            correlation
+        );
+        let mut unknown = encoded.as_object().unwrap().clone();
+        unknown.insert("run_id".into(), serde_json::json!("run_opaque"));
+        assert!(serde_json::from_value::<ExecutionCorrelation>(unknown.into()).is_err());
     }
 
     #[test]

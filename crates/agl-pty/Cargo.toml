@@ -5,8 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+native-test-fixtures = []
+
 [dependencies]
 agl-exec.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+sha2.workspace = true

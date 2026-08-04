@@ -5,18 +5,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use agl_exec::{CallerNamespace, CallerOwnerKind, ExecutionCorrelation, OpaqueOwnerId};
+#[cfg(test)]
+use agl_exec::{CallerOwner, CallerRole};
 use agl_extension::{
     EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
 };
-use agl_ids::{ExecutionScope, SessionId, StepId};
+use agl_ids::{ExecutionScope, RunId, SessionId, StepId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
     ExecutionContextSnapshot, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionId,
     ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile,
     ExecutionRequest, ExecutionRequestId, HostStartupPolicy, KillMode, ProcessBytes,
     ProcessBytesEncoding, ProcessHandle, TerminalEnsureRequest, TerminalEnvironmentRequest,
-    TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize,
+    TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize, TerminalTopologyId,
     resolve_execution_directory,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -330,11 +333,12 @@ impl ProcessTools {
             .terminals
             .execute_agent_command_cancellable(
                 TerminalEnsureRequest {
-                    session_id: admission.durable_session_id,
+                    topology_id: TerminalTopologyId::new(OpaqueOwnerId::new(
+                        admission.durable_session_id.as_str(),
+                    )?),
                     owner,
-                    root_run_id,
-                    creating_run_id: invocation.scope.run_id().clone(),
-                    creating_step_id: creating_step_id(&invocation.scope)?,
+                    authority_scope: OpaqueOwnerId::new(root_run_id.as_str())?,
+                    correlation: execution_correlation(&invocation.scope)?,
                     context: admission.snapshot,
                     profile: ExecutionProfile::Workspace,
                     shell,
@@ -432,8 +436,7 @@ impl ProcessTools {
         let timeout_ms = self.timeout_ms(args.timeout_ms, true, context.control().remaining())?;
         let request = ExecutionRequest {
             owner: admission.owner.clone(),
-            creating_run_id: invocation.scope.run_id().clone(),
-            creating_step_id: creating_step_id(&invocation.scope)?,
+            correlation: execution_correlation(&invocation.scope)?,
             kind: ExecutionKind::Shell,
             argv0: shell.snapshot.program.display().to_string(),
             program: shell.snapshot.program,
@@ -564,8 +567,7 @@ impl ProcessTools {
         });
         let request = ExecutionRequest {
             owner: admission.owner.clone(),
-            creating_run_id: invocation.scope.run_id().clone(),
-            creating_step_id: creating_step_id(&invocation.scope)?,
+            correlation: execution_correlation(&invocation.scope)?,
             kind: ExecutionKind::Shell,
             program: admission.snapshot.shell.program.clone(),
             argv0: admission.snapshot.shell.program.display().to_string(),
@@ -776,8 +778,7 @@ impl ProcessTools {
             self.timeout_ms(args.timeout_ms, foreground, context.control().remaining())?;
         Ok(ExecutionRequest {
             owner: admission.owner,
-            creating_run_id: invocation.scope.run_id().clone(),
-            creating_step_id: creating_step_id(&invocation.scope)?,
+            correlation: execution_correlation(&invocation.scope)?,
             kind: ExecutionKind::Argv,
             program: resolved_program.executable,
             argv0: resolved_program.argv0,
@@ -1230,33 +1231,48 @@ fn frozen_base_environment(
 fn terminal_owner(
     admission: &ProcessExecutionAdmission,
 ) -> Result<(TerminalOwner, agl_ids::RunId)> {
-    match &admission.owner {
-        ExecutionOwner::Session {
-            session_id,
-            root_run_id,
-        } => {
+    let caller = admission.owner.caller();
+    let root_run_id = RunId::parse(admission.owner.authority_scope().as_str())
+        .context("execution authority scope is not an agent run ID")?;
+    match caller.owner_kind() {
+        CallerOwnerKind::Persistent => {
+            let session_id = SessionId::parse(caller.owner_id().as_str())
+                .context("persistent execution owner is not an agent session ID")?;
             ensure!(
-                session_id == &admission.durable_session_id,
+                session_id == admission.durable_session_id,
                 "session process owner differs from its durable terminal session"
             );
-            Ok((
-                TerminalOwner::MainAgent {
-                    session_id: session_id.clone(),
-                },
-                root_run_id.clone(),
-            ))
+            Ok((TerminalOwner::new(caller.clone()), root_run_id))
         }
-        ExecutionOwner::Run {
-            run_id,
-            root_run_id,
-        } => Ok((
-            TerminalOwner::Subagent {
-                root_run_id: root_run_id.clone(),
-                owner_run_id: run_id.clone(),
-            },
-            root_run_id.clone(),
-        )),
+        CallerOwnerKind::Ephemeral => {
+            let run_id = RunId::parse(caller.owner_id().as_str())
+                .context("ephemeral execution owner is not an agent run ID")?;
+            let _ = run_id;
+            Ok((TerminalOwner::new(caller.clone()), root_run_id))
+        }
+        CallerOwnerKind::Service => bail!("service execution owners do not own agent terminals"),
     }
+}
+
+fn execution_correlation(scope: &ExecutionScope) -> Result<ExecutionCorrelation> {
+    Ok(ExecutionCorrelation::new(
+        CallerNamespace::new("agentlibre", 1)?,
+        OpaqueOwnerId::new(scope.run_id().as_str())?,
+        OpaqueOwnerId::new(creating_step_id(scope)?.as_str())?,
+    ))
+}
+
+#[cfg(test)]
+fn agent_run_owner(run_id: &RunId, root_run_id: &RunId) -> Result<ExecutionOwner> {
+    Ok(ExecutionOwner::new(
+        CallerOwner::new(
+            CallerNamespace::new("agentlibre", 1)?,
+            OpaqueOwnerId::new(run_id.as_str())?,
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        ),
+        OpaqueOwnerId::new(root_run_id.as_str())?,
+    ))
 }
 
 fn admitted_agent_shell(snapshot: &ExecutionContextSnapshot) -> Result<AdmittedShellProfile> {
@@ -1282,8 +1298,8 @@ fn admitted_agent_shell(snapshot: &ExecutionContextSnapshot) -> Result<AdmittedS
 }
 
 fn canonical_terminal_runtime_roots(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut roots = agl_process::process_standard_runtime_roots()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let mut roots =
+        agl_pty::standard_runtime_roots().map_err(|error| anyhow::anyhow!(error.to_string()))?;
     for root in configured {
         let canonical = root.canonicalize().with_context(|| {
             format!(
@@ -2813,10 +2829,7 @@ mod tests {
         std::fs::create_dir_all(root.join("state")).unwrap();
         let workspace = root.join("workspace").canonicalize().unwrap();
         let run_id = RunId::generate();
-        let owner = ExecutionOwner::Run {
-            run_id: run_id.clone(),
-            root_run_id: run_id.clone(),
-        };
+        let owner = agent_run_owner(&run_id, &run_id).unwrap();
         let execution_context = Arc::new(TestExecutionContext {
             snapshot: Mutex::new(ExecutionContextSnapshot {
                 workspace_root: workspace.clone(),

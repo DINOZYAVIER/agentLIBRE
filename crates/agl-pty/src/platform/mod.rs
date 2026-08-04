@@ -13,11 +13,9 @@ use agl_exec::ExecutionId;
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 
-use crate::ProcessPlatformDiagnostics;
+use crate::{PrivateLaunchEnvironment, ProcessPlatformDiagnostics};
 #[cfg(target_os = "linux")]
-use crate::terminal::environment::PrivateTerminalEnvironment;
-#[cfg(target_os = "linux")]
-use crate::{ExecutionIo, ExecutionRequest, ProcessError, ProcessErrorCode, Result};
+use agl_exec::{ExecutionIo, ExecutionRequest, ProcessError, ProcessErrorCode, Result};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -31,7 +29,8 @@ const LAUNCHER_PROTOCOL_VERSION: &str =
 const LAUNCHER_BUILD_ID: &str = env!("AGL_PROCESS_BUILD_ID");
 
 #[cfg(target_os = "linux")]
-pub(crate) struct LaunchDirectories {
+#[doc(hidden)]
+pub struct LaunchDirectories {
     pub execution_root: PathBuf,
     pub private_home: PathBuf,
     pub private_tmp: PathBuf,
@@ -125,16 +124,17 @@ fn validate_launcher_identity(protocol_version: &str, build_id: &str) -> Result<
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::LaunchedProcess;
+pub use linux::LaunchedProcess;
 
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn launch(
+#[doc(hidden)]
+pub fn launch(
     launcher_path: &Path,
     execution_id: &ExecutionId,
     request: &ExecutionRequest,
     directories: &LaunchDirectories,
-    private_environment: Option<PrivateTerminalEnvironment>,
+    private_environment: Option<PrivateLaunchEnvironment>,
     shell_integration_relay: Option<OwnedFd>,
     setup_timeout: Duration,
     cancelled: &AtomicBool,
@@ -163,87 +163,11 @@ pub(crate) fn launch(
     )
 }
 
-#[cfg(target_os = "linux")]
-pub(crate) use linux::{ShellIntegrationReceive, ShellIntegrationSocketPair};
-
-#[cfg(target_os = "linux")]
-pub(crate) fn create_shell_integration_transport(
-    event_path: &Path,
-    control_path: &Path,
-) -> Result<ShellIntegrationSocketPair> {
-    linux::create_shell_integration_transport(event_path, control_path)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn receive_shell_integration_event(
-    socket: &OwnedFd,
-    maximum_frame_bytes: usize,
-) -> Result<ShellIntegrationReceive> {
-    linux::receive_shell_integration_event(socket, maximum_frame_bytes)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn send_shell_integration_control(
-    socket: &OwnedFd,
-    frame: &[u8],
-    timeout: Duration,
-) -> Result<()> {
-    linux::send_shell_integration_control(socket, frame, timeout)
-}
-
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) fn run_shell_integration_relay(
-    socket: OwnedFd,
-    terminal_slave: std::os::fd::RawFd,
-    event_path: &Path,
-    control_path: &Path,
-    maximum_frame_bytes: usize,
-) -> i32 {
-    linux::run_shell_integration_relay(
-        socket,
-        terminal_slave,
-        event_path,
-        control_path,
-        maximum_frame_bytes,
-    )
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn interrupt_terminal_foreground(terminal: &OwnedFd) -> Result<()> {
-    linux::interrupt_terminal_foreground(terminal)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn notify_terminal_resize(terminal: &OwnedFd) -> Result<()> {
-    linux::notify_terminal_resize(terminal)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn terminal_foreground_process_group(
-    terminal: &OwnedFd,
-    shell_process_group: i32,
-) -> Result<Option<i32>> {
-    linux::terminal_foreground_process_group(terminal, shell_process_group)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn standard_runtime_roots() -> Result<Vec<PathBuf>> {
-    linux::standard_runtime_roots()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn standard_runtime_roots() -> crate::Result<Vec<std::path::PathBuf>> {
-    Err(crate::ProcessError::new(
-        crate::ProcessErrorCode::PlatformUnsupported,
-        "standard process runtime roots are available only on Linux",
-    ))
-}
-
 pub fn diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
     platform_diagnostics(launcher_path)
 }
 
-pub(crate) fn verify_launcher_binary_identity(launcher_path: &Path) -> crate::Result<()> {
+pub fn verify_launcher_binary_identity(launcher_path: &Path) -> Result<()> {
     platform_verify_launcher_binary_identity(launcher_path)
 }
 
@@ -253,7 +177,7 @@ fn platform_diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
 }
 
 #[cfg(target_os = "linux")]
-fn platform_verify_launcher_binary_identity(launcher_path: &Path) -> crate::Result<()> {
+fn platform_verify_launcher_binary_identity(launcher_path: &Path) -> Result<()> {
     linux::verify_launcher_identity(launcher_path)
 }
 
@@ -263,9 +187,9 @@ fn platform_diagnostics(launcher_path: &Path) -> ProcessPlatformDiagnostics {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn platform_verify_launcher_binary_identity(_launcher_path: &Path) -> crate::Result<()> {
-    Err(crate::ProcessError::new(
-        crate::ProcessErrorCode::PlatformUnsupported,
+fn platform_verify_launcher_binary_identity(_launcher_path: &Path) -> Result<()> {
+    Err(ProcessError::new(
+        ProcessErrorCode::PlatformUnsupported,
         "process launcher identity verification is supported only on Linux",
     ))
 }

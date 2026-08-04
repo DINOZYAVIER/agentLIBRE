@@ -1,61 +1,18 @@
 use std::path::{Path, PathBuf};
 
-use agl_ids::{RunId, SessionId, StepId};
 use serde::{Deserialize, Serialize};
 
-use crate::{ProcessBytes, ProcessError, ProcessErrorCode, Result};
-pub use agl_exec::{
-    EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,
-    ExecutionLeaseOrigin, ExecutionLimits, ExecutionProfile,
-    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ShellProfileSnapshot, TerminalSize,
+use crate::{
+    EnvironmentOverride, ExecutionAuthorization, ExecutionCorrelation, ExecutionGrantLease,
+    ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile, ProcessBytes,
+    ProcessError, ProcessErrorCode, Result, TerminalSize,
 };
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionOwner {
-    Session {
-        session_id: SessionId,
-        root_run_id: RunId,
-    },
-    Run {
-        run_id: RunId,
-        root_run_id: RunId,
-    },
-}
-
-impl ExecutionOwner {
-    pub fn may_access(&self, requester: &Self) -> bool {
-        match (self, requester) {
-            (
-                Self::Session { session_id, .. },
-                Self::Session {
-                    session_id: requester,
-                    ..
-                },
-            ) => session_id == requester,
-            (
-                Self::Run { run_id, .. },
-                Self::Run {
-                    run_id: requester, ..
-                },
-            ) => run_id == requester,
-            _ => false,
-        }
-    }
-
-    pub fn root_run_id(&self) -> &RunId {
-        match self {
-            Self::Session { root_run_id, .. } | Self::Run { root_run_id, .. } => root_run_id,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRequest {
     pub owner: ExecutionOwner,
-    pub creating_run_id: RunId,
-    pub creating_step_id: StepId,
+    pub correlation: ExecutionCorrelation,
     pub kind: ExecutionKind,
     pub program: PathBuf,
     pub argv0: String,
@@ -235,15 +192,36 @@ fn validate_canonical_path(path: &Path, label: &str) -> Result<()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use agl_exec::ExecutionId;
+    use crate::{
+        CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId,
+        ExecutionLeaseOrigin, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OpaqueOwnerId,
+        ShellProfileSnapshot,
+    };
 
     use super::*;
 
     fn owner() -> ExecutionOwner {
-        ExecutionOwner::Run {
-            run_id: RunId::generate(),
-            root_run_id: RunId::generate(),
-        }
+        owner_with_id("owner")
+    }
+
+    fn owner_with_id(owner_id: &str) -> ExecutionOwner {
+        ExecutionOwner::new(
+            CallerOwner::new(
+                CallerNamespace::new("test", 1).unwrap(),
+                OpaqueOwnerId::new(owner_id).unwrap(),
+                CallerOwnerKind::Ephemeral,
+                CallerRole::Agent,
+            ),
+            OpaqueOwnerId::new("authority").unwrap(),
+        )
+    }
+
+    fn correlation() -> ExecutionCorrelation {
+        ExecutionCorrelation::new(
+            CallerNamespace::new("test", 1).unwrap(),
+            OpaqueOwnerId::new("group").unwrap(),
+            OpaqueOwnerId::new("operation").unwrap(),
+        )
     }
 
     fn workspace() -> PathBuf {
@@ -258,7 +236,7 @@ mod tests {
     fn owner_access_is_exact_and_never_uses_execution_identity_as_pid_authority() {
         let execution_owner = owner();
         assert!(execution_owner.may_access(&execution_owner));
-        assert!(!execution_owner.may_access(&owner()));
+        assert!(!execution_owner.may_access(&owner_with_id("other-owner")));
         assert!(ExecutionId::generate().as_str().starts_with("exec_"));
     }
 
@@ -266,8 +244,7 @@ mod tests {
     fn exact_argv_metacharacters_are_accepted_as_data() {
         let request = ExecutionRequest {
             owner: owner(),
-            creating_run_id: RunId::generate(),
-            creating_step_id: StepId::generate(),
+            correlation: correlation(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
             argv0: "/bin/echo".to_owned(),
@@ -383,8 +360,7 @@ mod tests {
     fn terminal_size_is_rejected_for_pipes() {
         let mut request = ExecutionRequest {
             owner: owner(),
-            creating_run_id: RunId::generate(),
-            creating_step_id: StepId::generate(),
+            correlation: correlation(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
             argv0: "/bin/echo".to_owned(),
@@ -429,8 +405,7 @@ mod tests {
     fn host_profile_requires_explicit_typed_authority() {
         let mut request = ExecutionRequest {
             owner: owner(),
-            creating_run_id: RunId::generate(),
-            creating_step_id: StepId::generate(),
+            correlation: correlation(),
             kind: ExecutionKind::Argv,
             program: PathBuf::from("/bin/echo"),
             argv0: "/bin/echo".to_owned(),

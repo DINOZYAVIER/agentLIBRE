@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-const BUILD_ID_DOMAIN: &[u8] = b"agl-process-build-identity-v2\0";
-const BUILD_INPUTS: [&str; 7] = [
+const BUILD_ID_DOMAIN: &[u8] = b"agl-pty-launcher-build-identity-v1\0";
+const BUILD_INPUTS: [&str; 8] = [
     "Cargo.toml",
     "Cargo.lock",
-    "crates/agl-ids/Cargo.toml",
-    "crates/agl-ids/src",
+    "crates/agl-exec/Cargo.toml",
+    "crates/agl-exec/src",
+    "crates/agl-pty/Cargo.toml",
+    "crates/agl-pty/build.rs",
+    "crates/agl-pty/src",
     "crates/agl-process/Cargo.toml",
-    "crates/agl-process/build.rs",
-    "crates/agl-process/src",
 ];
 const BUILD_ENV_INPUTS: [&str; 6] = [
     "TARGET",
@@ -25,12 +26,12 @@ const BUILD_ENV_INPUTS: [&str; 6] = [
 fn main() {
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR")
-            .expect("Cargo must provide CARGO_MANIFEST_DIR to agl-process/build.rs"),
+            .expect("Cargo must provide CARGO_MANIFEST_DIR to agl-pty/build.rs"),
     );
     let workspace_root = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .expect("agl-process must remain below the workspace crates directory");
+        .expect("agl-pty must remain below the workspace crates directory");
     let mut inputs = Vec::new();
 
     for relative in BUILD_INPUTS {
@@ -78,7 +79,7 @@ fn collect_regular_files(root: &Path, path: &Path, inputs: &mut Vec<(String, Pat
     });
     if metadata.file_type().is_symlink() {
         panic!(
-            "agl-process build identity input must not be a symlink: {}",
+            "agl-pty build identity input must not be a symlink: {}",
             path.display()
         );
     }
@@ -100,7 +101,7 @@ fn collect_regular_files(root: &Path, path: &Path, inputs: &mut Vec<(String, Pat
     }
     if !metadata.is_dir() {
         panic!(
-            "agl-process build identity input must be a regular file or directory: {}",
+            "agl-pty build identity input must be a regular file or directory: {}",
             path.display()
         );
     }

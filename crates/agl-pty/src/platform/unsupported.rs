@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use crate::{ProcessErrorCode, ProcessPlatformDiagnostics};
+use crate::ProcessPlatformDiagnostics;
+use agl_exec::ProcessErrorCode;
 
 pub(crate) fn diagnostics(_launcher_path: &Path) -> ProcessPlatformDiagnostics {
     ProcessPlatformDiagnostics {

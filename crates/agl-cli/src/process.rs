@@ -475,16 +475,14 @@ fn print_execution_detail(status: &ExecutionStatus) {
 }
 
 fn owner_label(owner: &ExecutionOwner) -> String {
-    match owner {
-        ExecutionOwner::Session {
-            session_id,
-            root_run_id,
-        } => format!("session:{session_id}@{root_run_id}"),
-        ExecutionOwner::Run {
-            run_id,
-            root_run_id,
-        } => format!("run:{run_id}@{root_run_id}"),
-    }
+    format!(
+        "{}@{}:{:?}:{}@{}",
+        owner.caller().namespace().name(),
+        owner.caller().namespace().version(),
+        owner.caller().owner_kind(),
+        owner.caller().owner_id(),
+        owner.authority_scope(),
+    )
 }
 
 fn age_label(status: &ExecutionStatus) -> String {

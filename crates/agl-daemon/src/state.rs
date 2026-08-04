@@ -29,6 +29,9 @@ use agl_chat::{
     shared_terminal_registry,
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
+use agl_exec::{
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionOwner, OpaqueOwnerId,
+};
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::worker_protocol::WORKER_BUILD_ID;
@@ -42,12 +45,12 @@ use agl_inference::{
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionAuthorization, ExecutionCursor,
     ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
-    ExecutionOwner, ExecutionProfile, ExecutionState,
-    HostStartupPolicy as ProcessHostStartupPolicy, HumanShellHistoryStore, InputLease, KillMode,
-    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, ProcessError, ProcessErrorCode, TerminalEnsureRequest,
-    TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalOwner,
-    TerminalPromptState as ProcessTerminalPromptState, TerminalRecord, TerminalRegistry,
-    TerminalSecretReference, TerminalState, sanitize_terminal_card_output,
+    ExecutionProfile, ExecutionState, HostStartupPolicy as ProcessHostStartupPolicy,
+    HumanShellHistoryStore, InputLease, KillMode, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION,
+    ProcessError, ProcessErrorCode, TerminalEnsureRequest, TerminalEnvironmentRequest,
+    TerminalEnvironmentValue, TerminalOwner, TerminalPromptState as ProcessTerminalPromptState,
+    TerminalRecord, TerminalRegistry, TerminalSecretReference, TerminalState, TerminalTopologyId,
+    sanitize_terminal_card_output,
 };
 use agl_protocol::{
     DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
@@ -865,11 +868,11 @@ impl DaemonState {
     ) -> Result<DaemonEventKind, ProtocolError> {
         let executions = self
             .process_handle
-            .operator_list(ExecutionListFilter {
-                session_id: request.session_id,
-                root_run_id: request.root_run_id,
-                include_finished: request.include_finished,
-            })
+            .operator_list(agent_execution_filter(
+                request.session_id.as_ref(),
+                request.root_run_id.as_ref(),
+                request.include_finished,
+            ))
             .map_err(process_error)?;
         Ok(DaemonEventKind::ExecutionList(ExecutionListEvent {
             executions,
@@ -1564,12 +1567,10 @@ impl DaemonState {
         let admission_fingerprint = human_terminal_admission_fingerprint(&request)?;
         for record in self
             .terminal_registry
-            .list_session(&request.session_id)
+            .list_topology(&terminal_topology_id(&request.session_id))
             .map_err(terminal_application_error)?
         {
-            if record.profile != request.profile
-                || !matches!(record.owner, TerminalOwner::Human { .. })
-            {
+            if record.profile != request.profile || !record.owner.is_human() {
                 continue;
             }
             let refreshed = self
@@ -1651,13 +1652,13 @@ impl DaemonState {
         };
         let registered = self
             .terminal_registry
-            .list_session(&request.session_id)
+            .list_topology(&terminal_topology_id(&request.session_id))
             .map_err(terminal_application_error)?;
         if registered.len() >= agl_app::MAX_TERMINALS_PER_SESSION
             && !registered.iter().any(|record| {
                 record.profile == request.profile
                     && record.state.is_live()
-                    && matches!(&record.owner, TerminalOwner::Human { .. })
+                    && record.owner.is_human()
             })
         {
             return Err(ApplicationError::new(
@@ -1673,13 +1674,18 @@ impl DaemonState {
         let record = self
             .terminal_registry
             .ensure_terminal(TerminalEnsureRequest {
-                session_id: request.session_id.clone(),
-                owner: TerminalOwner::Human {
-                    session_id: request.session_id.clone(),
-                },
-                root_run_id: root_run_id.clone(),
-                creating_run_id: root_run_id,
-                creating_step_id: StepId::generate(),
+                topology_id: terminal_topology_id(&request.session_id),
+                owner: TerminalOwner::new(agent_caller_owner(
+                    request.session_id.as_str(),
+                    CallerOwnerKind::Persistent,
+                    CallerRole::Human,
+                )),
+                authority_scope: opaque_agent_id(root_run_id.as_str()),
+                correlation: agl_exec::ExecutionCorrelation::new(
+                    agent_caller_namespace(),
+                    opaque_agent_id(root_run_id.as_str()),
+                    opaque_agent_id(StepId::generate().as_str()),
+                ),
                 context: session.execution_context,
                 profile: request.profile,
                 shell,
@@ -1789,7 +1795,7 @@ impl DaemonState {
         let admission = self
             .terminal_registry
             .admit_human_command(
-                &request.session_id,
+                &terminal_topology_id(&request.session_id),
                 &request.terminal_id,
                 request.expected_command_sequence,
                 request.expected_prompt_generation,
@@ -2062,7 +2068,7 @@ impl DaemonState {
         if self.monitored_terminals.contains(&record.terminal_id) {
             return Ok(());
         }
-        if !matches!(record.owner, TerminalOwner::Human { .. }) {
+        if !record.owner.is_human() {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::TerminalOwnerMismatch,
                 "Human terminal monitor requires a Human-owned terminal",
@@ -2070,7 +2076,7 @@ impl DaemonState {
         }
         let spec = ShellMonitorSpec {
             terminal_id: record.terminal_id.clone(),
-            session_id: record.session_id.clone(),
+            session_id: session_id_from_topology(&record.topology_id)?,
             workspace_root: record.workspace_root.clone(),
             initial_command_sequence: record.command_sequence,
             registry: Arc::clone(&self.terminal_registry),
@@ -2165,7 +2171,7 @@ impl DaemonState {
     ) -> Result<Vec<TerminalRecord>, ApplicationError> {
         let records = self
             .terminal_registry
-            .list_session(session_id)
+            .list_topology(&terminal_topology_id(session_id))
             .map_err(terminal_application_error)?;
         if records.len() > agl_app::MAX_TERMINALS_PER_SESSION {
             return Err(ApplicationError::new(
@@ -2203,7 +2209,7 @@ impl DaemonState {
 
         if let Some(canonical) = requested_cwd {
             cwd_consumed = true;
-            let Some(owner_session_id) = record.owner.human_session_id() else {
+            if !record.owner.accepts_human_control() {
                 return Ok(TerminalMonitorProjection {
                     terminal: include_terminal
                         .then(|| self.terminal_view(&record))
@@ -2211,8 +2217,9 @@ impl DaemonState {
                     header: None,
                     cwd_consumed: true,
                 });
-            };
-            let Some(session) = self.sessions.get(owner_session_id).cloned() else {
+            }
+            let owner_session_id = session_id_from_topology(&record.topology_id)?;
+            let Some(session) = self.sessions.get(&owner_session_id).cloned() else {
                 return Ok(TerminalMonitorProjection {
                     terminal: include_terminal
                         .then(|| self.terminal_view(&record))
@@ -2230,30 +2237,32 @@ impl DaemonState {
                 let expected_root = record.workspace_root.clone();
                 let expected_revision = session.execution_context.revision;
                 let requested = canonical.to_path_buf();
-                match self.chat_factory.with_session(owner_session_id, |service| {
-                    let current = service.execution_context().clone();
-                    if current.workspace_root != expected_root {
-                        return Ok(TerminalCwdDecision::Ignore);
-                    }
-                    if current.revision < expected_revision {
-                        return Ok(TerminalCwdDecision::Retry);
-                    }
-                    if current.working_directory == requested {
-                        return Ok(TerminalCwdDecision::Applied(Box::new(current)));
-                    }
-                    service
-                        .set_working_directory(&requested, false)
-                        .map(|context| TerminalCwdDecision::Applied(Box::new(context.clone())))
-                }) {
+                match self
+                    .chat_factory
+                    .with_session(&owner_session_id, |service| {
+                        let current = service.execution_context().clone();
+                        if current.workspace_root != expected_root {
+                            return Ok(TerminalCwdDecision::Ignore);
+                        }
+                        if current.revision < expected_revision {
+                            return Ok(TerminalCwdDecision::Retry);
+                        }
+                        if current.working_directory == requested {
+                            return Ok(TerminalCwdDecision::Applied(Box::new(current)));
+                        }
+                        service
+                            .set_working_directory(&requested, false)
+                            .map(|context| TerminalCwdDecision::Applied(Box::new(context.clone())))
+                    }) {
                     Ok(TerminalCwdDecision::Applied(context))
                         if context.revision >= expected_revision =>
                     {
                         self.sessions
-                            .get_mut(owner_session_id)
+                            .get_mut(&owner_session_id)
                             .expect("terminal owner session was checked above")
                             .execution_context = *context;
                         header = self
-                            .application_snapshot(owner_session_id)
+                            .application_snapshot(&owner_session_id)
                             .ok()
                             .map(|snapshot| snapshot.header);
                     }
@@ -2282,29 +2291,46 @@ impl DaemonState {
             .process_handle
             .operator_status(&record.execution_id)
             .map_err(terminal_application_error)?;
-        let owner = match &record.owner {
-            TerminalOwner::Human { session_id } => TerminalOwnerView::Human {
+        let session_id = session_id_from_topology(&record.topology_id)?;
+        let promoted = record.owner.previous_owner().is_some();
+        let owner = if let Some(previous) = record.owner.previous_owner() {
+            TerminalOwnerView::SessionPromoted {
                 session_id: session_id.clone(),
-            },
-            TerminalOwner::MainAgent { session_id } => TerminalOwnerView::MainAgent {
+                previous_owner_run_id: RunId::parse(previous.owner_id().as_str()).map_err(
+                    |_| {
+                        ApplicationError::new(
+                            ApplicationErrorCode::Internal,
+                            "invalid promoted terminal owner mapping",
+                        )
+                    },
+                )?,
+            }
+        } else if record.owner.is_human() {
+            TerminalOwnerView::Human {
                 session_id: session_id.clone(),
-            },
-            TerminalOwner::Subagent {
-                root_run_id,
-                owner_run_id,
-            } => TerminalOwnerView::Subagent {
-                root_run_id: root_run_id.clone(),
-                owner_run_id: owner_run_id.clone(),
-            },
-            TerminalOwner::SessionPromoted {
-                session_id,
-                previous_owner_run_id,
-            } => TerminalOwnerView::SessionPromoted {
+            }
+        } else if record.owner.is_persistent() {
+            TerminalOwnerView::MainAgent {
                 session_id: session_id.clone(),
-                previous_owner_run_id: previous_owner_run_id.clone(),
-            },
+            }
+        } else {
+            TerminalOwnerView::Subagent {
+                root_run_id: RunId::parse(record.authority_scope.as_str()).map_err(|_| {
+                    ApplicationError::new(
+                        ApplicationErrorCode::Internal,
+                        "invalid terminal authority mapping",
+                    )
+                })?,
+                owner_run_id: RunId::parse(record.owner.caller().owner_id().as_str()).map_err(
+                    |_| {
+                        ApplicationError::new(
+                            ApplicationErrorCode::Internal,
+                            "invalid ephemeral terminal owner mapping",
+                        )
+                    },
+                )?,
+            }
         };
-        let promoted = matches!(record.owner, TerminalOwner::SessionPromoted { .. });
         let view = TerminalSessionView {
             terminal_id: record.terminal_id.clone(),
             execution_id: record.execution_id.clone(),
@@ -2339,7 +2365,7 @@ impl DaemonState {
             },
             promoted,
         };
-        view.validate_for_session(&record.session_id)?;
+        view.validate_for_session(&session_id)?;
         Ok(view)
     }
 
@@ -2360,11 +2386,7 @@ impl DaemonState {
             .count();
         let execution_count = self
             .process_handle
-            .operator_list(ExecutionListFilter {
-                session_id: Some(session_id.clone()),
-                root_run_id: None,
-                include_finished: false,
-            })
+            .operator_list(agent_execution_filter(Some(session_id), None, false))
             .map_err(application_process_error)?
             .into_iter()
             .filter(|status| !terminal_execution_ids.contains(&status.execution_id))
@@ -2411,11 +2433,7 @@ impl DaemonState {
             .collect::<Vec<_>>();
         let other_executions = self
             .process_handle
-            .operator_list(ExecutionListFilter {
-                session_id: Some(session_id.clone()),
-                root_run_id: None,
-                include_finished: false,
-            })
+            .operator_list(agent_execution_filter(Some(session_id), None, false))
             .map_err(application_process_error)?
             .into_iter()
             .filter(|status| !terminal_execution_ids.contains(&status.execution_id))
@@ -2776,15 +2794,11 @@ impl DaemonState {
             .collect::<Result<Vec<_>, _>>()?;
         let statuses = self
             .process_handle
-            .operator_list(ExecutionListFilter {
-                session_id: Some(session_id.clone()),
-                root_run_id: None,
-                include_finished: true,
-            })
+            .operator_list(agent_execution_filter(Some(session_id), None, true))
             .map_err(application_process_error)?;
         let mut executions = Vec::new();
         for status in statuses {
-            if !matches!(status.owner, ExecutionOwner::Session { .. }) {
+            if status.owner.caller().owner_kind() != CallerOwnerKind::Persistent {
                 continue;
             }
             executions.push(ExecutionView {
@@ -3428,11 +3442,7 @@ impl DaemonState {
                     });
                 };
                 self.process_handle
-                    .operator_list(ExecutionListFilter {
-                        session_id: Some(session_id),
-                        root_run_id: None,
-                        include_finished: true,
-                    })
+                    .operator_list(agent_execution_filter(Some(&session_id), None, true))
                     .map_err(application_process_error)?
                     .into_iter()
                     .filter(|status| {
@@ -3726,7 +3736,7 @@ impl DaemonState {
                             .terminal_registry
                             .record(&terminal_id)
                             .map_err(terminal_application_error)?;
-                        if current.session_id != session_id {
+                        if current.topology_id != terminal_topology_id(&session_id) {
                             return Err(ApplicationError::new(
                                 ApplicationErrorCode::TerminalOwnerMismatch,
                                 "terminal belongs to a different durable session",
@@ -3734,7 +3744,15 @@ impl DaemonState {
                         }
                         let promoted = self
                             .terminal_registry
-                            .promote_subagent(&terminal_id, &session_id)
+                            .promote_ephemeral_owner(
+                                &terminal_id,
+                                &terminal_topology_id(&session_id),
+                                agent_caller_owner(
+                                    session_id.as_str(),
+                                    CallerOwnerKind::Persistent,
+                                    CallerRole::Agent,
+                                ),
+                            )
                             .map_err(terminal_application_error)?;
                         Ok(ApplicationToolResult::TerminalPromoted {
                             terminal: self.terminal_view(&promoted)?,
@@ -3755,11 +3773,11 @@ impl DaemonState {
                         }),
                     ApplicationAction::ExecutionList { include_finished } => self
                         .process_handle
-                        .operator_list(ExecutionListFilter {
-                            session_id: Some(session_id),
-                            root_run_id: None,
+                        .operator_list(agent_execution_filter(
+                            Some(&session_id),
+                            None,
                             include_finished,
-                        })
+                        ))
                         .map_err(application_process_error)
                         .map(|executions| ApplicationToolResult::Executions {
                             executions: executions.into_iter().map(execution_view).collect(),
@@ -3915,11 +3933,7 @@ impl DaemonState {
     ) -> Result<(), ApplicationError> {
         let owned = self
             .process_handle
-            .operator_list(ExecutionListFilter {
-                session_id: Some(session_id.clone()),
-                root_run_id: None,
-                include_finished: true,
-            })
+            .operator_list(agent_execution_filter(Some(session_id), None, true))
             .map_err(application_process_error)?
             .into_iter()
             .any(|status| &status.execution_id == execution_id);
@@ -4224,8 +4238,7 @@ mod host_startup_tests {
 fn terminal_admitted_path_roots(
     configured_roots: &[PathBuf],
 ) -> Result<Vec<PathBuf>, ApplicationError> {
-    let mut roots =
-        agl_process::process_standard_runtime_roots().map_err(terminal_application_error)?;
+    let mut roots = agl_pty::standard_runtime_roots().map_err(terminal_application_error)?;
     for root in configured_roots {
         let canonical = root.canonicalize().map_err(application_runtime_error)?;
         if !canonical.is_dir() {
@@ -6157,6 +6170,71 @@ fn not_found(resource: &str) -> ProtocolError {
 
 fn runtime_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(ProtocolErrorCode::RuntimeFailure, error.to_string(), false)
+}
+
+fn agent_execution_filter(
+    session_id: Option<&SessionId>,
+    root_run_id: Option<&RunId>,
+    include_finished: bool,
+) -> ExecutionListFilter {
+    let owner = session_id.map(|session_id| {
+        ExecutionOwner::new(
+            CallerOwner::new(
+                CallerNamespace::new("agentlibre", 1).expect("static caller namespace is valid"),
+                OpaqueOwnerId::new(session_id.as_str())
+                    .expect("canonical session ID fits opaque owner contract"),
+                CallerOwnerKind::Persistent,
+                CallerRole::Human,
+            ),
+            OpaqueOwnerId::new(session_id.as_str())
+                .expect("canonical session ID fits opaque authority contract"),
+        )
+    });
+    let authority_scope = root_run_id.map(|run_id| {
+        OpaqueOwnerId::new(run_id.as_str())
+            .expect("canonical run ID fits opaque authority contract")
+    });
+    ExecutionListFilter {
+        owner,
+        authority_scope,
+        include_finished,
+    }
+}
+
+fn agent_caller_namespace() -> CallerNamespace {
+    CallerNamespace::new("agentlibre", 1).expect("static caller namespace is valid")
+}
+
+fn opaque_agent_id(value: &str) -> OpaqueOwnerId {
+    OpaqueOwnerId::new(value).expect("canonical agent ID fits opaque terminal contract")
+}
+
+fn agent_caller_owner(
+    owner_id: &str,
+    owner_kind: CallerOwnerKind,
+    role: CallerRole,
+) -> CallerOwner {
+    CallerOwner::new(
+        agent_caller_namespace(),
+        opaque_agent_id(owner_id),
+        owner_kind,
+        role,
+    )
+}
+
+fn terminal_topology_id(session_id: &SessionId) -> TerminalTopologyId {
+    TerminalTopologyId::new(opaque_agent_id(session_id.as_str()))
+}
+
+fn session_id_from_topology(
+    topology_id: &TerminalTopologyId,
+) -> Result<SessionId, ApplicationError> {
+    SessionId::parse(topology_id.as_str()).map_err(|_| {
+        ApplicationError::new(
+            ApplicationErrorCode::Internal,
+            "terminal topology does not map to an agent session",
+        )
+    })
 }
 
 fn protocol_release_reason(reason: ManagerReleaseReason) -> ModelReleaseReason {

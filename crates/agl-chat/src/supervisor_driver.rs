@@ -175,13 +175,10 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
             .map(crate::shared_process_handle)
             .transpose()
             .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
-        let terminal_run_owner =
-            run.session_id
-                .is_none()
-                .then(|| agl_process::ExecutionOwner::Run {
-                    run_id: run.run_id.clone(),
-                    root_run_id: run.root_run_id.clone(),
-                });
+        let terminal_run_owner = run
+            .session_id
+            .is_none()
+            .then(|| crate::execution_owner::run_owner(&run.run_id, &run.root_run_id));
         let input: ChatRunInput = serde_json::from_value(run.input.clone())?;
         let child_presentation_context = if run.kind == RunKind::Subagent {
             let parent_run_id = run.parent_run_id.clone().ok_or_else(|| {
@@ -704,7 +701,11 @@ impl Drop for ChatSupervisorDriver {
         let mut service = service;
         let terminal = self.execution.is_terminal();
         if terminal && let Some(process) = &self.process_handle {
-            if let Err(error) = process.expire_run_grants(&self.creating_run_id, "one_turn") {
+            let correlation_group_id = agl_exec::OpaqueOwnerId::new(self.creating_run_id.as_str())
+                .expect("canonical run ID fits opaque correlation contract");
+            if let Err(error) =
+                process.expire_correlation_group_grants(&correlation_group_id, "one_turn")
+            {
                 tracing::warn!(
                     target: "agentlibre::chat",
                     run_id = %self.creating_run_id,

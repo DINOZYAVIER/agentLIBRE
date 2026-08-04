@@ -8,7 +8,10 @@ use agl_content::{
     MediaType,
 };
 use agl_events::{EventScope, SafeRuntimeEvent, SafeRuntimeEventEnvelope};
-use agl_exec::{ExecutionId, WriterLeaseId};
+use agl_exec::{
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionCorrelation, ExecutionId,
+    OpaqueOwnerId, WriterLeaseId,
+};
 use agl_ids::{EventId, RunId, SessionId, StepId, TurnId};
 use agl_process::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionChannel, ExecutionExit,
@@ -1393,10 +1396,12 @@ fn local_operator_terminal_authority_is_kept_in_the_private_execution_record() {
     let step_id = StepId::generate();
     let (mut status, mut request) =
         execution_fixture(&run_id, &step_id, Vec::new(), BTreeMap::new());
-    let owner = ExecutionOwner::Session {
-        session_id: SessionId::generate(),
-        root_run_id: run_id,
-    };
+    let owner = execution_owner(
+        SessionId::generate().as_str(),
+        CallerOwnerKind::Persistent,
+        CallerRole::Human,
+        run_id.as_str(),
+    );
     status.owner = owner.clone();
     status.profile = ExecutionProfile::Host;
     request.owner = owner;
@@ -2388,10 +2393,12 @@ fn execution_fixture(
 ) -> (ExecutionStatus, ExecutionRequest) {
     let workspace = std::env::temp_dir().canonicalize().unwrap();
     let execution_id = ExecutionId::generate();
-    let owner = ExecutionOwner::Run {
-        run_id: run_id.clone(),
-        root_run_id: run_id.clone(),
-    };
+    let owner = execution_owner(
+        run_id.as_str(),
+        CallerOwnerKind::Ephemeral,
+        CallerRole::Agent,
+        run_id.as_str(),
+    );
     let status = ExecutionStatus {
         execution_id,
         owner: owner.clone(),
@@ -2413,8 +2420,11 @@ fn execution_fixture(
     };
     let request = ExecutionRequest {
         owner,
-        creating_run_id: run_id.clone(),
-        creating_step_id: step_id.clone(),
+        correlation: ExecutionCorrelation::new(
+            caller_namespace(),
+            opaque_owner(run_id.as_str()),
+            opaque_owner(step_id.as_str()),
+        ),
         kind: ExecutionKind::Argv,
         program: PathBuf::from("/bin/echo"),
         argv0: "/bin/echo".to_owned(),
@@ -2440,6 +2450,26 @@ fn execution_fixture(
         },
     };
     (status, request)
+}
+
+fn caller_namespace() -> CallerNamespace {
+    CallerNamespace::new("agentlibre", 1).unwrap()
+}
+
+fn opaque_owner(value: &str) -> OpaqueOwnerId {
+    OpaqueOwnerId::new(value).unwrap()
+}
+
+fn execution_owner(
+    owner_id: &str,
+    kind: CallerOwnerKind,
+    role: CallerRole,
+    authority_scope: &str,
+) -> ExecutionOwner {
+    ExecutionOwner::new(
+        CallerOwner::new(caller_namespace(), opaque_owner(owner_id), kind, role),
+        opaque_owner(authority_scope),
+    )
 }
 
 fn process_supervisor_options(

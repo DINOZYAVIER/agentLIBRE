@@ -5,31 +5,5 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-native-test-fixtures = []
-
-[[bin]]
-name = "agl-process-test-helper"
-path = "src/bin/agl-process-test-helper.rs"
-required-features = ["native-test-fixtures"]
-
-[[bin]]
-name = "agl-process-owner-fixture"
-path = "src/bin/agl-process-owner-fixture.rs"
-required-features = ["native-test-fixtures"]
-
 [dependencies]
-agl-exec.workspace = true
-agl-ids.workspace = true
-agl-pty.workspace = true
-agl-terminal.workspace = true
-libc.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-
-[build-dependencies]
-sha2.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
+agl-terminald.workspace = true

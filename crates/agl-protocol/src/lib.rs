@@ -5,7 +5,10 @@ pub use surface::*;
 
 use agl_content::Content;
 use agl_events::SafeRuntimeEventEnvelope;
-pub use agl_exec::{ExecutionId, ExecutionRequestId, WriterLeaseId};
+pub use agl_exec::{
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, ExecutionRequestId,
+    OpaqueOwnerId, WriterLeaseId,
+};
 use agl_ids::{
     AttemptId, DaemonInstanceId, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };

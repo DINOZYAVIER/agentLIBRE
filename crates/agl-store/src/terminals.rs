@@ -2,21 +2,20 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use agl_exec::ExecutionId;
-use agl_ids::{RunId, SessionId};
+use agl_exec::{ExecutionId, OpaqueOwnerId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionProfile, ProcessError, ProcessErrorCode,
     ShellIntegrationHealth, ShellProfileSnapshot, StoredTerminalRecord, TerminalOwner,
     TerminalPromptState, TerminalRecord, TerminalRepository, TerminalReservation, TerminalState,
     validate_terminal_replacement, validate_terminal_reservation,
 };
-use agl_terminal::TerminalId;
+use agl_terminal::{TerminalId, TerminalTopologyId};
 use rusqlite::{ErrorCode, OptionalExtension, Row, params};
 
 use crate::{AglStore, Result as StoreResult, StoreError};
 
-const TERMINAL_COLUMNS: &str = "terminal_id, execution_id, session_id, owner_kind,
-    owner_session_id, owner_root_run_id, owner_run_id, previous_owner_run_id, profile,
+const TERMINAL_COLUMNS: &str = "terminal_id, execution_id, topology_id, owner_json,
+    authority_scope, profile,
     workspace_root, shell_kind, shell_program, shell_argv_json, shell_login_argv_json,
     shell_environment_names_json, shell_executable_digest, shell_config_digest,
     environment_digest, command_sequence, prompt_kind, prompt_sequence, prompt_last_exit,
@@ -141,12 +140,9 @@ impl TerminalRepository for AglTerminalRepository {
 struct EncodedTerminal {
     terminal_id: String,
     execution_id: String,
-    session_id: String,
-    owner_kind: &'static str,
-    owner_session_id: Option<String>,
-    owner_root_run_id: Option<String>,
-    owner_run_id: Option<String>,
-    previous_owner_run_id: Option<String>,
+    topology_id: String,
+    owner_json: String,
+    authority_scope: String,
     profile: &'static str,
     workspace_root: Vec<u8>,
     shell_kind: &'static str,
@@ -171,19 +167,14 @@ struct EncodedTerminal {
 }
 
 fn encode_terminal(record: &StoredTerminalRecord) -> StoreResult<EncodedTerminal> {
-    let (owner_kind, owner_session_id, owner_root_run_id, owner_run_id, previous_owner_run_id) =
-        owner_columns(&record.record.owner);
     let (prompt_kind, prompt_sequence, prompt_last_exit, prompt_process_group) =
         prompt_columns(&record.record.prompt_state)?;
     Ok(EncodedTerminal {
         terminal_id: record.record.terminal_id.as_str().to_owned(),
         execution_id: record.record.execution_id.as_str().to_owned(),
-        session_id: record.record.session_id.as_str().to_owned(),
-        owner_kind,
-        owner_session_id,
-        owner_root_run_id,
-        owner_run_id,
-        previous_owner_run_id,
+        topology_id: record.record.topology_id.as_str().to_owned(),
+        owner_json: serde_json::to_string(&record.record.owner)?,
+        authority_scope: record.record.authority_scope.as_str().to_owned(),
         profile: execution_profile(record.record.profile),
         workspace_root: path_bytes(&record.record.workspace_root)?,
         shell_kind: shell_kind(record.record.shell_profile.kind),
@@ -228,16 +219,14 @@ fn encode_terminal(record: &StoredTerminalRecord) -> StoreResult<EncodedTerminal
 fn insert_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> StoreResult<()> {
     tx.execute(
         "INSERT INTO terminal_sessions
-         (terminal_id, execution_id, session_id, owner_kind, owner_session_id,
-          owner_root_run_id, owner_run_id, previous_owner_run_id, profile, workspace_root,
+         (terminal_id, execution_id, topology_id, owner_json, authority_scope, profile, workspace_root,
           shell_kind, shell_program, shell_argv_json, shell_login_argv_json,
           shell_environment_names_json, shell_executable_digest, shell_config_digest,
           environment_digest, command_sequence, prompt_kind, prompt_sequence,
           prompt_last_exit, prompt_process_group, integration_health, cwd, state, slot_key,
           fingerprint, active_slot)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
-                 ?27, ?28, ?29)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         terminal_params(record),
     )?;
     Ok(())
@@ -246,30 +235,26 @@ fn insert_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> 
 fn update_terminal(tx: &rusqlite::Transaction<'_>, record: &EncodedTerminal) -> StoreResult<usize> {
     Ok(tx.execute(
         "UPDATE terminal_sessions
-         SET execution_id = ?2, session_id = ?3, owner_kind = ?4, owner_session_id = ?5,
-             owner_root_run_id = ?6, owner_run_id = ?7, previous_owner_run_id = ?8,
-             profile = ?9, workspace_root = ?10, shell_kind = ?11, shell_program = ?12,
-             shell_argv_json = ?13, shell_login_argv_json = ?14,
-             shell_environment_names_json = ?15, shell_executable_digest = ?16,
-             shell_config_digest = ?17, environment_digest = ?18, command_sequence = ?19,
-             prompt_kind = ?20, prompt_sequence = ?21, prompt_last_exit = ?22,
-             prompt_process_group = ?23, integration_health = ?24, cwd = ?25, state = ?26,
-             slot_key = ?27, fingerprint = ?28, active_slot = ?29
+         SET execution_id = ?2, topology_id = ?3, owner_json = ?4, authority_scope = ?5,
+             profile = ?6, workspace_root = ?7, shell_kind = ?8, shell_program = ?9,
+             shell_argv_json = ?10, shell_login_argv_json = ?11,
+             shell_environment_names_json = ?12, shell_executable_digest = ?13,
+             shell_config_digest = ?14, environment_digest = ?15, command_sequence = ?16,
+             prompt_kind = ?17, prompt_sequence = ?18, prompt_last_exit = ?19,
+             prompt_process_group = ?20, integration_health = ?21, cwd = ?22, state = ?23,
+             slot_key = ?24, fingerprint = ?25, active_slot = ?26
          WHERE terminal_id = ?1",
         terminal_params(record),
     )?)
 }
 
-fn terminal_params(record: &EncodedTerminal) -> [&dyn rusqlite::ToSql; 29] {
+fn terminal_params(record: &EncodedTerminal) -> [&dyn rusqlite::ToSql; 26] {
     [
         &record.terminal_id,
         &record.execution_id,
-        &record.session_id,
-        &record.owner_kind,
-        &record.owner_session_id,
-        &record.owner_root_run_id,
-        &record.owner_run_id,
-        &record.previous_owner_run_id,
+        &record.topology_id,
+        &record.owner_json,
+        &record.authority_scope,
         &record.profile,
         &record.workspace_root,
         &record.shell_kind,
@@ -297,12 +282,9 @@ fn terminal_params(record: &EncodedTerminal) -> [&dyn rusqlite::ToSql; 29] {
 struct RawTerminal {
     terminal_id: String,
     execution_id: String,
-    session_id: String,
-    owner_kind: String,
-    owner_session_id: Option<String>,
-    owner_root_run_id: Option<String>,
-    owner_run_id: Option<String>,
-    previous_owner_run_id: Option<String>,
+    topology_id: String,
+    owner_json: String,
+    authority_scope: String,
     profile: String,
     workspace_root: Vec<u8>,
     shell_kind: String,
@@ -330,33 +312,30 @@ fn read_terminal(row: &Row<'_>) -> rusqlite::Result<RawTerminal> {
     Ok(RawTerminal {
         terminal_id: row.get(0)?,
         execution_id: row.get(1)?,
-        session_id: row.get(2)?,
-        owner_kind: row.get(3)?,
-        owner_session_id: row.get(4)?,
-        owner_root_run_id: row.get(5)?,
-        owner_run_id: row.get(6)?,
-        previous_owner_run_id: row.get(7)?,
-        profile: row.get(8)?,
-        workspace_root: row.get(9)?,
-        shell_kind: row.get(10)?,
-        shell_program: row.get(11)?,
-        shell_argv_json: row.get(12)?,
-        shell_login_argv_json: row.get(13)?,
-        shell_environment_names_json: row.get(14)?,
-        shell_executable_digest: row.get(15)?,
-        shell_config_digest: row.get(16)?,
-        environment_digest: row.get(17)?,
-        command_sequence: row.get(18)?,
-        prompt_kind: row.get(19)?,
-        prompt_sequence: row.get(20)?,
-        prompt_last_exit: row.get(21)?,
-        prompt_process_group: row.get(22)?,
-        integration_health: row.get(23)?,
-        cwd: row.get(24)?,
-        state: row.get(25)?,
-        slot_key: row.get(26)?,
-        fingerprint: row.get(27)?,
-        active_slot: row.get(28)?,
+        topology_id: row.get(2)?,
+        owner_json: row.get(3)?,
+        authority_scope: row.get(4)?,
+        profile: row.get(5)?,
+        workspace_root: row.get(6)?,
+        shell_kind: row.get(7)?,
+        shell_program: row.get(8)?,
+        shell_argv_json: row.get(9)?,
+        shell_login_argv_json: row.get(10)?,
+        shell_environment_names_json: row.get(11)?,
+        shell_executable_digest: row.get(12)?,
+        shell_config_digest: row.get(13)?,
+        environment_digest: row.get(14)?,
+        command_sequence: row.get(15)?,
+        prompt_kind: row.get(16)?,
+        prompt_sequence: row.get(17)?,
+        prompt_last_exit: row.get(18)?,
+        prompt_process_group: row.get(19)?,
+        integration_health: row.get(20)?,
+        cwd: row.get(21)?,
+        state: row.get(22)?,
+        slot_key: row.get(23)?,
+        fingerprint: row.get(24)?,
+        active_slot: row.get(25)?,
     })
 }
 
@@ -397,8 +376,22 @@ fn select_all_terminals(
 
 fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
     let terminal_id = parse_terminal_id(&raw.terminal_id, "terminal_sessions.terminal_id")?;
-    let session_id = parse_session_id(&raw.session_id, "terminal_sessions.session_id")?;
-    let owner = decode_owner(&raw, &session_id)?;
+    let topology_id =
+        TerminalTopologyId::new(OpaqueOwnerId::new(raw.topology_id.clone()).map_err(|_| {
+            invalid_store_value(
+                "terminal_sessions.topology_id",
+                &raw.topology_id,
+                "invalid opaque topology ID",
+            )
+        })?);
+    let owner: TerminalOwner = serde_json::from_str(&raw.owner_json)?;
+    let authority_scope = OpaqueOwnerId::new(raw.authority_scope.clone()).map_err(|_| {
+        invalid_store_value(
+            "terminal_sessions.authority_scope",
+            &raw.authority_scope,
+            "invalid opaque authority scope",
+        )
+    })?;
     let prompt_state = decode_prompt(&raw)?;
     let shell_profile = AdmittedShellProfile {
         kind: parse_shell_kind(&raw.shell_kind)?,
@@ -421,8 +414,9 @@ fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
         record: TerminalRecord {
             terminal_id,
             execution_id: parse_execution_id(&raw.execution_id, "terminal_sessions.execution_id")?,
-            session_id,
+            topology_id,
             owner,
+            authority_scope,
             profile: parse_execution_profile(&raw.profile)?,
             workspace_root: path_from_bytes(raw.workspace_root)?,
             shell_profile,
@@ -446,115 +440,6 @@ fn decode_terminal(raw: RawTerminal) -> StoreResult<StoredTerminalRecord> {
         reason: "stored terminal violates the persistence-neutral terminal contract",
     })?;
     Ok(stored)
-}
-
-type OwnerColumns = (
-    &'static str,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-fn owner_columns(owner: &TerminalOwner) -> OwnerColumns {
-    match owner {
-        TerminalOwner::Human { session_id } => (
-            "human",
-            Some(session_id.as_str().to_owned()),
-            None,
-            None,
-            None,
-        ),
-        TerminalOwner::MainAgent { session_id } => (
-            "main_agent",
-            Some(session_id.as_str().to_owned()),
-            None,
-            None,
-            None,
-        ),
-        TerminalOwner::Subagent {
-            root_run_id,
-            owner_run_id,
-        } => (
-            "subagent",
-            None,
-            Some(root_run_id.as_str().to_owned()),
-            Some(owner_run_id.as_str().to_owned()),
-            None,
-        ),
-        TerminalOwner::SessionPromoted {
-            session_id,
-            previous_owner_run_id,
-        } => (
-            "session_promoted",
-            Some(session_id.as_str().to_owned()),
-            None,
-            None,
-            Some(previous_owner_run_id.as_str().to_owned()),
-        ),
-    }
-}
-
-fn decode_owner(raw: &RawTerminal, session_id: &SessionId) -> StoreResult<TerminalOwner> {
-    match raw.owner_kind.as_str() {
-        "human" => Ok(TerminalOwner::Human {
-            session_id: parse_required_session_owner(raw, session_id)?,
-        }),
-        "main_agent" => Ok(TerminalOwner::MainAgent {
-            session_id: parse_required_session_owner(raw, session_id)?,
-        }),
-        "subagent" => Ok(TerminalOwner::Subagent {
-            root_run_id: parse_run_id(
-                required(
-                    raw.owner_root_run_id.as_deref(),
-                    "terminal_sessions.owner_root_run_id",
-                )?,
-                "terminal_sessions.owner_root_run_id",
-            )?,
-            owner_run_id: parse_run_id(
-                required(
-                    raw.owner_run_id.as_deref(),
-                    "terminal_sessions.owner_run_id",
-                )?,
-                "terminal_sessions.owner_run_id",
-            )?,
-        }),
-        "session_promoted" => Ok(TerminalOwner::SessionPromoted {
-            session_id: parse_required_session_owner(raw, session_id)?,
-            previous_owner_run_id: parse_run_id(
-                required(
-                    raw.previous_owner_run_id.as_deref(),
-                    "terminal_sessions.previous_owner_run_id",
-                )?,
-                "terminal_sessions.previous_owner_run_id",
-            )?,
-        }),
-        value => Err(invalid_store_value(
-            "terminal_sessions.owner_kind",
-            value,
-            "unknown terminal owner kind",
-        )),
-    }
-}
-
-fn parse_required_session_owner(raw: &RawTerminal, expected: &SessionId) -> StoreResult<SessionId> {
-    let value = required(
-        raw.owner_session_id.as_deref(),
-        "terminal_sessions.owner_session_id",
-    )?;
-    let parsed = parse_session_id(value, "terminal_sessions.owner_session_id")?;
-    if &parsed != expected {
-        return Err(invalid_store_value(
-            "terminal_sessions.owner_session_id",
-            value,
-            "terminal owner session does not match durable session",
-        ));
-    }
-    Ok(parsed)
-}
-
-fn required<'a>(value: Option<&'a str>, field: &'static str) -> StoreResult<&'a str> {
-    value.ok_or_else(|| invalid_store_value(field, "null", "required terminal field is absent"))
 }
 
 fn execution_profile(profile: ExecutionProfile) -> &'static str {
@@ -735,14 +620,6 @@ fn parse_execution_id(value: &str, field: &'static str) -> StoreResult<Execution
     ExecutionId::parse(value).map_err(|_| invalid_store_value(field, value, "invalid execution ID"))
 }
 
-fn parse_session_id(value: &str, field: &'static str) -> StoreResult<SessionId> {
-    SessionId::parse(value).map_err(|_| invalid_store_value(field, value, "invalid session ID"))
-}
-
-fn parse_run_id(value: &str, field: &'static str) -> StoreResult<RunId> {
-    RunId::parse(value).map_err(|_| invalid_store_value(field, value, "invalid run ID"))
-}
-
 #[cfg(unix)]
 fn path_bytes(path: &Path) -> StoreResult<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -814,13 +691,26 @@ fn terminal_store_error(error: StoreError) -> ProcessError {
 mod tests {
     use std::path::PathBuf;
 
-    use agl_exec::ExecutionId;
+    use agl_exec::{CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId};
     use agl_ids::{RunId, SessionId};
     use agl_process::{ProcessErrorCode, TerminalRepository, terminal_slot_key};
-    use agl_terminal::TerminalId;
+    use agl_terminal::{TerminalId, TerminalTopologyId};
 
     use super::*;
     use crate::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS};
+
+    fn opaque(value: &str) -> OpaqueOwnerId {
+        OpaqueOwnerId::new(value).unwrap()
+    }
+
+    fn owner(value: &str, kind: CallerOwnerKind, role: CallerRole) -> CallerOwner {
+        CallerOwner::new(
+            CallerNamespace::new("agentlibre", 1).unwrap(),
+            opaque(value),
+            kind,
+            role,
+        )
+    }
 
     struct TempRoot(PathBuf);
 
@@ -848,8 +738,13 @@ mod tests {
             record: TerminalRecord {
                 terminal_id: TerminalId::generate(),
                 execution_id: ExecutionId::generate(),
-                session_id: session_id.clone(),
-                owner: TerminalOwner::Human { session_id },
+                topology_id: TerminalTopologyId::new(opaque(session_id.as_str())),
+                owner: TerminalOwner::new(owner(
+                    session_id.as_str(),
+                    CallerOwnerKind::Persistent,
+                    CallerRole::Human,
+                )),
+                authority_scope: opaque(RunId::generate().as_str()),
                 profile: ExecutionProfile::Workspace,
                 workspace_root: PathBuf::from("/workspace"),
                 shell_profile: AdmittedShellProfile {
@@ -1034,13 +929,14 @@ mod tests {
         let root = TempRoot::new("replace");
         let repository = AglTerminalRepository::open_at(&root.0).unwrap();
         let mut first = stored_terminal();
-        let session_id = first.record.session_id.clone();
-        let root_run_id = RunId::generate();
+        let session_id = first.record.topology_id.as_str().to_owned();
         let owner_run_id = RunId::generate();
-        first.record.owner = TerminalOwner::Subagent {
-            root_run_id,
-            owner_run_id: owner_run_id.clone(),
-        };
+        let previous = owner(
+            owner_run_id.as_str(),
+            CallerOwnerKind::Ephemeral,
+            CallerRole::Agent,
+        );
+        first.record.owner = TerminalOwner::new(previous.clone());
         first.slot_key = terminal_slot_key(&first.record).unwrap();
         repository.reserve(&first).unwrap();
         first.record.state = TerminalState::Running;
@@ -1054,10 +950,10 @@ mod tests {
         );
         assert_eq!(repository.record(&first.record.terminal_id).unwrap(), first);
 
-        first.record.owner = TerminalOwner::SessionPromoted {
-            session_id,
-            previous_owner_run_id: owner_run_id,
-        };
+        first.record.owner = TerminalOwner::promoted(
+            owner(&session_id, CallerOwnerKind::Persistent, CallerRole::Agent),
+            previous,
+        );
         first.slot_key = terminal_slot_key(&first.record).unwrap();
         repository.replace(&first).unwrap();
         first.record.state = TerminalState::Exited;

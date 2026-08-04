@@ -1,10 +1,83 @@
 use agl_exec::{
-    AuthorityFingerprint, CallerOwner, ExecutionId, ExecutionProfile, ServiceGenerationId,
+    AuthorityFingerprint, CallerOwner, CallerOwnerKind, CallerRole, ExecutionId, ExecutionProfile,
+    OpaqueOwnerId, ServiceGenerationId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::TerminalId;
+
+/// Policy-neutral terminal lifecycle owner. Promotion replaces the active
+/// caller while retaining the immediately previous opaque owner for fencing;
+/// neither value is parsed by the terminal domain.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalOwner {
+    caller: CallerOwner,
+    previous_owner: Option<CallerOwner>,
+}
+
+impl TerminalOwner {
+    pub fn new(caller: CallerOwner) -> Self {
+        Self {
+            caller,
+            previous_owner: None,
+        }
+    }
+
+    pub fn promoted(caller: CallerOwner, previous_owner: CallerOwner) -> Self {
+        Self {
+            caller,
+            previous_owner: Some(previous_owner),
+        }
+    }
+
+    pub fn caller(&self) -> &CallerOwner {
+        &self.caller
+    }
+
+    pub fn previous_owner(&self) -> Option<&CallerOwner> {
+        self.previous_owner.as_ref()
+    }
+
+    pub fn is_human(&self) -> bool {
+        self.caller.role() == CallerRole::Human
+    }
+
+    pub fn is_agent(&self) -> bool {
+        self.caller.role() == CallerRole::Agent
+    }
+
+    pub fn accepts_human_control(&self) -> bool {
+        self.is_human() || self.previous_owner.is_some()
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.caller.owner_kind() == CallerOwnerKind::Persistent
+    }
+
+    pub fn is_ephemeral(&self) -> bool {
+        self.caller.owner_kind() == CallerOwnerKind::Ephemeral
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct TerminalTopologyId(OpaqueOwnerId);
+
+impl TerminalTopologyId {
+    pub fn new(value: OpaqueOwnerId) -> Self {
+        Self(value)
+    }
+
+    pub fn as_opaque(&self) -> &OpaqueOwnerId {
+        &self.0
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
