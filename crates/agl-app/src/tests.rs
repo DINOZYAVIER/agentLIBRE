@@ -6,11 +6,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use agl_content::Content;
-use agl_ids::{
-    AttemptId, DaemonInstanceId, MessageId, RunId, SessionId, StepId, TerminalSessionId, TurnId,
-};
+use agl_ids::{AttemptId, DaemonInstanceId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_kernel::ToolAccessMode;
 use agl_process::{ExecutionId, ExecutionProfile, ExecutionState, TerminalSize, WriterLeaseId};
+use agl_terminal::TerminalId;
 
 use super::*;
 
@@ -35,7 +34,7 @@ fn workspace_history_scope() -> String {
 
 #[test]
 fn human_command_card_has_typed_lifecycle_cursors_and_redacted_debug() {
-    let terminal_id = TerminalSessionId::generate();
+    let terminal_id = TerminalId::generate();
     let execution_id = ExecutionId::generate();
     let command_output = agl_process::sanitize_terminal_card_output(b"printf private-value", 64);
     let empty_output = agl_process::sanitize_terminal_card_output(b"", 64);
@@ -272,7 +271,7 @@ fn terminal_projection_rejects_cross_authority_host_and_inconsistent_promotion()
 #[test]
 fn terminal_picker_actions_are_typed_and_workspace_confirmation_is_explicit() {
     let session_id = SessionId::generate();
-    let terminal_id = TerminalSessionId::generate();
+    let terminal_id = TerminalId::generate();
     let list = ApplicationActionRequest {
         session_id: Some(session_id.clone()),
         client_submission_id: "list-terminals".to_owned(),
@@ -307,7 +306,7 @@ fn terminal_picker_actions_are_typed_and_workspace_confirmation_is_explicit() {
 #[test]
 fn human_history_commands_are_bounded_and_private_in_debug_output() {
     let command = HumanShellHistoryCommand::new(
-        TerminalSessionId::generate(),
+        TerminalId::generate(),
         7,
         "/workspace",
         "printf private-value",
@@ -1495,7 +1494,7 @@ fn human_terminal_ensure(profile: ExecutionProfile) -> HumanTerminalEnsure {
 
 fn terminal(session_id: &SessionId) -> TerminalSessionView {
     TerminalSessionView {
-        terminal_id: TerminalSessionId::generate(),
+        terminal_id: TerminalId::generate(),
         execution_id: ExecutionId::generate(),
         owner: TerminalOwnerView::Human {
             session_id: session_id.clone(),

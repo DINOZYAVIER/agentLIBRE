@@ -8,14 +8,14 @@ use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use agl_ids::TerminalSessionId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{ProcessError, ProcessErrorCode, Result};
+use agl_exec::{ProcessError, ProcessErrorCode, Result};
 
-pub const MAX_HISTORY_COMMAND_BYTES: usize =
-    crate::terminal::command::MAX_TYPED_TERMINAL_COMMAND_BYTES;
+use crate::{MAX_TYPED_TERMINAL_COMMAND_BYTES, TerminalId};
+
+pub const MAX_HISTORY_COMMAND_BYTES: usize = MAX_TYPED_TERMINAL_COMMAND_BYTES;
 pub const DEFAULT_HUMAN_HISTORY_ENTRIES: usize = 2_000;
 pub const DEFAULT_HUMAN_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_AGENT_HISTORY_ENTRIES: usize = 256;
@@ -25,7 +25,7 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalHistoryOwner {
     HumanWorkspace { workspace_digest: String },
-    EphemeralAgent { terminal_id: TerminalSessionId },
+    EphemeralAgent { terminal_id: TerminalId },
 }
 
 #[derive(Clone)]
@@ -138,13 +138,13 @@ impl HumanShellHistoryStore {
 
 #[derive(Debug)]
 pub struct EphemeralTerminalHistory {
-    terminal_id: TerminalSessionId,
+    terminal_id: TerminalId,
     max_entries: usize,
     commands: VecDeque<String>,
 }
 
 impl EphemeralTerminalHistory {
-    pub fn new(terminal_id: TerminalSessionId, max_entries: usize) -> Result<Self> {
+    pub fn new(terminal_id: TerminalId, max_entries: usize) -> Result<Self> {
         if max_entries == 0 {
             return Err(ProcessError::new(
                 ProcessErrorCode::InvalidRequest,
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn agent_history_never_touches_disk_and_dies_with_owner() {
-        let terminal_id = TerminalSessionId::generate();
+        let terminal_id = TerminalId::generate();
         let mut history = EphemeralTerminalHistory::new(terminal_id.clone(), 2).unwrap();
         history.push("cd one").unwrap();
         history.push("cd two").unwrap();

@@ -1,6 +1,6 @@
 use std::fmt::{self, Debug, Formatter};
 
-use agl_ids::TerminalSessionId;
+use agl_terminal::TerminalId;
 
 use crate::{ApplicationError, ApplicationErrorCode, MAX_TERMINAL_PATH_BYTES};
 
@@ -24,7 +24,7 @@ impl HumanShellHistoryPolicy {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct HumanShellHistoryCommand {
-    terminal_id: TerminalSessionId,
+    terminal_id: TerminalId,
     command_sequence: u64,
     workspace_root: String,
     command: String,
@@ -32,7 +32,7 @@ pub struct HumanShellHistoryCommand {
 
 impl HumanShellHistoryCommand {
     pub fn new(
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         command_sequence: u64,
         workspace_root: impl Into<String>,
         command: impl Into<String>,
@@ -65,7 +65,7 @@ impl HumanShellHistoryCommand {
         })
     }
 
-    pub fn terminal_id(&self) -> &TerminalSessionId {
+    pub fn terminal_id(&self) -> &TerminalId {
         &self.terminal_id
     }
 

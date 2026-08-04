@@ -1,8 +1,3 @@
-mod bash;
-pub mod integration;
-mod zsh;
-
-use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
@@ -10,97 +5,21 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::platform::LaunchDirectories;
 use crate::terminal::environment::PrivateTerminalEnvironment;
 use crate::terminal::history::TerminalHistorySeed;
-use crate::{
-    ExecutionProfile, ExecutionRequest, ProcessError, ProcessErrorCode, Result,
-    ShellProfileSnapshot,
-};
+use crate::{ExecutionProfile, ExecutionRequest, ProcessError, ProcessErrorCode, Result};
 
-pub(crate) use integration::ShellIntegrationToken;
-pub use integration::{
-    BoundedShellIntegration, CommandBoundary, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES,
-    ShellExit, ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth,
-    ShellIntegrationNotice, ShellIntegrationState, TerminalPromptState, TypedCommandAbortReason,
+pub(crate) use agl_terminal::ShellIntegrationToken;
+pub use agl_terminal::{
+    AdmittedShellKind, AdmittedShellProfile, BoundedShellIntegration, CommandBoundary,
+    HostStartupPolicy, IntegrationBatch, MAX_SHELL_INTEGRATION_FRAME_BYTES, ShellExit,
+    ShellIntegrationControl, ShellIntegrationEvent, ShellIntegrationHealth, ShellIntegrationNotice,
+    ShellIntegrationState, ShellStartupPaths, TerminalPromptState, TypedCommandAbortReason,
     TypedCommandTransactionId,
 };
 
 const PRIVATE_HOME_IN_SANDBOX: &str = "/.agl-private/home";
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdmittedShellKind {
-    Bash,
-    Zsh,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdmittedShellProfile {
-    pub kind: AdmittedShellKind,
-    pub snapshot: ShellProfileSnapshot,
-}
-
-impl AdmittedShellProfile {
-    pub fn validate(&self) -> Result<()> {
-        self.snapshot.validate()?;
-        let executable = self
-            .snapshot
-            .program
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| unsupported_shell("admitted shell executable has no UTF-8 basename"))?;
-        let expected = match self.kind {
-            AdmittedShellKind::Bash => "bash",
-            AdmittedShellKind::Zsh => "zsh",
-        };
-        if executable != expected {
-            return Err(unsupported_shell(format!(
-                "admitted shell kind `{expected}` does not match executable `{executable}`"
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum HostStartupPolicy {
-    ManagedOnly,
-    SourceUserRc { path: PathBuf },
-}
-
-impl HostStartupPolicy {
-    pub fn validate(&self, profile: ExecutionProfile) -> Result<()> {
-        match self {
-            Self::ManagedOnly => Ok(()),
-            Self::SourceUserRc { path } if profile != ExecutionProfile::Host => {
-                Err(ProcessError::new(
-                    ProcessErrorCode::LoginAuthorityRequired,
-                    "user shell rc may be sourced only by an authorized Host terminal",
-                ))
-            }
-            Self::SourceUserRc { path } => {
-                let canonical = path.canonicalize().map_err(|error| {
-                    ProcessError::new(
-                        ProcessErrorCode::InvalidRequest,
-                        format!("approved user shell rc cannot be canonicalized: {error}"),
-                    )
-                })?;
-                if &canonical != path || !canonical.is_file() {
-                    return Err(ProcessError::new(
-                        ProcessErrorCode::InvalidRequest,
-                        "approved user shell rc must be an existing canonical regular file",
-                    ));
-                }
-                Ok(())
-            }
-        }
-    }
-}
 
 /// Private materialization input consumed only inside `ProcessSupervisor`
 /// after it has allocated the execution-private home. Debug never renders the
@@ -140,6 +59,7 @@ impl ManagedShellStartup {
         request: &mut ExecutionRequest,
         directories: &LaunchDirectories,
     ) -> Result<(ManagedShellIntegrationTransport, PrivateTerminalEnvironment)> {
+        // Reject a non-conforming adapter before creating any private runtime state.
         self.shell.validate()?;
         self.host_startup.validate(request.profile)?;
         let private = directories.private_home.join("agl-terminal");
@@ -158,63 +78,23 @@ impl ManagedShellStartup {
         let control_visible = visible_home.join("integration.controls.fifo");
         let integration =
             crate::platform::create_shell_integration_transport(&event_host, &control_host)?;
-        let (startup_name, startup, history, args, extra_environment) = match self.shell.kind {
-            AdmittedShellKind::Bash => {
-                let name = "bashrc";
-                let startup_visible = visible_home.join(name);
-                let startup = bash::render_startup(
-                    &self.host_startup,
-                    &seed_visible,
-                    &startup_visible,
-                    &event_visible,
-                    &control_visible,
-                    &self.integration_token,
-                );
-                let args = vec![
-                    "--noprofile".to_owned(),
-                    "--rcfile".to_owned(),
-                    visible_home.join(name).to_string_lossy().into_owned(),
-                    "-i".to_owned(),
-                ];
-                (
-                    name,
-                    startup,
-                    bash::render_history(&self.history_seed),
-                    args,
-                    BTreeMap::new(),
-                )
-            }
-            AdmittedShellKind::Zsh => {
-                let name = ".zshrc";
-                let startup_visible = visible_home.join(name);
-                let startup = zsh::render_startup(
-                    &self.host_startup,
-                    &seed_visible,
-                    &startup_visible,
-                    &event_visible,
-                    &control_visible,
-                    &self.integration_token,
-                );
-                let args = vec!["-d".to_owned(), "-i".to_owned()];
-                let mut environment = BTreeMap::new();
-                environment.insert(
-                    "ZDOTDIR".to_owned(),
-                    visible_home.to_string_lossy().into_owned(),
-                );
-                (
-                    name,
-                    startup,
-                    zsh::render_history(&self.history_seed),
-                    args,
-                    environment,
-                )
-            }
-        };
-        write_private_file(&private.join(startup_name), startup.as_bytes())?;
-        write_private_file(&seed_host, &history)?;
+        let plan = self.shell.render_startup(
+            &self.host_startup,
+            &self.history_seed,
+            &ShellStartupPaths {
+                startup_directory: visible_home,
+                history_seed: seed_visible,
+                event_fifo: event_visible,
+                control_fifo: control_visible,
+            },
+            &self.integration_token,
+            request.profile,
+        )?;
+        write_private_file(&private.join(plan.startup_name), plan.startup.as_bytes())?;
+        write_private_file(&seed_host, &plan.history)?;
 
-        request.args = args;
-        request.environment.values.extend(extra_environment);
+        request.args = plan.args;
+        request.environment.values.extend(plan.environment);
         request
             .environment
             .values
@@ -289,15 +169,6 @@ fn validate_private_file(file: &File) -> Result<()> {
     Ok(())
 }
 
-fn shell_quote(path: &Path) -> String {
-    let value = path.as_os_str().to_string_lossy();
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn unsupported_shell(message: impl Into<String>) -> ProcessError {
-    ProcessError::new(ProcessErrorCode::InvalidRequest, message)
-}
-
 fn shell_io(context: &str, error: std::io::Error) -> ProcessError {
     ProcessError::new(ProcessErrorCode::Internal, format!("{context}: {error}"))
 }
@@ -318,7 +189,7 @@ mod tests {
     use super::*;
     use crate::{
         EnvironmentOverride, ExecutionAuthorization, ExecutionIo, ExecutionKind, ExecutionLimits,
-        ExecutionOwner,
+        ExecutionOwner, ExecutionProfile, ShellProfileSnapshot,
     };
 
     fn snapshot(kind: AdmittedShellKind) -> AdmittedShellProfile {
@@ -373,56 +244,6 @@ mod tests {
                 max_output_bytes: 1024,
             },
         }
-    }
-
-    #[test]
-    fn admitted_kind_must_match_exact_executable_basename() {
-        let mut shell = snapshot(AdmittedShellKind::Bash);
-        shell.snapshot.program = PathBuf::from("/bin/zsh");
-        assert_eq!(
-            shell.validate().unwrap_err().code(),
-            ProcessErrorCode::InvalidRequest
-        );
-    }
-
-    #[test]
-    fn managed_scripts_restore_private_history_after_approved_user_rc() {
-        let rc = PathBuf::from("/tmp/user's bashrc");
-        let policy = HostStartupPolicy::SourceUserRc { path: rc.clone() };
-        let token = ShellIntegrationToken::generate().unwrap();
-        let bash = bash::render_startup(
-            &policy,
-            Path::new("/private/history.seed"),
-            Path::new("/private/bashrc"),
-            Path::new("/private/integration.events.fifo"),
-            Path::new("/private/integration.controls.fifo"),
-            &token,
-        );
-        let zsh = zsh::render_startup(
-            &policy,
-            Path::new("/private/history.seed"),
-            Path::new("/private/.zshrc"),
-            Path::new("/private/integration.events.fifo"),
-            Path::new("/private/integration.controls.fifo"),
-            &token,
-        );
-        assert!(bash.contains("source '/tmp/user'\\''s bashrc'"));
-        assert!(zsh.contains("source '/tmp/user'\\''s bashrc'"));
-        assert_eq!(bash.matches("HISTFILE=/dev/null").count(), 2);
-        assert_eq!(zsh.matches("HISTFILE=/dev/null").count(), 2);
-        assert_eq!(bash.matches("set -m").count(), 2);
-        assert_eq!(zsh.matches("MONITOR").count(), 2);
-        assert!(bash.contains("bind 'set enable-bracketed-paste on'"));
-    }
-
-    #[test]
-    fn zsh_history_preserves_multiline_commands_as_one_extended_entry() {
-        let seed =
-            TerminalHistorySeed::from_commands(vec!["echo one\necho two".to_owned()]).unwrap();
-        assert_eq!(
-            String::from_utf8(zsh::render_history(&seed)).unwrap(),
-            ": 0:0;echo one\\\necho two\n"
-        );
     }
 
     #[test]
@@ -515,6 +336,11 @@ mod tests {
             .and_then(|candidate| candidate.canonicalize().ok())
     }
 
+    fn quote_shell_path(path: &Path) -> String {
+        let value = path.as_os_str().to_string_lossy();
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
     fn run_native_shell_integration(kind: AdmittedShellKind, executable: &Path) {
         let root = std::env::temp_dir().join(format!(
             "agl-native-managed-shell-{kind:?}-{}-{}",
@@ -532,29 +358,23 @@ mod tests {
         let token = ShellIntegrationToken::generate().unwrap();
         let seed = root.join("history.seed");
         write_private_file(&seed, b"").unwrap();
-        let startup = root.join(match kind {
-            AdmittedShellKind::Bash => "bashrc",
-            AdmittedShellKind::Zsh => ".zshrc",
-        });
-        let script = match kind {
-            AdmittedShellKind::Bash => bash::render_startup(
+        let shell = snapshot(kind);
+        let plan = shell
+            .render_startup(
                 &HostStartupPolicy::ManagedOnly,
-                &seed,
-                &startup,
-                &event_fifo,
-                &control_fifo,
+                &TerminalHistorySeed::empty(),
+                &ShellStartupPaths {
+                    startup_directory: root.clone(),
+                    history_seed: seed.clone(),
+                    event_fifo: event_fifo.clone(),
+                    control_fifo: control_fifo.clone(),
+                },
                 &token,
-            ),
-            AdmittedShellKind::Zsh => zsh::render_startup(
-                &HostStartupPolicy::ManagedOnly,
-                &seed,
-                &startup,
-                &event_fifo,
-                &control_fifo,
-                &token,
-            ),
-        };
-        write_private_file(&startup, script.as_bytes()).unwrap();
+                ExecutionProfile::Workspace,
+            )
+            .unwrap();
+        let startup = root.join(plan.startup_name);
+        write_private_file(&startup, plan.startup.as_bytes()).unwrap();
 
         let (mut master, slave) = open_test_pty();
         let relay_slave = slave.try_clone().unwrap();
@@ -601,7 +421,7 @@ mod tests {
                             let control = integration
                                 .encode_control(&ShellIntegrationControl::PromptReadyAck {
                                     event_sequence: shell_sequence,
-                                    prompt_generation: (!*input_pending).then_some(*sequence),
+                                    prompt_generation: (!input_pending).then_some(*sequence),
                                 })
                                 .unwrap();
                             crate::platform::send_shell_integration_control(
@@ -697,7 +517,7 @@ mod tests {
 
         let child_probe = format!(
             "{} -c 'for __fd in /proc/self/fd/*; do __target=$(readlink \"$__fd\" 2>/dev/null); case \"$__target\" in *integration.*.fifo*) printf \"__AGL_%s__=%s\\n\" FD_LEAK \"$__target\";; esac; done; if [[ -n ${{__agl_integration_token+x}} ]]; then printf \"__AGL_%s__\\n\" TOKEN_ENV_LEAK; fi'",
-            shell_quote(executable)
+            quote_shell_path(executable)
         );
         let long_command = format!(": '{}'", "x".repeat(9 * 1024));
         let commands = format!(
@@ -711,7 +531,7 @@ mod tests {
              {long_command}\n\
              printf 'AGL2\\0%s\\0%s\\0prompt_ready\\0%s\\0%s\\0%s\\0' fake 1 /pty-spoof - 0\n\
              rm -f -- {}; printf '__AGL_%s__\\n' ALIVE_AFTER_CHANNEL_LOSS\n",
-            shell_quote(&event_fifo),
+            quote_shell_path(&event_fifo),
         );
         master.write_all(commands.as_bytes()).unwrap();
         master.write_all(b"exit\n").unwrap();

@@ -3,7 +3,7 @@ use std::path::{Component, Path};
 use std::sync::Mutex;
 
 use agl_exec::ExecutionId;
-use agl_ids::TerminalSessionId;
+use agl_terminal::TerminalId;
 
 use super::registry::{TerminalOwner, TerminalRecord, TerminalState};
 use super::shell::{ShellIntegrationHealth, TerminalPromptState};
@@ -147,7 +147,7 @@ pub enum TerminalReservation {
 
 /// Durable terminal identity owner used by `TerminalRegistry`.
 ///
-/// `reserve` commits `TerminalSessionId -> ExecutionId` before process spawn.
+/// `reserve` commits `TerminalId -> ExecutionId` before process spawn.
 /// `recover_for_new_owner` is called once when a new process owner opens the
 /// store and atomically converts every previously-live record to
 /// `outcome_unknown`; it never relaunches or claims to reattach a PTY.
@@ -166,9 +166,9 @@ pub struct InMemoryTerminalRepository {
 
 #[derive(Default)]
 struct InMemoryTerminalState {
-    records: BTreeMap<TerminalSessionId, StoredTerminalRecord>,
-    active_slots: BTreeMap<String, TerminalSessionId>,
-    executions: BTreeMap<ExecutionId, TerminalSessionId>,
+    records: BTreeMap<TerminalId, StoredTerminalRecord>,
+    active_slots: BTreeMap<String, TerminalId>,
+    executions: BTreeMap<ExecutionId, TerminalId>,
 }
 
 impl InMemoryTerminalRepository {
@@ -176,7 +176,7 @@ impl InMemoryTerminalRepository {
         Self::default()
     }
 
-    pub fn record(&self, terminal_id: &TerminalSessionId) -> Result<StoredTerminalRecord> {
+    pub fn record(&self, terminal_id: &TerminalId) -> Result<StoredTerminalRecord> {
         self.lock()?
             .records
             .get(terminal_id)
@@ -513,7 +513,8 @@ fn invalid_record(message: impl Into<String>) -> ProcessError {
 mod tests {
     use std::path::PathBuf;
 
-    use agl_ids::{RunId, SessionId, TerminalSessionId};
+    use agl_ids::{RunId, SessionId};
+    use agl_terminal::TerminalId;
 
     use super::*;
     use crate::terminal::shell::{AdmittedShellKind, AdmittedShellProfile};
@@ -523,7 +524,7 @@ mod tests {
         let session_id = SessionId::generate();
         let mut stored = StoredTerminalRecord {
             record: TerminalRecord {
-                terminal_id: TerminalSessionId::generate(),
+                terminal_id: TerminalId::generate(),
                 execution_id: ExecutionId::generate(),
                 session_id: session_id.clone(),
                 owner: TerminalOwner::Human { session_id },
@@ -573,7 +574,7 @@ mod tests {
         );
 
         let mut retry = record.clone();
-        retry.record.terminal_id = TerminalSessionId::generate();
+        retry.record.terminal_id = TerminalId::generate();
         retry.record.execution_id = ExecutionId::generate();
         assert_eq!(
             repository.reserve(&retry).unwrap(),
@@ -581,7 +582,7 @@ mod tests {
         );
 
         let mut conflicting = record;
-        conflicting.record.terminal_id = TerminalSessionId::generate();
+        conflicting.record.terminal_id = TerminalId::generate();
         conflicting.record.execution_id = ExecutionId::generate();
         conflicting.fingerprint =
             "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
@@ -663,7 +664,7 @@ mod tests {
         );
 
         let mut successor = record.clone();
-        successor.record.terminal_id = TerminalSessionId::generate();
+        successor.record.terminal_id = TerminalId::generate();
         successor.record.execution_id = ExecutionId::generate();
         successor.record.state = TerminalState::Starting;
         successor.active_slot = true;

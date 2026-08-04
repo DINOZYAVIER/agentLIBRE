@@ -19,7 +19,7 @@ use agl_client::{
     AgentLibreClient, ClientError, ExecutionAttachment, ExecutionAttachmentEvent,
     PresentationSubscription, PresentationSubscriptionEvent, RunSubscriptionEvent,
 };
-use agl_ids::{MessageId, RequestId, RunId, SessionId, TerminalSessionId};
+use agl_ids::{MessageId, RequestId, RunId, SessionId};
 use agl_protocol::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationToolResult,
     ClientEffectKind, CommandAvailability, CommandCatalogRequest, CommandDescriptor,
@@ -33,6 +33,7 @@ use agl_protocol::{
     TerminalOwnerView, TerminalPromptState, TerminalSessionView, TerminalSize, WriterLeaseId,
 };
 use agl_runtime::AgentLibreRuntimeConfig;
+use agl_terminal::TerminalId;
 use anyhow::{Context as _, Result, bail};
 use crossterm::cursor::Show;
 use crossterm::event::{
@@ -434,7 +435,7 @@ enum PickerSubmit {
         mode: KillMode,
     },
     Promote {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
     },
 }
 
@@ -558,9 +559,9 @@ struct InteractiveState {
     snapshot: SessionPresentationSnapshot,
     catalog: Vec<CommandDescriptor>,
     composer: Composer,
-    last_terminal: Option<TerminalSessionId>,
+    last_terminal: Option<TerminalId>,
     terminal_cursors: BTreeMap<ExecutionId, u64>,
-    seen_terminals: BTreeSet<TerminalSessionId>,
+    seen_terminals: BTreeSet<TerminalId>,
     assistant_deltas: BTreeMap<MessageId, AssistantDeltaState>,
     continuation_submission_ids: BTreeMap<MessageId, String>,
     picker: Option<PickerState>,
@@ -2884,7 +2885,7 @@ fn update_terminal_input_gate(
 
 fn terminal_prompt_from_event(
     event: &agl_protocol::SessionPresentationEventPayload,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
 ) -> Option<TerminalPromptState> {
     match event {
         agl_protocol::SessionPresentationEventPayload::TerminalAdded { terminal }
@@ -2906,7 +2907,7 @@ fn terminal_prompt_from_event(
 
 fn terminal_prompt_from_snapshot(
     snapshot: &SessionPresentationSnapshot,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
 ) -> TerminalPromptState {
     snapshot
         .terminals
@@ -6349,7 +6350,7 @@ mod tests {
 
     fn test_terminal(owner: TerminalOwnerView, profile: ExecutionProfile) -> TerminalSessionView {
         TerminalSessionView {
-            terminal_id: TerminalSessionId::generate(),
+            terminal_id: TerminalId::generate(),
             execution_id: ExecutionId::generate(),
             owner,
             profile,

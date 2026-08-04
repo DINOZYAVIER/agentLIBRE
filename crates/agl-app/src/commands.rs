@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 
-use agl_ids::{MessageId, SessionId, TerminalSessionId};
+use agl_ids::{MessageId, SessionId};
 use agl_kernel::ToolAccessMode;
 use agl_process::{ExecutionId, KillMode};
+use agl_terminal::TerminalId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{ApplicationError, ApplicationErrorCode};
@@ -300,7 +301,7 @@ pub enum ApplicationAction {
         include_finished: bool,
     },
     TerminalPromote {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
     },
     IncompleteTurnContinue {
         message_id: MessageId,

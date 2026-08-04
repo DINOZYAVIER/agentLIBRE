@@ -3,15 +3,13 @@ use std::fmt::{self, Debug, Formatter};
 use std::path::Path;
 
 use agl_content::Content;
-use agl_ids::{
-    AttemptId, DaemonInstanceId, EventId, MessageId, RunId, SessionId, StepId, TerminalSessionId,
-    TurnId,
-};
+use agl_ids::{AttemptId, DaemonInstanceId, EventId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_kernel::ToolAccessMode;
 use agl_process::{
     ExecutionCursor, ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState,
     SanitizedTerminalOutput,
 };
+use agl_terminal::TerminalId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -372,7 +370,7 @@ impl Debug for SanitizedTerminalText {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HumanCommandCardView {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
     pub command_sequence: u64,
     pub command: SanitizedTerminalText,
@@ -1331,14 +1329,14 @@ pub enum SessionPresentationEvent {
         terminal: TerminalSessionView,
     },
     TerminalRemoved {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
     },
     TerminalCommandStarted {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         sequence: u64,
     },
     TerminalCommandFinished {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         sequence: u64,
         exit_status: i32,
         cwd: SanitizedDisplayPath,
@@ -1347,7 +1345,7 @@ pub enum SessionPresentationEvent {
         card: HumanCommandCardView,
     },
     HumanCommandCardRemoved {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         command_sequence: u64,
     },
     ActivityGraphDelta {

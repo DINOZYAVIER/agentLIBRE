@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
 
-use agl_ids::{RunId, SessionId, TerminalSessionId};
+use agl_ids::{RunId, SessionId};
 use agl_process::{
     ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState, TerminalSize, WriterLeaseId,
 };
+use agl_terminal::TerminalId;
 use serde::{Deserialize, Serialize};
 
 use crate::{ApplicationError, ApplicationErrorCode, SanitizedDisplayPath};
@@ -139,7 +140,7 @@ pub struct HumanTerminalEnsure {
 #[serde(deny_unknown_fields)]
 pub struct HumanTerminalCommandSubmit {
     pub session_id: SessionId,
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub client_submission_id: String,
     pub writer_lease_id: WriterLeaseId,
     pub expected_command_sequence: u64,
@@ -191,7 +192,7 @@ impl HumanTerminalCommandSubmit {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HumanTerminalCommandAccepted {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub command_sequence: u64,
     pub output_after_sequence: u64,
 }
@@ -286,7 +287,7 @@ pub enum TerminalOwnerView {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalSessionView {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
     pub owner: TerminalOwnerView,
     pub profile: ExecutionProfile,
