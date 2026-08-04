@@ -3243,7 +3243,7 @@ mod tests {
 
     fn terminal(session_id: &agl_ids::SessionId) -> TerminalSessionView {
         TerminalSessionView {
-            terminal_id: agl_ids::TerminalSessionId::generate(),
+            terminal_id: agl_terminal::TerminalId::generate(),
             execution_id: ExecutionId::generate(),
             owner: TerminalOwnerView::Human {
                 session_id: session_id.clone(),

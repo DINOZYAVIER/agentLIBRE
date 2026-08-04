@@ -3,7 +3,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf};
 
 pub use agl_pty::PrivateEnvironmentValue as TerminalSecretValue;
-pub(crate) use agl_pty::PrivateLaunchEnvironment as PrivateTerminalEnvironment;
+pub use agl_pty::PrivateLaunchEnvironment as PrivateTerminalEnvironment;
 pub use agl_pty::{
     MAX_PRIVATE_ENVIRONMENT_BYTES as MAX_TERMINAL_ENVIRONMENT_BYTES,
     MAX_PRIVATE_ENVIRONMENT_ENTRIES as MAX_TERMINAL_ENVIRONMENT_ENTRIES,
@@ -13,7 +13,7 @@ pub use agl_pty::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::{EnvironmentOverride, ProcessError, ProcessErrorCode, Result};
+use agl_exec::{EnvironmentOverride, ProcessError, ProcessErrorCode, Result};
 
 const RESERVED_PREFIXES: &[&str] = &["AGL_SHELL_INTEGRATION_", "AGL_TERMINAL_"];
 const RESERVED_NAMES: &[&str] = &["BASH_ENV", "ENV", "HISTFILE", "PROMPT_COMMAND", "ZDOTDIR"];
@@ -161,7 +161,7 @@ impl ResolvedTerminalEnvironment {
         self.total_bytes
     }
 
-    pub(crate) fn into_launch_parts(self) -> (EnvironmentOverride, PrivateTerminalEnvironment) {
+    pub fn into_launch_parts(self) -> (EnvironmentOverride, PrivateTerminalEnvironment) {
         (
             EnvironmentOverride {
                 values: self.public_values,
@@ -183,7 +183,7 @@ impl Debug for ResolvedTerminalEnvironment {
     }
 }
 
-pub(crate) struct TerminalEnvironmentAdmission {
+pub struct TerminalEnvironmentAdmission {
     values: BTreeMap<String, AdmittedValue>,
     admitted_roots: Vec<PathBuf>,
     digest: TerminalEnvironmentDigest,
@@ -200,15 +200,15 @@ impl Debug for TerminalEnvironmentAdmission {
 }
 
 impl TerminalEnvironmentAdmission {
-    pub(crate) fn digest(&self) -> &TerminalEnvironmentDigest {
+    pub fn digest(&self) -> &TerminalEnvironmentDigest {
         &self.digest
     }
 
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
         self.values.keys().map(String::as_str)
     }
 
-    pub(crate) fn resolve(
+    pub fn resolve(
         self,
         secrets: &dyn TerminalSecretResolver,
     ) -> Result<ResolvedTerminalEnvironment> {
@@ -275,7 +275,7 @@ impl TerminalEnvironmentRequest {
         self.admit()?.resolve(secrets)
     }
 
-    pub(crate) fn admit(&self) -> Result<TerminalEnvironmentAdmission> {
+    pub fn admit(&self) -> Result<TerminalEnvironmentAdmission> {
         if self
             .admitted_base
             .len()

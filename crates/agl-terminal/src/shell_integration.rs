@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ProcessError, ProcessErrorCode, Result};
+use agl_exec::{ProcessError, ProcessErrorCode, Result};
 
 pub const SHELL_INTEGRATION_VERSION: u8 = 2;
 pub const MAX_SHELL_INTEGRATION_FRAME_BYTES: usize = 80 * 1024;
@@ -19,10 +19,10 @@ const SHELL_INTEGRATION_TOKEN_HEX_BYTES: usize = SHELL_INTEGRATION_TOKEN_BYTES *
 /// renders the secret. The shell startup file is the only consumer of the
 /// textual value and removes itself after loading it.
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct ShellIntegrationToken(String);
+pub struct ShellIntegrationToken(String);
 
 impl ShellIntegrationToken {
-    pub(crate) fn generate() -> Result<Self> {
+    pub fn generate() -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let mut random = [0u8; SHELL_INTEGRATION_TOKEN_BYTES];
@@ -65,7 +65,7 @@ impl ShellIntegrationToken {
         }
     }
 
-    pub(crate) fn expose_to_managed_startup(&self) -> &str {
+    pub fn expose_to_managed_startup(&self) -> &str {
         &self.0
     }
 
@@ -86,7 +86,7 @@ impl Debug for ShellIntegrationToken {
 pub struct TypedCommandTransactionId(String);
 
 impl TypedCommandTransactionId {
-    pub(crate) fn generate() -> Result<Self> {
+    pub fn generate() -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let mut random = [0_u8; 16];
@@ -553,7 +553,7 @@ pub struct BoundedShellIntegration {
 }
 
 impl BoundedShellIntegration {
-    pub(crate) fn new(token: ShellIntegrationToken) -> Self {
+    pub fn new(token: ShellIntegrationToken) -> Self {
         Self {
             token,
             fields: Vec::with_capacity(7),
@@ -570,14 +570,14 @@ impl BoundedShellIntegration {
         &self.state
     }
 
-    pub(crate) fn last_shell_sequence(&self) -> Option<u64> {
+    pub fn last_shell_sequence(&self) -> Option<u64> {
         self.last_shell_sequence
     }
 
     /// Decodes one SOCK_SEQPACKET event. The relay preserves packet
     /// boundaries, so a partial frame or multiple concatenated frames is a
     /// protocol violation rather than an incremental read condition.
-    pub(crate) fn push_packet(&mut self, bytes: &[u8]) -> IntegrationBatch {
+    pub fn push_packet(&mut self, bytes: &[u8]) -> IntegrationBatch {
         let batch = self.push(bytes);
         if batch.notice.is_some() {
             return batch;
@@ -663,7 +663,7 @@ impl BoundedShellIntegration {
         }
     }
 
-    pub(crate) fn encode_control(&self, control: &ShellIntegrationControl) -> Result<Vec<u8>> {
+    pub fn encode_control(&self, control: &ShellIntegrationControl) -> Result<Vec<u8>> {
         if self.state.health == ShellIntegrationHealth::Degraded {
             return Err(invalid_frame(
                 "cannot send control through a degraded shell integration",
@@ -734,7 +734,7 @@ impl BoundedShellIntegration {
     /// integration stream. Shell frame and observed-event counters stay
     /// independent so an observation cannot collide with the next frame
     /// sequence emitted by Bash or Zsh.
-    pub(crate) fn observe_foreground(&mut self, process_group: Option<i32>) -> IntegrationBatch {
+    pub fn observe_foreground(&mut self, process_group: Option<i32>) -> IntegrationBatch {
         if self.state.health == ShellIntegrationHealth::Degraded
             || self.state.active_command_sequence.is_none()
             || self.state.foreground_process_group == process_group

@@ -4,9 +4,9 @@ use std::fmt::{self, Debug, Display, Formatter, Write as _};
 use agl_content::Content;
 use agl_exec::{ExecutionId, WriterLeaseId};
 use agl_ids::{
-    AttemptId, DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId,
-    TerminalSessionId, TurnId,
+    AttemptId, DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
+use agl_terminal::TerminalId;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
@@ -274,7 +274,7 @@ pub enum ApplicationAction {
         include_finished: bool,
     },
     TerminalPromote {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
     },
     IncompleteTurnContinue {
         message_id: MessageId,
@@ -392,7 +392,7 @@ pub struct HumanTerminalEnsureRequest {
 #[serde(deny_unknown_fields)]
 pub struct HumanTerminalCommandSubmitRequest {
     pub session_id: SessionId,
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub client_submission_id: String,
     pub writer_lease_id: WriterLeaseId,
     pub expected_command_sequence: u64,
@@ -665,7 +665,7 @@ impl Debug for SanitizedTerminalText {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HumanCommandCardView {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
     pub command_sequence: u64,
     pub command: SanitizedTerminalText,
@@ -966,7 +966,7 @@ pub enum TerminalWriterView {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalSessionView {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
     pub owner: TerminalOwnerView,
     pub profile: ExecutionProfile,
@@ -1155,14 +1155,14 @@ pub enum SessionPresentationEventPayload {
         terminal: TerminalSessionView,
     },
     TerminalRemoved {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
     },
     TerminalCommandStarted {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         sequence: u64,
     },
     TerminalCommandFinished {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         sequence: u64,
         exit_status: i32,
         cwd: SanitizedDisplayPath,
@@ -1171,7 +1171,7 @@ pub enum SessionPresentationEventPayload {
         card: HumanCommandCardView,
     },
     HumanCommandCardRemoved {
-        terminal_id: TerminalSessionId,
+        terminal_id: TerminalId,
         command_sequence: u64,
     },
     ActivityGraphDelta {
@@ -1239,7 +1239,7 @@ pub struct HumanTerminalEnsuredEvent {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HumanTerminalCommandAcceptedEvent {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub command_sequence: u64,
     pub output_after_sequence: u64,
 }
@@ -3575,7 +3575,7 @@ mod tests {
 
     fn terminal() -> TerminalSessionView {
         TerminalSessionView {
-            terminal_id: TerminalSessionId::parse(TERMINAL_ID).unwrap(),
+            terminal_id: TerminalId::parse(TERMINAL_ID).unwrap(),
             execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
             owner: TerminalOwnerView::Human {
                 session_id: session_id(),
@@ -4578,7 +4578,7 @@ mod tests {
         const SENTINEL: &str = "AGL_PROTOCOL_PRIVATE_COMMAND_148";
         let request = HumanTerminalCommandSubmitRequest {
             session_id: session_id(),
-            terminal_id: TerminalSessionId::parse(TERMINAL_ID).unwrap(),
+            terminal_id: TerminalId::parse(TERMINAL_ID).unwrap(),
             client_submission_id: "typed-command".to_owned(),
             writer_lease_id: WriterLeaseId::generate(),
             expected_command_sequence: 2,

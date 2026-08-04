@@ -65,6 +65,7 @@ dependencies = [
  "agl-process",
  "agl-runtime",
  "agl-skill",
+ "agl-terminal",
  "anyhow",
  "serde",
  "serde_json",
@@ -158,6 +159,7 @@ dependencies = [
  "agl-runtime",
  "agl-skill",
  "agl-store",
+ "agl-terminal",
  "anyhow",
  "clap",
  "clap_complete",
@@ -184,6 +186,7 @@ dependencies = [
  "agl-ids",
  "agl-model",
  "agl-protocol",
+ "agl-terminal",
  "futures-util",
  "libc",
  "serde_json",
@@ -262,6 +265,7 @@ dependencies = [
  "agl-skill",
  "agl-store",
  "agl-supervisor",
+ "agl-terminal",
  "anyhow",
  "futures-util",
  "libc",
@@ -526,6 +530,7 @@ dependencies = [
  "agl-exec",
  "agl-ids",
  "agl-pty",
+ "agl-terminal",
  "libc",
  "serde",
  "serde_json",
@@ -543,6 +548,7 @@ dependencies = [
  "agl-ids",
  "agl-model",
  "agl-process",
+ "agl-terminal",
  "base64",
  "serde",
  "serde_json",
@@ -636,6 +642,7 @@ dependencies = [
  "agl-exec",
  "agl-ids",
  "agl-process",
+ "agl-terminal",
  "libc",
  "rusqlite",
  "serde",
@@ -654,6 +661,46 @@ dependencies = [
  "agl-store",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agl-terminal"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-exec",
+ "agl-pty",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "agl-terminal-client"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-exec",
+ "agl-terminal",
+ "agl-terminal-protocol",
+ "futures-util",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "agl-terminal-protocol"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "agl-exec",
+ "agl-terminal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

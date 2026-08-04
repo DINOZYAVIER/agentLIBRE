@@ -30,10 +30,7 @@ use agl_chat::{
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
 use agl_function::RuntimeDelegationPlan;
-use agl_ids::{
-    DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TerminalSessionId,
-    TurnId,
-};
+use agl_ids::{DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
 use agl_inference::worker_protocol::WORKER_BUILD_ID;
 use agl_inference::worker_supervisor::WorkerLifecyclePhase;
 use agl_inference::{
@@ -76,6 +73,7 @@ use agl_supervisor::{
     IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
     SupervisorHandle, SupervisorOptions,
 };
+use agl_terminal::TerminalId;
 use anyhow::{Context, Result, anyhow, ensure};
 use sha2::{Digest, Sha256};
 
@@ -116,14 +114,14 @@ pub struct DaemonState {
     process_handle: agl_process::ProcessHandle,
     terminal_registry: Arc<TerminalRegistry>,
     human_terminal_history: HumanShellHistoryStore,
-    terminal_presentations: BTreeMap<TerminalSessionId, TerminalPresentationMetadata>,
+    terminal_presentations: BTreeMap<TerminalId, TerminalPresentationMetadata>,
     human_terminal_submissions: BTreeMap<(SessionId, String), HumanTerminalSubmission>,
     human_command_submissions: BTreeMap<(SessionId, String), HumanCommandSubmission>,
-    human_command_tracking: BTreeMap<(TerminalSessionId, u64), HumanCommandTracking>,
+    human_command_tracking: BTreeMap<(TerminalId, u64), HumanCommandTracking>,
     next_human_command_submission_ordinal: u64,
     exiting_sessions: BTreeSet<SessionId>,
     shell_monitor: ShellMonitorConnector,
-    monitored_terminals: BTreeSet<TerminalSessionId>,
+    monitored_terminals: BTreeSet<TerminalId>,
     _supervisor: Supervisor,
     supervisor_handle: SupervisorHandle,
 }
@@ -137,7 +135,7 @@ struct TerminalPresentationMetadata {
 #[derive(Clone)]
 struct HumanTerminalSubmission {
     fingerprint: String,
-    terminal_id: TerminalSessionId,
+    terminal_id: TerminalId,
 }
 
 #[derive(Clone)]
@@ -217,7 +215,7 @@ struct SessionRunCancellation {
 }
 
 struct SessionExecutionTermination {
-    live_terminal_ids: Vec<TerminalSessionId>,
+    live_terminal_ids: Vec<TerminalId>,
     execution_ids: Vec<ExecutionId>,
     counts: SessionTerminationCounts,
     process: agl_process::ProcessHandle,
@@ -1876,7 +1874,7 @@ impl DaemonState {
 
     pub(crate) fn human_command_card_events(
         &mut self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         events: &[agl_process::ShellIntegrationEvent],
     ) -> Result<(Vec<SessionPresentationEvent>, bool), ApplicationError> {
         let finished = events.iter().find_map(|event| match event {
@@ -2028,7 +2026,7 @@ impl DaemonState {
 
     pub(crate) fn human_command_outcome_unknown_events(
         &mut self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
     ) -> Vec<SessionPresentationEvent> {
         let tracking_keys = self
             .human_command_tracking
@@ -2192,7 +2190,7 @@ impl DaemonState {
 
     pub(crate) fn terminal_monitor_projection(
         &mut self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         requested_cwd: Option<&Path>,
         include_terminal: bool,
     ) -> Result<TerminalMonitorProjection, ApplicationError> {

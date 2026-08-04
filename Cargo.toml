@@ -25,6 +25,9 @@ members = [
     "crates/agl-oven",
     "crates/agl-process",
     "crates/agl-pty",
+    "crates/agl-terminal",
+    "crates/agl-terminal-client",
+    "crates/agl-terminal-protocol",
     "crates/agl-protocol",
     "crates/agl-repo",
     "crates/agl-session",
@@ -78,6 +81,9 @@ agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-process = { path = "crates/agl-process" }
 agl-pty = { path = "crates/agl-pty" }
+agl-terminal = { path = "crates/agl-terminal" }
+agl-terminal-client = { path = "crates/agl-terminal-client" }
+agl-terminal-protocol = { path = "crates/agl-terminal-protocol" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }

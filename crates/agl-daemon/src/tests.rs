@@ -3678,7 +3678,7 @@ async fn two_headless_clients_share_a_human_terminal_until_confirmed_session_exi
     );
     let mismatched_terminal = first_client
         .submit_human_terminal_command(agl_protocol::HumanTerminalCommandSubmitRequest {
-            terminal_id: agl_ids::TerminalSessionId::generate(),
+            terminal_id: agl_terminal::TerminalId::generate(),
             writer_lease_id: replacement_attachment.writer_lease_id().unwrap().clone(),
             client_submission_id: "mismatched-terminal-writer".to_owned(),
             command: "printf 'must-not-run\\n'".to_owned(),

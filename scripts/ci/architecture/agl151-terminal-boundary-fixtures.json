@@ -24,7 +24,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal-client -> agl-client crosses terminal-to-agent"],
       "add_packages": [
-        { "name": "agl-terminal-client", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
+        { "name": "agl-terminal-client", "source": null }
       ],
       "dependencies": [
         { "from": "agl-terminal-client", "name": "agl-client", "kind": null }
@@ -35,7 +35,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal -> agl-app is forbidden below terminal UI"],
       "add_packages": [
-        { "name": "agl-terminal", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
+        { "name": "agl-terminal", "source": null }
       ],
       "dependencies": [
         { "from": "agl-terminal", "name": "agl-app", "kind": null }
@@ -72,7 +72,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["requires an immutable pinned git revision"],
       "add_packages": [
-        { "name": "agl-terminal", "source": null }
+        { "name": "agl-terminald", "source": null }
       ],
       "dependencies": []
     },

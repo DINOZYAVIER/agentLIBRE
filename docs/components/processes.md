@@ -83,7 +83,7 @@ names cannot substitute a different shell profile.
 The daemon lazily owns one Human workspace terminal, an optional separately
 approved Human Host terminal, one main-agent workspace terminal, and one
 workspace terminal per live subagent. Each terminal has a stable
-`TerminalSessionId` and one backing `ExecutionId`; switching between Chat and
+terminal-owned `TerminalId` and one backing `ExecutionId`; switching between Chat and
 Terminal only changes the client view. It does not launch a new shell or stop
 the existing shell, foreground program, REPL, editor, jobs, cwd, or exports.
 
@@ -189,7 +189,7 @@ becomes `outcome_unknown`; agentLIBRE retains safe metadata/output and never
 automatically reruns the command.
 
 Persistent terminals follow the same rule. Their durable
-`TerminalSessionId -> ExecutionId` mapping remains visible as
+`TerminalId -> ExecutionId` mapping remains visible as
 `outcome_unknown`, keeps its topology slot fenced, and cannot be replaced until
 the old outcome is known. Shell input, jobs and private integration events are
 not replayed.

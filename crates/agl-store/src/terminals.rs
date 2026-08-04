@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use agl_exec::ExecutionId;
-use agl_ids::{RunId, SessionId, TerminalSessionId};
+use agl_ids::{RunId, SessionId};
 use agl_process::{
     AdmittedShellKind, AdmittedShellProfile, ExecutionProfile, ProcessError, ProcessErrorCode,
     ShellIntegrationHealth, ShellProfileSnapshot, StoredTerminalRecord, TerminalOwner,
     TerminalPromptState, TerminalRecord, TerminalRepository, TerminalReservation, TerminalState,
     validate_terminal_replacement, validate_terminal_reservation,
 };
+use agl_terminal::TerminalId;
 use rusqlite::{ErrorCode, OptionalExtension, Row, params};
 
 use crate::{AglStore, Result as StoreResult, StoreError};
@@ -41,10 +42,7 @@ impl AglTerminalRepository {
         }
     }
 
-    pub fn record(
-        &self,
-        terminal_id: &TerminalSessionId,
-    ) -> agl_process::Result<StoredTerminalRecord> {
+    pub fn record(&self, terminal_id: &TerminalId) -> agl_process::Result<StoredTerminalRecord> {
         self.with_store(|store| {
             let raw =
                 select_terminal(store.connection(), terminal_id.as_str())?.ok_or_else(|| {
@@ -728,8 +726,8 @@ fn decode_u64(value: i64, field: &'static str) -> StoreResult<u64> {
     u64::try_from(value).map_err(|_| invalid_store_value(field, value, "value must be nonnegative"))
 }
 
-fn parse_terminal_id(value: &str, field: &'static str) -> StoreResult<TerminalSessionId> {
-    TerminalSessionId::parse(value)
+fn parse_terminal_id(value: &str, field: &'static str) -> StoreResult<TerminalId> {
+    TerminalId::parse(value)
         .map_err(|_| invalid_store_value(field, value, "invalid terminal session ID"))
 }
 
@@ -817,8 +815,9 @@ mod tests {
     use std::path::PathBuf;
 
     use agl_exec::ExecutionId;
-    use agl_ids::{RunId, SessionId, TerminalSessionId};
+    use agl_ids::{RunId, SessionId};
     use agl_process::{ProcessErrorCode, TerminalRepository, terminal_slot_key};
+    use agl_terminal::TerminalId;
 
     use super::*;
     use crate::{CURRENT_SCHEMA_VERSION, STORE_MIGRATIONS};
@@ -830,7 +829,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "agl-terminal-store-{label}-{}-{}",
                 std::process::id(),
-                TerminalSessionId::generate()
+                TerminalId::generate()
             ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -847,7 +846,7 @@ mod tests {
         let session_id = SessionId::generate();
         let mut stored = StoredTerminalRecord {
             record: TerminalRecord {
-                terminal_id: TerminalSessionId::generate(),
+                terminal_id: TerminalId::generate(),
                 execution_id: ExecutionId::generate(),
                 session_id: session_id.clone(),
                 owner: TerminalOwner::Human { session_id },
@@ -1004,7 +1003,7 @@ mod tests {
         );
 
         let mut retry = record.clone();
-        retry.record.terminal_id = TerminalSessionId::generate();
+        retry.record.terminal_id = TerminalId::generate();
         retry.record.execution_id = ExecutionId::generate();
         assert_eq!(
             repository.reserve(&retry).unwrap(),
@@ -1074,7 +1073,7 @@ mod tests {
         human.active_slot = false;
         repository.replace(&human).unwrap();
         let mut successor = human;
-        successor.record.terminal_id = TerminalSessionId::generate();
+        successor.record.terminal_id = TerminalId::generate();
         successor.record.execution_id = ExecutionId::generate();
         successor.record.state = TerminalState::Starting;
         successor.active_slot = true;
@@ -1239,7 +1238,7 @@ mod tests {
 
     fn stored_retry(existing: &StoredTerminalRecord) -> StoredTerminalRecord {
         let mut retry = existing.clone();
-        retry.record.terminal_id = TerminalSessionId::generate();
+        retry.record.terminal_id = TerminalId::generate();
         retry.record.execution_id = ExecutionId::generate();
         retry.record.state = TerminalState::Starting;
         retry.record.prompt_state = TerminalPromptState::Unknown;

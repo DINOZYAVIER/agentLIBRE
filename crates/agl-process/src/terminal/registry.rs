@@ -7,14 +7,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agl_exec::{ExecutionId, ExecutionRequestId};
-use agl_ids::{RunId, SessionId, StepId, TerminalSessionId};
+use agl_ids::{RunId, SessionId, StepId};
+use agl_terminal::{
+    AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult, TerminalId,
+    human_terminal_command_submission,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::terminal::command::{
-    AgentTerminalCommandQueue, HumanTerminalCommandAdmission, TerminalCommandResult,
-    human_terminal_command_submission,
-};
 use crate::terminal::environment::{
     TerminalEnvironmentDigest, TerminalEnvironmentRequest, TerminalSecretResolver,
 };
@@ -93,7 +93,7 @@ impl TerminalState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalRecord {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub execution_id: ExecutionId,
     pub session_id: SessionId,
     pub owner: TerminalOwner,
@@ -160,8 +160,8 @@ pub struct TerminalRegistry {
 
 #[derive(Default)]
 struct RegistryState {
-    slots: BTreeMap<TerminalSlot, TerminalSessionId>,
-    terminals: BTreeMap<TerminalSessionId, TerminalEntry>,
+    slots: BTreeMap<TerminalSlot, TerminalId>,
+    terminals: BTreeMap<TerminalId, TerminalEntry>,
     retired_subagents: BTreeSet<RunId>,
 }
 
@@ -249,7 +249,7 @@ enum TerminalSlot {
     HumanHost(SessionId),
     MainAgent(SessionId),
     Subagent(RunId),
-    Promoted(TerminalSessionId),
+    Promoted(TerminalId),
 }
 
 trait TerminalExecutionStarter: Send + Sync {
@@ -461,7 +461,7 @@ impl TerminalRegistry {
             return Ok(existing.record.clone());
         }
 
-        let terminal_id = TerminalSessionId::generate();
+        let terminal_id = TerminalId::generate();
         let execution_id = ExecutionId::generate();
         let record = TerminalRecord {
             terminal_id: terminal_id.clone(),
@@ -600,7 +600,7 @@ impl TerminalRegistry {
     fn fail_reserved_admission(
         &self,
         state: &mut RegistryState,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         launch_error: ProcessError,
     ) -> Result<TerminalRecord> {
         let (mut failed, slot) = {
@@ -643,7 +643,7 @@ impl TerminalRegistry {
     pub fn admit_human_command(
         &self,
         session_id: &SessionId,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         expected_command_sequence: u64,
         expected_prompt_generation: u64,
         command: &str,
@@ -759,7 +759,7 @@ impl TerminalRegistry {
     /// writer cannot enter while this admission is pending.
     pub fn write_admitted_human_command(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         execution_id: &ExecutionId,
         command_sequence: u64,
         lease: InputLease,
@@ -896,7 +896,7 @@ impl TerminalRegistry {
 
     pub fn cancel_human_command_admission(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         command_sequence: u64,
     ) -> Result<()> {
         let mut state = self.lock()?;
@@ -1072,7 +1072,7 @@ impl TerminalRegistry {
 
     fn fail_agent_command(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         command_sequence: u64,
         error: ProcessError,
     ) -> Result<()> {
@@ -1097,7 +1097,7 @@ impl TerminalRegistry {
 
     fn execute_agent_drive_action(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         action: AgentDriveAction,
     ) -> Result<()> {
         match action {
@@ -1184,7 +1184,7 @@ impl TerminalRegistry {
 
     fn submit_agent_command(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         execution_id: &ExecutionId,
         command_sequence: u64,
         submission: ProcessBytes,
@@ -1349,7 +1349,7 @@ impl TerminalRegistry {
         Ok(())
     }
 
-    pub fn record(&self, terminal_id: &TerminalSessionId) -> Result<TerminalRecord> {
+    pub fn record(&self, terminal_id: &TerminalId) -> Result<TerminalRecord> {
         self.lock()?
             .terminals
             .get(terminal_id)
@@ -1367,7 +1367,7 @@ impl TerminalRegistry {
             .collect())
     }
 
-    pub fn refresh(&self, terminal_id: &TerminalSessionId) -> Result<TerminalRecord> {
+    pub fn refresh(&self, terminal_id: &TerminalId) -> Result<TerminalRecord> {
         let (execution_id, current, owns_driver) = {
             let state = self.lock()?;
             let entry = state
@@ -1389,7 +1389,7 @@ impl TerminalRegistry {
 
     fn persist_execution_status(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         status: ExecutionStatus,
     ) -> Result<TerminalRecord> {
         let mut state = self.lock()?;
@@ -1453,7 +1453,7 @@ impl TerminalRegistry {
     /// execution outcome. Live, stopping, and `outcome_unknown` terminals keep
     /// their slot so `/workspace` cannot accidentally admit a second shell
     /// before the old authority boundary is known to be gone.
-    pub fn retire_terminal_slot(&self, terminal_id: &TerminalSessionId) -> Result<TerminalRecord> {
+    pub fn retire_terminal_slot(&self, terminal_id: &TerminalId) -> Result<TerminalRecord> {
         let current = self.record(terminal_id)?;
         match current.state {
             TerminalState::Exited | TerminalState::Failed => return Ok(current),
@@ -1497,7 +1497,7 @@ impl TerminalRegistry {
     /// daemon. PTY output has no call path to this method.
     pub fn accept_private_integration(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         bytes: &[u8],
     ) -> Result<IntegrationBatch> {
         self.accept_private_integration_sample(terminal_id, bytes, None)
@@ -1505,7 +1505,7 @@ impl TerminalRegistry {
 
     fn accept_private_integration_sample(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         bytes: &[u8],
         foreground_sample: Option<Option<i32>>,
     ) -> Result<IntegrationBatch> {
@@ -1605,7 +1605,7 @@ impl TerminalRegistry {
 
     fn update_private_integration(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         update: impl FnOnce(&mut BoundedShellIntegration) -> IntegrationBatch,
     ) -> Result<IntegrationBatch> {
         let mut state = self.lock()?;
@@ -1662,7 +1662,7 @@ impl TerminalRegistry {
     /// and persistent agent commands; callers must never feed PTY bytes here.
     pub fn poll_private_integration(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         maximum_bytes: usize,
     ) -> Result<IntegrationBatch> {
         if maximum_bytes == 0 {
@@ -1739,7 +1739,7 @@ impl TerminalRegistry {
 
     fn accept_acknowledged_private_packet(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         bytes: &[u8],
         foreground_sample: Option<i32>,
         transport_degraded: bool,
@@ -1777,16 +1777,16 @@ impl TerminalRegistry {
 
         if batch.notice.is_none() {
             let events = batch.events.clone();
-            for event in &events {
+            for event in events {
                 let result = (|| -> Result<()> {
-                    match event {
+                    match &event {
                         ShellIntegrationEvent::PromptReady {
                             sequence,
                             input_pending,
                             ..
                         } => {
                             let mut next_record = record.clone();
-                            apply_event_to_record(&mut next_record, event)?;
+                            apply_event_to_record(&mut next_record, &event)?;
                             if entry.pending_human_command.is_some()
                                 || entry.pending_agent_transaction.is_some()
                                 || entry.active_typed_command.is_some()
@@ -1839,7 +1839,7 @@ impl TerminalRegistry {
                             ..
                         } => {
                             let mut next_record = record.clone();
-                            apply_event_to_record(&mut next_record, event)?;
+                            apply_event_to_record(&mut next_record, &event)?;
                             let next_command_sequence =
                                 record.command_sequence.checked_add(1).ok_or_else(|| {
                                     ProcessError::new(
@@ -1940,7 +1940,7 @@ impl TerminalRegistry {
                             cwd,
                         } => {
                             let mut next_record = record.clone();
-                            apply_event_to_record(&mut next_record, event)?;
+                            apply_event_to_record(&mut next_record, &event)?;
                             match transaction_id {
                                 None => {
                                     if entry.pending_human_command.is_some()
@@ -2090,7 +2090,7 @@ impl TerminalRegistry {
 
     pub fn integration_closed(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
     ) -> Result<Option<ShellIntegrationNotice>> {
         Ok(self
             .update_private_integration(terminal_id, |integration| integration.channel_closed())?
@@ -2099,7 +2099,7 @@ impl TerminalRegistry {
 
     pub fn promote_subagent(
         &self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         session_id: &SessionId,
     ) -> Result<TerminalRecord> {
         let quiesce_deadline = Instant::now() + AGENT_TERMINAL_PROMOTION_QUIESCE_TIMEOUT;
@@ -2217,11 +2217,7 @@ impl TerminalRegistry {
         }
     }
 
-    pub fn terminate_terminal(
-        &self,
-        terminal_id: &TerminalSessionId,
-        mode: KillMode,
-    ) -> Result<()> {
+    pub fn terminate_terminal(&self, terminal_id: &TerminalId, mode: KillMode) -> Result<()> {
         let mut state = self.lock()?;
         let (record, slot, owns_driver) = {
             let entry = state
@@ -2407,7 +2403,7 @@ fn insert_stored_terminal(state: &mut RegistryState, stored: StoredTerminalRecor
 fn replace_terminal_record(
     repository: &dyn TerminalRepository,
     state: &mut RegistryState,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
     record: TerminalRecord,
     slot: TerminalSlot,
     active_slot: bool,
@@ -2482,7 +2478,7 @@ fn replace_terminal_record(
 
 fn mark_terminal_outcome_unknown(
     state: &mut RegistryState,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
     handoff: Option<(TerminalOwner, TerminalSlot)>,
 ) -> Result<()> {
     let (old_slot, old_active_slot) = {
@@ -2996,7 +2992,7 @@ fn merge_terminal_state(current: TerminalState, observed: TerminalState) -> Term
     }
 }
 
-fn terminal_not_found(terminal_id: &TerminalSessionId) -> ProcessError {
+fn terminal_not_found(terminal_id: &TerminalId) -> ProcessError {
     ProcessError::new(
         ProcessErrorCode::ExecutionNotFound,
         format!("terminal `{terminal_id}` was not found"),
@@ -3011,8 +3007,8 @@ mod tests {
     use agl_exec::WriterLeaseId;
 
     use super::*;
-    use crate::terminal::command::MAX_AGENT_TERMINAL_COMMAND_BYTES;
     use crate::terminal::environment::TerminalSecretValue;
+    use agl_terminal::MAX_AGENT_TERMINAL_COMMAND_BYTES;
 
     struct NoSecrets;
 
@@ -3138,7 +3134,7 @@ mod tests {
                 .unwrap()
                 .get(execution_id)
                 .cloned()
-                .ok_or_else(|| terminal_not_found(&TerminalSessionId::generate()))
+                .ok_or_else(|| terminal_not_found(&TerminalId::generate()))
         }
 
         fn kill(&self, execution_id: &ExecutionId, _mode: KillMode) -> Result<()> {
@@ -3147,7 +3143,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(execution_id)
-                .ok_or_else(|| terminal_not_found(&TerminalSessionId::generate()))?
+                .ok_or_else(|| terminal_not_found(&TerminalId::generate()))?
                 .state = ExecutionState::Cancelled;
             Ok(())
         }
@@ -3429,7 +3425,7 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             let status = records
                 .get_mut(execution_id)
-                .ok_or_else(|| terminal_not_found(&TerminalSessionId::generate()))?;
+                .ok_or_else(|| terminal_not_found(&TerminalId::generate()))?;
             status.owner = owner;
             drop(records);
             self.writable_leases.lock().unwrap().remove(execution_id);
@@ -3694,7 +3690,7 @@ mod tests {
         let environment = request.environment.resolve(&NoSecrets).unwrap();
         let environment_digest = environment.digest().clone();
         let record = TerminalRecord {
-            terminal_id: TerminalSessionId::generate(),
+            terminal_id: TerminalId::generate(),
             execution_id: ExecutionId::generate(),
             session_id: request.session_id.clone(),
             owner: request.owner.clone(),

@@ -1,11 +1,10 @@
-pub mod command;
-pub mod environment;
-pub mod history;
+pub use agl_terminal::environment;
+pub use agl_terminal::history;
 pub mod registry;
 pub mod repository;
 pub mod shell;
 
-pub use command::CommandCardSanitizer;
+pub use agl_terminal::CommandCardSanitizer;
 
 pub use registry::{
     TerminalEnsureRequest, TerminalOwner, TerminalRecord, TerminalRegistry, TerminalState,

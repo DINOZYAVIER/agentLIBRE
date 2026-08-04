@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use crate::terminal::history::TerminalHistorySeed;
+use crate::history::TerminalHistorySeed;
 
-use super::integration::ShellIntegrationToken;
+use super::ShellIntegrationToken;
 use super::{HostStartupPolicy, shell_quote};
 
 pub(super) fn render_startup(

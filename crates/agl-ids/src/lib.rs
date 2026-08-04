@@ -113,7 +113,6 @@ define_id!(EventId, "evt_");
 define_id!(RequestId, "req_");
 define_id!(MessageId, "msg_");
 define_id!(DaemonInstanceId, "daemon_");
-define_id!(TerminalSessionId, "term_");
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct ExecutionScope {
@@ -282,7 +281,6 @@ mod tests {
         assert_id_format!(RequestId, "req_");
         assert_id_format!(MessageId, "msg_");
         assert_id_format!(DaemonInstanceId, "daemon_");
-        assert_id_format!(TerminalSessionId, "term_");
     }
 
     #[test]

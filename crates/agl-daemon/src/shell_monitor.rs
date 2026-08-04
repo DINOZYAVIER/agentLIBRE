@@ -6,11 +6,12 @@ use agl_app::{
     ApplicationCallContext, ApplicationService, SanitizedDisplayPath, SessionHeader,
     SessionPresentationEvent, Severity, TerminalSessionView,
 };
-use agl_ids::{SessionId, TerminalSessionId};
+use agl_ids::SessionId;
 use agl_process::{
     HumanShellHistoryStore, ProcessErrorCode, ShellExit, ShellIntegrationEvent,
     ShellIntegrationNotice, TerminalRegistry,
 };
+use agl_terminal::TerminalId;
 
 use crate::state::{DaemonStateCallError, DaemonStateExecutor};
 
@@ -28,7 +29,7 @@ struct ShellMonitorConnection {
 }
 
 pub(crate) struct ShellMonitorSpec {
-    pub terminal_id: TerminalSessionId,
+    pub terminal_id: TerminalId,
     pub session_id: SessionId,
     pub workspace_root: PathBuf,
     pub initial_command_sequence: u64,
@@ -192,7 +193,7 @@ fn monitor_terminal(connection: ShellMonitorConnection, spec: ShellMonitorSpec) 
 
 fn project_human_command_cards(
     connection: &ShellMonitorConnection,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
     events: &[ShellIntegrationEvent],
 ) -> Option<(Vec<SessionPresentationEvent>, bool)> {
     let state = connection.state.upgrade()?;
@@ -243,7 +244,7 @@ fn close_integration(
 
 fn project_human_command_outcome_unknown(
     connection: &ShellMonitorConnection,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
 ) -> Option<Vec<SessionPresentationEvent>> {
     let state = connection.state.upgrade()?;
     loop {
@@ -260,7 +261,7 @@ fn project_human_command_outcome_unknown(
 
 fn project_terminal(
     connection: &ShellMonitorConnection,
-    terminal_id: &TerminalSessionId,
+    terminal_id: &TerminalId,
     cwd: Option<&PathBuf>,
     include_terminal: bool,
 ) -> Option<TerminalMonitorProjection> {
@@ -366,7 +367,7 @@ impl TrustedCommandTracker {
 
     fn accept(
         &mut self,
-        terminal_id: &TerminalSessionId,
+        terminal_id: &TerminalId,
         events: &[ShellIntegrationEvent],
         accepted_command_sequence: u64,
     ) -> Result<ProjectedIntegrationEvents, ()> {
@@ -440,7 +441,7 @@ mod tests {
 
     #[test]
     fn trusted_pair_yields_only_private_history_and_metadata() {
-        let terminal_id = TerminalSessionId::generate();
+        let terminal_id = TerminalId::generate();
         let directory = cwd();
         let command = "printf 'private-token'";
         let mut tracker = TrustedCommandTracker::new(0);
@@ -482,7 +483,7 @@ mod tests {
     fn unfinished_or_mismatched_boundaries_never_complete_history() {
         let directory = cwd();
         let mut tracker = TrustedCommandTracker::new(7);
-        let terminal_id = TerminalSessionId::generate();
+        let terminal_id = TerminalId::generate();
         let started = tracker
             .accept(
                 &terminal_id,

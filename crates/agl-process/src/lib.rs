@@ -22,6 +22,11 @@ pub use agl_exec::{
     WRITABLE_INPUT_LEASE_TTL, WriterLeaseId, resolve_execution_directory,
 };
 pub use agl_pty::ProcessPlatformDiagnostics;
+pub use agl_terminal::{
+    AgentTerminalCommandQueue, CommandCardSanitizer, HumanTerminalCommandAdmission,
+    QueuedTerminalCommand, SanitizedTerminalOutput, TerminalCommandOutputRange,
+    TerminalCommandResult, human_terminal_command_submission, sanitize_terminal_card_output,
+};
 pub use repository::{ExecutionRepository, InMemoryExecutionRepository};
 pub use request::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,
@@ -30,11 +35,6 @@ pub use request::{
 };
 pub use status::{ExecutionListFilter, ExecutionStatus, ShellIntegrationReadResult};
 pub use supervisor::{ProcessHandle, ProcessSupervisor};
-pub use terminal::command::{
-    AgentTerminalCommandQueue, CommandCardSanitizer, HumanTerminalCommandAdmission,
-    QueuedTerminalCommand, SanitizedTerminalOutput, TerminalCommandOutputRange,
-    TerminalCommandResult, human_terminal_command_submission, sanitize_terminal_card_output,
-};
 pub use terminal::environment::{
     RejectTerminalSecrets, ResolvedTerminalEnvironment, TerminalEnvironmentDigest,
     TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalSecretReference,

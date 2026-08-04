@@ -1,22 +1,18 @@
 [package]
-name = "agl-client"
+name = "agl-terminal-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-agl-content.workspace = true
-agl-events.workspace = true
-agl-ids.workspace = true
-agl-protocol.workspace = true
+agl-exec.workspace = true
 agl-terminal.workspace = true
-libc.workspace = true
+agl-terminal-protocol.workspace = true
 futures-util.workspace = true
-serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-agl-config.workspace = true
-agl-model.workspace = true
+serde_json.workspace = true
