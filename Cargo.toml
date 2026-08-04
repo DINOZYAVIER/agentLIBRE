@@ -24,6 +24,7 @@ members = [
     "crates/agl-notes",
     "crates/agl-oven",
     "crates/agl-process",
+    "crates/agl-pty",
     "crates/agl-protocol",
     "crates/agl-repo",
     "crates/agl-session",
@@ -76,6 +77,7 @@ agl-model = { path = "crates/agl-model" }
 agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-process = { path = "crates/agl-process" }
+agl-pty = { path = "crates/agl-pty" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }

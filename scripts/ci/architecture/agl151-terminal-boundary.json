@@ -48,7 +48,7 @@
     ],
     "future": [
       {"name": "agl-exec", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
-      {"name": "agl-pty", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
+      {"name": "agl-pty", "owner": "agl-terminal", "status": "in-tree-split", "kind": "crate", "category": "terminal"},
       {"name": "agl-terminal", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
       {"name": "agl-terminal-protocol", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
       {"name": "agl-terminal-client", "owner": "agl-terminal", "status": "not-yet-present", "kind": "crate", "category": "terminal"},
