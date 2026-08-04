@@ -522,10 +522,19 @@ version = "1.0.0-alpha.12"
 dependencies = [
  "agl-exec",
  "agl-ids",
+ "agl-pty",
  "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+]
+
+[[package]]
+name = "agl-pty"
+version = "1.0.0-alpha.12"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

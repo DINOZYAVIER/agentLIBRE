@@ -1,4 +1,3 @@
-mod config;
 mod platform;
 mod repository;
 mod request;
@@ -22,7 +21,7 @@ pub use agl_exec::{
     ProcessErrorCode, ProcessSupervisorOptions, Result, WRITABLE_INPUT_LEASE_HEARTBEAT,
     WRITABLE_INPUT_LEASE_TTL, WriterLeaseId, resolve_execution_directory,
 };
-pub use config::ProcessPlatformDiagnostics;
+pub use agl_pty::ProcessPlatformDiagnostics;
 pub use repository::{ExecutionRepository, InMemoryExecutionRepository};
 pub use request::{
     EnvironmentOverride, ExecutionAuthorization, ExecutionGrantLease, ExecutionIo, ExecutionKind,

@@ -49,7 +49,7 @@
         "normal: agl-pty -> agl-store is forbidden below terminal UI"
       ],
       "add_packages": [
-        { "name": "agl-pty", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
+        { "name": "agl-pty", "source": null }
       ],
       "dependencies": [
         { "from": "agl-pty", "name": "agl-protocol", "kind": null },
@@ -72,7 +72,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["requires an immutable pinned git revision"],
       "add_packages": [
-        { "name": "agl-pty", "source": null }
+        { "name": "agl-terminal", "source": null }
       ],
       "dependencies": []
     },

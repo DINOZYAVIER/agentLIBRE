@@ -46,15 +46,15 @@
 
 ### Selected Targets
 
-**In-tree split contract (Step 02):**
+**In-tree split packages (Step 02):**
 - `agl-exec`
+- `agl-pty`
 
-This package is still owned by the selected future `agl-terminal` repository.
-Its temporary workspace source exists only to build the extraction seam before
-the Step 03 immutable Git cutover.
+These packages are still owned by the selected future `agl-terminal`
+repository. Their temporary workspace sources exist only to build the
+extraction seam before the Step 03 immutable Git cutover.
 
 **Not-yet-present crates:**
-- `agl-pty`
 - `agl-terminal`
 - `agl-terminal-protocol`
 - `agl-terminal-client`
@@ -97,5 +97,5 @@ The following are core agentLIBRE domains and are NOT candidates for terminal ex
 
 ## Summary of State
 - **Current Facts:** 37 packages owned by `agentLIBRE`.
-- **Selected Target:** 8 packages for `agl-terminal` ownership: one in-tree
-  split contract and seven not yet present.
+- **Selected Target:** 8 packages for `agl-terminal` ownership: two in-tree
+  split packages and six not yet present.
