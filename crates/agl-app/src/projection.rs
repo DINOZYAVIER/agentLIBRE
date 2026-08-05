@@ -1,14 +1,10 @@
 use std::collections::BTreeSet;
-use std::fmt::{self, Debug, Formatter};
 use std::path::Path;
 
 use agl_content::Content;
+use agl_exec::{ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState};
 use agl_ids::{AttemptId, DaemonInstanceId, EventId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_kernel::ToolAccessMode;
-use agl_process::{
-    ExecutionCursor, ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState,
-    SanitizedTerminalOutput,
-};
 use agl_terminal::TerminalId;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +16,6 @@ use crate::{
 pub const MAX_PRESENTATION_ITEMS: usize = 2_000;
 pub const MAX_EXECUTION_VIEWS: usize = 2_000;
 pub const MAX_PRESENTATION_CONTENT_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_HUMAN_COMMAND_CARDS: usize = 32;
-pub const MAX_HUMAN_COMMAND_BYTES: usize = 64 * 1024;
-pub const MAX_HUMAN_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
-pub const MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ACTIVITY_NODES: usize = 512;
 pub const MAX_ACTIVE_ACTIVITY_NODES: usize = 256;
 pub const MAX_ACTIVITY_PATH_NODES: usize = 32;
@@ -315,98 +307,6 @@ pub struct ExecutionView {
     pub exit: Option<ExecutionExit>,
     pub last_sequence: u64,
     pub output_truncated: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HumanCommandCardState {
-    Starting,
-    Running,
-    Exited,
-    OutcomeUnknown,
-}
-
-pub type ExecutionOutputCursor = ExecutionCursor;
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SanitizedTerminalText(String);
-
-impl SanitizedTerminalText {
-    /// Converts only the output of the daemon-side terminal sanitizer into a
-    /// presentation value; raw PTY bytes and shell-integration strings have no
-    /// direct constructor on this type.
-    pub fn from_process_sanitized(output: &SanitizedTerminalOutput) -> Self {
-        Self(output.text().to_owned())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn validate(&self, maximum_bytes: usize, allow_empty: bool) -> Result<(), ApplicationError> {
-        if (!allow_empty && self.0.is_empty())
-            || self.0.len() > maximum_bytes
-            || self.0.chars().any(is_forbidden_presentation_character)
-        {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "sanitized terminal text is empty, oversized, or contains a forbidden character",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl Debug for SanitizedTerminalText {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SanitizedTerminalText")
-            .field("bytes", &self.0.len())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanCommandCardView {
-    pub terminal_id: TerminalId,
-    pub execution_id: ExecutionId,
-    pub command_sequence: u64,
-    pub command: SanitizedTerminalText,
-    pub output: SanitizedTerminalText,
-    pub output_start: ExecutionOutputCursor,
-    pub output_end: ExecutionOutputCursor,
-    pub state: HumanCommandCardState,
-    pub exit_status: Option<i32>,
-    pub cwd: SanitizedDisplayPath,
-    pub truncated: bool,
-    pub filtered_effects: u32,
-    pub started_at_unix_ms: u64,
-    pub updated_at_unix_ms: u64,
-}
-
-impl HumanCommandCardView {
-    pub fn validate(&self) -> Result<(), ApplicationError> {
-        self.command.validate(MAX_HUMAN_COMMAND_BYTES, false)?;
-        self.output.validate(MAX_HUMAN_COMMAND_OUTPUT_BYTES, true)?;
-        if self.output_start.after_sequence > self.output_end.after_sequence
-            || self.updated_at_unix_ms < self.started_at_unix_ms
-        {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "Human command card cursors or timestamps are inconsistent",
-            ));
-        }
-        self.cwd.validate()?;
-        if matches!(self.state, HumanCommandCardState::Exited) != self.exit_status.is_some() {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "only an exited Human command card carries an exit status",
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1172,7 +1072,6 @@ pub struct SessionPresentationSnapshot {
     pub queued_prompts: Vec<QueuedPromptView>,
     pub terminals: Vec<TerminalSessionView>,
     pub executions: Vec<ExecutionView>,
-    pub human_commands: Vec<HumanCommandCardView>,
     pub activity: Option<ActivityGraphView>,
     pub command_context: CommandContext,
 }
@@ -1198,7 +1097,6 @@ impl SessionPresentationSnapshot {
             || self.queued_prompts.len() > MAX_QUEUED_PROMPTS_PER_SESSION
             || self.terminals.len() > MAX_TERMINALS_PER_SESSION
             || self.executions.len() > MAX_EXECUTION_VIEWS
-            || self.human_commands.len() > MAX_HUMAN_COMMAND_CARDS
         {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::InvalidArguments,
@@ -1228,25 +1126,6 @@ impl SessionPresentationSnapshot {
                     "snapshot execution identities must be unique",
                 ));
             }
-        }
-        let mut command_keys = BTreeSet::new();
-        let mut command_output_bytes = 0usize;
-        for command in &self.human_commands {
-            command.validate()?;
-            command_output_bytes =
-                command_output_bytes.saturating_add(command.output.as_str().len());
-            if !command_keys.insert((&command.terminal_id, command.command_sequence)) {
-                return Err(ApplicationError::new(
-                    ApplicationErrorCode::InvalidArguments,
-                    "Human command card identities must be unique",
-                ));
-            }
-        }
-        if command_output_bytes > MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::InvalidArguments,
-                "Human command cards exceed their aggregate output bound",
-            ));
         }
         if let Some(activity) = &self.activity {
             activity.validate()?;
@@ -1340,13 +1219,6 @@ pub enum SessionPresentationEvent {
         sequence: u64,
         exit_status: i32,
         cwd: SanitizedDisplayPath,
-    },
-    HumanCommandCardUpsert {
-        card: HumanCommandCardView,
-    },
-    HumanCommandCardRemoved {
-        terminal_id: TerminalId,
-        command_sequence: u64,
     },
     ActivityGraphDelta {
         batch: ActivityGraphDeltaBatch,

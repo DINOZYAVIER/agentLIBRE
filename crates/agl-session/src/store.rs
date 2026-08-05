@@ -22,7 +22,7 @@ pub struct SessionMetadata {
     pub updated_at_unix_ms: u128,
     pub local_inference_config_path: PathBuf,
     pub backend: String,
-    pub execution_context: agl_process::ExecutionContextSnapshot,
+    pub execution_context: agl_exec::ExecutionContextSnapshot,
     pub runtime_selection: SessionRuntimeSelection,
 }
 
@@ -414,7 +414,7 @@ impl ChatSessionStore {
         session_id: SessionId,
         local_inference_config_path: impl Into<PathBuf>,
         backend: impl Into<String>,
-        execution_context: agl_process::ExecutionContextSnapshot,
+        execution_context: agl_exec::ExecutionContextSnapshot,
         runtime_selection: SessionRuntimeSelection,
     ) -> Result<Self> {
         execution_context
@@ -503,7 +503,7 @@ impl ChatSessionStore {
         &self.session_dir
     }
 
-    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+    pub fn execution_context(&self) -> &agl_exec::ExecutionContextSnapshot {
         &self.metadata.execution_context
     }
 
@@ -536,8 +536,8 @@ impl ChatSessionStore {
     pub fn compare_and_set_execution_context(
         &mut self,
         expected_revision: u64,
-        next: agl_process::ExecutionContextSnapshot,
-    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+        next: agl_exec::ExecutionContextSnapshot,
+    ) -> Result<&agl_exec::ExecutionContextSnapshot> {
         next.validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let current = &self.metadata.execution_context;
@@ -571,8 +571,8 @@ impl ChatSessionStore {
         sessions_root: impl AsRef<Path>,
         session_id: &SessionId,
         expected_revision: u64,
-        next: agl_process::ExecutionContextSnapshot,
-    ) -> Result<agl_process::ExecutionContextSnapshot> {
+        next: agl_exec::ExecutionContextSnapshot,
+    ) -> Result<agl_exec::ExecutionContextSnapshot> {
         next.validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let metadata_path = sessions_root
@@ -614,7 +614,7 @@ impl ChatSessionStore {
         Ok(metadata.execution_context)
     }
 
-    pub fn reload_execution_context(&mut self) -> Result<&agl_process::ExecutionContextSnapshot> {
+    pub fn reload_execution_context(&mut self) -> Result<&agl_exec::ExecutionContextSnapshot> {
         let metadata_path = self.session_dir.join("session.json");
         let bytes = std::fs::read(&metadata_path)
             .with_context(|| format!("failed to read {}", metadata_path.display()))?;
@@ -635,8 +635,8 @@ impl ChatSessionStore {
     pub fn reset_workspace_execution_context(
         &mut self,
         expected_revision: u64,
-        next: agl_process::ExecutionContextSnapshot,
-    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+        next: agl_exec::ExecutionContextSnapshot,
+    ) -> Result<&agl_exec::ExecutionContextSnapshot> {
         next.validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let current = &self.metadata.execution_context;

@@ -3,9 +3,9 @@ mod options;
 mod run_factory;
 mod scheduler;
 mod server;
-mod shell_monitor;
 mod state;
 mod surface;
+mod terminal_bridge;
 #[cfg(test)]
 mod tests;
 mod transcript;

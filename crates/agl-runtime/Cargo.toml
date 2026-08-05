@@ -10,6 +10,7 @@ agl-artifact.workspace = true
 agl-assets.workspace = true
 agl-function.workspace = true
 agl-extension.workspace = true
+agl-exec.workspace = true
 agl-ids.workspace = true
 agl-model.workspace = true
 agl-process.workspace = true

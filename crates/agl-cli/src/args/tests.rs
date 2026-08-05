@@ -1,9 +1,5 @@
 use super::*;
 
-const SESSION_ID: &str = "ses_01890f17-4a00-7000-8000-000000000001";
-const RUN_ID: &str = "run_01890f17-4a00-7000-8000-000000000002";
-const EXECUTION_ID: &str = "exec_01890f17-4a00-7000-8000-000000000003";
-
 fn parse_command(args: impl IntoIterator<Item = &'static str>) -> CliCommand {
     parse_cli(args.into_iter().map(str::to_string))
         .unwrap()
@@ -110,15 +106,6 @@ fn real_cli_commands_have_long_help() {
     let command = Cli::command();
     let mut path = vec![command.get_name().to_string()];
     assert_cli_help_tree_is_documented(&command, &mut path);
-}
-
-#[test]
-fn welcome_text_can_render_magenta() {
-    let text = welcome_text(true);
-
-    assert!(text.starts_with("\x1b[35m"));
-    assert!(text.ends_with("\x1b[0m"));
-    assert!(text.contains("▒▒████████▒▒███████ ███████████"));
 }
 
 fn assert_cli_help_tree_is_documented(command: &clap::Command, path: &mut Vec<String>) {
@@ -1105,114 +1092,19 @@ fn parse_daemon_status_command_with_socket_override() {
         CliCommand::DaemonStatus(DaemonStatusOptions {
             socket_path: Some(PathBuf::from("/tmp/agl.sock")),
             detail: true,
+            overview: false,
         }),
     );
 }
 
 #[test]
-fn parse_process_operator_commands() {
+fn bare_agl_is_a_bounded_daemon_status_query() {
     assert_command(
-        [
-            "agl",
-            "process",
-            "list",
-            "--session",
-            SESSION_ID,
-            "--run",
-            RUN_ID,
-            "--all",
-            "--json",
-        ],
-        CliCommand::Process(ProcessCommand::List(ProcessListOptions {
-            session_id: Some(SessionId::parse(SESSION_ID).unwrap()),
-            root_run_id: Some(RunId::parse(RUN_ID).unwrap()),
-            include_finished: true,
-            json: true,
-        })),
-    );
-    assert_command(
-        [
-            "agl",
-            "process",
-            "status",
-            EXECUTION_ID,
-            "--private-command",
-            "--json",
-        ],
-        CliCommand::Process(ProcessCommand::Status(ProcessStatusOptions {
-            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
-            private_command: true,
-            json: true,
-        })),
-    );
-    assert_command(
-        [
-            "agl",
-            "process",
-            "read",
-            EXECUTION_ID,
-            "--after",
-            "8",
-            "--max-bytes",
-            "4096",
-        ],
-        CliCommand::Process(ProcessCommand::Read(ProcessReadOptions {
-            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
-            after_sequence: 8,
-            max_bytes: 4096,
-            json: false,
-        })),
-    );
-    assert_command(
-        [
-            "agl",
-            "process",
-            "attach",
-            EXECUTION_ID,
-            "--after",
-            "9",
-            "--read-only",
-        ],
-        CliCommand::Process(ProcessCommand::Attach(ProcessAttachOptions {
-            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
-            after_sequence: 9,
-            read_only: true,
-        })),
-    );
-    assert_command(
-        [
-            "agl",
-            "process",
-            "kill",
-            EXECUTION_ID,
-            "--immediate",
-            "--yes",
-            "--json",
-        ],
-        CliCommand::Process(ProcessCommand::Kill(ProcessKillOptions {
-            execution_id: ExecutionId::parse(EXECUTION_ID).unwrap(),
-            immediate: true,
-            yes: true,
-            json: true,
-        })),
-    );
-    assert_command(
-        ["agl", "process", "doctor", "--json"],
-        CliCommand::Process(ProcessCommand::Doctor(ProcessDoctorOptions { json: true })),
-    );
-    assert_parse_error_contains(
-        ["agl", "process", "read", EXECUTION_ID, "--max-bytes", "0"],
-        "--max-bytes must be between 1 and 65536",
-    );
-}
-
-#[test]
-fn parse_bare_prompt_as_run() {
-    assert_command(
-        ["agl", "hello"],
-        CliCommand::Run(RunOptions {
-            prompt: Some("hello".to_string()),
-            ..RunOptions::default()
+        ["agl"],
+        CliCommand::DaemonStatus(DaemonStatusOptions {
+            socket_path: None,
+            detail: false,
+            overview: true,
         }),
     );
 }
@@ -1221,14 +1113,8 @@ fn parse_bare_prompt_as_run() {
 fn removed_command_names_do_not_fall_through_to_bare_prompt() {
     for command in ["chat", "infer", "generate", "setup", "doctor"] {
         let message = parse_error(["agl", command, "--help"]);
-        assert!(message.contains("unknown command"), "{message}");
-        assert!(message.contains("Use `agl run --prompt TEXT`"), "{message}");
+        assert!(message.contains("unrecognized subcommand"), "{message}");
     }
-}
-
-#[test]
-fn parse_rejects_blank_bare_prompt() {
-    assert_parse_error_contains(["agl", "   "], "prompt cannot be empty");
 }
 
 #[test]
@@ -1248,7 +1134,7 @@ fn parse_home_override() {
 
 #[test]
 fn removed_chat_command_is_rejected() {
-    assert_parse_error_contains(["agl", "chat"], "unknown command");
+    assert_parse_error_contains(["agl", "chat"], "unrecognized subcommand");
 }
 
 #[test]

@@ -5,28 +5,37 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agl_exec::{CallerNamespace, CallerOwnerKind, ExecutionCorrelation, OpaqueOwnerId};
+use agl_exec::{
+    AuthorityFingerprint, CallerNamespace, CallerOwnerKind, EnvironmentOverride,
+    ExecutionAuthorization, ExecutionContextSnapshot, ExecutionCorrelation, ExecutionCursor,
+    ExecutionExit, ExecutionGrantLease, ExecutionId, ExecutionIo, ExecutionKind,
+    ExecutionLeaseOrigin, ExecutionLimits, ExecutionOwner, ExecutionProfile, ExecutionRequest,
+    ExecutionStatus, KillMode, OpaqueOwnerId, ProcessBytes, ProcessBytesEncoding, TerminalSize,
+    resolve_execution_directory,
+};
 #[cfg(test)]
 use agl_exec::{CallerOwner, CallerRole};
 use agl_extension::{
     EffectId, ExtensionDescriptor, ExtensionId, ObservedEffect, OperationKind, ToolDeclaration,
-    ToolDispatchContext, ToolHandler, ToolHandlerError, ToolId, ToolInvocation, ToolResult,
+    ToolDispatchContext, ToolDispatchControl, ToolHandler, ToolHandlerError, ToolId,
+    ToolInvocation, ToolResult,
 };
 use agl_ids::{ExecutionScope, RunId, SessionId, StepId};
-use agl_process::{
-    AdmittedShellKind, AdmittedShellProfile, EnvironmentOverride, ExecutionAuthorization,
-    ExecutionContextSnapshot, ExecutionCursor, ExecutionExit, ExecutionGrantLease, ExecutionId,
-    ExecutionIo, ExecutionKind, ExecutionLimits, ExecutionOwner, ExecutionProfile,
-    ExecutionRequest, ExecutionRequestId, HostStartupPolicy, KillMode, ProcessBytes,
-    ProcessBytesEncoding, ProcessHandle, TerminalEnsureRequest, TerminalEnvironmentRequest,
-    TerminalHistorySeed, TerminalOwner, TerminalRegistry, TerminalSize, TerminalTopologyId,
-    resolve_execution_directory,
+use agl_process::TerminalEndpoint;
+use agl_terminal::environment::TerminalEnvironmentRequest;
+use agl_terminal::{
+    AdmittedShellKind, AdmittedShellProfile, HostStartupPolicy, TerminalOperation, TerminalOwner,
+    TerminalTopologyId,
 };
+use agl_terminal_client::{TerminalClient, UnixTerminalTransport};
+use agl_terminal_protocol::{ExecutionAdmission, ExecutionOperation, TerminalAdmission};
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
@@ -120,45 +129,42 @@ impl ProcessToolRuntimeConfig {
 
 #[derive(Clone)]
 pub struct ProcessTools {
-    process: ProcessHandle,
-    terminals: Arc<TerminalRegistry>,
+    terminal: Arc<TerminalEndpoint>,
     context: Arc<dyn ProcessExecutionContext>,
     config: ProcessToolRuntimeConfig,
 }
 
 impl ProcessTools {
     pub fn new(
-        process: ProcessHandle,
-        terminals: Arc<TerminalRegistry>,
+        terminal: Arc<TerminalEndpoint>,
         context: Arc<dyn ProcessExecutionContext>,
         config: ProcessToolRuntimeConfig,
     ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
-            process,
-            terminals,
+            terminal,
             context,
             config,
         })
     }
 
-    pub fn process_handle(&self) -> ProcessHandle {
-        self.process.clone()
+    pub fn terminal_endpoint(&self) -> Arc<TerminalEndpoint> {
+        Arc::clone(&self.terminal)
     }
 
-    fn execute(&self, context: ToolDispatchContext) -> Result<Value> {
+    async fn execute(&self, context: ToolDispatchContext) -> Result<Value> {
         let id = context.invocation().capability_id.as_str();
         match id {
             PROCESS_PWD_TOOL_ID => self.pwd(context),
             PROCESS_CD_TOOL_ID => self.cd(context),
-            PROCESS_EXEC_TOOL_ID => self.exec(context),
-            PROCESS_START_TOOL_ID => self.start(context),
-            PROCESS_STATUS_TOOL_ID => self.status(context),
-            PROCESS_READ_TOOL_ID => self.read(context),
-            PROCESS_WRITE_TOOL_ID => self.write(context),
-            PROCESS_RESIZE_TOOL_ID => self.resize(context),
-            PROCESS_KILL_TOOL_ID => self.kill(context),
-            SHELL_EXEC_TOOL_ID => self.shell(context),
+            PROCESS_EXEC_TOOL_ID => self.exec(context).await,
+            PROCESS_START_TOOL_ID => self.start(context).await,
+            PROCESS_STATUS_TOOL_ID => self.status(context).await,
+            PROCESS_READ_TOOL_ID => self.read(context).await,
+            PROCESS_WRITE_TOOL_ID => self.write(context).await,
+            PROCESS_RESIZE_TOOL_ID => self.resize(context).await,
+            PROCESS_KILL_TOOL_ID => self.kill(context).await,
+            SHELL_EXEC_TOOL_ID => self.shell(context).await,
             _ => bail!("unknown process tool `{id}`"),
         }
     }
@@ -222,30 +228,18 @@ impl ProcessTools {
         }))
     }
 
-    fn exec(&self, context: ToolDispatchContext) -> Result<Value> {
+    async fn exec(&self, context: ToolDispatchContext) -> Result<Value> {
         let args =
             parse_args::<ArgvArgs>(PROCESS_EXEC_TOOL_ID, context.invocation().arguments.clone())?;
         let request = self.argv_request(&context, args, ExecutionIo::Pipes, true)?;
-        let owner = request.owner.clone();
-        let started = self
-            .process
-            .start_cancellable(request, context.control().deadline(), || {
-                context.control().is_cancelled()
-            })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let status = self
-            .process
-            .wait(
-                &started.execution_id,
-                &owner,
-                context.control().deadline(),
-                || context.control().is_cancelled(),
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        self.foreground_result(PROCESS_EXEC_TOOL_ID, &owner, status)
+        let client = self.client(&context)?;
+        let started = start_execution(&client, &context, request).await?;
+        let status = wait_execution(&client, &context, started).await?;
+        self.foreground_result(&client, &context, PROCESS_EXEC_TOOL_ID, status)
+            .await
     }
 
-    fn start(&self, context: ToolDispatchContext) -> Result<Value> {
+    async fn start(&self, context: ToolDispatchContext) -> Result<Value> {
         let args = parse_args::<StartArgs>(
             PROCESS_START_TOOL_ID,
             context.invocation().arguments.clone(),
@@ -258,16 +252,12 @@ impl ProcessTools {
             terminal_size,
             ..request
         };
-        let status = self
-            .process
-            .start_cancellable(request, context.control().deadline(), || {
-                context.control().is_cancelled()
-            })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let client = self.client(&context)?;
+        let status = start_execution(&client, &context, request).await?;
         Ok(background_result(PROCESS_START_TOOL_ID, &status))
     }
 
-    fn shell(&self, context: ToolDispatchContext) -> Result<Value> {
+    async fn shell(&self, context: ToolDispatchContext) -> Result<Value> {
         let args =
             parse_args::<ShellArgs>(SHELL_EXEC_TOOL_ID, context.invocation().arguments.clone())?;
         validate_shell_contract(&args).map_err(|error| {
@@ -290,18 +280,18 @@ impl ProcessTools {
         let profile: ExecutionProfile = args.profile.unwrap_or_default().into();
         if profile == ExecutionProfile::Workspace {
             if args.workspace_access == WorkspaceAccessArg::Write {
-                return self.cow_workspace_shell(context, args);
+                return self.cow_workspace_shell(context, args).await;
             }
-            return self.agent_shell(context, args);
+            return self.agent_shell(context, args).await;
         }
         ensure!(
             args.workspace_access == WorkspaceAccessArg::ReadOnly,
             "host shell fallback cannot receive repository mutation authority"
         );
-        self.one_shot_host_shell(context, args)
+        self.one_shot_host_shell(context, args).await
     }
 
-    fn agent_shell(&self, context: ToolDispatchContext, args: ShellArgs) -> Result<Value> {
+    async fn agent_shell(&self, context: ToolDispatchContext, args: ShellArgs) -> Result<Value> {
         ensure!(
             args.cwd.is_none() && args.env.is_none() && args.terminal_size.is_none(),
             "persistent workspace core.process:shell.exec uses the owner's durable cwd, environment, and terminal size"
@@ -316,7 +306,6 @@ impl ProcessTools {
         );
         let invocation = context.invocation();
         let admission = self.context.load(&invocation.scope)?;
-        let execution_owner = admission.owner.clone();
         admission
             .snapshot
             .shell
@@ -326,47 +315,53 @@ impl ProcessTools {
         let shell = admitted_agent_shell(&admission.snapshot)?;
         let environment = self.agent_terminal_environment(&admission.snapshot, &shell)?;
         let timeout_ms = self.timeout_ms(args.timeout_ms, true, context.control().remaining())?;
-        let deadline = timeout_ms
-            .map(Duration::from_millis)
-            .and_then(|duration| std::time::Instant::now().checked_add(duration));
-        let result = self
-            .terminals
-            .execute_agent_command_cancellable(
-                TerminalEnsureRequest {
-                    topology_id: TerminalTopologyId::new(OpaqueOwnerId::new(
-                        admission.durable_session_id.as_str(),
-                    )?),
-                    owner,
-                    authority_scope: OpaqueOwnerId::new(root_run_id.as_str())?,
-                    correlation: execution_correlation(&invocation.scope)?,
-                    context: admission.snapshot,
-                    profile: ExecutionProfile::Workspace,
-                    shell,
-                    environment,
-                    runtime_read_only_roots: self.config.runtime_read_only_roots.clone(),
-                    host_startup: HostStartupPolicy::ManagedOnly,
-                    authorization: ExecutionAuthorization::default(),
-                    grant_lease: None,
-                    terminal_size: self.config.default_terminal_size,
-                    limits: self.execution_limits(None),
-                    history_seed: TerminalHistorySeed::empty(),
-                },
-                args.command,
-                deadline,
-                || context.control().is_cancelled(),
-            )
+        let mut terminal_admission = TerminalAdmission {
+            topology_id: TerminalTopologyId::new(OpaqueOwnerId::new(
+                admission.durable_session_id.as_str(),
+            )?),
+            owner,
+            authority_scope: OpaqueOwnerId::new(root_run_id.as_str())?,
+            correlation: execution_correlation(&invocation.scope)?,
+            context: admission.snapshot,
+            profile: ExecutionProfile::Workspace,
+            shell,
+            environment,
+            runtime_read_only_roots: self.config.runtime_read_only_roots.clone(),
+            host_startup: HostStartupPolicy::ManagedOnly,
+            authorization: ExecutionAuthorization::default(),
+            grant_lease: None,
+            terminal_size: self.config.default_terminal_size,
+            limits: self.execution_limits(None),
+            history_seed: Vec::new(),
+            authority_fingerprint: authority_fingerprint(&context)?,
+            request_fingerprint: String::new(),
+            operations: all_terminal_operations(),
+        };
+        terminal_admission
+            .seal_request_fingerprint()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let mut output = self
-            .process
-            .read(
-                &result.execution_id,
-                &execution_owner,
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        let result = controlled(
+            context.control(),
+            token.clone(),
+            client.execute_agent_command(terminal_admission, args.command, timeout_ms, token),
+        )
+        .await?;
+        let token = CancellationToken::new();
+        let mut output = controlled(
+            context.control(),
+            token.clone(),
+            client.read_execution(
+                result.execution_id.clone(),
                 ExecutionCursor {
                     after_sequence: result.output.after_sequence,
                 },
-                self.config.max_result_bytes,
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                checked_maximum_bytes(self.config.max_result_bytes)?,
+                token,
+            ),
+        )
+        .await?;
         output
             .chunks
             .retain(|chunk| chunk.sequence <= result.output.through_sequence);
@@ -402,7 +397,11 @@ impl ProcessTools {
         }))
     }
 
-    fn cow_workspace_shell(&self, context: ToolDispatchContext, args: ShellArgs) -> Result<Value> {
+    async fn cow_workspace_shell(
+        &self,
+        context: ToolDispatchContext,
+        args: ShellArgs,
+    ) -> Result<Value> {
         ensure!(
             args.cwd.is_none() && args.env.is_none() && args.terminal_size.is_none(),
             "workspace shell fallback uses the caller's durable cwd, environment, and terminal size"
@@ -458,21 +457,9 @@ impl ProcessTools {
             grant_lease: None,
             limits: self.execution_limits(timeout_ms),
         };
-        let status = self
-            .process
-            .start_cancellable(request, context.control().deadline(), || {
-                context.control().is_cancelled()
-            })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let status = self
-            .process
-            .wait(
-                &status.execution_id,
-                &admission.owner,
-                context.control().deadline(),
-                || context.control().is_cancelled(),
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let client = self.client(&context)?;
+        let status = start_execution(&client, &context, request).await?;
+        let status = wait_execution(&client, &context, status).await?;
         let diff = transaction
             .diff(&args.expected_effects.workspace_paths)
             .map_err(|error| match error.downcast::<EffectEnvelopeViolation>() {
@@ -493,7 +480,9 @@ impl ProcessTools {
         } else {
             None
         };
-        let mut result = self.foreground_result(SHELL_EXEC_TOOL_ID, &admission.owner, status)?;
+        let mut result = self
+            .foreground_result(&client, &context, SHELL_EXEC_TOOL_ID, status)
+            .await?;
         let object = result
             .as_object_mut()
             .context("shell foreground result must be an object")?;
@@ -526,7 +515,11 @@ impl ProcessTools {
         Ok(result)
     }
 
-    fn one_shot_host_shell(&self, context: ToolDispatchContext, args: ShellArgs) -> Result<Value> {
+    async fn one_shot_host_shell(
+        &self,
+        context: ToolDispatchContext,
+        args: ShellArgs,
+    ) -> Result<Value> {
         let profile = ExecutionProfile::Host;
         let login = args.login.unwrap_or(false);
         let invocation = context.invocation();
@@ -586,22 +579,12 @@ impl ProcessTools {
             grant_lease,
             limits: self.execution_limits(timeout_ms),
         };
-        let status = self
-            .process
-            .start_cancellable(request, context.control().deadline(), || {
-                context.control().is_cancelled()
-            })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let status = self
-            .process
-            .wait(
-                &status.execution_id,
-                &admission.owner,
-                context.control().deadline(),
-                || context.control().is_cancelled(),
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let mut result = self.foreground_result(SHELL_EXEC_TOOL_ID, &admission.owner, status)?;
+        let client = self.client(&context)?;
+        let status = start_execution(&client, &context, request).await?;
+        let status = wait_execution(&client, &context, status).await?;
+        let mut result = self
+            .foreground_result(&client, &context, SHELL_EXEC_TOOL_ID, status)
+            .await?;
         let object = result
             .as_object_mut()
             .context("shell foreground result must be an object")?;
@@ -623,65 +606,90 @@ impl ProcessTools {
         Ok(result)
     }
 
-    fn status(&self, context: ToolDispatchContext) -> Result<Value> {
-        let invocation = context.into_invocation();
-        let args = parse_args::<ExecutionIdArgs>(PROCESS_STATUS_TOOL_ID, invocation.arguments)?;
+    async fn status(&self, context: ToolDispatchContext) -> Result<Value> {
+        let invocation = context.invocation();
+        let args =
+            parse_args::<ExecutionIdArgs>(PROCESS_STATUS_TOOL_ID, invocation.arguments.clone())?;
         let execution_id = parse_execution_id(&args.execution_id)?;
-        let owner = self.context.load(&invocation.scope)?.owner;
-        let status = self
-            .process
-            .status(&execution_id, &owner)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.context.load(&invocation.scope)?;
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        let status = controlled(
+            context.control(),
+            token.clone(),
+            client.inspect_execution(execution_id, token),
+        )
+        .await?;
         Ok(json!({"tool": PROCESS_STATUS_TOOL_ID, "status": status}))
     }
 
-    fn read(&self, context: ToolDispatchContext) -> Result<Value> {
-        let invocation = context.into_invocation();
-        let args = parse_args::<ReadOutputArgs>(PROCESS_READ_TOOL_ID, invocation.arguments)?;
+    async fn read(&self, context: ToolDispatchContext) -> Result<Value> {
+        let invocation = context.invocation();
+        let args =
+            parse_args::<ReadOutputArgs>(PROCESS_READ_TOOL_ID, invocation.arguments.clone())?;
         ensure!(
             args.max_bytes > 0 && args.max_bytes <= self.config.max_result_bytes,
             "core.process:process.read max_bytes must be between 1 and {}",
             self.config.max_result_bytes
         );
         let execution_id = parse_execution_id(&args.execution_id)?;
-        let owner = self.context.load(&invocation.scope)?.owner;
-        let output = self
-            .process
-            .read(
-                &execution_id,
-                &owner,
+        self.context.load(&invocation.scope)?;
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        let output = controlled(
+            context.control(),
+            token.clone(),
+            client.read_execution(
+                execution_id,
                 ExecutionCursor {
                     after_sequence: args.after_sequence.unwrap_or(0),
                 },
-                args.max_bytes,
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                checked_maximum_bytes(args.max_bytes)?,
+                token,
+            ),
+        )
+        .await?;
         Ok(json!({"tool": PROCESS_READ_TOOL_ID, "output": output}))
     }
 
-    fn write(&self, context: ToolDispatchContext) -> Result<Value> {
-        let invocation = context.into_invocation();
-        let args = parse_args::<WriteArgs>(PROCESS_WRITE_TOOL_ID, invocation.arguments)?;
+    async fn write(&self, context: ToolDispatchContext) -> Result<Value> {
+        let invocation = context.invocation();
+        let args = parse_args::<WriteArgs>(PROCESS_WRITE_TOOL_ID, invocation.arguments.clone())?;
         let execution_id = parse_execution_id(&args.execution_id)?;
         let bytes: ProcessBytes = args.bytes.into();
         bytes
             .decode(self.config.max_input_bytes)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let owner = self.context.load(&invocation.scope)?.owner;
-        let lease = self
-            .process
-            .attach(&execution_id, &owner, ExecutionRequestId::generate(), true)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let written = self.process.write(
-            &execution_id,
-            &owner,
-            lease.clone(),
-            bytes,
-            args.eof.unwrap_or(false),
-        );
-        let detached = self.process.detach(&execution_id, &owner, lease);
-        written.map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        detached.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.context.load(&invocation.scope)?;
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        let attachment = controlled(
+            context.control(),
+            token.clone(),
+            client.attach_execution(execution_id.clone(), true, token),
+        )
+        .await?;
+        let lease = attachment.lease;
+        let token = CancellationToken::new();
+        controlled(
+            context.control(),
+            token.clone(),
+            client.write_execution(
+                execution_id.clone(),
+                lease.clone(),
+                bytes,
+                args.eof.unwrap_or(false),
+                token,
+            ),
+        )
+        .await?;
+        let token = CancellationToken::new();
+        controlled(
+            context.control(),
+            token.clone(),
+            client.detach_execution(execution_id.clone(), lease, token),
+        )
+        .await?;
         Ok(json!({
             "tool": PROCESS_WRITE_TOOL_ID,
             "status": "accepted",
@@ -690,11 +698,11 @@ impl ProcessTools {
         }))
     }
 
-    fn resize(&self, context: ToolDispatchContext) -> Result<Value> {
-        let invocation = context.into_invocation();
-        let args = parse_args::<ResizeArgs>(PROCESS_RESIZE_TOOL_ID, invocation.arguments)?;
+    async fn resize(&self, context: ToolDispatchContext) -> Result<Value> {
+        let invocation = context.invocation();
+        let args = parse_args::<ResizeArgs>(PROCESS_RESIZE_TOOL_ID, invocation.arguments.clone())?;
         let execution_id = parse_execution_id(&args.execution_id)?;
-        let owner = self.context.load(&invocation.scope)?.owner;
+        self.context.load(&invocation.scope)?;
         let terminal_size = TerminalSize {
             columns: args.columns,
             rows: args.rows,
@@ -702,9 +710,14 @@ impl ProcessTools {
         terminal_size
             .validate()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        self.process
-            .resize(&execution_id, &owner, terminal_size)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        controlled(
+            context.control(),
+            token.clone(),
+            client.resize_execution(execution_id.clone(), terminal_size, token),
+        )
+        .await?;
         Ok(json!({
             "tool": PROCESS_RESIZE_TOOL_ID,
             "status": "resized",
@@ -713,15 +726,20 @@ impl ProcessTools {
         }))
     }
 
-    fn kill(&self, context: ToolDispatchContext) -> Result<Value> {
-        let invocation = context.into_invocation();
-        let args = parse_args::<KillArgs>(PROCESS_KILL_TOOL_ID, invocation.arguments)?;
+    async fn kill(&self, context: ToolDispatchContext) -> Result<Value> {
+        let invocation = context.invocation();
+        let args = parse_args::<KillArgs>(PROCESS_KILL_TOOL_ID, invocation.arguments.clone())?;
         let execution_id = parse_execution_id(&args.execution_id)?;
-        let owner = self.context.load(&invocation.scope)?.owner;
+        self.context.load(&invocation.scope)?;
         let mode = args.mode.unwrap_or_default().into();
-        self.process
-            .kill(&execution_id, &owner, mode)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let client = self.client(&context)?;
+        let token = CancellationToken::new();
+        controlled(
+            context.control(),
+            token.clone(),
+            client.terminate_execution(execution_id.clone(), mode, token),
+        )
+        .await?;
         Ok(json!({
             "tool": PROCESS_KILL_TOOL_ID,
             "status": "termination_requested",
@@ -885,21 +903,25 @@ impl ProcessTools {
         }
     }
 
-    fn foreground_result(
+    async fn foreground_result(
         &self,
+        client: &TerminalClient<UnixTerminalTransport>,
+        context: &ToolDispatchContext,
         tool_id: &str,
-        owner: &ExecutionOwner,
-        status: agl_process::ExecutionStatus,
+        status: ExecutionStatus,
     ) -> Result<Value> {
-        let output = self
-            .process
-            .read(
-                &status.execution_id,
-                owner,
+        let token = CancellationToken::new();
+        let output = controlled(
+            context.control(),
+            token.clone(),
+            client.read_execution(
+                status.execution_id.clone(),
                 ExecutionCursor::default(),
-                self.config.max_result_bytes,
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                checked_maximum_bytes(self.config.max_result_bytes)?,
+                token,
+            ),
+        )
+        .await?;
         let result_truncated = output.next_sequence < status.last_sequence;
         Ok(json!({
             "tool": tool_id,
@@ -912,6 +934,130 @@ impl ProcessTools {
             "output_expired": status.output_expired,
         }))
     }
+
+    fn client(
+        &self,
+        context: &ToolDispatchContext,
+    ) -> Result<TerminalClient<UnixTerminalTransport>> {
+        let authority = authority_fingerprint(context)?;
+        self.terminal
+            .connect(authority)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+}
+
+fn authority_fingerprint(context: &ToolDispatchContext) -> Result<AuthorityFingerprint> {
+    AuthorityFingerprint::new(context.invocation().policy_hash.as_str())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+fn all_execution_operations() -> BTreeSet<ExecutionOperation> {
+    BTreeSet::from([
+        ExecutionOperation::Inspect,
+        ExecutionOperation::Read,
+        ExecutionOperation::Write,
+        ExecutionOperation::Resize,
+        ExecutionOperation::Interrupt,
+        ExecutionOperation::Terminate,
+    ])
+}
+
+fn all_terminal_operations() -> BTreeSet<TerminalOperation> {
+    BTreeSet::from([
+        TerminalOperation::Inspect,
+        TerminalOperation::Attach,
+        TerminalOperation::Read,
+        TerminalOperation::Write,
+        TerminalOperation::Resize,
+        TerminalOperation::Interrupt,
+        TerminalOperation::Terminate,
+    ])
+}
+
+fn checked_maximum_bytes(value: usize) -> Result<u32> {
+    u32::try_from(value).context("terminal read byte limit exceeds u32")
+}
+
+async fn controlled<T, E, F>(
+    control: &ToolDispatchControl,
+    cancellation: CancellationToken,
+    future: F,
+) -> Result<T>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => {
+                return result.map_err(|error| anyhow::anyhow!(error.to_string()));
+            }
+            () = sleep(Duration::from_millis(10)) => {
+                if control.is_cancelled() {
+                    cancellation.cancel();
+                    bail!("tool execution was cancelled");
+                }
+                if control.is_expired() {
+                    cancellation.cancel();
+                    bail!("tool execution deadline elapsed");
+                }
+            }
+        }
+    }
+}
+
+async fn start_execution(
+    client: &TerminalClient<UnixTerminalTransport>,
+    context: &ToolDispatchContext,
+    request: ExecutionRequest,
+) -> Result<ExecutionStatus> {
+    let mut admission = ExecutionAdmission {
+        authority_fingerprint: authority_fingerprint(context)?,
+        request_fingerprint: String::new(),
+        request,
+        operations: all_execution_operations(),
+    };
+    admission
+        .seal_request_fingerprint()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let token = CancellationToken::new();
+    controlled(
+        context.control(),
+        token.clone(),
+        client.start_execution(admission, token),
+    )
+    .await
+}
+
+async fn wait_execution(
+    client: &TerminalClient<UnixTerminalTransport>,
+    context: &ToolDispatchContext,
+    mut status: ExecutionStatus,
+) -> Result<ExecutionStatus> {
+    while !status.state.is_terminal() {
+        if context.control().is_cancelled() || context.control().is_expired() {
+            let token = CancellationToken::new();
+            client
+                .terminate_execution(status.execution_id.clone(), KillMode::Graceful, token)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            bail!(if context.control().is_cancelled() {
+                "tool execution was cancelled"
+            } else {
+                "tool execution deadline elapsed"
+            });
+        }
+        sleep(Duration::from_millis(10)).await;
+        let token = CancellationToken::new();
+        status = controlled(
+            context.control(),
+            token.clone(),
+            client.inspect_execution(status.execution_id.clone(), token),
+        )
+        .await?;
+    }
+    Ok(status)
 }
 
 struct CowWorkspaceTransaction {
@@ -1383,7 +1529,7 @@ impl ToolHandler for ProcessTools {
         Box::pin(async move {
             let tool_id = context.invocation().capability_id.as_str().to_owned();
             let conditional_effects = context.authorized_conditional_effects().clone();
-            match self.execute(context) {
+            match self.execute(context).await {
                 Ok(data) => {
                     let observed = observed_process_effects(&tool_id, &conditional_effects, &data);
                     Ok(ToolResult::new(data).with_observed_effects(observed))
@@ -1674,7 +1820,7 @@ fn execution_authorization(
             .grant_provenance()
             .context("host process execution lacks immutable grant provenance")?;
         Some(ExecutionGrantLease {
-            origin: agl_process::ExecutionLeaseOrigin::ToolGrant,
+            origin: ExecutionLeaseOrigin::ToolGrant,
             grant_id: provenance.grant_id.clone(),
             duration: provenance.duration.clone(),
             scope_digest: provenance.scope_digest.clone(),
@@ -1784,7 +1930,7 @@ fn terminal_size(
     }
 }
 
-fn background_result(tool_id: &str, status: &agl_process::ExecutionStatus) -> Value {
+fn background_result(tool_id: &str, status: &ExecutionStatus) -> Value {
     json!({
         "tool": tool_id,
         "execution_id": status.execution_id,
@@ -2639,7 +2785,7 @@ mod tests {
             workspace_root: workspace.clone(),
             working_directory: workspace,
             private_execution_roots: Vec::new(),
-            shell: agl_process::ShellProfileSnapshot {
+            shell: agl_exec::ShellProfileSnapshot {
                 program: PathBuf::from("/bin/sh"),
                 command_args: vec!["-c".to_owned()],
                 login_command_args: None,
@@ -2835,7 +2981,7 @@ mod tests {
                 workspace_root: workspace.clone(),
                 working_directory: workspace.clone(),
                 private_execution_roots: Vec::new(),
-                shell: agl_process::ShellProfileSnapshot {
+                shell: agl_exec::ShellProfileSnapshot {
                     program: PathBuf::from("/bin/sh"),
                     command_args: vec!["-c".to_string()],
                     login_command_args: Some(vec!["-l".to_string(), "-c".to_string()]),
@@ -2849,36 +2995,13 @@ mod tests {
             owner,
             durable_session_id: SessionId::generate(),
         });
-        let repository = Arc::new(agl_process::InMemoryExecutionRepository::new());
-        let spool = Arc::new(agl_process::FileOutputSpool::new(root.join("spool")).unwrap());
-        let supervisor = agl_process::ProcessSupervisor::start(
-            agl_process::ProcessSupervisorOptions {
-                launcher_path: root.join("missing-launcher"),
-                data_root: root.join("spool"),
-                state_root: root.join("state"),
-                max_active: 1,
-                command_capacity: 8,
-                poll_interval: Duration::from_millis(1),
-                setup_timeout: Duration::from_millis(100),
-                termination_grace: Duration::from_millis(10),
-                max_input_bytes: 1024,
-                max_result_bytes: 1024,
-                max_spool_bytes: 4096,
-                termination_output_headroom_bytes: 1024,
-                finished_retention: Duration::from_secs(60),
-                runtime_read_only_roots: Vec::new(),
-            },
-            repository,
-            spool,
-        )
-        .unwrap();
         let tools = ProcessTools::new(
-            supervisor.handle(),
             Arc::new(
-                TerminalRegistry::new(
-                    supervisor.handle(),
-                    Arc::new(agl_process::RejectTerminalSecrets),
-                    Arc::new(agl_process::InMemoryTerminalRepository::new()),
+                TerminalEndpoint::new(
+                    root.join("terminal.sock"),
+                    root.join("service-identity.json"),
+                    AuthorityFingerprint::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                    "b".repeat(40),
                 )
                 .unwrap(),
             ),
@@ -2995,7 +3118,6 @@ mod tests {
             DispatchDenialCode::ConditionalEffectDenied
         );
         assert_eq!(execution_context.snapshot.lock().unwrap().revision, 2);
-        supervisor.shutdown().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

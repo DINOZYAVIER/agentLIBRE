@@ -1,9 +1,7 @@
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use agl_extension::SkillId;
-use agl_ids::{RunId, SessionId};
-use agl_process::ExecutionId;
+use agl_ids::SessionId;
 use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -22,7 +20,6 @@ macro_rules! cli_help {
 }
 
 mod help {
-    pub(super) const WELCOME: &str = cli_help!("welcome");
     pub(super) const AGL: &str = cli_help!("agl");
     pub(super) const COMPLETION: &str = cli_help!("completion");
     pub(super) const CONFIG: &str = cli_help!("config");
@@ -91,13 +88,6 @@ mod help {
     pub(super) const NOTES_SEARCH: &str = cli_help!("notes/search");
     pub(super) const NOTES_SHOW: &str = cli_help!("notes/show");
     pub(super) const NOTES_UPDATE: &str = cli_help!("notes/update");
-    pub(super) const PROCESS: &str = cli_help!("process");
-    pub(super) const PROCESS_ATTACH: &str = cli_help!("process/attach");
-    pub(super) const PROCESS_DOCTOR: &str = cli_help!("process/doctor");
-    pub(super) const PROCESS_KILL: &str = cli_help!("process/kill");
-    pub(super) const PROCESS_LIST: &str = cli_help!("process/list");
-    pub(super) const PROCESS_READ: &str = cli_help!("process/read");
-    pub(super) const PROCESS_STATUS: &str = cli_help!("process/status");
     pub(super) const REPO: &str = cli_help!("repo");
     pub(super) const REPO_COMPONENT: &str = cli_help!("repo/component");
     pub(super) const REPO_COMPONENT_LOCK: &str = cli_help!("repo/component/lock");
@@ -114,6 +104,15 @@ mod help {
     pub(super) const RUNTIME: &str = cli_help!("runtime");
     pub(super) const RUNTIME_IDENTITY: &str = cli_help!("runtime/identity");
     pub(super) const RUN: &str = cli_help!("run");
+    pub(super) const SESSION: &str = cli_help!("session");
+    pub(super) const SESSION_NEW: &str = cli_help!("session/new");
+    pub(super) const SESSION_LIST: &str = cli_help!("session/list");
+    pub(super) const SESSION_SHOW: &str = cli_help!("session/show");
+    pub(super) const SESSION_RESUME: &str = cli_help!("session/resume");
+    pub(super) const SESSION_SUBMIT: &str = cli_help!("session/submit");
+    pub(super) const SESSION_FOLLOW: &str = cli_help!("session/follow");
+    pub(super) const SESSION_CANCEL: &str = cli_help!("session/cancel");
+    pub(super) const SESSION_FINISH: &str = cli_help!("session/finish");
     pub(super) const SERVE: &str = cli_help!("serve");
     pub(super) const SKILL: &str = cli_help!("skill");
     pub(super) const SKILL_INIT: &str = cli_help!("skill/init");
@@ -147,49 +146,12 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
 
-    /// Resume the latest session or an explicit session ID in the interactive UI.
-    #[arg(
-        long,
-        value_name = "latest|SESSION_ID",
-        num_args = 0..=1,
-        default_missing_value = "latest"
-    )]
-    resume: Option<String>,
-
-    /// Disable private prompt and shell input history for this UI.
-    #[arg(long)]
-    no_input_history: bool,
-
-    /// Daemon Unix socket for the interactive UI.
+    /// Daemon Unix socket.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
 
-    /// Initial interactive workspace root.
-    #[arg(long, value_name = "DIR")]
-    workspace_root: Option<PathBuf>,
-
-    /// Initial agentFUNCTION reference.
-    #[arg(long = "function", value_name = "REF")]
-    function_ref: Option<String>,
-
-    /// Initial installed model binding.
-    #[arg(long, value_name = "MODEL_ID")]
-    model: Option<String>,
-
-    /// Initial operation mode.
-    #[arg(long, value_enum)]
-    mode: Option<ToolAccessMode>,
-
-    /// Initial admitted skill selection.
-    #[arg(long = "skill", value_name = "SKILL_ID")]
-    skills: Vec<String>,
-
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Prompt text for a one-shot run.
-    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
-    prompt: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -261,11 +223,11 @@ enum Commands {
     /// Run one prompt and print the final answer.
     #[command(long_about = help::RUN)]
     Run(RunArgs),
-    /// Inspect and control durable local process executions.
-    #[command(long_about = help::PROCESS)]
-    Process {
+    /// Create, inspect, submit to, follow, cancel, and finish durable sessions.
+    #[command(long_about = help::SESSION)]
+    Session {
         #[command(subcommand)]
-        command: ProcessCommands,
+        command: SessionCommands,
     },
     /// Export and replay canonical semantic traces.
     #[command(long_about = help::TRACE)]
@@ -710,25 +672,68 @@ enum DaemonCommands {
 }
 
 #[derive(Debug, Subcommand)]
-enum ProcessCommands {
-    /// List live or retained process executions.
-    #[command(long_about = help::PROCESS_LIST)]
-    List(ProcessListArgs),
-    /// Show one process execution.
-    #[command(long_about = help::PROCESS_STATUS)]
-    Status(ProcessStatusArgs),
-    /// Replay retained process output.
-    #[command(long_about = help::PROCESS_READ)]
-    Read(ProcessReadArgs),
-    /// Attach the local terminal to a live execution.
-    #[command(long_about = help::PROCESS_ATTACH)]
-    Attach(ProcessAttachArgs),
-    /// Terminate a live execution.
-    #[command(long_about = help::PROCESS_KILL)]
-    Kill(ProcessKillArgs),
-    /// Diagnose the native process sandbox backend.
-    #[command(long_about = help::PROCESS_DOCTOR)]
-    Doctor(ProcessDoctorArgs),
+enum SessionCommands {
+    #[command(long_about = help::SESSION_NEW)]
+    New(SessionNewArgs),
+    #[command(long_about = help::SESSION_LIST)]
+    List(JsonArgs),
+    #[command(long_about = help::SESSION_SHOW)]
+    Show(SessionShowArgs),
+    #[command(long_about = help::SESSION_RESUME)]
+    Resume(SessionIdArgs),
+    #[command(long_about = help::SESSION_SUBMIT)]
+    Submit(SessionSubmitArgs),
+    #[command(long_about = help::SESSION_FOLLOW)]
+    Follow(SessionIdArgs),
+    #[command(long_about = help::SESSION_CANCEL)]
+    Cancel(SessionIdArgs),
+    #[command(long_about = help::SESSION_FINISH)]
+    Finish(SessionIdArgs),
+}
+
+#[derive(Debug, Args)]
+struct JsonArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionNewArgs {
+    #[arg(long, value_name = "DIR")]
+    workspace_root: Option<PathBuf>,
+    #[arg(long = "function", value_name = "REF")]
+    function_ref: Option<String>,
+    #[arg(long = "skill", value_name = "SKILL_ID")]
+    skills: Vec<String>,
+    #[arg(long, value_enum, default_value_t = ToolAccessMode::ReadOnly)]
+    mode: ToolAccessMode,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionIdArgs {
+    session_id: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionShowArgs {
+    session_id: String,
+    #[arg(long)]
+    include_content: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionSubmitArgs {
+    session_id: String,
+    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
+    prompt: Vec<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1851,100 +1856,6 @@ struct InferenceServeArgs {
 }
 
 #[derive(Debug, Args)]
-struct ProcessListArgs {
-    /// Limit results to one session owner.
-    #[arg(long, value_name = "SESSION_ID")]
-    session: Option<String>,
-
-    /// Limit results to one root run.
-    #[arg(long = "run", value_name = "RUN_ID")]
-    root_run: Option<String>,
-
-    /// Include retained terminal executions.
-    #[arg(long = "all")]
-    include_finished: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProcessStatusArgs {
-    /// Durable execution identity.
-    #[arg(value_name = "EXECUTION_ID")]
-    execution_id: String,
-
-    /// Include the bounded private display command.
-    #[arg(long)]
-    private_command: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProcessReadArgs {
-    /// Durable execution identity.
-    #[arg(value_name = "EXECUTION_ID")]
-    execution_id: String,
-
-    /// Replay output strictly after this sequence.
-    #[arg(long, default_value_t = 0)]
-    after: u64,
-
-    /// Maximum decoded bytes to return.
-    #[arg(long, default_value_t = 65_536)]
-    max_bytes: usize,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProcessAttachArgs {
-    /// Durable execution identity.
-    #[arg(value_name = "EXECUTION_ID")]
-    execution_id: String,
-
-    /// Replay output strictly after this sequence.
-    #[arg(long, default_value_t = 0)]
-    after: u64,
-
-    /// Do not acquire the execution's writable input lease.
-    #[arg(long)]
-    read_only: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProcessKillArgs {
-    /// Durable execution identity.
-    #[arg(value_name = "EXECUTION_ID")]
-    execution_id: String,
-
-    /// Send immediate termination instead of graceful termination.
-    #[arg(long)]
-    immediate: bool,
-
-    /// Confirm termination without an interactive prompt.
-    #[arg(long)]
-    yes: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
-struct ProcessDoctorArgs {
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args)]
 struct StatusArgs {
     /// Unix socket path for the daemon.
     #[arg(long, value_name = "PATH")]
@@ -1981,10 +1892,8 @@ pub(crate) fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliInv
 }
 
 impl Cli {
-    fn into_invocation(self, display_name: &'static str) -> Result<CliInvocation> {
-        if (self.resume.is_some() || self.no_input_history) && self.command.is_some() {
-            bail!("--resume and --no-input-history are available only with bare `agl`");
-        }
+    fn into_invocation(self, _display_name: &'static str) -> Result<CliInvocation> {
+        let socket_path = self.socket.clone();
         let command = match self.command {
             Some(Commands::Completion { shell }) => CliCommand::Completion { shell },
             Some(Commands::Config { command }) => CliCommand::Config(match command {
@@ -2010,7 +1919,10 @@ impl Cli {
             Some(Commands::Notes { command }) => CliCommand::Notes(notes_command(command)?),
             Some(Commands::Init(args)) => CliCommand::Init(setup_init_options(args)),
             Some(Commands::Run(args)) => CliCommand::Run(run_options_from_args(args)?),
-            Some(Commands::Process { command }) => CliCommand::Process(process_command(command)?),
+            Some(Commands::Session { command }) => CliCommand::Session(SessionOptions {
+                socket_path,
+                command: session_command(command)?,
+            }),
             Some(Commands::Trace { command }) => CliCommand::Trace(match command {
                 TraceCommands::Export(args) => TraceCommand::Export(TraceExportOptions {
                     events: args.events,
@@ -2061,27 +1973,14 @@ impl Cli {
                 DaemonCommands::Status(args) => CliCommand::DaemonStatus(DaemonStatusOptions {
                     socket_path: args.socket,
                     detail: args.detail,
+                    overview: false,
                 }),
             },
-            None if self.prompt.is_empty()
-                && std::io::stdin().is_terminal()
-                && std::io::stdout().is_terminal() =>
-            {
-                CliCommand::Interactive(InteractiveOptions {
-                    resume: self.resume,
-                    input_history: !self.no_input_history,
-                    socket_path: self.socket,
-                    workspace_root: self.workspace_root,
-                    function_ref: self.function_ref,
-                    model_id: self.model,
-                    operation_mode: self.mode,
-                    skills: validate_skill_ids(self.skills)?,
-                })
-            }
-            None if self.prompt.is_empty() => CliCommand::Help {
-                bin_name: display_name,
-            },
-            None => top_level_prompt_command(self.prompt)?,
+            None => CliCommand::DaemonStatus(DaemonStatusOptions {
+                socket_path: self.socket,
+                detail: false,
+                overview: true,
+            }),
         };
 
         Ok(CliInvocation {
@@ -2089,6 +1988,49 @@ impl Cli {
             home: self.home,
         })
     }
+}
+
+fn session_command(command: SessionCommands) -> Result<SessionCommand> {
+    Ok(match command {
+        SessionCommands::New(args) => SessionCommand::New(SessionNewOptions {
+            workspace_root: args.workspace_root,
+            function_ref: args.function_ref,
+            skills: validate_skill_ids(args.skills)?,
+            tool_mode: args.mode,
+            json: args.json,
+        }),
+        SessionCommands::List(args) => SessionCommand::List { json: args.json },
+        SessionCommands::Show(args) => SessionCommand::Show(SessionShowOptions {
+            session_id: SessionId::parse(&args.session_id)
+                .map_err(|_| anyhow::anyhow!("invalid session ID"))?,
+            include_content: args.include_content,
+            json: args.json,
+        }),
+        SessionCommands::Resume(args) => SessionCommand::Resume(session_id_options(args)?),
+        SessionCommands::Submit(args) => {
+            let prompt = args.prompt.join(" ");
+            if prompt.trim().is_empty() {
+                bail!("session submit requires a nonempty prompt");
+            }
+            SessionCommand::Submit(SessionSubmitOptions {
+                session_id: SessionId::parse(&args.session_id)
+                    .map_err(|_| anyhow::anyhow!("invalid session ID"))?,
+                prompt,
+                json: args.json,
+            })
+        }
+        SessionCommands::Follow(args) => SessionCommand::Follow(session_id_options(args)?),
+        SessionCommands::Cancel(args) => SessionCommand::Cancel(session_id_options(args)?),
+        SessionCommands::Finish(args) => SessionCommand::Finish(session_id_options(args)?),
+    })
+}
+
+fn session_id_options(args: SessionIdArgs) -> Result<SessionIdOptions> {
+    Ok(SessionIdOptions {
+        session_id: SessionId::parse(&args.session_id)
+            .map_err(|_| anyhow::anyhow!("invalid session ID"))?,
+        json: args.json,
+    })
 }
 
 fn setup_init_options(args: SetupInitArgs) -> SetupInitOptions {
@@ -2721,63 +2663,6 @@ fn skill_command(command: SkillCommands) -> SkillCommand {
     }
 }
 
-fn process_command(command: ProcessCommands) -> Result<ProcessCommand> {
-    Ok(match command {
-        ProcessCommands::List(args) => ProcessCommand::List(ProcessListOptions {
-            session_id: args
-                .session
-                .map(|value| {
-                    SessionId::parse(&value)
-                        .with_context(|| format!("invalid --session identity `{value}`"))
-                })
-                .transpose()?,
-            root_run_id: args
-                .root_run
-                .map(|value| {
-                    RunId::parse(&value)
-                        .with_context(|| format!("invalid --run identity `{value}`"))
-                })
-                .transpose()?,
-            include_finished: args.include_finished,
-            json: args.json,
-        }),
-        ProcessCommands::Status(args) => ProcessCommand::Status(ProcessStatusOptions {
-            execution_id: parse_execution_id(&args.execution_id)?,
-            private_command: args.private_command,
-            json: args.json,
-        }),
-        ProcessCommands::Read(args) => {
-            if args.max_bytes == 0 || args.max_bytes > 65_536 {
-                bail!("--max-bytes must be between 1 and 65536");
-            }
-            ProcessCommand::Read(ProcessReadOptions {
-                execution_id: parse_execution_id(&args.execution_id)?,
-                after_sequence: args.after,
-                max_bytes: args.max_bytes,
-                json: args.json,
-            })
-        }
-        ProcessCommands::Attach(args) => ProcessCommand::Attach(ProcessAttachOptions {
-            execution_id: parse_execution_id(&args.execution_id)?,
-            after_sequence: args.after,
-            read_only: args.read_only,
-        }),
-        ProcessCommands::Kill(args) => ProcessCommand::Kill(ProcessKillOptions {
-            execution_id: parse_execution_id(&args.execution_id)?,
-            immediate: args.immediate,
-            yes: args.yes,
-            json: args.json,
-        }),
-        ProcessCommands::Doctor(args) => {
-            ProcessCommand::Doctor(ProcessDoctorOptions { json: args.json })
-        }
-    })
-}
-
-fn parse_execution_id(value: &str) -> Result<ExecutionId> {
-    ExecutionId::parse(value).with_context(|| format!("invalid execution identity `{value}`"))
-}
-
 fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
     let prompt = args.prompt_option.or_else(|| {
         if args.prompt.is_empty() {
@@ -2793,14 +2678,6 @@ fn run_options_from_args(args: RunArgs) -> Result<RunOptions> {
     Ok(RunOptions {
         prompt,
         ..run_options_from_common(args.common)?
-    })
-}
-
-fn run_options_from_prompt(prompt: String) -> Result<RunOptions> {
-    validate_prompt(&prompt)?;
-    Ok(RunOptions {
-        prompt: Some(prompt),
-        ..RunOptions::default()
     })
 }
 
@@ -2943,44 +2820,8 @@ fn validate_skill_ids(values: Vec<String>) -> Result<Vec<String>> {
     Ok(values)
 }
 
-fn top_level_prompt_command(parts: Vec<String>) -> Result<CliCommand> {
-    let first = parts.first().map(String::as_str);
-    if matches!(
-        first,
-        Some("chat" | "infer" | "generate" | "setup" | "doctor" | "model")
-    ) {
-        let name = first.expect("checked by matches");
-        bail!("unknown command `{name}`. Use `agl run --prompt TEXT` for a one-shot prompt.");
-    }
-    Ok(CliCommand::Run(run_options_from_prompt(join_prompt(
-        parts,
-    ))?))
-}
-
 fn join_prompt(parts: Vec<String>) -> String {
     parts.join(" ")
-}
-
-pub(crate) fn print_usage(bin_name: &'static str) -> Result<()> {
-    print!("{}", welcome_text(should_color_welcome()));
-    println!();
-
-    let mut command = Cli::command().name(bin_name).bin_name(bin_name);
-    command.print_help().context("failed to print CLI help")?;
-    println!();
-    Ok(())
-}
-
-fn should_color_welcome() -> bool {
-    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
-}
-
-fn welcome_text(color: bool) -> String {
-    if color {
-        format!("\x1b[35m{}\x1b[0m", help::WELCOME)
-    } else {
-        help::WELCOME.to_string()
-    }
 }
 
 pub(crate) fn print_completion(shell: Shell) {
@@ -3004,12 +2845,12 @@ struct PublicCompletionCli {
     #[arg(long, global = true, value_name = "DIR")]
     home: Option<PathBuf>,
 
+    /// Daemon Unix socket.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<PublicCompletionCommands>,
-
-    /// Prompt text for a one-shot run.
-    #[arg(value_name = "PROMPT", num_args = 1.., trailing_var_arg = true)]
-    prompt: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3070,10 +2911,10 @@ enum PublicCompletionCommands {
     Init(SetupInitArgs),
     /// Run one prompt and print the final answer.
     Run(RunArgs),
-    /// Inspect and control durable local process executions.
-    Process {
+    /// Create, inspect, submit to, follow, cancel, and finish durable sessions.
+    Session {
         #[command(subcommand)]
-        command: ProcessCommands,
+        command: SessionCommands,
     },
     /// Export and replay canonical semantic traces.
     Trace {

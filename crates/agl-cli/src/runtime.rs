@@ -1,5 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agl_client::{AgentLibreClient, ClientError};
 use agl_inference::worker_protocol::WORKER_BUILD_ID;
@@ -8,7 +9,7 @@ use agl_runtime::{
     RuntimeSourceEvidence, RuntimeSourceState, current_executable_is_in, current_runtime_identity,
     seal_runtime_manifest,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 const INTERNAL_SEAL_DIRECTORY: &str = "AGL_INTERNAL_SEAL_RUNTIME_MANIFEST";
 const INTERNAL_SOURCE_STATE: &str = "AGL_INTERNAL_RUNTIME_SOURCE_STATE";
@@ -31,6 +32,58 @@ pub(crate) async fn connect_daemon(socket_path: &Path) -> Result<AgentLibreClien
         ClientError::IdentityMismatch("local agentLIBRE runtime identity could not be verified")
     })?;
     AgentLibreClient::connect_first_party(socket_path, protocol_identity(&identity)).await
+}
+
+pub(crate) fn verify_runtime_bundle_identity() -> Result<()> {
+    let runtime_identity = agl_runtime::current_runtime_identity()
+        .context("runtime manifest identity verification failed")?;
+    let runtime = agl_runtime::AgentLibreRuntimeConfig::from_env()?;
+    runtime
+        .execution
+        .terminal_endpoint(&runtime.paths)?
+        .read_identity()
+        .context("terminal service identity verification failed")?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let executable = std::env::current_exe().context("failed to resolve current executable")?;
+        let parent = executable
+            .parent()
+            .context("current executable has no parent directory")?;
+        let directory = if parent.file_name().is_some_and(|name| name == "deps") {
+            parent
+                .parent()
+                .context("test executable directory has no target parent")?
+        } else {
+            parent
+        };
+        let worker_path = directory.join(agl_inference::worker_protocol::WORKER_BINARY_NAME);
+        let worker = agl_inference::worker_protocol::WorkerExecutable::open_exact(&worker_path)
+            .map_err(anyhow::Error::from)
+            .context("inference worker trust verification failed")?;
+        let process =
+            agl_inference::worker_protocol::WorkerProcess::spawn(&worker, Duration::from_secs(5))
+                .map_err(anyhow::Error::from)
+                .context("inference worker identity verification failed")?;
+        if runtime_identity.sealed() {
+            ensure!(
+                runtime_identity.worker_build_id() == Some(process.identity().build_id()),
+                "sealed runtime manifest worker build ID does not match the exact worker"
+            );
+            ensure!(
+                runtime_identity.native_bundle_id() == Some(process.native_bundle_id()),
+                "sealed runtime manifest native bundle ID does not match the exact worker"
+            );
+        }
+        process
+            .shutdown(
+                agl_inference::worker_protocol::ShutdownReason::Requested,
+                Duration::from_secs(5),
+            )
+            .map_err(anyhow::Error::from)
+            .context("inference worker identity verification shutdown failed")?;
+    }
+    Ok(())
 }
 
 fn protocol_identity(identity: &agl_runtime::CurrentRuntimeIdentity) -> RuntimeGenerationIdentity {

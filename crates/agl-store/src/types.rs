@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use agl_events::SafeRuntimeEventEnvelope;
+use agl_exec::ExecutionContextSnapshot;
 use agl_ids::{RunId, SessionId, StepId, TurnId};
-use agl_process::ExecutionContextSnapshot;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StoreError};

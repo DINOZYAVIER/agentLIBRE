@@ -26,8 +26,8 @@ use agl_protocol::{
     AssistantItemState, DaemonCapability, InferenceStatusRequest, ModelReleaseOutcome,
     ModelReleaseReason, ProtocolInferenceDeviceKind, ProtocolInferenceWorkerState,
     ProtocolRunState, ProtocolToolMode, RunBudgetRequest, RunSubmitRequest, RunSubscribeRequest,
-    RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionOpenRequest,
-    SessionPresentationItem, SessionPresentationRequest,
+    RuntimeGenerationKind, SessionFinishReason, SessionFinishRequest, SessionListRequest,
+    SessionOpenRequest, SessionPresentationItem, SessionPresentationRequest,
 };
 use agl_repo::{
     ComponentStatus, RepoComponentInitOptions as AglRepoComponentInitOptions, init_repo_component,
@@ -58,22 +58,20 @@ mod memory;
 mod model;
 mod notes;
 mod one_shot;
-#[path = "process.rs"]
-mod process_command;
 mod repo;
 mod runtime;
+mod session;
 mod store;
 mod trace;
-mod tui;
 
 use args::{
     CliCommand, CronAddOptions, CronCommand, CronDeleteOptions, CronDisableOptions,
     CronEnableOptions, CronHistoryOptions, CronListOptions, CronRunOptions, CronShowOptions,
     CronTargetArg, CronTargetKindArg, CronTickOptions, DaemonStatusOptions, InferenceCommand,
-    ProcessCommand, RunOptions, ServeOptions, SkillCommand, SkillFolderSyncOptions,
-    SkillFolderSyncSituationArg, SkillInitOptions, SkillInspectOptions, SkillListOptions,
-    SkillListSourceArg, SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions,
-    SkillVerifyOptions, parse_cli, print_completion, print_usage,
+    RunOptions, ServeOptions, SkillCommand, SkillFolderSyncOptions, SkillFolderSyncSituationArg,
+    SkillInitOptions, SkillInspectOptions, SkillListOptions, SkillListSourceArg,
+    SkillRevokeOptions, SkillStatusOptions, SkillTrustOptions, SkillVerifyOptions, parse_cli,
+    print_completion,
 };
 use artifact::run_artifact;
 use config::run_config;
@@ -83,8 +81,8 @@ use memory::run_memory;
 use model::run_model;
 use notes::run_notes;
 use one_shot::OneShotSession;
-use process_command::run_process;
 use repo::run_repo;
+use session::run_session;
 use store::run_store;
 use trace::run_trace;
 
@@ -117,7 +115,7 @@ pub fn run_cli() {
     if env::var_os("AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE").as_deref()
         == Some(std::ffi::OsStr::new("1"))
     {
-        if let Err(err) = process_command::verify_runtime_bundle_identity() {
+        if let Err(err) = runtime::verify_runtime_bundle_identity() {
             eprintln!("error: {err:#}");
             process::exit(1);
         }
@@ -133,13 +131,6 @@ pub fn run_cli() {
     };
     let command = invocation.command;
     match &command {
-        CliCommand::Help { bin_name } => {
-            if let Err(err) = print_usage(bin_name) {
-                eprintln!("error: {err:#}");
-                process::exit(1);
-            }
-            return;
-        }
         CliCommand::HelpPrinted => return,
         CliCommand::Completion { shell } => {
             print_completion(*shell);
@@ -253,7 +244,6 @@ pub(crate) enum InferenceAuthoritySurface {
     Cron,
     InitInventory,
     FunctionSmoke,
-    Interactive,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,7 +281,6 @@ pub(crate) const fn inference_authority_decision(
             | InferenceAuthoritySurface::Cron
             | InferenceAuthoritySurface::InitInventory
             | InferenceAuthoritySurface::FunctionSmoke => InferenceAuthorityDecision::Standalone,
-            InferenceAuthoritySurface::Interactive => InferenceAuthorityDecision::Reject,
         },
         DaemonConnectionClass::Incompatible => InferenceAuthorityDecision::Reject,
     }
@@ -299,10 +288,9 @@ pub(crate) const fn inference_authority_decision(
 
 fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
     match command {
-        CliCommand::Interactive(_)
-        | CliCommand::Run(_)
-        | CliCommand::Process(ProcessCommand::Attach(_))
-        | CliCommand::Inference(InferenceCommand::Run(_)) => CliRuntimeProfile::Interactive,
+        CliCommand::Run(_) | CliCommand::Inference(InferenceCommand::Run(_)) => {
+            CliRuntimeProfile::Interactive
+        }
         CliCommand::Config(_)
         | CliCommand::Artifact(_)
         | CliCommand::Cron(_)
@@ -312,15 +300,14 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
         | CliCommand::Store(_)
         | CliCommand::Repo(_)
         | CliCommand::Skill(_)
+        | CliCommand::Session(_)
         | CliCommand::Memory(_)
         | CliCommand::Notes(_)
-        | CliCommand::Process(_)
         | CliCommand::Trace(_)
         | CliCommand::RuntimeIdentity
         | CliCommand::DaemonStatus(_) => CliRuntimeProfile::LightBatch,
         CliCommand::Serve(_)
         | CliCommand::Inference(InferenceCommand::Serve(_))
-        | CliCommand::Help { .. }
         | CliCommand::HelpPrinted
         | CliCommand::Completion { .. } => CliRuntimeProfile::FullBatch,
     }
@@ -328,8 +315,6 @@ fn cli_runtime_profile(command: &CliCommand) -> CliRuntimeProfile {
 
 fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
     match command {
-        CliCommand::Interactive(options) => tui::run_interactive(options, runtime),
-        CliCommand::Help { bin_name } => print_usage(bin_name),
         CliCommand::HelpPrinted => Ok(()),
         CliCommand::Completion { shell } => {
             print_completion(shell);
@@ -346,7 +331,7 @@ fn run(command: CliCommand, runtime: &AgentLibreRuntimeConfig) -> Result<()> {
         CliCommand::Notes(command) => run_notes(command, runtime),
         CliCommand::Repo(command) => run_repo(command),
         CliCommand::Skill(command) => run_skill(command, runtime),
-        CliCommand::Process(command) => run_process(command, runtime),
+        CliCommand::Session(options) => run_session(options, runtime),
         CliCommand::Trace(command) => run_trace(command),
         CliCommand::RuntimeIdentity => runtime::print_runtime_identity(),
         CliCommand::Serve(options) => run_serve(options, runtime),
@@ -2160,8 +2145,25 @@ fn run_daemon_status(
         .enable_all()
         .build()
         .context("failed to build daemon status runtime")?;
+    if options.overview {
+        println!("agentLIBRE command client");
+        println!("sessions=agl session --help");
+        println!("interactive_ui=agl-terminal");
+    }
     match async_runtime.block_on(runtime::connect_daemon(&socket_path)) {
         Ok(client) => {
+            if options.overview {
+                let hello = client.hello()?;
+                let sessions =
+                    async_runtime.block_on(client.list_sessions(SessionListRequest::default()))?;
+                println!("daemon=running");
+                println!("daemon_instance_id={}", hello.daemon_instance_id);
+                println!("session_count={}", sessions.sessions.len());
+                for session in sessions.sessions {
+                    println!("session={} status={:?}", session.session_id, session.status);
+                }
+                return Ok(());
+            }
             let inspection = client.hello().and_then(|hello| {
                 async_runtime
                     .block_on(client.inference_status(InferenceStatusRequest {
@@ -2983,7 +2985,6 @@ tool_call_format = "gemma_function_call"
             InferenceAuthoritySurface::Cron,
             InferenceAuthoritySurface::InitInventory,
             InferenceAuthoritySurface::FunctionSmoke,
-            InferenceAuthoritySurface::Interactive,
         ];
         for surface in surfaces {
             assert_eq!(
@@ -3007,14 +3008,6 @@ tool_call_format = "gemma_function_call"
                 InferenceAuthorityDecision::Standalone
             );
         }
-        assert_eq!(
-            inference_authority_decision(
-                InferenceAuthoritySurface::Interactive,
-                DaemonConnectionClass::Unavailable
-            ),
-            InferenceAuthorityDecision::Reject
-        );
-
         let available: std::result::Result<(), ClientError> = Ok(());
         let unavailable: std::result::Result<(), ClientError> =
             Err(ClientError::DaemonUnavailable("absent".to_owned()));

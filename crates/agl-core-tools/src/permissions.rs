@@ -1,14 +1,18 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use agl_exec::AuthorityFingerprint;
 use agl_extension::{
     EffectId, ExtensionDescriptor, ExtensionId, OperationKind, ToolDeclaration,
     ToolDispatchContext, ToolHandler, ToolId, ToolResult,
 };
+use agl_process::TerminalEndpoint;
 use agl_store::{AglStore, PermissionGrantDraft, PermissionRequestDraft, PermissionRequestRecord};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use crate::{ToolCatalog, ToolCatalogError, parse_tool_args as parse_args};
 
@@ -22,7 +26,7 @@ pub const PERMISSIONS_REVOKE_TOOL_ID: &str = "permissions.revoke";
 pub struct PermissionTools {
     store_root: PathBuf,
     runtime_status: PermissionRuntimeStatus,
-    process_handle: Option<agl_process::ProcessHandle>,
+    terminal_endpoint: Option<Arc<TerminalEndpoint>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,7 +55,7 @@ impl PermissionTools {
         Self {
             store_root: store_root.as_ref().to_path_buf(),
             runtime_status: PermissionRuntimeStatus::default(),
-            process_handle: None,
+            terminal_endpoint: None,
         }
     }
 
@@ -60,8 +64,8 @@ impl PermissionTools {
         self
     }
 
-    pub fn with_process_handle(mut self, process_handle: agl_process::ProcessHandle) -> Self {
-        self.process_handle = Some(process_handle);
+    pub fn with_terminal_endpoint(mut self, terminal_endpoint: Arc<TerminalEndpoint>) -> Self {
+        self.terminal_endpoint = Some(terminal_endpoint);
         self
     }
 
@@ -212,13 +216,31 @@ impl PermissionTools {
 
     fn revoke(&self, arguments: Value) -> Result<Value> {
         let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
-        let terminated_executions = self
-            .process_handle
-            .as_ref()
-            .map(|process| process.terminate_grant(&args.grant_id))
-            .transpose()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-            .unwrap_or_default();
+        self.commit_revocation(args, 0)
+    }
+
+    async fn revoke_live(
+        &self,
+        arguments: Value,
+        policy_hash: &agl_extension::PolicyHash,
+    ) -> Result<Value> {
+        let args = parse_args::<RevokeArgs>(PERMISSIONS_REVOKE_TOOL_ID, arguments)?;
+        let terminated_executions = if let Some(endpoint) = &self.terminal_endpoint {
+            let authority = AuthorityFingerprint::new(policy_hash.as_str())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            endpoint
+                .connect(authority)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                .revoke_grant(args.grant_id.clone(), CancellationToken::new())
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        } else {
+            0
+        };
+        self.commit_revocation(args, terminated_executions)
+    }
+
+    fn commit_revocation(&self, args: RevokeArgs, terminated_executions: u32) -> Result<Value> {
         let store = self.open_store_writable()?;
         let grant = store.revoke_permission_grant(&args.grant_id, args.revoke_ref.as_deref())?;
         Ok(json!({
@@ -253,7 +275,12 @@ impl ToolHandler for PermissionTools {
     fn dispatch(&self, context: ToolDispatchContext) -> agl_extension::ToolHandlerFuture<'_> {
         Box::pin(async move {
             let invocation = context.into_invocation();
-            let data = self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?;
+            let data = if invocation.capability_id.as_str() == PERMISSIONS_REVOKE_TOOL_ID {
+                self.revoke_live(invocation.arguments, &invocation.policy_hash)
+                    .await?
+            } else {
+                self.dispatch(invocation.capability_id.as_str(), invocation.arguments)?
+            };
             Ok(ToolResult::new(data))
         })
     }

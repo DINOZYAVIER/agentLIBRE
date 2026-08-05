@@ -7,7 +7,6 @@ use std::time::Duration;
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::net::UnixStream;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
-use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tokio_util::codec::{Framed, LinesCodec};
 
 use agl_ids::{RequestId, RunId};
@@ -16,7 +15,6 @@ use agl_protocol::*;
 const OUTBOUND_CAPACITY: usize = 128;
 const ONE_SHOT_CAPACITY: usize = 32;
 const SUBSCRIPTION_CAPACITY: usize = 256;
-const EXECUTION_ATTACHMENT_CAPACITY: usize = 256;
 const ABANDONED_STREAM_CAPACITY: usize = 256;
 const CONNECTION_ROUTE_CAPACITY: usize = 256;
 const IGNORED_TERMINAL_CAPACITY: usize = 256;
@@ -347,6 +345,19 @@ impl AgentLibreClient {
         }
     }
 
+    pub async fn cancel_active_session_work(
+        &self,
+        request: SessionCancelActiveRequest,
+    ) -> Result<SessionActiveWorkCancelledEvent, ClientError> {
+        match self
+            .request(DaemonRequestKind::SessionCancelActive(request))
+            .await?
+        {
+            DaemonEventKind::SessionActiveWorkCancelled(event) => Ok(event),
+            other => Err(unexpected("session_active_work_cancelled", &other)),
+        }
+    }
+
     pub async fn session_status(
         &self,
         request: SessionStatusRequest,
@@ -507,110 +518,6 @@ impl AgentLibreClient {
         })
     }
 
-    pub async fn execution_list(
-        &self,
-        request: ExecutionListRequest,
-    ) -> Result<ExecutionListEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::ExecutionList(request))
-            .await?
-        {
-            DaemonEventKind::ExecutionList(event) => Ok(event),
-            other => Err(unexpected("execution_list", &other)),
-        }
-    }
-
-    pub async fn execution_status(
-        &self,
-        request: ExecutionStatusRequest,
-    ) -> Result<ExecutionStatusEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::ExecutionStatus(request))
-            .await?
-        {
-            DaemonEventKind::ExecutionStatus(event) => Ok(event),
-            other => Err(unexpected("execution_status", &other)),
-        }
-    }
-
-    pub async fn execution_read(
-        &self,
-        request: ExecutionReadRequest,
-    ) -> Result<ExecutionReadEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::ExecutionRead(request))
-            .await?
-        {
-            DaemonEventKind::ExecutionRead(event) => Ok(event),
-            other => Err(unexpected("execution_read", &other)),
-        }
-    }
-
-    pub async fn execution_kill(
-        &self,
-        request: ExecutionKillRequest,
-    ) -> Result<ExecutionKillAcceptedEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::ExecutionKill(request))
-            .await?
-        {
-            DaemonEventKind::ExecutionKillAccepted(event) => Ok(event),
-            other => Err(unexpected("execution_kill_accepted", &other)),
-        }
-    }
-
-    pub async fn attach_execution(
-        &self,
-        execution_id: ExecutionId,
-        after_sequence: u64,
-        writable: bool,
-    ) -> Result<ExecutionAttachment, ClientError> {
-        let attachment_id = ExecutionRequestId::generate();
-        let expected_attachment_id = attachment_id.clone();
-        let request = ExecutionAttachRequest {
-            attachment_id,
-            execution_id: execution_id.clone(),
-            after_sequence,
-            writable,
-        };
-        let mut raw = self
-            .stream(DaemonRequestKind::ExecutionAttach(request))
-            .await?;
-        let started = match raw.recv().await? {
-            DaemonEventKind::ExecutionAttachmentStarted(started)
-                if started.attachment_id == expected_attachment_id
-                    && started.status.execution_id == execution_id
-                    && started.writable == writable
-                    && started.writable == started.writer_lease_id.is_some() =>
-            {
-                started
-            }
-            other => return Err(unexpected("execution_attachment_started", &other)),
-        };
-        if started.next_sequence != after_sequence {
-            return Err(ClientError::SequenceGap {
-                expected: after_sequence,
-                actual: started.next_sequence,
-            });
-        }
-        let heartbeat = started.heartbeat_interval_ms.map(|milliseconds| {
-            let period = Duration::from_millis(milliseconds);
-            let mut interval = tokio::time::interval_at(Instant::now() + period, period);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            interval
-        });
-        Ok(ExecutionAttachment {
-            client: self.clone(),
-            attachment_id: started.attachment_id.clone(),
-            execution_id,
-            last_sequence: started.next_sequence,
-            started,
-            raw,
-            heartbeat,
-            finished: false,
-        })
-    }
-
     pub async fn command_catalog(
         &self,
         request: CommandCatalogRequest,
@@ -724,19 +631,6 @@ impl AgentLibreClient {
         }
     }
 
-    pub async fn submit_human_terminal_command(
-        &self,
-        request: HumanTerminalCommandSubmitRequest,
-    ) -> Result<HumanTerminalCommandAcceptedEvent, ClientError> {
-        match self
-            .request(DaemonRequestKind::HumanTerminalCommandSubmit(request))
-            .await?
-        {
-            DaemonEventKind::HumanTerminalCommandAccepted(event) => Ok(event),
-            other => Err(unexpected("human_terminal_command_accepted", &other)),
-        }
-    }
-
     async fn request(&self, kind: DaemonRequestKind) -> Result<DaemonEventKind, ClientError> {
         let _permit = Arc::clone(&self.one_shot_slots)
             .acquire_owned()
@@ -768,12 +662,7 @@ impl AgentLibreClient {
         let cancellation = expected
             .stream_cancellation(&kind)
             .expect("a stream response family must define cancellation");
-        let capacity = if matches!(expected, Expected::ExecutionStream) {
-            EXECUTION_ATTACHMENT_CAPACITY
-        } else {
-            SUBSCRIPTION_CAPACITY
-        };
-        let (events, receiver) = mpsc::channel(capacity);
+        let (events, receiver) = mpsc::channel(SUBSCRIPTION_CAPACITY);
         let (failure, failure_receiver) = watch::channel(None);
         let request = DaemonRequest::new(request_id.clone(), kind);
         request
@@ -1215,173 +1104,6 @@ impl PresentationSubscription {
     }
 }
 
-pub struct ExecutionAttachment {
-    client: AgentLibreClient,
-    attachment_id: ExecutionRequestId,
-    execution_id: ExecutionId,
-    last_sequence: u64,
-    pub started: ExecutionAttachmentStartedEvent,
-    raw: RawSubscription,
-    heartbeat: Option<Interval>,
-    finished: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExecutionAttachmentEvent {
-    Output(ExecutionOutputEvent),
-    Finished(ExecutionAttachmentFinishedEvent),
-}
-
-impl ExecutionAttachment {
-    pub fn attachment_id(&self) -> &ExecutionRequestId {
-        &self.attachment_id
-    }
-
-    pub fn writer_lease_id(&self) -> Option<&WriterLeaseId> {
-        self.started.writer_lease_id.as_ref()
-    }
-
-    pub async fn input(
-        &self,
-        bytes: ProcessBytes,
-        eof: bool,
-    ) -> Result<ExecutionInputAcceptedEvent, ClientError> {
-        match self
-            .client
-            .request(DaemonRequestKind::ExecutionInput(ExecutionInputRequest {
-                attachment_id: self.attachment_id.clone(),
-                bytes,
-                eof,
-            }))
-            .await?
-        {
-            DaemonEventKind::ExecutionInputAccepted(event)
-                if event.attachment_id == self.attachment_id =>
-            {
-                Ok(event)
-            }
-            other => Err(unexpected("execution_input_accepted", &other)),
-        }
-    }
-
-    pub async fn resize(
-        &self,
-        columns: u16,
-        rows: u16,
-    ) -> Result<ExecutionResizeAcceptedEvent, ClientError> {
-        match self
-            .client
-            .request(DaemonRequestKind::ExecutionResize(ExecutionResizeRequest {
-                attachment_id: self.attachment_id.clone(),
-                columns,
-                rows,
-            }))
-            .await?
-        {
-            DaemonEventKind::ExecutionResizeAccepted(event)
-                if event.attachment_id == self.attachment_id =>
-            {
-                Ok(event)
-            }
-            other => Err(unexpected("execution_resize_accepted", &other)),
-        }
-    }
-
-    pub async fn detach(&self) -> Result<ExecutionDetachAcceptedEvent, ClientError> {
-        match self
-            .client
-            .request(DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
-                attachment_id: self.attachment_id.clone(),
-            }))
-            .await?
-        {
-            DaemonEventKind::ExecutionDetachAccepted(event)
-                if event.attachment_id == self.attachment_id =>
-            {
-                Ok(event)
-            }
-            other => Err(unexpected("execution_detach_accepted", &other)),
-        }
-    }
-
-    pub async fn renew_lease(&self) -> Result<ExecutionLeaseRenewedEvent, ClientError> {
-        match self
-            .client
-            .request(DaemonRequestKind::ExecutionLeaseRenew(
-                ExecutionLeaseRenewRequest {
-                    attachment_id: self.attachment_id.clone(),
-                },
-            ))
-            .await?
-        {
-            DaemonEventKind::ExecutionLeaseRenewed(event)
-                if event.attachment_id == self.attachment_id =>
-            {
-                Ok(event)
-            }
-            other => Err(unexpected("execution_lease_renewed", &other)),
-        }
-    }
-
-    pub async fn next(&mut self) -> Result<Option<ExecutionAttachmentEvent>, ClientError> {
-        if self.finished {
-            return Ok(None);
-        }
-        loop {
-            let kind = if let Some(heartbeat) = self.heartbeat.as_mut() {
-                tokio::select! {
-                    _ = heartbeat.tick() => {
-                        self.renew_lease().await?;
-                        continue;
-                    }
-                    event = self.raw.recv() => event?,
-                }
-            } else {
-                self.raw.recv().await?
-            };
-            match kind {
-                DaemonEventKind::ExecutionOutput(event)
-                    if event.attachment_id == self.attachment_id
-                        && event.execution_id == self.execution_id =>
-                {
-                    let expected = self.last_sequence.saturating_add(1);
-                    // Execution cursors cover the complete durable execution
-                    // event sequence. Lifecycle, resize, and other metadata
-                    // can therefore occupy sequence values that have no PTY
-                    // output chunk. Output must be strictly monotonic, but it
-                    // is not necessarily contiguous.
-                    if event.chunk.sequence <= self.last_sequence {
-                        return Err(ClientError::SequenceGap {
-                            expected,
-                            actual: event.chunk.sequence,
-                        });
-                    }
-                    self.last_sequence = event.chunk.sequence;
-                    self.raw.last_sequence = event.chunk.sequence;
-                    return Ok(Some(ExecutionAttachmentEvent::Output(event)));
-                }
-                DaemonEventKind::ExecutionAttachmentFinished(event)
-                    if event.attachment_id == self.attachment_id
-                        && event.execution_id == self.execution_id =>
-                {
-                    if event.last_delivered_sequence < self.last_sequence {
-                        return Err(ClientError::SequenceGap {
-                            expected: self.last_sequence,
-                            actual: event.last_delivered_sequence,
-                        });
-                    }
-                    self.last_sequence = event.last_delivered_sequence;
-                    self.raw.last_sequence = event.last_delivered_sequence;
-                    self.finished = true;
-                    self.raw.terminal = true;
-                    return Ok(Some(ExecutionAttachmentEvent::Finished(event)));
-                }
-                other => return Err(unexpected("execution attachment stream event", &other)),
-            }
-        }
-    }
-}
-
 struct RawSubscription {
     request_id: RequestId,
     events: mpsc::Receiver<DaemonEventKind>,
@@ -1435,7 +1157,6 @@ enum ConnectionCommand {
 #[derive(Clone)]
 enum StreamCancellation {
     Subscription,
-    ExecutionAttachment(ExecutionRequestId),
 }
 
 impl StreamCancellation {
@@ -1444,11 +1165,6 @@ impl StreamCancellation {
             Self::Subscription => {
                 DaemonRequestKind::SubscriptionCancel(SubscriptionCancelRequest {
                     subscription_request_id: stream_request_id,
-                })
-            }
-            Self::ExecutionAttachment(attachment_id) => {
-                DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
-                    attachment_id: attachment_id.clone(),
                 })
             }
         }
@@ -1481,6 +1197,7 @@ enum Expected {
     Hello,
     SessionOpened,
     SessionStatus,
+    SessionActiveWorkCancelled,
     SessionFinished,
     SessionList,
     SessionTranscript,
@@ -1488,27 +1205,17 @@ enum Expected {
     RunStatus,
     RunTree,
     RunEvents,
-    ExecutionList,
-    ExecutionStatus,
-    ExecutionRead,
-    ExecutionInput,
-    ExecutionResize,
-    ExecutionDetach,
-    ExecutionKill,
-    ExecutionLeaseRenew,
     CommandCatalog,
     CommandSuggestions,
     ApplicationAction,
     PresentationSnapshotStream,
     SubscriptionCancelled,
     HumanTerminalEnsured,
-    HumanTerminalCommandAccepted,
     InferenceInventory,
     InferenceStatus,
     ModelUnload,
     RunStream,
     PresentationStream,
-    ExecutionStream,
 }
 
 impl Expected {
@@ -1524,6 +1231,9 @@ impl Expected {
                 Self::SessionStatus
             }
             DaemonRequestKind::SessionFinish(_) if !stream => Self::SessionFinished,
+            DaemonRequestKind::SessionCancelActive(_) if !stream => {
+                Self::SessionActiveWorkCancelled
+            }
             DaemonRequestKind::SessionList(_) if !stream => Self::SessionList,
             DaemonRequestKind::SessionTranscript(_) if !stream => Self::SessionTranscript,
             DaemonRequestKind::RunSubmit(_) if !stream => Self::RunAccepted,
@@ -1536,15 +1246,6 @@ impl Expected {
             DaemonRequestKind::InferenceInventory(_) if !stream => Self::InferenceInventory,
             DaemonRequestKind::InferenceStatus(_) if !stream => Self::InferenceStatus,
             DaemonRequestKind::ModelUnload(_) if !stream => Self::ModelUnload,
-            DaemonRequestKind::ExecutionList(_) if !stream => Self::ExecutionList,
-            DaemonRequestKind::ExecutionStatus(_) if !stream => Self::ExecutionStatus,
-            DaemonRequestKind::ExecutionRead(_) if !stream => Self::ExecutionRead,
-            DaemonRequestKind::ExecutionInput(_) if !stream => Self::ExecutionInput,
-            DaemonRequestKind::ExecutionResize(_) if !stream => Self::ExecutionResize,
-            DaemonRequestKind::ExecutionDetach(_) if !stream => Self::ExecutionDetach,
-            DaemonRequestKind::ExecutionKill(_) if !stream => Self::ExecutionKill,
-            DaemonRequestKind::ExecutionLeaseRenew(_) if !stream => Self::ExecutionLeaseRenew,
-            DaemonRequestKind::ExecutionAttach(_) if stream => Self::ExecutionStream,
             DaemonRequestKind::CommandCatalog(_) if !stream => Self::CommandCatalog,
             DaemonRequestKind::CommandSuggestions(_) if !stream => Self::CommandSuggestions,
             DaemonRequestKind::ApplicationAction(_) if !stream => Self::ApplicationAction,
@@ -1555,9 +1256,6 @@ impl Expected {
             DaemonRequestKind::SubscriptionCancel(_) if !stream => Self::SubscriptionCancelled,
             DaemonRequestKind::HumanTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
             DaemonRequestKind::HumanHostTerminalEnsure(_) if !stream => Self::HumanTerminalEnsured,
-            DaemonRequestKind::HumanTerminalCommandSubmit(_) if !stream => {
-                Self::HumanTerminalCommandAccepted
-            }
             _ => return None,
         })
     }
@@ -1568,6 +1266,9 @@ impl Expected {
                 Self::Hello => matches!(event, DaemonEventKind::Hello(_)),
                 Self::SessionOpened => matches!(event, DaemonEventKind::SessionOpened(_)),
                 Self::SessionStatus => matches!(event, DaemonEventKind::SessionStatus(_)),
+                Self::SessionActiveWorkCancelled => {
+                    matches!(event, DaemonEventKind::SessionActiveWorkCancelled(_))
+                }
                 Self::SessionFinished => matches!(event, DaemonEventKind::SessionFinished(_)),
                 Self::SessionList => matches!(event, DaemonEventKind::SessionList(_)),
                 Self::SessionTranscript => matches!(event, DaemonEventKind::SessionTranscript(_)),
@@ -1580,20 +1281,6 @@ impl Expected {
                 }
                 Self::InferenceStatus => matches!(event, DaemonEventKind::InferenceStatus(_)),
                 Self::ModelUnload => matches!(event, DaemonEventKind::ModelUnload(_)),
-                Self::ExecutionList => matches!(event, DaemonEventKind::ExecutionList(_)),
-                Self::ExecutionStatus => matches!(event, DaemonEventKind::ExecutionStatus(_)),
-                Self::ExecutionRead => matches!(event, DaemonEventKind::ExecutionRead(_)),
-                Self::ExecutionInput => matches!(event, DaemonEventKind::ExecutionInputAccepted(_)),
-                Self::ExecutionResize => {
-                    matches!(event, DaemonEventKind::ExecutionResizeAccepted(_))
-                }
-                Self::ExecutionDetach => {
-                    matches!(event, DaemonEventKind::ExecutionDetachAccepted(_))
-                }
-                Self::ExecutionKill => matches!(event, DaemonEventKind::ExecutionKillAccepted(_)),
-                Self::ExecutionLeaseRenew => {
-                    matches!(event, DaemonEventKind::ExecutionLeaseRenewed(_))
-                }
                 Self::CommandCatalog => matches!(event, DaemonEventKind::CommandCatalog(_)),
                 Self::CommandSuggestions => matches!(event, DaemonEventKind::CommandSuggestions(_)),
                 Self::ApplicationAction => {
@@ -1604,9 +1291,6 @@ impl Expected {
                 }
                 Self::HumanTerminalEnsured => {
                     matches!(event, DaemonEventKind::HumanTerminalEnsured(_))
-                }
-                Self::HumanTerminalCommandAccepted => {
-                    matches!(event, DaemonEventKind::HumanTerminalCommandAccepted(_))
                 }
                 Self::RunStream => matches!(
                     event,
@@ -1628,12 +1312,6 @@ impl Expected {
                         | DaemonEventKind::SessionPresentationEvent(_)
                         | DaemonEventKind::SessionPresentationSubscriptionFinished(_)
                 ),
-                Self::ExecutionStream => matches!(
-                    event,
-                    DaemonEventKind::ExecutionAttachmentStarted(_)
-                        | DaemonEventKind::ExecutionOutput(_)
-                        | DaemonEventKind::ExecutionAttachmentFinished(_)
-                ),
             }
     }
 
@@ -1649,24 +1327,15 @@ impl Expected {
                     event,
                     DaemonEventKind::SessionPresentationSubscriptionFinished(_)
                 ),
-                Self::ExecutionStream => {
-                    matches!(event, DaemonEventKind::ExecutionAttachmentFinished(_))
-                }
                 _ => true,
             }
     }
 
-    fn stream_cancellation(self, request: &DaemonRequestKind) -> Option<StreamCancellation> {
+    fn stream_cancellation(self, _request: &DaemonRequestKind) -> Option<StreamCancellation> {
         match self {
             Self::RunStream | Self::PresentationSnapshotStream | Self::PresentationStream => {
                 Some(StreamCancellation::Subscription)
             }
-            Self::ExecutionStream => match request {
-                DaemonRequestKind::ExecutionAttach(request) => Some(
-                    StreamCancellation::ExecutionAttachment(request.attachment_id.clone()),
-                ),
-                _ => None,
-            },
             _ => None,
         }
     }
@@ -1858,9 +1527,6 @@ fn stream_sequence(event: &DaemonEventKind) -> Option<u64> {
         DaemonEventKind::SessionPresentationSubscriptionFinished(event) => {
             Some(event.last_delivered_cursor.revision)
         }
-        DaemonEventKind::ExecutionAttachmentStarted(event) => Some(event.next_sequence),
-        DaemonEventKind::ExecutionOutput(event) => Some(event.chunk.sequence),
-        DaemonEventKind::ExecutionAttachmentFinished(event) => Some(event.last_delivered_sequence),
         _ => None,
     }
 }
@@ -1923,6 +1589,7 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
     match event {
         DaemonEventKind::Hello(_) => "hello",
         DaemonEventKind::SessionOpened(_) => "session_opened",
+        DaemonEventKind::SessionActiveWorkCancelled(_) => "session_active_work_cancelled",
         DaemonEventKind::SessionFinished(_) => "session_finished",
         DaemonEventKind::SessionStatus(_) => "session_status",
         DaemonEventKind::SessionList(_) => "session_list",
@@ -1955,18 +1622,6 @@ fn event_name(event: &DaemonEventKind) -> &'static str {
         }
         DaemonEventKind::SubscriptionCancelled(_) => "subscription_cancelled",
         DaemonEventKind::HumanTerminalEnsured(_) => "human_terminal_ensured",
-        DaemonEventKind::HumanTerminalCommandAccepted(_) => "human_terminal_command_accepted",
-        DaemonEventKind::ExecutionList(_) => "execution_list",
-        DaemonEventKind::ExecutionStatus(_) => "execution_status",
-        DaemonEventKind::ExecutionRead(_) => "execution_read",
-        DaemonEventKind::ExecutionAttachmentStarted(_) => "execution_attachment_started",
-        DaemonEventKind::ExecutionLeaseRenewed(_) => "execution_lease_renewed",
-        DaemonEventKind::ExecutionOutput(_) => "execution_output",
-        DaemonEventKind::ExecutionInputAccepted(_) => "execution_input_accepted",
-        DaemonEventKind::ExecutionResizeAccepted(_) => "execution_resize_accepted",
-        DaemonEventKind::ExecutionDetachAccepted(_) => "execution_detach_accepted",
-        DaemonEventKind::ExecutionKillAccepted(_) => "execution_kill_accepted",
-        DaemonEventKind::ExecutionAttachmentFinished(_) => "execution_attachment_finished",
         DaemonEventKind::Error(_) => "error",
     }
 }
@@ -2474,11 +2129,6 @@ mod tests {
                             sessions: Vec::new(),
                         })
                     }
-                    DaemonRequestKind::ExecutionList(_) => {
-                        DaemonEventKind::ExecutionList(ExecutionListEvent {
-                            executions: Vec::new(),
-                        })
-                    }
                     other => panic!("unexpected request: {other:?}"),
                 };
                 server
@@ -2493,154 +2143,13 @@ mod tests {
         let client = AgentLibreClient::from_test_stream(client_stream)
             .await
             .unwrap();
-        let (sessions, executions) = tokio::join!(
+        let (first, second) = tokio::join!(
             client.list_sessions(SessionListRequest::default()),
-            client.execution_list(ExecutionListRequest {
-                session_id: None,
-                root_run_id: None,
-                include_finished: false,
-            })
+            client.list_sessions(SessionListRequest::default())
         );
-        assert!(sessions.unwrap().sessions.is_empty());
-        assert!(executions.unwrap().executions.is_empty());
+        assert!(first.unwrap().sessions.is_empty());
+        assert!(second.unwrap().sessions.is_empty());
         server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn execution_attachment_accepts_monotonic_output_with_metadata_sequence_gaps() {
-        let (client_stream, server_stream) = UnixStream::pair().unwrap();
-        let execution_id = ExecutionId::generate();
-        let server_execution_id = execution_id.clone();
-        let server = tokio::spawn(async move {
-            let mut server = handshake(server_stream, agl_ids::DaemonInstanceId::generate()).await;
-            let request: DaemonRequest =
-                serde_json::from_str(&server.next().await.unwrap().unwrap()).unwrap();
-            let attachment_id = match &request.kind {
-                DaemonRequestKind::ExecutionAttach(request) => request.attachment_id.clone(),
-                other => panic!("unexpected request: {other:?}"),
-            };
-            assert!(matches!(
-                request.kind,
-                DaemonRequestKind::ExecutionAttach(ExecutionAttachRequest {
-                    attachment_id: _,
-                    ref execution_id,
-                    after_sequence: 0,
-                    writable: false,
-                }) if execution_id == &server_execution_id
-            ));
-            let status = ExecutionStatus {
-                execution_id: server_execution_id.clone(),
-                owner: ExecutionOwner::new(
-                    CallerOwner::new(
-                        CallerNamespace::new("agentlibre", 1).unwrap(),
-                        OpaqueOwnerId::new(agl_ids::SessionId::generate().as_str()).unwrap(),
-                        CallerOwnerKind::Persistent,
-                        CallerRole::Human,
-                    ),
-                    OpaqueOwnerId::new(RunId::generate().as_str()).unwrap(),
-                ),
-                state: ExecutionState::Running,
-                profile: ExecutionProfile::Workspace,
-                io: ExecutionIo::Pty,
-                cwd: std::path::PathBuf::from("/workspace"),
-                terminal_size: Some(TerminalSize::default()),
-                exit: None,
-                first_retained_sequence: Some(3),
-                last_sequence: 7,
-                retained_bytes: 2,
-                discarded_output_bytes: 0,
-                output_truncated: false,
-                output_expired: false,
-                started_at_unix_ms: Some(1),
-                finished_at_unix_ms: None,
-                error_code: None,
-            };
-            let events = [
-                DaemonEventKind::ExecutionAttachmentStarted(ExecutionAttachmentStartedEvent {
-                    attachment_id: attachment_id.clone(),
-                    status,
-                    writable: false,
-                    writer_lease_id: None,
-                    next_sequence: 0,
-                    lease_ttl_ms: None,
-                    heartbeat_interval_ms: None,
-                }),
-                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
-                    attachment_id: attachment_id.clone(),
-                    execution_id: server_execution_id.clone(),
-                    chunk: ExecutionOutputChunk {
-                        sequence: 3,
-                        channel: ExecutionChannel::Terminal,
-                        bytes: ProcessBytes::from_bytes(b"a"),
-                    },
-                    state: ExecutionState::Running,
-                }),
-                DaemonEventKind::ExecutionOutput(ExecutionOutputEvent {
-                    attachment_id: attachment_id.clone(),
-                    execution_id: server_execution_id.clone(),
-                    chunk: ExecutionOutputChunk {
-                        sequence: 5,
-                        channel: ExecutionChannel::Terminal,
-                        bytes: ProcessBytes::from_bytes(b"b"),
-                    },
-                    state: ExecutionState::Running,
-                }),
-                DaemonEventKind::ExecutionAttachmentFinished(ExecutionAttachmentFinishedEvent {
-                    attachment_id,
-                    execution_id: server_execution_id,
-                    state: ExecutionState::Running,
-                    last_delivered_sequence: 7,
-                    reason: ExecutionAttachmentFinishReason::Detached,
-                }),
-            ];
-            for event in events {
-                server
-                    .send(
-                        serde_json::to_string(&DaemonEvent::new(
-                            Some(request.request_id.clone()),
-                            event,
-                        ))
-                        .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-            }
-        });
-
-        let client = AgentLibreClient::from_test_stream(client_stream)
-            .await
-            .unwrap();
-        let mut attachment = client
-            .attach_execution(execution_id, 0, false)
-            .await
-            .unwrap();
-        for expected in [3, 5] {
-            assert!(matches!(
-                attachment.next().await.unwrap(),
-                Some(ExecutionAttachmentEvent::Output(event))
-                    if event.chunk.sequence == expected
-            ));
-        }
-        assert!(matches!(
-            attachment.next().await.unwrap(),
-            Some(ExecutionAttachmentEvent::Finished(event))
-                if event.last_delivered_sequence == 7
-        ));
-        server.await.unwrap();
-    }
-
-    #[test]
-    fn execution_stream_cancellation_uses_the_terminal_owned_attachment_id() {
-        let stream_request_id = RequestId::generate();
-        let attachment_id = ExecutionRequestId::generate();
-        let cancellation = StreamCancellation::ExecutionAttachment(attachment_id.clone());
-
-        assert!(matches!(
-            cancellation.request(stream_request_id),
-            DaemonRequestKind::ExecutionDetach(ExecutionDetachRequest {
-                attachment_id: actual,
-            }) if actual == attachment_id
-        ));
     }
 
     #[tokio::test]
@@ -3311,7 +2820,6 @@ mod tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
-            human_commands: Vec::new(),
             activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id),

@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agl_events::{
@@ -96,7 +96,7 @@ impl ToolEffectJournal for RuntimeToolEffectJournal {
 }
 
 struct ChatProcessExecutionContext {
-    state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
     store_root: PathBuf,
     sessions_root: PathBuf,
     scope_session_id: Option<SessionId>,
@@ -107,7 +107,7 @@ impl ChatProcessExecutionContext {
     fn admission_identity(
         &self,
         scope: &ExecutionScope,
-    ) -> Result<(agl_process::ExecutionOwner, SessionId)> {
+    ) -> Result<(agl_exec::ExecutionOwner, SessionId)> {
         let store = agl_store::AglStore::open_current_read_only_at(&self.store_root)
             .context("failed to open execution owner store")?;
         let run = store
@@ -147,7 +147,7 @@ impl ChatProcessExecutionContext {
         }
     }
 
-    fn snapshot(&self) -> Result<agl_process::ExecutionContextSnapshot> {
+    fn snapshot(&self) -> Result<agl_exec::ExecutionContextSnapshot> {
         self.state
             .lock()
             .map_err(|error| anyhow::anyhow!("execution context lock is poisoned: {error}"))
@@ -169,7 +169,7 @@ impl agl_core_tools::ProcessExecutionContext for ChatProcessExecutionContext {
         &self,
         scope: &ExecutionScope,
         expected_revision: u64,
-        next: agl_process::ExecutionContextSnapshot,
+        next: agl_exec::ExecutionContextSnapshot,
     ) -> Result<agl_core_tools::ProcessExecutionAdmission> {
         let (owner, durable_session_id) = self.admission_identity(scope)?;
         let current = self.snapshot()?;
@@ -207,15 +207,10 @@ impl agl_core_tools::ProcessExecutionContext for ChatProcessExecutionContext {
     }
 }
 
-static PROCESS_HANDLES: OnceLock<Mutex<BTreeMap<PathBuf, agl_process::ProcessHandle>>> =
-    OnceLock::new();
-static TERMINAL_REGISTRIES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<agl_process::TerminalRegistry>>>> =
-    OnceLock::new();
-
 pub struct ChatTurnRuntime {
     session: InferenceSession,
-    execution_context: agl_process::ExecutionContextSnapshot,
-    execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    execution_context: agl_exec::ExecutionContextSnapshot,
+    execution_context_state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
     process_tools: agl_core_tools::ProcessTools,
     active_effective_capabilities: Option<agl_kernel::EffectiveToolSet>,
     event_sink: Option<RuntimeEventWriter>,
@@ -241,7 +236,7 @@ impl ChatTurnRuntime {
         session: InferenceSession,
         runtime: &agl_runtime::AgentLibreRuntimeConfig,
         workspace_root: impl AsRef<Path>,
-        execution_context: agl_process::ExecutionContextSnapshot,
+        execution_context: agl_exec::ExecutionContextSnapshot,
         scope_session_id: Option<SessionId>,
         persist_session_context: bool,
     ) -> Result<Self> {
@@ -390,29 +385,19 @@ impl ChatTurnRuntime {
         &mut self.session
     }
 
-    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+    pub fn execution_context(&self) -> &agl_exec::ExecutionContextSnapshot {
         &self.execution_context
     }
 
-    pub fn terminate_process_owner(&self, owner: &agl_process::ExecutionOwner) -> Result<usize> {
-        self.process_tools
-            .process_handle()
-            .terminate_owner(owner)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-    }
-
     fn reconcile_process_grants(&self) -> Result<usize> {
-        let store = agl_store::AglStore::open_current_at(self.session.store_root())?;
-        let live_grant_ids = store.live_process_permission_grant_ids()?;
-        self.process_tools
-            .process_handle()
-            .terminate_inactive_grants(live_grant_ids)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        // Revocation is fenced atomically by `agl-terminald`; agentLIBRE no
+        // longer enumerates or mutates canonical execution lifecycle here.
+        Ok(0)
     }
 
     pub fn install_execution_context(
         &mut self,
-        execution_context: agl_process::ExecutionContextSnapshot,
+        execution_context: agl_exec::ExecutionContextSnapshot,
     ) -> Result<()> {
         ensure!(
             self.active_effective_capabilities.is_none(),
@@ -1296,11 +1281,8 @@ fn build_process_tools(
     runtime: &agl_runtime::AgentLibreRuntimeConfig,
     context: Arc<dyn agl_core_tools::ProcessExecutionContext>,
 ) -> Result<agl_core_tools::ProcessTools> {
-    let process = shared_process_handle(runtime)?;
-    let terminals = shared_terminal_registry(runtime)?;
     agl_core_tools::ProcessTools::new(
-        process,
-        terminals,
+        Arc::new(runtime.execution.terminal_endpoint(&runtime.paths)?),
         context,
         agl_core_tools::ProcessToolRuntimeConfig {
             base_environment: runtime.execution.admitted_environment()?,
@@ -1315,7 +1297,7 @@ fn build_process_tools(
             max_input_bytes: runtime.execution.max_input_bytes,
             max_result_bytes: runtime.execution.max_result_bytes,
             max_spool_bytes: runtime.execution.max_spool_bytes,
-            default_terminal_size: agl_process::TerminalSize {
+            default_terminal_size: agl_exec::TerminalSize {
                 columns: runtime.execution.default_terminal_columns,
                 rows: runtime.execution.default_terminal_rows,
             },
@@ -1323,82 +1305,12 @@ fn build_process_tools(
     )
 }
 
-pub fn shared_process_handle(
-    runtime: &agl_runtime::AgentLibreRuntimeConfig,
-) -> Result<agl_process::ProcessHandle> {
-    let key = runtime.paths.store_root();
-    let handles = PROCESS_HANDLES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut handles = handles
-        .lock()
-        .map_err(|error| anyhow::anyhow!("process runtime registry is poisoned: {error}"))?;
-    if let Some(handle) = handles.get(&key) {
-        return Ok(handle.clone());
-    }
-
-    let options = runtime
-        .execution
-        .supervisor_options(&runtime.paths, process_launcher_path()?)?;
-    let repository = Arc::new(agl_store::AglExecutionRepository::open_at(
-        &key,
-        options.finished_retention,
-    )?);
-    let spool = Arc::new(
-        agl_process::FileOutputSpool::new(options.data_root.clone())
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
-    );
-    let supervisor = agl_process::ProcessSupervisor::start(options, repository, spool)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let handle = supervisor.handle();
-    handles.insert(key, handle.clone());
-    Ok(handle)
-}
-
-pub fn shared_terminal_registry(
-    runtime: &agl_runtime::AgentLibreRuntimeConfig,
-) -> Result<Arc<agl_process::TerminalRegistry>> {
-    let key = runtime.paths.store_root();
-    let process = shared_process_handle(runtime)?;
-    let registries = TERMINAL_REGISTRIES.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut registries = registries
-        .lock()
-        .map_err(|error| anyhow::anyhow!("terminal runtime registry is poisoned: {error}"))?;
-    if let Some(registry) = registries.get(&key) {
-        return Ok(Arc::clone(registry));
-    }
-    let repository = Arc::new(agl_store::AglTerminalRepository::open_at(&key)?);
-    let registry = Arc::new(
-        agl_process::TerminalRegistry::new(
-            process,
-            Arc::new(agl_process::RejectTerminalSecrets),
-            repository,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
-    );
-    registries.insert(key, Arc::clone(&registry));
-    Ok(registry)
-}
-
-fn process_launcher_path() -> Result<PathBuf> {
-    let executable = std::env::current_exe().context("failed to resolve current executable")?;
-    let parent = executable
-        .parent()
-        .context("current executable has no parent directory")?;
-    let directory = if parent.file_name().is_some_and(|name| name == "deps") {
-        parent
-            .parent()
-            .context("test executable directory has no target parent")?
-    } else {
-        parent
-    };
-    Ok(directory.join("agl-process-launcher"))
-}
-
 fn build_chat_tool_runtime(
     session: &InferenceSession,
     core_tools: &agl_core_tools::CoreTools,
     workspace_root: &Path,
     process_tools: &agl_core_tools::ProcessTools,
-    execution_context_state: &Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    execution_context_state: &Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
 ) -> Result<ToolRuntime> {
     let screen_id = agl_extension::ToolId::new(agl_host_tools::SCREEN_CAPTURE_TOOL_ID)?;
     chat_tool_runtime(ChatToolRuntimeConfig {

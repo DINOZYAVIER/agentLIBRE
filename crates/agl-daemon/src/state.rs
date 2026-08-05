@@ -5,32 +5,31 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use agl_app::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationCallContext,
     ApplicationError, ApplicationErrorCode, ApplicationToolResult, CommandContext,
-    ContinueActionView, ContinueUnavailableReason, ExecutionView, HumanCommandCardState,
-    HumanCommandCardView, HumanTerminalCommandAccepted, HumanTerminalCommandAdmission,
-    HumanTerminalCommandSubmit, HumanTerminalEnsure, IncompleteAssistantItemView,
-    IncompleteOutputReason, MAX_ACTIVE_ACTIVITY_BYTES, MAX_ACTIVE_ACTIVITY_NODES,
-    MAX_ACTIVITY_NODE_BYTES, MAX_ACTIVITY_PATH_NODES, MAX_HUMAN_COMMAND_OUTPUT_BYTES,
+    ContinueActionView, ContinueUnavailableReason, ExecutionView, HumanTerminalEnsure,
+    IncompleteAssistantItemView, IncompleteOutputReason, MAX_ACTIVE_ACTIVITY_BYTES,
+    MAX_ACTIVE_ACTIVITY_NODES, MAX_ACTIVITY_NODE_BYTES, MAX_ACTIVITY_PATH_NODES,
     MAX_PRESENTATION_CONTENT_BYTES, MAX_PRESENTATION_ITEMS, PresentationCursor,
     PresentationSnapshotPage, PromptAdmission, PromptAdmissionState, PromptSubmission,
-    QueuedPromptView, SanitizedDisplayPath, SanitizedTerminalText, SessionHeader, SessionOpen,
-    SessionOpened, SessionPresentationEvent, SessionPresentationItem, SessionPresentationSnapshot,
-    SessionPresentationStatus, ShellProfileView, SuggestionPage, SuggestionRequest,
-    TerminalEnsureDisposition, TerminalEnsured, TerminalOwnerView, TerminalSessionView,
-    TerminalWriterView,
+    QueuedPromptView, SanitizedDisplayPath, SessionHeader, SessionOpen, SessionOpened,
+    SessionPresentationItem, SessionPresentationSnapshot, SessionPresentationStatus,
+    ShellProfileView, SuggestionPage, SuggestionRequest, TerminalEnsureDisposition,
+    TerminalEnsured, TerminalOwnerView, TerminalSessionView, TerminalWriterView,
 };
 use agl_chat::{
     ChatOptions, ChatRunInput, ChatService, ChatSupervisorFactory, InferenceClientHandle,
-    InferenceOptions, ToolAccessMode as ChatToolMode, shared_process_handle,
-    shared_terminal_registry,
+    InferenceOptions, ToolAccessMode as ChatToolMode,
 };
 use agl_cron::{CronJob, CronTargetKind, STORE_STATUS_BUILTIN_CRON_TARGET};
 use agl_exec::{
-    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionOwner, OpaqueOwnerId,
+    CallerNamespace, CallerOwner, CallerOwnerKind, CallerRole, ExecutionAuthorization,
+    ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
+    ExecutionOwner, ExecutionProfile, ExecutionState, KillMode,
+    LOCAL_OPERATOR_TERMINAL_LEASE_DURATION, OpaqueOwnerId, ProcessError, ProcessErrorCode,
 };
 use agl_function::RuntimeDelegationPlan;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId};
@@ -42,28 +41,17 @@ use agl_inference::{
     ModelUnloadOutcome as ManagerUnloadOutcome, ModelUnloadTarget as ManagerUnloadTarget,
     WorkerRuntimeStatusHandle,
 };
-use agl_process::{
-    AdmittedShellKind, AdmittedShellProfile, ExecutionAuthorization, ExecutionCursor,
-    ExecutionGrantLease, ExecutionId, ExecutionLeaseOrigin, ExecutionLimits, ExecutionListFilter,
-    ExecutionProfile, ExecutionState, HostStartupPolicy as ProcessHostStartupPolicy,
-    HumanShellHistoryStore, InputLease, KillMode, LOCAL_OPERATOR_TERMINAL_LEASE_DURATION,
-    ProcessError, ProcessErrorCode, TerminalEnsureRequest, TerminalEnvironmentRequest,
-    TerminalEnvironmentValue, TerminalOwner, TerminalPromptState as ProcessTerminalPromptState,
-    TerminalRecord, TerminalRegistry, TerminalSecretReference, TerminalState, TerminalTopologyId,
-    sanitize_terminal_card_output,
-};
 use agl_protocol::{
-    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind,
-    ExecutionKillAcceptedEvent, ExecutionListEvent, ExecutionReadEvent, ExecutionStatusEvent,
-    HelloEvent, HelloRequest, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
+    DaemonCapability, DaemonEvent, DaemonEventKind, DaemonRequest, DaemonRequestKind, HelloEvent,
+    HelloRequest, InferenceDeviceEvent, InferenceInventoryEvent, InferenceStatusEvent,
     InferenceStatusRequest, ModelReleaseOutcome, ModelReleaseReason, ModelUnloadEvent,
     ModelUnloadOutcome, ModelUnloadRequest, ModelUnloadTarget, PROTOCOL_VERSION, ProtocolError,
     ProtocolErrorCode, ProtocolErrorDetails, ProtocolInferenceDeviceKind,
     ProtocolInferenceWorkerState, ProtocolRunKind, ProtocolRunState, ProtocolToolMode,
     RunAcceptedEvent, RunEventsEvent, RunStatusEvent, RunTreeEvent, RunTreeNodeEvent,
-    RunUsageEvent, RuntimeGenerationIdentity, RuntimeGenerationKind, SessionFinishedEvent,
-    SessionListEvent, SessionOpenedEvent, SessionStatus, SessionStatusEvent, SessionSummary,
-    SessionTranscriptEvent,
+    RunUsageEvent, RuntimeGenerationIdentity, RuntimeGenerationKind,
+    SessionActiveWorkCancelledEvent, SessionFinishedEvent, SessionListEvent, SessionOpenedEvent,
+    SessionStatus, SessionStatusEvent, SessionSummary, SessionTranscriptEvent,
 };
 use agl_runtime::{
     AgentLibreRuntimeConfig, CurrentRuntimeIdentity, RuntimeIdentityKind, current_runtime_identity,
@@ -76,19 +64,25 @@ use agl_supervisor::{
     IdempotentRunSpec, RunAccepted, RunOutcome, RunSpec, RunSubscription, Supervisor,
     SupervisorHandle, SupervisorOptions,
 };
-use agl_terminal::TerminalId;
-use anyhow::{Context, Result, anyhow, ensure};
+use agl_terminal::environment::{
+    TerminalEnvironmentRequest, TerminalEnvironmentValue, TerminalSecretReference,
+};
+use agl_terminal::{
+    AdmittedShellKind, AdmittedShellProfile, HostStartupPolicy as ProcessHostStartupPolicy,
+    TerminalId, TerminalOwner, TerminalPromptState as ProcessTerminalPromptState, TerminalRecord,
+    TerminalState, TerminalTopologyId,
+};
+use agl_terminal_protocol::TerminalAdmission;
+use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::run_factory::{BuiltinCronRunInput, DaemonRunFactory};
-use crate::shell_monitor::{ShellMonitorConnector, ShellMonitorSpec, TerminalMonitorProjection};
+use crate::terminal_bridge::TerminalBridge;
 use crate::transcript::transcript_event;
 
 const RUN_SUBMIT_IDEMPOTENCY_NAMESPACE: &str = "daemon.run_submit";
 const INCOMPLETE_CONTINUE_IDEMPOTENCY_NAMESPACE: &str = "daemon.incomplete_continue";
 const CRON_RUN_IDEMPOTENCY_NAMESPACE: &str = "daemon.cron_run";
-const PRIVATE_COMMAND_DISPLAY_MAX_BYTES: usize = 4096;
-const MAX_HUMAN_COMMAND_IDEMPOTENCY_RECORDS: usize = 128;
 const MAX_QUEUED_PROMPTS_PER_SESSION: usize = 32;
 const SESSION_EXIT_RUN_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_EXIT_RUN_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -114,17 +108,10 @@ pub struct DaemonState {
     sessions: BTreeMap<SessionId, SessionRuntime>,
     chat_factory: ChatSupervisorFactory,
     presentation_proxy: agl_app::TurnPresentationProxy,
-    process_handle: agl_process::ProcessHandle,
-    terminal_registry: Arc<TerminalRegistry>,
-    human_terminal_history: HumanShellHistoryStore,
+    terminal_bridge: TerminalBridge,
     terminal_presentations: BTreeMap<TerminalId, TerminalPresentationMetadata>,
     human_terminal_submissions: BTreeMap<(SessionId, String), HumanTerminalSubmission>,
-    human_command_submissions: BTreeMap<(SessionId, String), HumanCommandSubmission>,
-    human_command_tracking: BTreeMap<(TerminalId, u64), HumanCommandTracking>,
-    next_human_command_submission_ordinal: u64,
     exiting_sessions: BTreeSet<SessionId>,
-    shell_monitor: ShellMonitorConnector,
-    monitored_terminals: BTreeSet<TerminalId>,
     _supervisor: Supervisor,
     supervisor_handle: SupervisorHandle,
 }
@@ -139,25 +126,6 @@ struct TerminalPresentationMetadata {
 struct HumanTerminalSubmission {
     fingerprint: String,
     terminal_id: TerminalId,
-}
-
-#[derive(Clone)]
-struct HumanCommandSubmission {
-    fingerprint: String,
-    accepted: HumanTerminalCommandAccepted,
-    card: HumanCommandCardView,
-    ordinal: u64,
-    completed: bool,
-}
-
-#[derive(Clone)]
-struct HumanCommandTracking {
-    execution_id: ExecutionId,
-    display_command: SanitizedTerminalText,
-    command_filtered_effects: u32,
-    command_truncated: bool,
-    output_start: ExecutionCursor,
-    started_at_unix_ms: u64,
 }
 
 #[derive(Clone)]
@@ -200,12 +168,6 @@ enum HumanTerminalAuthority {
     LocalOperatorHost { operator_uid: u32 },
 }
 
-enum TerminalCwdDecision {
-    Applied(Box<agl_process::ExecutionContextSnapshot>),
-    Ignore,
-    Retry,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SessionTerminationCounts {
     terminals: u32,
@@ -218,11 +180,11 @@ struct SessionRunCancellation {
 }
 
 struct SessionExecutionTermination {
-    live_terminal_ids: Vec<TerminalId>,
+    live_terminals: Vec<(TerminalTopologyId, TerminalId)>,
     execution_ids: Vec<ExecutionId>,
     counts: SessionTerminationCounts,
-    process: agl_process::ProcessHandle,
-    registry: Arc<TerminalRegistry>,
+    human_terminals: TerminalBridge,
+    agent_executions: TerminalBridge,
     timeout: Duration,
     poll_interval: Duration,
 }
@@ -290,9 +252,9 @@ impl SessionExecutionTermination {
                 let mut pending = false;
                 for execution_id in &self.execution_ids {
                     let status = self
-                        .process
-                        .operator_status(execution_id)
-                        .map_err(application_process_error)?;
+                        .agent_executions
+                        .execution_status(execution_id.clone())
+                        .map_err(application_runtime_error)?;
                     if status.state == ExecutionState::OutcomeUnknown {
                         return Err(ApplicationError::new(
                             ApplicationErrorCode::OutcomeUnknown,
@@ -313,12 +275,12 @@ impl SessionExecutionTermination {
                 std::thread::sleep(self.poll_interval);
             }
         }
-        for terminal_id in &self.live_terminal_ids {
+        for (topology_id, terminal_id) in &self.live_terminals {
             ensure_application_call_live(context)?;
             let refreshed = self
-                .registry
-                .refresh(terminal_id)
-                .map_err(terminal_application_error)?;
+                .human_terminals
+                .record(topology_id.clone(), terminal_id)
+                .map_err(application_runtime_error)?;
             if refreshed.state.is_live() || refreshed.state == TerminalState::OutcomeUnknown {
                 return Err(ApplicationError::new(
                     ApplicationErrorCode::OutcomeUnknown,
@@ -350,7 +312,7 @@ struct SessionRuntime {
     resumed: bool,
     options: ChatOptions,
     delegation_plan: Option<RuntimeDelegationPlan>,
-    execution_context: agl_process::ExecutionContextSnapshot,
+    execution_context: agl_exec::ExecutionContextSnapshot,
     selected_model_id: Option<String>,
     runtime_context_revision: u64,
 }
@@ -403,14 +365,9 @@ impl DaemonState {
             );
         }
         let store_root = runtime.paths.store_root();
-        let process_handle =
-            shared_process_handle(&runtime).context("failed to start daemon process supervisor")?;
-        let terminal_registry = shared_terminal_registry(&runtime)
-            .context("failed to start shared daemon terminal registry")?;
-        let human_terminal_history =
-            HumanShellHistoryStore::with_defaults(runtime.paths.state_dir.join("terminal-history"))
-                .map_err(|error| anyhow!(error.to_string()))
-                .context("failed to initialize private Human terminal history")?;
+        let terminal_bridge =
+            TerminalBridge::daemon(runtime.execution.terminal_endpoint(&runtime.paths)?)
+                .context("failed to configure terminal service adapter")?;
         let presentation_proxy = agl_app::TurnPresentationProxy::new();
         let chat_factory = ChatSupervisorFactory::with_runtime(
             &store_root,
@@ -435,17 +392,10 @@ impl DaemonState {
             sessions: BTreeMap::new(),
             chat_factory,
             presentation_proxy,
-            process_handle,
-            terminal_registry,
-            human_terminal_history,
+            terminal_bridge,
             terminal_presentations: BTreeMap::new(),
             human_terminal_submissions: BTreeMap::new(),
-            human_command_submissions: BTreeMap::new(),
-            human_command_tracking: BTreeMap::new(),
-            next_human_command_submission_ordinal: 1,
             exiting_sessions: BTreeSet::new(),
-            shell_monitor: ShellMonitorConnector::default(),
-            monitored_terminals: BTreeSet::new(),
             _supervisor: supervisor,
             supervisor_handle,
         })
@@ -468,6 +418,9 @@ impl DaemonState {
                 self.open_setup_smoke_session(*request)
             }
             DaemonRequestKind::SessionClear(request) => self.clear_session(request.session_id),
+            DaemonRequestKind::SessionCancelActive(request) => self
+                .cancel_active_session_work(request.session_id, context)
+                .map_err(protocol_application_error),
             DaemonRequestKind::SessionFinish(request) => {
                 self.finish_session(request.session_id, request.reason, context)
             }
@@ -491,27 +444,6 @@ impl DaemonState {
                 "run_subscribe must be handled by the streaming transport",
                 false,
             )),
-            DaemonRequestKind::ExecutionList(request) => self.execution_list(request),
-            DaemonRequestKind::ExecutionStatus(request) => {
-                self.execution_status(request.execution_id, request.include_private_command)
-            }
-            DaemonRequestKind::ExecutionRead(request) => self.execution_read(
-                request.execution_id,
-                request.after_sequence,
-                request.max_bytes,
-            ),
-            DaemonRequestKind::ExecutionKill(request) => {
-                self.execution_kill(request.execution_id, request.mode)
-            }
-            DaemonRequestKind::ExecutionAttach(_)
-            | DaemonRequestKind::ExecutionLeaseRenew(_)
-            | DaemonRequestKind::ExecutionInput(_)
-            | DaemonRequestKind::ExecutionResize(_)
-            | DaemonRequestKind::ExecutionDetach(_) => Err(ProtocolError::new(
-                ProtocolErrorCode::InvalidRequest,
-                "execution attachment operations must be handled by the streaming transport",
-                false,
-            )),
             DaemonRequestKind::CommandCatalog(_)
             | DaemonRequestKind::CommandSuggestions(_)
             | DaemonRequestKind::ApplicationAction(_)
@@ -519,8 +451,7 @@ impl DaemonState {
             | DaemonRequestKind::SessionPresentationSubscribe(_)
             | DaemonRequestKind::SubscriptionCancel(_)
             | DaemonRequestKind::HumanTerminalEnsure(_)
-            | DaemonRequestKind::HumanHostTerminalEnsure(_)
-            | DaemonRequestKind::HumanTerminalCommandSubmit(_) => Err(ProtocolError::new(
+            | DaemonRequestKind::HumanHostTerminalEnsure(_) => Err(ProtocolError::new(
                 ProtocolErrorCode::InvalidRequest,
                 "interactive surface operations must be handled by the private connection adapter",
                 false,
@@ -555,23 +486,6 @@ impl DaemonState {
 
     pub fn supervisor_handle(&self) -> SupervisorHandle {
         self.supervisor_handle.clone()
-    }
-
-    pub fn process_handle(&self) -> agl_process::ProcessHandle {
-        self.process_handle.clone()
-    }
-
-    pub fn process_read_limit(&self) -> usize {
-        self.runtime.execution.max_result_bytes
-    }
-
-    pub fn process_input_limit(&self) -> usize {
-        self.runtime.execution.max_input_bytes
-    }
-
-    #[cfg(test)]
-    pub(crate) fn monitored_terminal_count(&self) -> usize {
-        self.monitored_terminals.len()
     }
 
     pub fn submit_cron_job(
@@ -727,6 +641,7 @@ impl DaemonState {
                 DaemonCapability::SessionOpen,
                 DaemonCapability::SetupSmokeSessionOpen,
                 DaemonCapability::SessionClear,
+                DaemonCapability::SessionCancelActive,
                 DaemonCapability::SessionFinish,
                 DaemonCapability::SessionStatus,
                 DaemonCapability::SessionList,
@@ -742,9 +657,6 @@ impl DaemonState {
                 DaemonCapability::InferenceInventory,
                 DaemonCapability::InferenceStatus,
                 DaemonCapability::ModelUnload,
-                DaemonCapability::ExecutionList,
-                DaemonCapability::ExecutionControl,
-                DaemonCapability::ExecutionAttach,
                 DaemonCapability::CommandCatalog,
                 DaemonCapability::CommandSuggestions,
                 DaemonCapability::ApplicationActions,
@@ -860,79 +772,6 @@ impl DaemonState {
             released_contexts: result.released_contexts,
             outcome,
         }))
-    }
-
-    fn execution_list(
-        &self,
-        request: agl_protocol::ExecutionListRequest,
-    ) -> Result<DaemonEventKind, ProtocolError> {
-        let executions = self
-            .process_handle
-            .operator_list(agent_execution_filter(
-                request.session_id.as_ref(),
-                request.root_run_id.as_ref(),
-                request.include_finished,
-            ))
-            .map_err(process_error)?;
-        Ok(DaemonEventKind::ExecutionList(ExecutionListEvent {
-            executions,
-        }))
-    }
-
-    fn execution_status(
-        &self,
-        execution_id: ExecutionId,
-        include_private_command: bool,
-    ) -> Result<DaemonEventKind, ProtocolError> {
-        let status = self
-            .process_handle
-            .operator_status(&execution_id)
-            .map_err(process_error)?;
-        let private_command = include_private_command
-            .then(|| {
-                self.process_handle
-                    .operator_private_command(&execution_id, PRIVATE_COMMAND_DISPLAY_MAX_BYTES)
-                    .map_err(process_error)
-            })
-            .transpose()?;
-        Ok(DaemonEventKind::ExecutionStatus(ExecutionStatusEvent {
-            status,
-            private_command,
-        }))
-    }
-
-    fn execution_read(
-        &self,
-        execution_id: ExecutionId,
-        after_sequence: u64,
-        max_bytes: usize,
-    ) -> Result<DaemonEventKind, ProtocolError> {
-        if max_bytes == 0 || max_bytes > self.runtime.execution.max_result_bytes {
-            return Err(invalid(format!(
-                "execution max_bytes must be between 1 and {}",
-                self.runtime.execution.max_result_bytes
-            )));
-        }
-        let output = self
-            .process_handle
-            .operator_read(&execution_id, ExecutionCursor { after_sequence }, max_bytes)
-            .map_err(process_error)?;
-        Ok(DaemonEventKind::ExecutionRead(ExecutionReadEvent {
-            output,
-        }))
-    }
-
-    fn execution_kill(
-        &self,
-        execution_id: ExecutionId,
-        mode: agl_process::KillMode,
-    ) -> Result<DaemonEventKind, ProtocolError> {
-        self.process_handle
-            .operator_kill(&execution_id, mode)
-            .map_err(process_error)?;
-        Ok(DaemonEventKind::ExecutionKillAccepted(
-            ExecutionKillAcceptedEvent { execution_id, mode },
-        ))
     }
 
     fn open_session(
@@ -1538,10 +1377,12 @@ impl DaemonState {
                 ));
             }
             let record = self
-                .terminal_registry
-                .refresh(&previous.terminal_id)
-                .map_err(terminal_application_error)?;
-            self.ensure_human_terminal_monitor(&record)?;
+                .terminal_bridge
+                .record(
+                    terminal_topology_id(&request.session_id),
+                    &previous.terminal_id,
+                )
+                .map_err(application_runtime_error)?;
             return Ok(TerminalEnsured {
                 terminal: self.terminal_view(&record)?,
                 disposition: TerminalEnsureDisposition::Reused,
@@ -1566,17 +1407,14 @@ impl DaemonState {
 
         let admission_fingerprint = human_terminal_admission_fingerprint(&request)?;
         for record in self
-            .terminal_registry
-            .list_topology(&terminal_topology_id(&request.session_id))
-            .map_err(terminal_application_error)?
+            .terminal_bridge
+            .list_topology(terminal_topology_id(&request.session_id))
+            .map_err(application_runtime_error)?
         {
             if record.profile != request.profile || !record.owner.is_human() {
                 continue;
             }
-            let refreshed = self
-                .terminal_registry
-                .refresh(&record.terminal_id)
-                .map_err(terminal_application_error)?;
+            let refreshed = record;
             if refreshed.state == TerminalState::OutcomeUnknown {
                 return Err(ApplicationError::new(
                     ApplicationErrorCode::OutcomeUnknown,
@@ -1603,23 +1441,19 @@ impl DaemonState {
                         terminal_id: refreshed.terminal_id.clone(),
                     },
                 );
-                self.ensure_human_terminal_monitor(&refreshed)?;
                 return Ok(TerminalEnsured {
                     terminal: self.terminal_view(&refreshed)?,
                     disposition: TerminalEnsureDisposition::Reused,
                 });
             }
-            self.terminal_registry
-                .retire_terminal_slot(&refreshed.terminal_id)
-                .map_err(terminal_application_error)?;
+            self.terminal_bridge
+                .retire(refreshed.terminal_id)
+                .map_err(application_runtime_error)?;
         }
         let shell = admitted_terminal_shell(&session.execution_context, &request.shell_profile_id)?;
         let (environment, environment_names) =
             self.terminal_environment(&session.execution_context, &request.agl_env)?;
-        let history_seed = self
-            .human_terminal_history
-            .load(&session.execution_context.workspace_root)
-            .map_err(terminal_application_error)?;
+        let history_seed = Vec::new();
         let (host_startup, authorization, grant_lease) = match authority {
             HumanTerminalAuthority::Workspace => (
                 ProcessHostStartupPolicy::ManagedOnly,
@@ -1651,9 +1485,9 @@ impl DaemonState {
             }
         };
         let registered = self
-            .terminal_registry
-            .list_topology(&terminal_topology_id(&request.session_id))
-            .map_err(terminal_application_error)?;
+            .terminal_bridge
+            .list_topology(terminal_topology_id(&request.session_id))
+            .map_err(application_runtime_error)?;
         if registered.len() >= agl_app::MAX_TERMINALS_PER_SESSION
             && !registered.iter().any(|record| {
                 record.profile == request.profile
@@ -1672,8 +1506,8 @@ impl DaemonState {
             .collect::<BTreeSet<_>>();
         let root_run_id = RunId::generate();
         let record = self
-            .terminal_registry
-            .ensure_terminal(TerminalEnsureRequest {
+            .terminal_bridge
+            .ensure(TerminalAdmission {
                 topology_id: terminal_topology_id(&request.session_id),
                 owner: TerminalOwner::new(agent_caller_owner(
                     request.session_id.as_str(),
@@ -1701,8 +1535,11 @@ impl DaemonState {
                     max_output_bytes: self.runtime.execution.max_spool_bytes,
                 },
                 history_seed,
+                authority_fingerprint: self.terminal_bridge.authority(),
+                request_fingerprint: String::new(),
+                operations: BTreeSet::new(),
             })
-            .map_err(terminal_application_error)?;
+            .map_err(application_runtime_error)?;
         let disposition = if existing.contains(&record.terminal_id) {
             TerminalEnsureDisposition::Reused
         } else {
@@ -1722,386 +1559,15 @@ impl DaemonState {
                 terminal_id: record.terminal_id.clone(),
             },
         );
-        self.ensure_human_terminal_monitor(&record)?;
         Ok(TerminalEnsured {
             terminal: self.terminal_view(&record)?,
             disposition,
         })
     }
 
-    pub(crate) fn application_submit_human_terminal_command(
-        &mut self,
-        request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
-        request.validate()?;
-        self.ensure_session_accepts_work(&request.session_id)?;
-        let terminal = self
-            .terminal_registry
-            .record(&request.terminal_id)
-            .map_err(terminal_application_error)?;
-        let lease = self
-            .process_handle
-            .operator_resolve_writer_lease(&terminal.execution_id, request.writer_lease_id.clone())
-            .map_err(human_writer_lease_application_error)?;
-        let fingerprint = human_command_fingerprint(&request)?;
-        let submission_key = (
-            request.session_id.clone(),
-            request.client_submission_id.clone(),
-        );
-        if let Some(previous) = self.human_command_submissions.get(&submission_key) {
-            if previous.fingerprint != fingerprint {
-                return Err(ApplicationError::new(
-                    ApplicationErrorCode::InvalidArguments,
-                    "Human command submission ID was already used with different command data",
-                ));
-            }
-            return Ok(HumanTerminalCommandAdmission {
-                accepted: previous.accepted.clone(),
-                card: previous.card.clone(),
-            });
-        }
-
-        if self.human_command_submissions.len() >= MAX_HUMAN_COMMAND_IDEMPOTENCY_RECORDS {
-            let evict = self
-                .human_command_submissions
-                .iter()
-                .filter(|(_, submission)| submission.completed)
-                .min_by_key(|(_, submission)| submission.ordinal)
-                .map(|(key, _)| key.clone());
-            let Some(evict) = evict else {
-                return Err(ApplicationError::new(
-                    ApplicationErrorCode::InputBackpressure,
-                    "Human command idempotency window is full",
-                ));
-            };
-            self.human_command_submissions.remove(&evict);
-        }
-
-        let display_command = sanitize_terminal_card_output(
-            request.command.as_bytes(),
-            agl_app::MAX_HUMAN_COMMAND_BYTES,
-        );
-        let command_filtered_effects = display_command.filtered_effects();
-        let command_truncated = display_command.truncated();
-        let display_command_text = if display_command.text().is_empty() {
-            SanitizedTerminalText::from_process_sanitized(&sanitize_terminal_card_output(
-                b"[command contained only filtered controls]",
-                agl_app::MAX_HUMAN_COMMAND_BYTES,
-            ))
-        } else {
-            SanitizedTerminalText::from_process_sanitized(&display_command)
-        };
-
-        let admission = self
-            .terminal_registry
-            .admit_human_command(
-                &terminal_topology_id(&request.session_id),
-                &request.terminal_id,
-                request.expected_command_sequence,
-                request.expected_prompt_generation,
-                &request.command,
-            )
-            .map_err(terminal_application_error)?;
-        if admission.execution_id != terminal.execution_id {
-            let _ = self
-                .terminal_registry
-                .cancel_human_command_admission(&request.terminal_id, admission.command_sequence);
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::TerminalOwnerMismatch,
-                "writer attachment belongs to a different terminal execution",
-            ));
-        }
-        if let Err(error) = self.terminal_registry.write_admitted_human_command(
-            &request.terminal_id,
-            &admission.execution_id,
-            admission.command_sequence,
-            lease,
-            admission.submission.clone(),
-        ) {
-            let _ = self
-                .terminal_registry
-                .cancel_human_command_admission(&request.terminal_id, admission.command_sequence);
-            return Err(terminal_application_error(error));
-        }
-
-        let accepted = HumanTerminalCommandAccepted {
-            terminal_id: request.terminal_id.clone(),
-            command_sequence: admission.command_sequence,
-            output_after_sequence: admission.output_after_sequence,
-        };
-        let started_at_unix_ms = current_unix_ms();
-        let output_start = ExecutionCursor {
-            after_sequence: admission.output_after_sequence,
-        };
-        let card = HumanCommandCardView {
-            terminal_id: request.terminal_id.clone(),
-            execution_id: admission.execution_id.clone(),
-            command_sequence: admission.command_sequence,
-            command: display_command_text.clone(),
-            output: SanitizedTerminalText::from_process_sanitized(&sanitize_terminal_card_output(
-                b"",
-                MAX_HUMAN_COMMAND_OUTPUT_BYTES,
-            )),
-            output_start,
-            output_end: output_start,
-            state: HumanCommandCardState::Starting,
-            exit_status: None,
-            cwd: SanitizedDisplayPath::from_path(&terminal.cwd),
-            truncated: command_truncated,
-            filtered_effects: command_filtered_effects,
-            started_at_unix_ms,
-            updated_at_unix_ms: started_at_unix_ms,
-        };
-        self.human_command_tracking.insert(
-            (request.terminal_id, admission.command_sequence),
-            HumanCommandTracking {
-                execution_id: admission.execution_id,
-                display_command: display_command_text,
-                command_filtered_effects,
-                command_truncated,
-                output_start,
-                started_at_unix_ms,
-            },
-        );
-        let ordinal = self.next_human_command_submission_ordinal;
-        self.next_human_command_submission_ordinal = ordinal.saturating_add(1);
-        self.human_command_submissions.insert(
-            submission_key,
-            HumanCommandSubmission {
-                fingerprint,
-                accepted: accepted.clone(),
-                card: card.clone(),
-                ordinal,
-                completed: false,
-            },
-        );
-        Ok(HumanTerminalCommandAdmission { accepted, card })
-    }
-
-    pub(crate) fn human_command_card_events(
-        &mut self,
-        terminal_id: &TerminalId,
-        events: &[agl_process::ShellIntegrationEvent],
-    ) -> Result<(Vec<SessionPresentationEvent>, bool), ApplicationError> {
-        let finished = events.iter().find_map(|event| match event {
-            agl_process::ShellIntegrationEvent::CommandFinished { exit, cwd, .. } => Some((
-                match exit {
-                    agl_process::ShellExit::Code { code } => *code,
-                    agl_process::ShellExit::Signal { signal } => signal.saturating_add(128),
-                },
-                cwd.clone(),
-            )),
-            _ => None,
-        });
-        let tracking_key = self
-            .human_command_tracking
-            .keys()
-            .find(|(tracked_terminal, _)| tracked_terminal == terminal_id)
-            .cloned();
-        let Some(tracking_key) = tracking_key else {
-            return Ok((Vec::new(), false));
-        };
-        let tracking = self
-            .human_command_tracking
-            .get(&tracking_key)
-            .cloned()
-            .expect("Human command tracking key was selected above");
-        let previous_card = self
-            .human_command_submissions
-            .values()
-            .find(|submission| {
-                submission.accepted.terminal_id == *terminal_id
-                    && submission.accepted.command_sequence == tracking_key.1
-            })
-            .map(|submission| submission.card.clone())
-            .ok_or_else(|| {
-                ApplicationError::new(
-                    ApplicationErrorCode::Internal,
-                    "Human command tracking is missing its private presentation card",
-                )
-            })?;
-        let started = events.iter().any(|event| {
-            matches!(
-                event,
-                agl_process::ShellIntegrationEvent::CommandStarted { .. }
-            )
-        });
-        let mut raw = Vec::new();
-        let mut output_through_sequence = tracking.output_start.after_sequence;
-        let mut process_output_truncated = false;
-        let mut process_output_expired = false;
-        let page_bytes = self
-            .runtime
-            .execution
-            .max_result_bytes
-            .clamp(1, MAX_HUMAN_COMMAND_OUTPUT_BYTES);
-        loop {
-            let read = self
-                .process_handle
-                .operator_read(
-                    &tracking.execution_id,
-                    ExecutionCursor {
-                        after_sequence: output_through_sequence,
-                    },
-                    page_bytes,
-                )
-                .map_err(terminal_application_error)?;
-            process_output_truncated |= read.output_truncated;
-            process_output_expired |= read.output_expired;
-            let previous_sequence = output_through_sequence;
-            output_through_sequence = read.next_sequence;
-            let empty = read.chunks.is_empty();
-            for chunk in read.chunks {
-                let decoded = chunk
-                    .bytes
-                    .decode(page_bytes)
-                    .map_err(terminal_application_error)?;
-                let remaining = MAX_HUMAN_COMMAND_OUTPUT_BYTES
-                    .saturating_add(1)
-                    .saturating_sub(raw.len());
-                raw.extend_from_slice(&decoded[..decoded.len().min(remaining)]);
-                if raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES {
-                    break;
-                }
-            }
-            if raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES
-                || empty
-                || output_through_sequence <= previous_sequence
-            {
-                break;
-            }
-        }
-        let sanitized = sanitize_terminal_card_output(&raw, MAX_HUMAN_COMMAND_OUTPUT_BYTES);
-        let exit_status = finished.as_ref().map(|(status, _)| *status);
-        let mut card = HumanCommandCardView {
-            terminal_id: terminal_id.clone(),
-            execution_id: tracking.execution_id,
-            command_sequence: tracking_key.1,
-            command: tracking.display_command,
-            output: SanitizedTerminalText::from_process_sanitized(&sanitized),
-            output_start: tracking.output_start,
-            output_end: ExecutionCursor {
-                after_sequence: output_through_sequence,
-            },
-            state: if finished.is_some() {
-                HumanCommandCardState::Exited
-            } else if started || previous_card.state == HumanCommandCardState::Running {
-                HumanCommandCardState::Running
-            } else {
-                HumanCommandCardState::Starting
-            },
-            exit_status,
-            cwd: finished
-                .as_ref()
-                .map(|(_, cwd)| SanitizedDisplayPath::from_path(cwd))
-                .unwrap_or_else(|| previous_card.cwd.clone()),
-            truncated: tracking.command_truncated
-                || process_output_truncated
-                || process_output_expired
-                || raw.len() > MAX_HUMAN_COMMAND_OUTPUT_BYTES
-                || sanitized.truncated(),
-            filtered_effects: tracking
-                .command_filtered_effects
-                .saturating_add(sanitized.filtered_effects()),
-            started_at_unix_ms: tracking.started_at_unix_ms,
-            updated_at_unix_ms: previous_card.updated_at_unix_ms,
-        };
-        let changed = card != previous_card;
-        if changed {
-            card.updated_at_unix_ms = current_unix_ms().max(card.started_at_unix_ms);
-        }
-        for submission in self.human_command_submissions.values_mut() {
-            if submission.accepted.terminal_id == card.terminal_id
-                && submission.accepted.command_sequence == card.command_sequence
-            {
-                submission.card = card.clone();
-                if finished.is_some() {
-                    submission.completed = true;
-                }
-            }
-        }
-        if finished.is_some() {
-            self.human_command_tracking.remove(&tracking_key);
-        }
-        let presentation = changed
-            .then_some(SessionPresentationEvent::HumanCommandCardUpsert { card })
-            .into_iter()
-            .collect();
-        Ok((presentation, finished.is_none()))
-    }
-
-    pub(crate) fn human_command_outcome_unknown_events(
-        &mut self,
-        terminal_id: &TerminalId,
-    ) -> Vec<SessionPresentationEvent> {
-        let tracking_keys = self
-            .human_command_tracking
-            .keys()
-            .filter(|(tracked_terminal, _)| tracked_terminal == terminal_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut presentation = Vec::new();
-        for tracking_key in tracking_keys {
-            for submission in self.human_command_submissions.values_mut() {
-                if submission.accepted.terminal_id == tracking_key.0
-                    && submission.accepted.command_sequence == tracking_key.1
-                {
-                    submission.card.state = HumanCommandCardState::OutcomeUnknown;
-                    submission.card.exit_status = None;
-                    submission.card.updated_at_unix_ms =
-                        current_unix_ms().max(submission.card.started_at_unix_ms);
-                    submission.completed = true;
-                    presentation.push(SessionPresentationEvent::HumanCommandCardUpsert {
-                        card: submission.card.clone(),
-                    });
-                }
-            }
-            self.human_command_tracking.remove(&tracking_key);
-        }
-        presentation
-    }
-
-    fn ensure_human_terminal_monitor(
-        &mut self,
-        record: &TerminalRecord,
-    ) -> Result<(), ApplicationError> {
-        if self.monitored_terminals.contains(&record.terminal_id) {
-            return Ok(());
-        }
-        if !record.owner.is_human() {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::TerminalOwnerMismatch,
-                "Human terminal monitor requires a Human-owned terminal",
-            ));
-        }
-        let spec = ShellMonitorSpec {
-            terminal_id: record.terminal_id.clone(),
-            session_id: session_id_from_topology(&record.topology_id)?,
-            workspace_root: record.workspace_root.clone(),
-            initial_command_sequence: record.command_sequence,
-            registry: Arc::clone(&self.terminal_registry),
-            history: self.human_terminal_history.clone(),
-            maximum_read_bytes: self.runtime.execution.max_result_bytes,
-            poll_interval: Duration::from_millis(
-                self.runtime.execution.poll_interval_ms.clamp(1, 100),
-            ),
-        };
-        match self.shell_monitor.spawn(spec) {
-            Ok(true) => {
-                self.monitored_terminals.insert(record.terminal_id.clone());
-                Ok(())
-            }
-            Ok(false) => Ok(()),
-            Err(_) => Err(ApplicationError::new(
-                ApplicationErrorCode::Internal,
-                "failed to start private shell-integration monitor",
-            )),
-        }
-    }
-
     fn terminal_environment(
         &self,
-        context: &agl_process::ExecutionContextSnapshot,
+        context: &agl_exec::ExecutionContextSnapshot,
         overlay: &agl_app::StructuredEnvironmentOverlay,
     ) -> Result<(TerminalEnvironmentRequest, Vec<String>), ApplicationError> {
         let admitted_path_roots =
@@ -2170,9 +1636,9 @@ impl DaemonState {
         include_finished: bool,
     ) -> Result<Vec<TerminalRecord>, ApplicationError> {
         let records = self
-            .terminal_registry
-            .list_topology(&terminal_topology_id(session_id))
-            .map_err(terminal_application_error)?;
+            .terminal_bridge
+            .list_topology(terminal_topology_id(session_id))
+            .map_err(application_runtime_error)?;
         if records.len() > agl_app::MAX_TERMINALS_PER_SESSION {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::Internal,
@@ -2181,106 +1647,9 @@ impl DaemonState {
         }
         records
             .into_iter()
-            .map(|record| {
-                self.terminal_registry
-                    .refresh(&record.terminal_id)
-                    .map_err(terminal_application_error)
-            })
-            .filter_map(|record| match record {
-                Ok(record) if include_finished || record.state.is_live() => Some(Ok(record)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
+            .filter(|record| include_finished || record.state.is_live())
+            .map(Ok)
             .collect()
-    }
-
-    pub(crate) fn terminal_monitor_projection(
-        &mut self,
-        terminal_id: &TerminalId,
-        requested_cwd: Option<&Path>,
-        include_terminal: bool,
-    ) -> Result<TerminalMonitorProjection, ApplicationError> {
-        let record = self
-            .terminal_registry
-            .record(terminal_id)
-            .map_err(terminal_application_error)?;
-        let mut cwd_consumed = requested_cwd.is_none();
-        let mut header = None;
-
-        if let Some(canonical) = requested_cwd {
-            cwd_consumed = true;
-            if !record.owner.accepts_human_control() {
-                return Ok(TerminalMonitorProjection {
-                    terminal: include_terminal
-                        .then(|| self.terminal_view(&record))
-                        .transpose()?,
-                    header: None,
-                    cwd_consumed: true,
-                });
-            }
-            let owner_session_id = session_id_from_topology(&record.topology_id)?;
-            let Some(session) = self.sessions.get(&owner_session_id).cloned() else {
-                return Ok(TerminalMonitorProjection {
-                    terminal: include_terminal
-                        .then(|| self.terminal_view(&record))
-                        .transpose()?,
-                    header: None,
-                    cwd_consumed: true,
-                });
-            };
-            if session.execution_context.workspace_root == record.workspace_root
-                && canonical.starts_with(&record.workspace_root)
-                && session.status != SessionStatus::Finished
-                && session.status != SessionStatus::Failed
-                && session.execution_context.working_directory != canonical
-            {
-                let expected_root = record.workspace_root.clone();
-                let expected_revision = session.execution_context.revision;
-                let requested = canonical.to_path_buf();
-                match self
-                    .chat_factory
-                    .with_session(&owner_session_id, |service| {
-                        let current = service.execution_context().clone();
-                        if current.workspace_root != expected_root {
-                            return Ok(TerminalCwdDecision::Ignore);
-                        }
-                        if current.revision < expected_revision {
-                            return Ok(TerminalCwdDecision::Retry);
-                        }
-                        if current.working_directory == requested {
-                            return Ok(TerminalCwdDecision::Applied(Box::new(current)));
-                        }
-                        service
-                            .set_working_directory(&requested, false)
-                            .map(|context| TerminalCwdDecision::Applied(Box::new(context.clone())))
-                    }) {
-                    Ok(TerminalCwdDecision::Applied(context))
-                        if context.revision >= expected_revision =>
-                    {
-                        self.sessions
-                            .get_mut(&owner_session_id)
-                            .expect("terminal owner session was checked above")
-                            .execution_context = *context;
-                        header = self
-                            .application_snapshot(&owner_session_id)
-                            .ok()
-                            .map(|snapshot| snapshot.header);
-                    }
-                    Ok(TerminalCwdDecision::Ignore) => {}
-                    Ok(TerminalCwdDecision::Applied(_))
-                    | Ok(TerminalCwdDecision::Retry)
-                    | Err(_) => cwd_consumed = false,
-                }
-            }
-        }
-
-        Ok(TerminalMonitorProjection {
-            terminal: include_terminal
-                .then(|| self.terminal_view(&record))
-                .transpose()?,
-            header,
-            cwd_consumed,
-        })
     }
 
     fn terminal_view(
@@ -2288,9 +1657,9 @@ impl DaemonState {
         record: &TerminalRecord,
     ) -> Result<TerminalSessionView, ApplicationError> {
         let status = self
-            .process_handle
-            .operator_status(&record.execution_id)
-            .map_err(terminal_application_error)?;
+            .terminal_bridge
+            .execution_status(record.execution_id.clone())
+            .map_err(application_runtime_error)?;
         let session_id = session_id_from_topology(&record.topology_id)?;
         let promoted = record.owner.previous_owner().is_some();
         let owner = if let Some(previous) = record.owner.previous_owner() {
@@ -2385,9 +1754,9 @@ impl DaemonState {
             })
             .count();
         let execution_count = self
-            .process_handle
-            .operator_list(agent_execution_filter(Some(session_id), None, false))
-            .map_err(application_process_error)?
+            .session_execution_bridge(session_id)?
+            .execution_list(agent_execution_filter(Some(session_id), None, false))
+            .map_err(application_runtime_error)?
             .into_iter()
             .filter(|status| !terminal_execution_ids.contains(&status.execution_id))
             .count();
@@ -2431,65 +1800,41 @@ impl DaemonState {
             .iter()
             .filter(|record| record.state.is_live())
             .collect::<Vec<_>>();
-        let other_executions = self
-            .process_handle
-            .operator_list(agent_execution_filter(Some(session_id), None, false))
-            .map_err(application_process_error)?
+        let execution_bridge = self.session_execution_bridge(session_id)?;
+        let other_executions = execution_bridge
+            .execution_list(agent_execution_filter(Some(session_id), None, false))
+            .map_err(application_runtime_error)?
             .into_iter()
             .filter(|status| !terminal_execution_ids.contains(&status.execution_id))
             .collect::<Vec<_>>();
 
-        let mut waiting = Vec::with_capacity(live_terminals.len() + other_executions.len());
         for record in &live_terminals {
             ensure_application_call_live(context)?;
-            match self
-                .terminal_registry
-                .terminate_terminal(&record.terminal_id, KillMode::Graceful)
-            {
-                Ok(()) => waiting.push(record.execution_id.clone()),
-                Err(error) if error.code() == ProcessErrorCode::ExecutionNotLive => {
-                    let refreshed = self
-                        .terminal_registry
-                        .refresh(&record.terminal_id)
-                        .map_err(terminal_application_error)?;
-                    if refreshed.state.is_live() {
-                        return Err(terminal_application_error(error));
-                    }
-                }
-                Err(error) => return Err(terminal_application_error(error)),
-            }
+            self.terminal_bridge
+                .terminate(record.terminal_id.clone())
+                .map_err(application_runtime_error)?;
         }
         for status in &other_executions {
             ensure_application_call_live(context)?;
-            match self
-                .process_handle
-                .operator_kill(&status.execution_id, KillMode::Graceful)
-            {
-                Ok(()) => waiting.push(status.execution_id.clone()),
-                Err(error) if error.code() == ProcessErrorCode::ExecutionNotLive => {
-                    let current = self
-                        .process_handle
-                        .operator_status(&status.execution_id)
-                        .map_err(application_process_error)?;
-                    if !current.state.is_terminal() {
-                        return Err(application_process_error(error));
-                    }
-                }
-                Err(error) => return Err(application_process_error(error)),
-            }
+            execution_bridge
+                .terminate_execution(status.execution_id.clone(), KillMode::Graceful)
+                .map_err(application_runtime_error)?;
         }
         Ok(SessionExecutionTermination {
-            live_terminal_ids: live_terminals
+            live_terminals: live_terminals
                 .iter()
-                .map(|record| record.terminal_id.clone())
+                .map(|record| (record.topology_id.clone(), record.terminal_id.clone()))
                 .collect(),
-            execution_ids: waiting,
+            execution_ids: other_executions
+                .iter()
+                .map(|status| status.execution_id.clone())
+                .collect(),
             counts: SessionTerminationCounts {
                 terminals: bounded_count(live_terminals.len()),
                 executions: bounded_count(other_executions.len()),
             },
-            process: self.process_handle.clone(),
-            registry: Arc::clone(&self.terminal_registry),
+            human_terminals: self.terminal_bridge.clone(),
+            agent_executions: execution_bridge,
             timeout: Duration::from_millis(
                 self.runtime
                     .execution
@@ -2511,9 +1856,9 @@ impl DaemonState {
             if record.workspace_root != workspace_root {
                 continue;
             }
-            self.terminal_registry
-                .retire_terminal_slot(&record.terminal_id)
-                .map_err(terminal_application_error)?;
+            self.terminal_bridge
+                .retire(record.terminal_id)
+                .map_err(application_runtime_error)?;
         }
         Ok(())
     }
@@ -2614,6 +1959,55 @@ impl DaemonState {
         Ok((
             DaemonEventKind::SessionFinished(SessionFinishedEvent { session_id, reason }),
             counts,
+        ))
+    }
+
+    fn cancel_active_session_work(
+        &mut self,
+        session_id: SessionId,
+        context: &ApplicationCallContext,
+    ) -> Result<DaemonEventKind, ApplicationError> {
+        let plan = self.begin_active_work_cancel(session_id, context)?;
+        let outcome = plan.wait(context)?;
+        self.complete_active_work_cancel(plan, outcome, context)
+    }
+
+    fn begin_active_work_cancel(
+        &mut self,
+        session_id: SessionId,
+        context: &ApplicationCallContext,
+    ) -> Result<SessionExitPlan, ApplicationError> {
+        ensure_application_call_live(context)?;
+        self.sessions.get(&session_id).ok_or_else(|| {
+            ApplicationError::new(ApplicationErrorCode::NotFound, "session not found")
+        })?;
+        self.exiting_sessions.insert(session_id.clone());
+        let active_runs = self.active_session_root_runs(&session_id)?;
+        let runs = self.begin_cancel_session_root_runs(active_runs, context)?;
+        let executions = self.begin_terminate_session_work(&session_id, context)?;
+        Ok(SessionExitPlan {
+            session_id,
+            reason: agl_protocol::SessionFinishReason::ExitCommand,
+            runs,
+            executions,
+        })
+    }
+
+    fn complete_active_work_cancel(
+        &mut self,
+        plan: SessionExitPlan,
+        outcome: SessionExitOutcome,
+        context: &ApplicationCallContext,
+    ) -> Result<DaemonEventKind, ApplicationError> {
+        ensure_application_call_live(context)?;
+        self.exiting_sessions.remove(&plan.session_id);
+        Ok(DaemonEventKind::SessionActiveWorkCancelled(
+            SessionActiveWorkCancelledEvent {
+                session_id: plan.session_id,
+                cancelled_runs: outcome.cancelled_runs,
+                terminated_terminals: outcome.terminated.terminals,
+                terminated_executions: outcome.terminated.executions,
+            },
         ))
     }
 
@@ -2793,9 +2187,9 @@ impl DaemonState {
             .map(|record| self.terminal_view(record))
             .collect::<Result<Vec<_>, _>>()?;
         let statuses = self
-            .process_handle
-            .operator_list(agent_execution_filter(Some(session_id), None, true))
-            .map_err(application_process_error)?;
+            .terminal_bridge
+            .execution_list(agent_execution_filter(Some(session_id), None, true))
+            .map_err(application_runtime_error)?;
         let mut executions = Vec::new();
         for status in statuses {
             if status.owner.caller().owner_kind() != CallerOwnerKind::Persistent {
@@ -2905,7 +2299,6 @@ impl DaemonState {
             queued_prompts,
             terminals,
             executions,
-            human_commands: Vec::new(),
             activity: None,
             command_context,
         };
@@ -3441,9 +2834,9 @@ impl DaemonState {
                         next_cursor: None,
                     });
                 };
-                self.process_handle
-                    .operator_list(agent_execution_filter(Some(&session_id), None, true))
-                    .map_err(application_process_error)?
+                self.terminal_bridge
+                    .execution_list(agent_execution_filter(Some(&session_id), None, true))
+                    .map_err(application_runtime_error)?
                     .into_iter()
                     .filter(|status| {
                         status
@@ -3733,9 +3126,9 @@ impl DaemonState {
                         .map(|terminals| ApplicationToolResult::Terminals { terminals }),
                     ApplicationAction::TerminalPromote { terminal_id } => {
                         let current = self
-                            .terminal_registry
-                            .record(&terminal_id)
-                            .map_err(terminal_application_error)?;
+                            .terminal_bridge
+                            .record(terminal_topology_id(&session_id), &terminal_id)
+                            .map_err(application_runtime_error)?;
                         if current.topology_id != terminal_topology_id(&session_id) {
                             return Err(ApplicationError::new(
                                 ApplicationErrorCode::TerminalOwnerMismatch,
@@ -3743,17 +3136,17 @@ impl DaemonState {
                             ));
                         }
                         let promoted = self
-                            .terminal_registry
-                            .promote_ephemeral_owner(
-                                &terminal_id,
-                                &terminal_topology_id(&session_id),
+                            .terminal_bridge
+                            .promote(
+                                terminal_id,
+                                terminal_topology_id(&session_id),
                                 agent_caller_owner(
                                     session_id.as_str(),
                                     CallerOwnerKind::Persistent,
                                     CallerRole::Agent,
                                 ),
                             )
-                            .map_err(terminal_application_error)?;
+                            .map_err(application_runtime_error)?;
                         Ok(ApplicationToolResult::TerminalPromoted {
                             terminal: self.terminal_view(&promoted)?,
                         })
@@ -3771,34 +3164,6 @@ impl DaemonState {
                         .map(|admission| ApplicationToolResult::IncompleteTurnContinued {
                             admission,
                         }),
-                    ApplicationAction::ExecutionList { include_finished } => self
-                        .process_handle
-                        .operator_list(agent_execution_filter(
-                            Some(&session_id),
-                            None,
-                            include_finished,
-                        ))
-                        .map_err(application_process_error)
-                        .map(|executions| ApplicationToolResult::Executions {
-                            executions: executions.into_iter().map(execution_view).collect(),
-                        }),
-                    ApplicationAction::ExecutionAttach {
-                        execution_id,
-                        read_only,
-                    } => {
-                        self.ensure_application_execution_owner(&session_id, &execution_id)?;
-                        Ok(ApplicationToolResult::AttachAccepted {
-                            execution_id,
-                            read_only,
-                        })
-                    }
-                    ApplicationAction::ExecutionKill { execution_id, mode } => {
-                        self.ensure_application_execution_owner(&session_id, &execution_id)?;
-                        self.process_handle
-                            .operator_kill(&execution_id, mode)
-                            .map_err(application_process_error)?;
-                        Ok(ApplicationToolResult::KillAccepted { execution_id, mode })
-                    }
                     ApplicationAction::RuntimeContextReload => {
                         let (visible_tools, revision) = self
                             .chat_factory
@@ -3926,30 +3291,23 @@ impl DaemonState {
         }
     }
 
-    fn ensure_application_execution_owner(
+    fn session_execution_bridge(
         &self,
         session_id: &SessionId,
-        execution_id: &ExecutionId,
-    ) -> Result<(), ApplicationError> {
-        let owned = self
-            .process_handle
-            .operator_list(agent_execution_filter(Some(session_id), None, true))
-            .map_err(application_process_error)?
-            .into_iter()
-            .any(|status| &status.execution_id == execution_id);
-        if owned {
-            return Ok(());
-        }
-        match self.process_handle.operator_status(execution_id) {
-            Ok(_) => Err(ApplicationError::new(
-                ApplicationErrorCode::TerminalOwnerMismatch,
-                "execution belongs to a different session owner",
-            )),
-            Err(error) if error.code() == ProcessErrorCode::ExecutionNotFound => Err(
-                ApplicationError::new(ApplicationErrorCode::NotFound, "execution not found"),
-            ),
-            Err(error) => Err(application_process_error(error)),
-        }
+    ) -> Result<TerminalBridge, ApplicationError> {
+        let policy_hash = self
+            .chat_factory
+            .current_policy_hash(session_id)
+            .map_err(application_runtime_error)?
+            .ok_or_else(|| {
+                ApplicationError::new(
+                    ApplicationErrorCode::NotAuthorized,
+                    "session effective capability policy is unavailable",
+                )
+            })?;
+        self.terminal_bridge
+            .with_authority(policy_hash)
+            .map_err(application_runtime_error)
     }
 
     fn refresh_session_execution_context(
@@ -4030,7 +3388,7 @@ impl DaemonState {
 }
 
 fn admitted_terminal_shell(
-    context: &agl_process::ExecutionContextSnapshot,
+    context: &agl_exec::ExecutionContextSnapshot,
     requested_profile_id: &str,
 ) -> Result<AdmittedShellProfile, ApplicationError> {
     let executable = context
@@ -4369,30 +3727,13 @@ fn workspace_history_scope(workspace_root: &Path) -> String {
     rendered
 }
 
-fn human_command_fingerprint(
-    request: &HumanTerminalCommandSubmit,
-) -> Result<String, ApplicationError> {
-    let encoded = serde_json::to_vec(request).map_err(application_runtime_error)?;
-    let mut digest = Sha256::new();
-    digest.update(b"agentlibre.human-terminal-command.v1\0");
-    digest.update(encoded);
-    let digest = digest.finalize();
-    Ok(format!(
-        "sha256:{}",
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
-}
-
 fn human_terminal_admission_fingerprint(
     request: &HumanTerminalEnsure,
 ) -> Result<String, ApplicationError> {
     let mut stable = request.clone();
     stable.client_submission_id.clear();
     stable.execution_context_revision = 0;
-    stable.terminal_size = agl_process::TerminalSize::default();
+    stable.terminal_size = agl_exec::TerminalSize::default();
     human_terminal_request_digest(b"agentlibre.human-terminal-admission.v1\0", &stable)
 }
 
@@ -4416,13 +3757,6 @@ fn human_terminal_request_digest(
 
 fn bounded_count(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
-}
-
-fn current_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
 }
 
 fn paginate_presentation_snapshot(
@@ -5177,7 +4511,6 @@ mod presentation_paging_tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
-            human_commands: Vec::new(),
             activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id.clone()),
@@ -5237,19 +4570,6 @@ fn terminal_application_error(error: ProcessError) -> ApplicationError {
         | ProcessErrorCode::Internal => ApplicationErrorCode::Internal,
     };
     ApplicationError::new(code, error.message().to_owned())
-}
-
-fn human_writer_lease_application_error(error: ProcessError) -> ApplicationError {
-    if matches!(
-        error.code(),
-        ProcessErrorCode::InputLeaseBusy | ProcessErrorCode::InputLeaseExpired
-    ) {
-        return ApplicationError::new(
-            ApplicationErrorCode::WriterLeaseBusy,
-            "Human terminal writer lease is expired, replaced, or not current",
-        );
-    }
-    terminal_application_error(error)
 }
 
 fn protocol_application_error(error: ApplicationError) -> ProtocolError {
@@ -5322,23 +4642,6 @@ fn protocol_runtime_identity(identity: &CurrentRuntimeIdentity) -> RuntimeGenera
         generation_id: identity.generation_id.clone(),
         builtin_catalog_digest: identity.builtin_catalog_digest.clone(),
         executable_digest: identity.executable_digest.clone(),
-    }
-}
-
-fn application_process_error(error: ProcessError) -> ApplicationError {
-    let protocol = process_error(error);
-    application_protocol_error(protocol)
-}
-
-fn execution_view(status: agl_process::ExecutionStatus) -> ExecutionView {
-    ExecutionView {
-        execution_id: status.execution_id,
-        state: status.state,
-        profile: status.profile,
-        cwd: SanitizedDisplayPath::from_path(&status.cwd),
-        exit: status.exit,
-        last_sequence: status.last_sequence,
-        output_truncated: status.output_truncated || status.output_expired,
     }
 }
 
@@ -5536,6 +4839,23 @@ impl DaemonStateExecutor {
         })
         .map_err(daemon_state_application_error)?
     }
+
+    fn cancel_active_session_work(
+        &self,
+        context: ApplicationCallContext,
+        session_id: SessionId,
+    ) -> Result<DaemonEventKind, ApplicationError> {
+        let plan = self
+            .call(context.clone(), move |state, context| {
+                state.begin_active_work_cancel(session_id, context)
+            })
+            .map_err(daemon_state_application_error)??;
+        let outcome = plan.wait(&context)?;
+        self.call(context, move |state, context| {
+            state.complete_active_work_cancel(plan, outcome, context)
+        })
+        .map_err(daemon_state_application_error)?
+    }
 }
 
 fn run_daemon_state_executor(
@@ -5556,10 +4876,6 @@ pub struct SharedDaemonState {
     blocking_bridge: Arc<tokio::sync::Semaphore>,
     inference_client: InferenceClientHandle,
     supervisor_handle: SupervisorHandle,
-    process_handle: agl_process::ProcessHandle,
-    terminal_registry: Arc<TerminalRegistry>,
-    process_read_limit: usize,
-    process_input_limit: usize,
 }
 
 impl SharedDaemonState {
@@ -5612,32 +4928,20 @@ impl SharedDaemonState {
     fn from_state(state: DaemonState) -> Result<Self> {
         let daemon_instance_id = state.daemon_instance_id.clone();
         let presentation_proxy = state.presentation_proxy.clone();
-        let shell_monitor = state.shell_monitor.clone();
         let inference_client = state.inference_client.clone();
         let supervisor_handle = state.supervisor_handle();
-        let process_handle = state.process_handle();
-        let terminal_registry = Arc::clone(&state.terminal_registry);
-        let process_read_limit = state.process_read_limit();
-        let process_input_limit = state.process_input_limit();
         let inner = DaemonStateExecutor::spawn(state)?;
         let application =
             crate::surface::application_service(daemon_instance_id, Arc::downgrade(&inner));
         presentation_proxy
             .connect(application.clone())
             .expect("daemon turn presentation proxy must connect exactly once");
-        shell_monitor
-            .connect(Arc::downgrade(&inner), application.clone())
-            .expect("daemon shell monitor connector must connect exactly once");
         Ok(Self {
             inner,
             application,
             blocking_bridge: Arc::new(tokio::sync::Semaphore::new(DAEMON_STATE_QUEUE_CAPACITY)),
             inference_client,
             supervisor_handle,
-            process_handle,
-            terminal_registry,
-            process_read_limit,
-            process_input_limit,
         })
     }
 
@@ -5704,6 +5008,17 @@ impl SharedDaemonState {
                 }),
             );
         }
+        if let DaemonRequestKind::SessionCancelActive(cancel) = &request.kind {
+            let result = self
+                .inner
+                .cancel_active_session_work(context, cancel.session_id.clone());
+            return DaemonEvent::new(
+                Some(request_id),
+                result.unwrap_or_else(|error| {
+                    DaemonEventKind::Error(protocol_application_error(error))
+                }),
+            );
+        }
         self.inner
             .call(context, move |state, context| {
                 state.handle_request_with_context(request, context)
@@ -5734,37 +5049,6 @@ impl SharedDaemonState {
 
     pub fn supervisor_handle(&self) -> Result<SupervisorHandle> {
         Ok(self.supervisor_handle.clone())
-    }
-
-    pub fn process_handle(&self) -> Result<agl_process::ProcessHandle> {
-        Ok(self.process_handle.clone())
-    }
-
-    pub(crate) fn operator_write_attached_input(
-        &self,
-        execution_id: &ExecutionId,
-        lease: InputLease,
-        bytes: agl_process::ProcessBytes,
-        eof: bool,
-    ) -> std::result::Result<(), ProcessError> {
-        if self.terminal_registry.write_raw_human_input_if_managed(
-            execution_id,
-            lease.clone(),
-            bytes.clone(),
-            eof,
-        )? {
-            return Ok(());
-        }
-        self.process_handle
-            .operator_write(execution_id, lease, bytes, eof)
-    }
-
-    pub fn process_read_limit(&self) -> Result<usize> {
-        Ok(self.process_read_limit)
-    }
-
-    pub fn process_input_limit(&self) -> Result<usize> {
-        Ok(self.process_input_limit)
     }
 
     pub(crate) async fn operator_ensure_human_host_terminal(
@@ -6253,43 +5537,6 @@ fn protocol_release_outcome(outcome: ManagerReleaseOutcome) -> ModelReleaseOutco
         ManagerReleaseOutcome::Failed => ModelReleaseOutcome::Failed,
         ManagerReleaseOutcome::BackendLost => ModelReleaseOutcome::BackendLost,
     }
-}
-
-pub(crate) fn process_error(error: ProcessError) -> ProtocolError {
-    let (code, retryable) = match error.code() {
-        ProcessErrorCode::InvalidRequest
-        | ProcessErrorCode::InvalidBytes
-        | ProcessErrorCode::InputTooLarge
-        | ProcessErrorCode::InvalidTerminalSize
-        | ProcessErrorCode::IoModeMismatch
-        | ProcessErrorCode::InputLeaseExpired
-        | ProcessErrorCode::ExecutionNotLive => (ProtocolErrorCode::InvalidRequest, false),
-        ProcessErrorCode::ExecutionNotFound | ProcessErrorCode::OutputExpired => {
-            (ProtocolErrorCode::NotFound, false)
-        }
-        ProcessErrorCode::ExecutionNotOwned
-        | ProcessErrorCode::HostAuthorityRequired
-        | ProcessErrorCode::LoginAuthorityRequired
-        | ProcessErrorCode::GrantRevoked
-        | ProcessErrorCode::GrantExpired => (ProtocolErrorCode::Unauthorized, false),
-        ProcessErrorCode::PlatformUnsupported
-        | ProcessErrorCode::LauncherUnavailable
-        | ProcessErrorCode::SandboxUnavailable
-        | ProcessErrorCode::SandboxExecutableUnavailable => (ProtocolErrorCode::Unsupported, false),
-        ProcessErrorCode::ActiveLimitReached
-        | ProcessErrorCode::InputBackpressure
-        | ProcessErrorCode::InputLeaseBusy => (ProtocolErrorCode::Busy, true),
-        ProcessErrorCode::LauncherProtocol
-        | ProcessErrorCode::SpawnFailed
-        | ProcessErrorCode::Cancelled
-        | ProcessErrorCode::TimedOut
-        | ProcessErrorCode::OutputLimitExceeded
-        | ProcessErrorCode::SupervisorShutdown
-        | ProcessErrorCode::StateConflict
-        | ProcessErrorCode::StoreCorrupt
-        | ProcessErrorCode::Internal => (ProtocolErrorCode::RuntimeFailure, false),
-    };
-    ProtocolError::new(code, error.to_string(), retryable)
 }
 
 fn supervisor_error(error: agl_supervisor::SupervisorError) -> ProtocolError {

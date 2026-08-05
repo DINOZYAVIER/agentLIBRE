@@ -681,9 +681,9 @@ fn capability_activity_detail(detail: CapabilityPresentationDetail) -> ActivityD
         } => CapabilityActivityDetail::ProcessExecution {
             profile: match profile {
                 CapabilityPresentationExecutionProfile::Workspace => {
-                    agl_process::ExecutionProfile::Workspace
+                    agl_exec::ExecutionProfile::Workspace
                 }
-                CapabilityPresentationExecutionProfile::Host => agl_process::ExecutionProfile::Host,
+                CapabilityPresentationExecutionProfile::Host => agl_exec::ExecutionProfile::Host,
             },
             exit_status,
         },

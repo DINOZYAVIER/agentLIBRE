@@ -10,6 +10,7 @@ impl AglStore {
     pub fn open_at(root: impl AsRef<Path>) -> Result<Self> {
         let store = Self::open_for_migration_at(root)?;
         store.migrate()?;
+        store.reject_obsolete_terminal_state()?;
         secure_database_files(&store.database_path)?;
         Ok(store)
     }
@@ -19,6 +20,7 @@ impl AglStore {
         let conn =
             Connection::open_with_flags(&status.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         configure_read_only(&conn)?;
+        reject_obsolete_terminal_state(&conn)?;
         Ok(Self {
             conn,
             database_path: status.database_path,
@@ -29,6 +31,7 @@ impl AglStore {
         let status = Self::current_schema_status_at(root)?;
         let conn = Connection::open(&status.database_path)?;
         configure_writable(&conn)?;
+        reject_obsolete_terminal_state(&conn)?;
         secure_database_files(&status.database_path)?;
         Ok(Self {
             conn,
@@ -74,6 +77,30 @@ impl AglStore {
             }
         }
     }
+}
+
+impl AglStore {
+    pub(crate) fn reject_obsolete_terminal_state(&self) -> Result<()> {
+        reject_obsolete_terminal_state(&self.conn)
+    }
+}
+
+fn reject_obsolete_terminal_state(connection: &Connection) -> Result<()> {
+    for table in ["executions", "execution_events", "terminal_sessions"] {
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Err(crate::StoreError::InvalidValue {
+                field: "store schema",
+                value: table.to_owned(),
+                reason: "obsolete combined execution/terminal state is rejected; create a fresh agentLIBRE store",
+            });
+        }
+    }
+    Ok(())
 }
 
 const BUSY_TIMEOUT: Duration = Duration::from_millis(5_000);

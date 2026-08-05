@@ -35,8 +35,8 @@ impl AglStore {
         &self,
         run_id: &RunId,
         expected_revision: u64,
-        next: &agl_process::ExecutionContextSnapshot,
-    ) -> Result<agl_process::ExecutionContextSnapshot> {
+        next: &agl_exec::ExecutionContextSnapshot,
+    ) -> Result<agl_exec::ExecutionContextSnapshot> {
         next.validate().map_err(|error| StoreError::InvalidValue {
             field: "runs.execution_context_json",
             value: error.code().as_str().to_owned(),

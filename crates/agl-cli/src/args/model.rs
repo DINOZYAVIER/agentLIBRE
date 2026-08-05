@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use agl_ids::{RunId, SessionId};
-use agl_process::ExecutionId;
+use agl_ids::SessionId;
 use clap::ValueEnum;
 use clap_complete::Shell;
 
@@ -13,8 +12,6 @@ pub(crate) struct CliInvocation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CliCommand {
-    Interactive(InteractiveOptions),
-    Help { bin_name: &'static str },
     HelpPrinted,
     Completion { shell: Shell },
     Config(ConfigCommand),
@@ -29,7 +26,7 @@ pub(crate) enum CliCommand {
     Notes(NotesCommand),
     Repo(RepoCommand),
     Skill(SkillCommand),
-    Process(ProcessCommand),
+    Session(SessionOptions),
     Trace(TraceCommand),
     RuntimeIdentity,
     DaemonStatus(DaemonStatusOptions),
@@ -101,18 +98,6 @@ pub(crate) enum ArtifactSourceCommand {
         name: String,
         json: bool,
     },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct InteractiveOptions {
-    pub(crate) resume: Option<String>,
-    pub(crate) input_history: bool,
-    pub(crate) socket_path: Option<PathBuf>,
-    pub(crate) workspace_root: Option<PathBuf>,
-    pub(crate) function_ref: Option<String>,
-    pub(crate) model_id: Option<String>,
-    pub(crate) operation_mode: Option<ToolAccessMode>,
-    pub(crate) skills: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -284,55 +269,49 @@ pub(crate) enum SkillCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ProcessCommand {
-    List(ProcessListOptions),
-    Status(ProcessStatusOptions),
-    Read(ProcessReadOptions),
-    Attach(ProcessAttachOptions),
-    Kill(ProcessKillOptions),
-    Doctor(ProcessDoctorOptions),
+pub(crate) enum SessionCommand {
+    New(SessionNewOptions),
+    List { json: bool },
+    Show(SessionShowOptions),
+    Resume(SessionIdOptions),
+    Submit(SessionSubmitOptions),
+    Follow(SessionIdOptions),
+    Cancel(SessionIdOptions),
+    Finish(SessionIdOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessListOptions {
-    pub(crate) session_id: Option<SessionId>,
-    pub(crate) root_run_id: Option<RunId>,
-    pub(crate) include_finished: bool,
+pub(crate) struct SessionOptions {
+    pub(crate) socket_path: Option<PathBuf>,
+    pub(crate) command: SessionCommand,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionNewOptions {
+    pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) function_ref: Option<String>,
+    pub(crate) skills: Vec<String>,
+    pub(crate) tool_mode: ToolAccessMode,
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessStatusOptions {
-    pub(crate) execution_id: ExecutionId,
-    pub(crate) private_command: bool,
+pub(crate) struct SessionIdOptions {
+    pub(crate) session_id: SessionId,
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessReadOptions {
-    pub(crate) execution_id: ExecutionId,
-    pub(crate) after_sequence: u64,
-    pub(crate) max_bytes: usize,
+pub(crate) struct SessionShowOptions {
+    pub(crate) session_id: SessionId,
+    pub(crate) include_content: bool,
     pub(crate) json: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessAttachOptions {
-    pub(crate) execution_id: ExecutionId,
-    pub(crate) after_sequence: u64,
-    pub(crate) read_only: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessKillOptions {
-    pub(crate) execution_id: ExecutionId,
-    pub(crate) immediate: bool,
-    pub(crate) yes: bool,
-    pub(crate) json: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProcessDoctorOptions {
+pub(crate) struct SessionSubmitOptions {
+    pub(crate) session_id: SessionId,
+    pub(crate) prompt: String,
     pub(crate) json: bool,
 }
 
@@ -817,6 +796,7 @@ pub(crate) struct ServeOptions {
 pub(crate) struct DaemonStatusOptions {
     pub(crate) socket_path: Option<PathBuf>,
     pub(crate) detail: bool,
+    pub(crate) overview: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

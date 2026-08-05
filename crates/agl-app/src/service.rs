@@ -6,17 +6,15 @@ use std::sync::{
 
 use agl_content::Content;
 use agl_ids::{DaemonInstanceId, EventId, MessageId, RunId, SessionId, TurnId};
-use agl_process::{ExecutionId, KillMode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 
 use crate::{
-    ApplicationActionRequest, CommandCatalog, CommandContext, ExecutionView, HumanCommandCardState,
-    HumanCommandCardView, HumanTerminalCommandAccepted, HumanTerminalCommandSubmit,
-    HumanTerminalEnsure, PresentationCursor, SessionHeader, SessionLaunchOptions,
-    SessionPresentationEvent, SessionPresentationEventEnvelope, SessionPresentationItem,
-    SessionPresentationSnapshot, SuggestionPage, SuggestionRequest, TerminalEnsured,
-    TerminalSessionView, shared_command_catalog,
+    ApplicationActionRequest, CommandCatalog, CommandContext, HumanTerminalEnsure,
+    PresentationCursor, SessionHeader, SessionLaunchOptions, SessionPresentationEvent,
+    SessionPresentationEventEnvelope, SessionPresentationItem, SessionPresentationSnapshot,
+    SuggestionPage, SuggestionRequest, TerminalEnsured, TerminalSessionView,
+    shared_command_catalog,
 };
 
 const PRESENTATION_CHANNEL_CAPACITY: usize = 256;
@@ -224,17 +222,6 @@ pub enum ApplicationToolResult {
     TerminalPromoted {
         terminal: TerminalSessionView,
     },
-    Executions {
-        executions: Vec<ExecutionView>,
-    },
-    AttachAccepted {
-        execution_id: ExecutionId,
-        read_only: bool,
-    },
-    KillAccepted {
-        execution_id: ExecutionId,
-        mode: KillMode,
-    },
     Reloaded {
         visible_tools: Vec<String>,
         context_revision: u64,
@@ -295,22 +282,11 @@ pub trait ApplicationBackend: Send + Sync + 'static {
         context: ApplicationCallContext,
         request: HumanTerminalEnsure,
     ) -> Result<TerminalEnsured, ApplicationError>;
-    fn submit_human_terminal_command(
-        &self,
-        context: ApplicationCallContext,
-        request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError>;
     fn suggestions(
         &self,
         context: ApplicationCallContext,
         request: SuggestionRequest,
     ) -> Result<SuggestionPage, ApplicationError>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HumanTerminalCommandAdmission {
-    pub accepted: HumanTerminalCommandAccepted,
-    pub card: HumanCommandCardView,
 }
 
 /// Cancellation shared with a finite synchronous application-owner call.
@@ -533,68 +509,6 @@ impl ApplicationService {
         ensured.validate_for_session(&session_id)?;
         self.refresh(&session_id).await?;
         Ok(ensured)
-    }
-
-    pub async fn submit_human_terminal_command(
-        &self,
-        request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAccepted, ApplicationError> {
-        request.validate()?;
-        let session_id = request.session_id.clone();
-        // Install the private same-epoch projection before the backend can
-        // admit bytes and the terminal monitor can emit card updates.
-        self.snapshot(&session_id).await?;
-        let backend = Arc::clone(&self.backend);
-        let admission = self
-            .blocking(move |context| backend.submit_human_terminal_command(context, request))
-            .await?;
-        admission.card.validate()?;
-        if admission.accepted.terminal_id != admission.card.terminal_id
-            || admission.accepted.command_sequence != admission.card.command_sequence
-        {
-            return Err(ApplicationError::new(
-                ApplicationErrorCode::Internal,
-                "Human terminal command admission returned an inconsistent private card",
-            ));
-        }
-        self.publish_admitted_human_command_card(&session_id, admission.card)?;
-        Ok(admission.accepted)
-    }
-
-    fn publish_admitted_human_command_card(
-        &self,
-        session_id: &SessionId,
-        card: HumanCommandCardView,
-    ) -> Result<(), ApplicationError> {
-        let mut projections = self.projections.lock().map_err(lock_error)?;
-        let projection = projections.get_mut(session_id).ok_or_else(|| {
-            ApplicationError::new(
-                ApplicationErrorCode::NotFound,
-                "session projection not found",
-            )
-        })?;
-        let superseded = projection
-            .snapshot
-            .human_commands
-            .iter()
-            .find(|existing| {
-                existing.terminal_id == card.terminal_id
-                    && existing.command_sequence == card.command_sequence
-            })
-            .is_some_and(|existing| {
-                existing == &card
-                    || existing.updated_at_unix_ms > card.updated_at_unix_ms
-                    || human_command_card_state_rank(existing.state)
-                        > human_command_card_state_rank(card.state)
-            });
-        if !superseded {
-            publish_to_projection(
-                session_id,
-                SessionPresentationEvent::HumanCommandCardUpsert { card },
-                projection,
-            )?;
-        }
-        Ok(())
     }
 
     pub async fn refresh(&self, session_id: &SessionId) -> Result<(), ApplicationError> {
@@ -882,14 +796,6 @@ fn lock_error<T>(_error: std::sync::PoisonError<T>) -> ApplicationError {
     )
 }
 
-fn human_command_card_state_rank(state: HumanCommandCardState) -> u8 {
-    match state {
-        HumanCommandCardState::Starting => 0,
-        HumanCommandCardState::Running => 1,
-        HumanCommandCardState::Exited | HumanCommandCardState::OutcomeUnknown => 2,
-    }
-}
-
 fn validate_submission_id(value: &str) -> Result<(), ApplicationError> {
     if value.is_empty() || value.len() > 256 || value.contains(['\0', '\n', '\r']) {
         return Err(ApplicationError::new(
@@ -962,7 +868,6 @@ fn merge_provisional_items(
     // state owned by this daemon epoch. Backend snapshots deliberately do not
     // persist them, but a refresh must not erase them for connected or
     // reconnecting clients in the same epoch.
-    snapshot.human_commands = projection.snapshot.human_commands.clone();
     snapshot.activity = projection.snapshot.activity.clone();
 }
 
@@ -1718,58 +1623,6 @@ fn apply_event(
         | SessionPresentationEvent::TerminalCommandFinished { .. }
         | SessionPresentationEvent::CommandAvailabilityChanged
         | SessionPresentationEvent::Notice { .. } => {}
-        SessionPresentationEvent::HumanCommandCardUpsert { card } => {
-            if let Some(existing) = snapshot.human_commands.iter_mut().find(|existing| {
-                existing.terminal_id == card.terminal_id
-                    && existing.command_sequence == card.command_sequence
-            }) {
-                *existing = card.clone();
-            } else {
-                if snapshot.human_commands.len() >= crate::MAX_HUMAN_COMMAND_CARDS {
-                    let Some(position) = snapshot.human_commands.iter().position(|card| {
-                        !matches!(
-                            card.state,
-                            crate::HumanCommandCardState::Starting
-                                | crate::HumanCommandCardState::Running
-                        )
-                    }) else {
-                        return Err(ApplicationError::new(
-                            ApplicationErrorCode::InputBackpressure,
-                            "all retained Human command cards are active",
-                        ));
-                    };
-                    snapshot.human_commands.remove(position);
-                }
-                snapshot.human_commands.push(card.clone());
-            }
-            while snapshot
-                .human_commands
-                .iter()
-                .map(|card| card.output.as_str().len())
-                .sum::<usize>()
-                > crate::MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES
-            {
-                let Some(position) = snapshot.human_commands.iter().position(|card| {
-                    !matches!(
-                        card.state,
-                        crate::HumanCommandCardState::Starting
-                            | crate::HumanCommandCardState::Running
-                    )
-                }) else {
-                    return Err(ApplicationError::new(
-                        ApplicationErrorCode::InputBackpressure,
-                        "active Human command cards exceed the aggregate output bound",
-                    ));
-                };
-                snapshot.human_commands.remove(position);
-            }
-        }
-        SessionPresentationEvent::HumanCommandCardRemoved {
-            terminal_id,
-            command_sequence,
-        } => snapshot.human_commands.retain(|card| {
-            &card.terminal_id != terminal_id || card.command_sequence != *command_sequence
-        }),
         SessionPresentationEvent::ActivityGraphDelta { batch } => {
             if projection.last_activity_batch.as_ref() == Some(batch) {
                 return Ok(());
@@ -1884,7 +1737,6 @@ fn validate_event(
             terminal.validate_for_session(session_id)
         }
         SessionPresentationEvent::ExecutionStateChanged { execution } => execution.validate(),
-        SessionPresentationEvent::HumanCommandCardUpsert { card } => card.validate(),
         SessionPresentationEvent::ActivityGraphDelta { batch } => batch.validate_shape(),
         SessionPresentationEvent::AssistantTextDelta { text, .. } if text.len() > 16 * 1024 => {
             Err(ApplicationError::new(

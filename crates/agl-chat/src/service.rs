@@ -373,13 +373,13 @@ impl ChatService {
         self.turn_runtime.workspace_root()
     }
 
-    pub fn execution_context(&self) -> &agl_process::ExecutionContextSnapshot {
+    pub fn execution_context(&self) -> &agl_exec::ExecutionContextSnapshot {
         self.turn_runtime.execution_context()
     }
 
     pub(crate) fn install_run_execution_context(
         &mut self,
-        execution_context: agl_process::ExecutionContextSnapshot,
+        execution_context: agl_exec::ExecutionContextSnapshot,
     ) -> Result<()> {
         self.turn_runtime
             .install_execution_context(execution_context)
@@ -461,7 +461,7 @@ impl ChatService {
             "workspace root is not a directory: {}",
             canonical.display()
         );
-        let next = agl_process::ExecutionContextSnapshot {
+        let next = agl_exec::ExecutionContextSnapshot {
             workspace_root: canonical.clone(),
             working_directory: canonical.clone(),
             private_execution_roots: Vec::new(),
@@ -478,7 +478,7 @@ impl ChatService {
         }
         if let Err(error) = self.turn_runtime.set_workspace_root(&canonical) {
             if let Some(history) = &mut self.chat_history {
-                let rollback = agl_process::ExecutionContextSnapshot {
+                let rollback = agl_exec::ExecutionContextSnapshot {
                     revision: next
                         .revision
                         .checked_add(1)
@@ -501,20 +501,20 @@ impl ChatService {
         &mut self,
         requested: impl AsRef<Path>,
         host: bool,
-    ) -> Result<&agl_process::ExecutionContextSnapshot> {
+    ) -> Result<&agl_exec::ExecutionContextSnapshot> {
         if self.context_released {
             bail!("cannot change working directory after the chat session context was released");
         }
         let current = self.turn_runtime.execution_context().clone();
         let profile = if host {
-            agl_process::ExecutionProfile::Host
+            agl_exec::ExecutionProfile::Host
         } else {
-            agl_process::ExecutionProfile::Workspace
+            agl_exec::ExecutionProfile::Workspace
         };
         let working_directory =
-            agl_process::resolve_execution_directory(&current, requested.as_ref(), profile, host)
+            agl_exec::resolve_execution_directory(&current, requested.as_ref(), profile, host)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let next = agl_process::ExecutionContextSnapshot {
+        let next = agl_exec::ExecutionContextSnapshot {
             working_directory,
             revision: current
                 .revision
@@ -660,7 +660,6 @@ impl ChatService {
         if self.session_finished {
             return Ok(());
         }
-        self.terminate_session_processes()?;
         self.expire_session_permission_grants()?;
         self.release_inference_context()?;
         if let Some(history) = &mut self.chat_history {
@@ -674,7 +673,6 @@ impl ChatService {
         if self.session_finished {
             return Ok(());
         }
-        self.terminate_session_processes()?;
         self.expire_session_permission_grants()?;
         self.release_inference_context()?;
         if let Some(history) = &mut self.chat_history {
@@ -691,17 +689,6 @@ impl ChatService {
         self.turn_runtime.release_context()?;
         self.context_released = true;
         Ok(())
-    }
-
-    fn terminate_session_processes(&self) -> Result<usize> {
-        if !self.is_session_scoped() {
-            return Ok(0);
-        }
-        self.turn_runtime
-            .terminate_process_owner(&crate::execution_owner::session_owner(
-                &self.session_id,
-                &RunId::generate(),
-            ))
     }
 
     fn expire_session_permission_grants(&self) -> Result<usize> {
@@ -1894,6 +1881,7 @@ tool_call_format = "hermes_json"
             inference: agl_runtime::AgentLibreInferenceConfig::default(),
             execution: agl_runtime::AgentLibreExecutionConfig::default(),
         };
+        agl_store::AglStore::migrate_at(runtime.paths.store_root()).unwrap();
         let options = ChatOptions {
             inference: crate::InferenceOptions {
                 config: Some(config_path),
@@ -2734,7 +2722,7 @@ tool_call_format = "hermes_json"
         let child = chat.root.join("child");
         let outside = chat.root.parent().unwrap().join(format!(
             "agl-chat-service-outside-{}",
-            agl_process::ExecutionId::generate()
+            agl_exec::ExecutionId::generate()
         ));
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
