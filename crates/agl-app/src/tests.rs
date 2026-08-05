@@ -6,9 +6,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use agl_content::Content;
+use agl_exec::{ExecutionId, ExecutionProfile, ExecutionState, TerminalSize};
 use agl_ids::{AttemptId, DaemonInstanceId, MessageId, RunId, SessionId, StepId, TurnId};
 use agl_kernel::ToolAccessMode;
-use agl_process::{ExecutionId, ExecutionProfile, ExecutionState, TerminalSize, WriterLeaseId};
 use agl_terminal::TerminalId;
 
 use super::*;
@@ -30,43 +30,6 @@ fn display_path(text: &str) -> SanitizedDisplayPath {
 
 fn workspace_history_scope() -> String {
     format!("sha256:{}", "a".repeat(64))
-}
-
-#[test]
-fn human_command_card_has_typed_lifecycle_cursors_and_redacted_debug() {
-    let terminal_id = TerminalId::generate();
-    let execution_id = ExecutionId::generate();
-    let command_output = agl_process::sanitize_terminal_card_output(b"printf private-value", 64);
-    let empty_output = agl_process::sanitize_terminal_card_output(b"", 64);
-    let mut card = HumanCommandCardView {
-        terminal_id,
-        execution_id,
-        command_sequence: 1,
-        command: SanitizedTerminalText::from_process_sanitized(&command_output),
-        output: SanitizedTerminalText::from_process_sanitized(&empty_output),
-        output_start: agl_process::ExecutionCursor { after_sequence: 7 },
-        output_end: agl_process::ExecutionCursor { after_sequence: 7 },
-        state: HumanCommandCardState::Starting,
-        exit_status: None,
-        cwd: display_path("/workspace"),
-        truncated: false,
-        filtered_effects: 0,
-        started_at_unix_ms: 10,
-        updated_at_unix_ms: 10,
-    };
-    card.validate().unwrap();
-    assert!(!format!("{card:?}").contains("private-value"));
-
-    card.state = HumanCommandCardState::Exited;
-    assert!(card.validate().is_err());
-    card.exit_status = Some(0);
-    card.updated_at_unix_ms = 11;
-    card.validate().unwrap();
-
-    card.state = HumanCommandCardState::OutcomeUnknown;
-    card.exit_status = None;
-    card.output_end.after_sequence = 6;
-    assert!(card.validate().is_err());
 }
 
 #[cfg(unix)]
@@ -145,16 +108,13 @@ fn command_catalog_has_the_selected_unique_surface_and_busy_availability() {
     assert_eq!(
         names,
         [
-            "attach",
             "clear",
             "disconnect",
             "exit",
             "help",
-            "kill",
             "mode",
             "model",
             "new",
-            "processes",
             "reload",
             "resume",
             "skills",
@@ -338,7 +298,6 @@ async fn presentation_snapshot_and_live_registration_are_revision_contiguous() {
             snapshot: snapshot.clone(),
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -364,118 +323,6 @@ async fn presentation_snapshot_and_live_registration_are_revision_contiguous() {
 }
 
 #[tokio::test]
-async fn human_command_submission_is_redacted_and_publishes_its_private_card() {
-    const SENTINEL: &str = "AGL_PRIVATE_HUMAN_COMMAND_148";
-    let daemon_instance_id = DaemonInstanceId::generate();
-    let session_id = SessionId::generate();
-    let terminal = terminal(&session_id);
-    let command_sequence = 1;
-    let cursor = agl_process::ExecutionCursor { after_sequence: 4 };
-    let card = HumanCommandCardView {
-        terminal_id: terminal.terminal_id.clone(),
-        execution_id: terminal.execution_id.clone(),
-        command_sequence,
-        command: SanitizedTerminalText::from_process_sanitized(
-            &agl_process::sanitize_terminal_card_output(SENTINEL.as_bytes(), 64),
-        ),
-        output: SanitizedTerminalText::from_process_sanitized(
-            &agl_process::sanitize_terminal_card_output(b"", 64),
-        ),
-        output_start: cursor,
-        output_end: cursor,
-        state: HumanCommandCardState::Starting,
-        exit_status: None,
-        cwd: display_path("/workspace"),
-        truncated: false,
-        filtered_effects: 0,
-        started_at_unix_ms: 1,
-        updated_at_unix_ms: 1,
-    };
-    let accepted = HumanTerminalCommandAccepted {
-        terminal_id: terminal.terminal_id.clone(),
-        command_sequence,
-        output_after_sequence: cursor.after_sequence,
-    };
-    let mut backend_snapshot = snapshot(&daemon_instance_id, &session_id);
-    backend_snapshot.terminals.push(terminal.clone());
-    let service = ApplicationService::new(
-        daemon_instance_id,
-        Arc::new(FakeBackend {
-            snapshot: backend_snapshot,
-            older_page_cursor: None,
-            exit_on_invoke: false,
-            human_command_admission: Some(HumanTerminalCommandAdmission {
-                accepted: accepted.clone(),
-                card: card.clone(),
-            }),
-        }),
-    );
-    let mut subscription = service
-        .subscribe(PresentationSubscribe {
-            session_id: session_id.clone(),
-        })
-        .await
-        .unwrap();
-    let request = HumanTerminalCommandSubmit {
-        session_id,
-        terminal_id: terminal.terminal_id,
-        client_submission_id: "private-command".to_owned(),
-        writer_lease_id: WriterLeaseId::generate(),
-        expected_command_sequence: 0,
-        expected_prompt_generation: 1,
-        command: SENTINEL.to_owned(),
-    };
-    let request_debug = format!("{request:?}");
-    assert!(!request_debug.contains(SENTINEL));
-    assert!(!request_debug.contains(request.writer_lease_id.as_str()));
-    assert_eq!(
-        service
-            .submit_human_terminal_command(request.clone())
-            .await
-            .unwrap(),
-        accepted
-    );
-    let first = subscription.next().await.unwrap();
-    let event = if matches!(
-        first.event,
-        SessionPresentationEvent::HumanCommandCardUpsert { .. }
-    ) {
-        first
-    } else {
-        subscription.next().await.unwrap()
-    };
-    assert!(matches!(
-        event.event,
-        SessionPresentationEvent::HumanCommandCardUpsert { card: observed }
-            if observed == card
-    ));
-
-    let mut running = card;
-    running.state = HumanCommandCardState::Running;
-    running.updated_at_unix_ms = 2;
-    service
-        .publish(
-            &request.session_id,
-            SessionPresentationEvent::HumanCommandCardUpsert {
-                card: running.clone(),
-            },
-        )
-        .unwrap();
-    let request_session_id = request.session_id.clone();
-    service
-        .submit_human_terminal_command(request)
-        .await
-        .unwrap();
-    let current = service.snapshot(&request_session_id).await.unwrap();
-    assert!(
-        current
-            .human_commands
-            .iter()
-            .any(|observed| observed == &running)
-    );
-}
-
-#[tokio::test]
 async fn non_durable_refresh_retains_final_assistant_items() {
     let daemon_instance_id = DaemonInstanceId::generate();
     let session_id = SessionId::generate();
@@ -487,7 +334,6 @@ async fn non_durable_refresh_retains_final_assistant_items() {
             snapshot: backend_snapshot,
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -538,7 +384,6 @@ async fn presentation_page_cursor_is_preserved_on_initial_and_replacement_snapsh
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: Some(older_page_cursor.clone()),
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -776,7 +621,6 @@ async fn session_exit_publishes_a_terminal_boundary_to_peer_subscribers() {
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: None,
             exit_on_invoke: true,
-            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -822,7 +666,6 @@ async fn chat_presentation_proxy_is_nonblocking_and_reconciles_by_message_id() {
             snapshot: snapshot(&DaemonInstanceId::generate(), &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     let mut subscription = service
@@ -1167,7 +1010,6 @@ async fn inference_activity_remains_current_without_a_live_subscriber() {
             snapshot: snapshot(&DaemonInstanceId::generate(), &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     service.snapshot(&session_id).await.unwrap();
@@ -1242,7 +1084,6 @@ async fn child_activity_uses_the_durable_spawn_step_and_survives_resnapshot() {
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     let _initial_subscription = service
@@ -1442,7 +1283,6 @@ async fn terminal_events_update_metadata_without_a_raw_output_variant() {
             snapshot: snapshot(&daemon_instance_id, &session_id),
             older_page_cursor: None,
             exit_on_invoke: false,
-            human_command_admission: None,
         }),
     );
     service.snapshot(&session_id).await.unwrap();
@@ -1561,7 +1401,6 @@ fn snapshot(
         queued_prompts: Vec::new(),
         terminals: Vec::new(),
         executions: Vec::new(),
-        human_commands: Vec::new(),
         activity: None,
         command_context,
     }
@@ -1571,7 +1410,6 @@ struct FakeBackend {
     snapshot: SessionPresentationSnapshot,
     older_page_cursor: Option<String>,
     exit_on_invoke: bool,
-    human_command_admission: Option<HumanTerminalCommandAdmission>,
 }
 
 struct SequencedSnapshotBackend {
@@ -1650,17 +1488,6 @@ impl ApplicationBackend for BlockingSnapshotBackend {
         ))
     }
 
-    fn submit_human_terminal_command(
-        &self,
-        _context: ApplicationCallContext,
-        _request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
-        Err(ApplicationError::new(
-            ApplicationErrorCode::CommandUnavailable,
-            "not used",
-        ))
-    }
-
     fn suggestions(
         &self,
         _context: ApplicationCallContext,
@@ -1729,17 +1556,6 @@ impl ApplicationBackend for SequencedSnapshotBackend {
         _context: ApplicationCallContext,
         _request: HumanTerminalEnsure,
     ) -> Result<TerminalEnsured, ApplicationError> {
-        Err(ApplicationError::new(
-            ApplicationErrorCode::CommandUnavailable,
-            "not used",
-        ))
-    }
-
-    fn submit_human_terminal_command(
-        &self,
-        _context: ApplicationCallContext,
-        _request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
         Err(ApplicationError::new(
             ApplicationErrorCode::CommandUnavailable,
             "not used",
@@ -1822,16 +1638,6 @@ impl ApplicationBackend for FakeBackend {
             ApplicationErrorCode::CommandUnavailable,
             "not used",
         ))
-    }
-
-    fn submit_human_terminal_command(
-        &self,
-        _context: ApplicationCallContext,
-        _request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
-        self.human_command_admission.clone().ok_or_else(|| {
-            ApplicationError::new(ApplicationErrorCode::CommandUnavailable, "not used")
-        })
     }
 
     fn suggestions(

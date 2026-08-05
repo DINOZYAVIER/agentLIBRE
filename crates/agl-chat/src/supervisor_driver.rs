@@ -169,16 +169,6 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
         run: &DurableRunRecord,
         cancellation: RunCancellation,
     ) -> SupervisorResult<Box<dyn DurableRunDriver>> {
-        let process_handle = self
-            .runtime
-            .as_ref()
-            .map(crate::shared_process_handle)
-            .transpose()
-            .map_err(|error| SupervisorError::Driver(format!("{error:#}")))?;
-        let terminal_run_owner = run
-            .session_id
-            .is_none()
-            .then(|| crate::execution_owner::run_owner(&run.run_id, &run.root_run_id));
         let input: ChatRunInput = serde_json::from_value(run.input.clone())?;
         let child_presentation_context = if run.kind == RunKind::Subagent {
             let parent_run_id = run.parent_run_id.clone().ok_or_else(|| {
@@ -502,9 +492,6 @@ impl DurableRunDriverFactory for ChatSupervisorFactory {
             bridge_finished,
             terminal: None,
             usage: run.usage.clone(),
-            process_handle,
-            terminal_run_owner,
-            creating_run_id: run.run_id.clone(),
         }))
     }
 }
@@ -518,9 +505,6 @@ struct ChatSupervisorDriver {
     bridge_finished: Arc<AtomicBool>,
     terminal: Option<SupervisorTerminal>,
     usage: RunUsage,
-    process_handle: Option<agl_process::ProcessHandle>,
-    terminal_run_owner: Option<agl_process::ExecutionOwner>,
-    creating_run_id: agl_ids::RunId,
 }
 
 impl DurableRunDriver for ChatSupervisorDriver {
@@ -700,30 +684,6 @@ impl Drop for ChatSupervisorDriver {
         };
         let mut service = service;
         let terminal = self.execution.is_terminal();
-        if terminal && let Some(process) = &self.process_handle {
-            let correlation_group_id = agl_exec::OpaqueOwnerId::new(self.creating_run_id.as_str())
-                .expect("canonical run ID fits opaque correlation contract");
-            if let Err(error) =
-                process.expire_correlation_group_grants(&correlation_group_id, "one_turn")
-            {
-                tracing::warn!(
-                    target: "agentlibre::chat",
-                    run_id = %self.creating_run_id,
-                    error = %error,
-                    "failed to terminate process executions after one-turn grant expiry"
-                );
-            }
-            if let Some(owner) = &self.terminal_run_owner
-                && let Err(error) = process.terminate_owner(owner)
-            {
-                tracing::warn!(
-                    target: "agentlibre::chat",
-                    run_id = %self.creating_run_id,
-                    error = %error,
-                    "failed to terminate run-owned process executions"
-                );
-            }
-        }
         if !terminal {
             service.suspend_durable_turn();
         }

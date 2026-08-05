@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter, Write as _};
 
 use agl_content::Content;
-use agl_exec::{ExecutionId, WriterLeaseId};
+use agl_exec::ExecutionId;
 use agl_ids::{
     AttemptId, DaemonInstanceId, EventId, MessageId, RequestId, RunId, SessionId, StepId, TurnId,
 };
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    DaemonEventKind, DaemonRequestKind, ExecutionCursor, ExecutionExit, ExecutionProfile,
-    ExecutionState, KillMode, ProtocolToolMode, TerminalSize,
+    DaemonEventKind, DaemonRequestKind, ExecutionExit, ExecutionProfile, ExecutionState,
+    ProtocolToolMode, TerminalSize,
 };
 
 pub const MAX_JSONL_FRAME_BYTES: usize = 1024 * 1024;
@@ -37,10 +37,6 @@ pub const MAX_SUGGESTIONS: usize = 50;
 pub const MAX_COMMAND_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_DISPLAY_BYTES: usize = 8 * 1024;
 pub const MAX_SAFE_METADATA_ENTRIES: usize = 64;
-pub const MAX_HUMAN_COMMAND_BYTES: usize = 64 * 1024;
-pub const MAX_HUMAN_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
-pub const MAX_HUMAN_COMMAND_CARDS: usize = 32;
-pub const MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ACTIVITY_NODES: usize = 512;
 pub const MAX_ACTIVE_ACTIVITY_NODES: usize = 256;
 pub const MAX_ACTIVITY_PATH_NODES: usize = 32;
@@ -94,7 +90,6 @@ pub enum ClientEffectKind {
     Help,
     Disconnect,
     InputHistory,
-    RawExecutionAttach,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -120,7 +115,6 @@ pub enum CommandCategory {
     Session,
     Runtime,
     Workspace,
-    Execution,
     Client,
 }
 
@@ -132,7 +126,6 @@ pub enum CommandArgumentKind {
     Unsigned,
     Path,
     SessionId,
-    ExecutionId,
     ModelId,
     OperationMode,
     SkillId,
@@ -165,9 +158,6 @@ pub enum ApplicationActionKind {
     TerminalList,
     TerminalPromote,
     IncompleteTurnContinue,
-    ExecutionList,
-    ExecutionAttach,
-    ExecutionKill,
     RuntimeContextReload,
     SessionClear,
     SessionExit,
@@ -179,7 +169,6 @@ pub enum CommandConcurrency {
     ReadOnly,
     TurnBoundaryMutation,
     SessionDestructive,
-    StartsExecution,
     SurfaceLocal,
 }
 
@@ -280,17 +269,6 @@ pub enum ApplicationAction {
         message_id: MessageId,
         expected_execution_context_revision: u64,
     },
-    ExecutionList {
-        include_finished: bool,
-    },
-    ExecutionAttach {
-        execution_id: ExecutionId,
-        read_only: bool,
-    },
-    ExecutionKill {
-        execution_id: ExecutionId,
-        mode: KillMode,
-    },
     RuntimeContextReload,
     SessionClear,
     SessionExit {
@@ -386,36 +364,6 @@ pub struct HumanTerminalEnsureRequest {
     pub terminal_size: TerminalSize,
     pub agl_env: StructuredEnvironmentOverlay,
     pub host_startup: HostStartupPolicy,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanTerminalCommandSubmitRequest {
-    pub session_id: SessionId,
-    pub terminal_id: TerminalId,
-    pub client_submission_id: String,
-    pub writer_lease_id: WriterLeaseId,
-    pub expected_command_sequence: u64,
-    pub expected_prompt_generation: u64,
-    pub command: String,
-}
-
-impl Debug for HumanTerminalCommandSubmitRequest {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HumanTerminalCommandSubmitRequest")
-            .field("session_id", &self.session_id)
-            .field("terminal_id", &self.terminal_id)
-            .field("client_submission_id", &self.client_submission_id)
-            .field("writer_lease_present", &true)
-            .field("expected_command_sequence", &self.expected_command_sequence)
-            .field(
-                "expected_prompt_generation",
-                &self.expected_prompt_generation,
-            )
-            .field("command_bytes", &self.command.len())
-            .finish()
-    }
 }
 
 /// Explicit local-operator admission for one Human Host terminal lifetime.
@@ -614,71 +562,6 @@ pub struct ExecutionView {
     pub exit: Option<ExecutionExit>,
     pub last_sequence: u64,
     pub output_truncated: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HumanCommandCardState {
-    Starting,
-    Running,
-    Exited,
-    OutcomeUnknown,
-}
-
-pub type ExecutionOutputCursor = ExecutionCursor;
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SanitizedTerminalText(String);
-
-impl SanitizedTerminalText {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn validate(
-        &self,
-        maximum_bytes: usize,
-        allow_empty: bool,
-    ) -> Result<(), SurfaceValidationError> {
-        if (!allow_empty && self.0.is_empty())
-            || self.0.len() > maximum_bytes
-            || self.0.chars().any(is_forbidden_presentation_character)
-        {
-            return Err(SurfaceValidationError::new(
-                "sanitized terminal text is empty, oversized, or contains a forbidden character",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl Debug for SanitizedTerminalText {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SanitizedTerminalText")
-            .field("bytes", &self.0.len())
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanCommandCardView {
-    pub terminal_id: TerminalId,
-    pub execution_id: ExecutionId,
-    pub command_sequence: u64,
-    pub command: SanitizedTerminalText,
-    pub output: SanitizedTerminalText,
-    pub output_start: ExecutionOutputCursor,
-    pub output_end: ExecutionOutputCursor,
-    pub state: HumanCommandCardState,
-    pub exit_status: Option<i32>,
-    pub cwd: SanitizedDisplayPath,
-    pub truncated: bool,
-    pub filtered_effects: u32,
-    pub started_at_unix_ms: u64,
-    pub updated_at_unix_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1007,7 +890,6 @@ pub struct SessionPresentationSnapshot {
     pub queued_prompts: Vec<QueuedPromptView>,
     pub terminals: Vec<TerminalSessionView>,
     pub executions: Vec<ExecutionView>,
-    pub human_commands: Vec<HumanCommandCardView>,
     pub activity: Option<ActivityGraphView>,
     pub command_context: CommandContext,
 }
@@ -1167,13 +1049,6 @@ pub enum SessionPresentationEventPayload {
         exit_status: i32,
         cwd: SanitizedDisplayPath,
     },
-    HumanCommandCardUpsert {
-        card: HumanCommandCardView,
-    },
-    HumanCommandCardRemoved {
-        terminal_id: TerminalId,
-        command_sequence: u64,
-    },
     ActivityGraphDelta {
         batch: ActivityGraphDeltaBatch,
     },
@@ -1237,14 +1112,6 @@ pub struct HumanTerminalEnsuredEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanTerminalCommandAcceptedEvent {
-    pub terminal_id: TerminalId,
-    pub command_sequence: u64,
-    pub output_after_sequence: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationToolResult {
     SessionOpened {
@@ -1271,17 +1138,6 @@ pub enum ApplicationToolResult {
     },
     TerminalPromoted {
         terminal: TerminalSessionView,
-    },
-    Executions {
-        executions: Vec<ExecutionView>,
-    },
-    AttachAccepted {
-        execution_id: ExecutionId,
-        read_only: bool,
-    },
-    KillAccepted {
-        execution_id: ExecutionId,
-        mode: KillMode,
     },
     Reloaded {
         visible_tools: Vec<String>,
@@ -1438,55 +1294,6 @@ impl HumanTerminalEnsureRequest {
             ));
         }
         self.agl_env.validate()
-    }
-}
-
-impl HumanTerminalCommandSubmitRequest {
-    pub fn validate(&self) -> Result<(), SurfaceValidationError> {
-        bound_string(
-            &self.client_submission_id,
-            MAX_IDENTIFIER_BYTES,
-            "client submission ID",
-            false,
-        )?;
-        validate_single_line(&self.client_submission_id, "client submission ID")?;
-        bound_string(
-            &self.command,
-            MAX_HUMAN_COMMAND_BYTES,
-            "Human terminal command",
-            false,
-        )?;
-        if self
-            .command
-            .chars()
-            .any(is_forbidden_human_command_character)
-        {
-            return Err(SurfaceValidationError::new(
-                "Human terminal command contains a forbidden control character",
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl HumanCommandCardView {
-    fn validate(&self) -> Result<(), SurfaceValidationError> {
-        self.command.validate(MAX_HUMAN_COMMAND_BYTES, false)?;
-        self.output.validate(MAX_HUMAN_COMMAND_OUTPUT_BYTES, true)?;
-        if self.output_start.after_sequence > self.output_end.after_sequence
-            || self.updated_at_unix_ms < self.started_at_unix_ms
-        {
-            return Err(SurfaceValidationError::new(
-                "Human command card cursors or timestamps are inconsistent",
-            ));
-        }
-        self.cwd.validate()?;
-        if matches!(self.state, HumanCommandCardState::Exited) != self.exit_status.is_some() {
-            return Err(SurfaceValidationError::new(
-                "only an exited Human command card carries an exit status",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -2094,11 +1901,6 @@ impl SessionPresentationSnapshot {
             MAX_PRESENTATION_ITEMS,
             "execution records",
         )?;
-        bound_count(
-            self.human_commands.len(),
-            MAX_HUMAN_COMMAND_CARDS,
-            "Human command cards",
-        )?;
         validate_header(&self.header)?;
         for item in &self.items {
             validate_item(item)?;
@@ -2116,23 +1918,6 @@ impl SessionPresentationSnapshot {
         }
         for execution in &self.executions {
             validate_execution(execution)?;
-        }
-        let mut command_keys = BTreeSet::new();
-        let mut command_output_bytes = 0usize;
-        for command in &self.human_commands {
-            command.validate()?;
-            command_output_bytes =
-                command_output_bytes.saturating_add(command.output.as_str().len());
-            if !command_keys.insert((&command.terminal_id, command.command_sequence)) {
-                return Err(SurfaceValidationError::new(
-                    "Human command card identities must be unique",
-                ));
-            }
-        }
-        if command_output_bytes > MAX_HUMAN_COMMAND_AGGREGATE_OUTPUT_BYTES {
-            return Err(SurfaceValidationError::new(
-                "Human command cards exceed their aggregate output bound",
-            ));
         }
         if let Some(activity) = &self.activity {
             activity.validate()?;
@@ -2420,7 +2205,6 @@ impl DaemonRequestKind {
             Self::ApplicationAction(request) => validate_application_action_request(request),
             Self::HumanTerminalEnsure(request) => request.validate(),
             Self::HumanHostTerminalEnsure(request) => request.validate(),
-            Self::HumanTerminalCommandSubmit(request) => request.validate(),
             Self::SessionPresentation(request) => bound_optional_string(
                 request.page_cursor.as_deref(),
                 MAX_IDENTIFIER_BYTES,
@@ -2556,7 +2340,6 @@ impl DaemonEventKind {
                 Ok(())
             }
             Self::HumanTerminalEnsured(event) => event.terminal.validate(),
-            Self::HumanTerminalCommandAccepted(_) => Ok(()),
             Self::InferenceInventory(event) => validate_inference_inventory(event),
             Self::InferenceStatus(event) => validate_inference_status(event),
             Self::ModelUnload(event) => validate_model_unload_event(event),
@@ -3079,9 +2862,6 @@ fn validate_application_action_request(
         | ApplicationAction::TerminalList { .. }
         | ApplicationAction::TerminalPromote { .. }
         | ApplicationAction::IncompleteTurnContinue { .. }
-        | ApplicationAction::ExecutionList { .. }
-        | ApplicationAction::ExecutionAttach { .. }
-        | ApplicationAction::ExecutionKill { .. }
         | ApplicationAction::RuntimeContextReload
         | ApplicationAction::SessionClear
         | ApplicationAction::SessionExit { .. } => Ok(()),
@@ -3118,27 +2898,15 @@ fn validate_action_result(result: &ApplicationToolResult) -> Result<(), SurfaceV
         | ApplicationToolResult::WorkspaceChanged { header } => validate_header(header),
         ApplicationToolResult::Terminals { terminals } => validate_terminals(terminals),
         ApplicationToolResult::TerminalPromoted { terminal } => terminal.validate(),
-        ApplicationToolResult::Executions { executions } => {
-            bound_count(
-                executions.len(),
-                MAX_PRESENTATION_ITEMS,
-                "execution results",
-            )?;
-            for execution in executions {
-                validate_execution(execution)?;
-            }
-            Ok(())
-        }
         ApplicationToolResult::Reloaded { visible_tools, .. } => validate_identifier_list(
             visible_tools,
             MAX_COMMAND_DESCRIPTORS,
             "visible tools",
             "tool ID",
         ),
-        ApplicationToolResult::AttachAccepted { .. }
-        | ApplicationToolResult::KillAccepted { .. }
-        | ApplicationToolResult::Cleared { .. }
-        | ApplicationToolResult::SessionExited { .. } => Ok(()),
+        ApplicationToolResult::Cleared { .. } | ApplicationToolResult::SessionExited { .. } => {
+            Ok(())
+        }
         ApplicationToolResult::IncompleteTurnContinued { admission } => {
             if admission.queued
                 != matches!(
@@ -3178,7 +2946,6 @@ fn validate_presentation_event(
             terminal.validate_for_session(&envelope.session_id)
         }
         SessionPresentationEventPayload::TerminalCommandFinished { cwd, .. } => cwd.validate(),
-        SessionPresentationEventPayload::HumanCommandCardUpsert { card } => card.validate(),
         SessionPresentationEventPayload::ActivityGraphDelta { batch } => batch.validate_shape(),
         SessionPresentationEventPayload::ExecutionStateChanged { execution } => {
             validate_execution(execution)
@@ -3191,7 +2958,6 @@ fn validate_presentation_event(
         | SessionPresentationEventPayload::PromptActivated { .. }
         | SessionPresentationEventPayload::TerminalRemoved { .. }
         | SessionPresentationEventPayload::TerminalCommandStarted { .. }
-        | SessionPresentationEventPayload::HumanCommandCardRemoved { .. }
         | SessionPresentationEventPayload::CommandAvailabilityChanged
         | SessionPresentationEventPayload::SessionFinished => Ok(()),
     }
@@ -3639,7 +3405,6 @@ mod tests {
             queued_prompts: Vec::new(),
             terminals: Vec::new(),
             executions: Vec::new(),
-            human_commands: Vec::new(),
             activity: None,
             command_context: CommandContext {
                 session_id: Some(session_id),
@@ -4531,76 +4296,5 @@ mod tests {
         ] {
             assert!(validate_workspace_history_scope(invalid).is_err());
         }
-    }
-
-    #[test]
-    fn human_command_card_wire_lifecycle_is_typed_and_debug_is_redacted() {
-        let value = serde_json::json!({
-            "terminal_id": TERMINAL_ID,
-            "execution_id": EXECUTION_ID,
-            "command_sequence": 4,
-            "command": "printf private-value",
-            "output": "done\n",
-            "output_start": { "after_sequence": 10 },
-            "output_end": { "after_sequence": 12 },
-            "state": "exited",
-            "exit_status": 0,
-            "cwd": { "text": "/workspace", "truncated": false },
-            "truncated": false,
-            "filtered_effects": 0,
-            "started_at_unix_ms": 20,
-            "updated_at_unix_ms": 21
-        });
-        let card = serde_json::from_value::<HumanCommandCardView>(value.clone()).unwrap();
-        card.validate().unwrap();
-        assert!(!format!("{card:?}").contains("private-value"));
-
-        let mut missing_exit = value.clone();
-        missing_exit["exit_status"] = serde_json::Value::Null;
-        assert!(
-            serde_json::from_value::<HumanCommandCardView>(missing_exit)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
-        let mut raw_escape = value;
-        raw_escape["command"] = serde_json::json!("printf \u{1b}[31m");
-        assert!(
-            serde_json::from_value::<HumanCommandCardView>(raw_escape)
-                .unwrap()
-                .validate()
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn human_command_submit_uses_writer_authority_and_redacts_debug() {
-        const SENTINEL: &str = "AGL_PROTOCOL_PRIVATE_COMMAND_148";
-        let request = HumanTerminalCommandSubmitRequest {
-            session_id: session_id(),
-            terminal_id: TerminalId::parse(TERMINAL_ID).unwrap(),
-            client_submission_id: "typed-command".to_owned(),
-            writer_lease_id: WriterLeaseId::generate(),
-            expected_command_sequence: 2,
-            expected_prompt_generation: 3,
-            command: SENTINEL.to_owned(),
-        };
-        request.validate().unwrap();
-        let request_debug = format!("{request:?}");
-        assert!(!request_debug.contains(SENTINEL));
-        assert!(!request_debug.contains(request.writer_lease_id.as_str()));
-        let envelope = DaemonRequest::new(
-            request_id(),
-            DaemonRequestKind::HumanTerminalCommandSubmit(request.clone()),
-        );
-        let envelope_debug = format!("{envelope:?}");
-        assert!(!envelope_debug.contains(SENTINEL));
-        assert!(!envelope_debug.contains(request.writer_lease_id.as_str()));
-        let encoded = serde_json::to_value(envelope).unwrap();
-        assert_eq!(
-            encoded["payload"]["writer_lease_id"],
-            request.writer_lease_id.as_str()
-        );
-        assert!(encoded["payload"].get("attachment_id").is_none());
     }
 }

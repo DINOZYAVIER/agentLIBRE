@@ -1,10 +1,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use agl_process::{
-    EnvironmentOverride, ExecutionContextSnapshot, ProcessSupervisorOptions, ShellProfileSnapshot,
+use agl_exec::{
+    AuthorityFingerprint, EnvironmentOverride, ExecutionContextSnapshot, ShellProfileSnapshot,
 };
+use agl_process::{TERMINAL_BUILD_ID, TERMINAL_SOURCE_REVISION, TerminalEndpoint};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -342,31 +342,16 @@ impl AgentLibreExecutionConfig {
         Ok(snapshot)
     }
 
-    pub fn supervisor_options(
-        &self,
-        paths: &AgentLibrePaths,
-        launcher_path: PathBuf,
-    ) -> Result<ProcessSupervisorOptions> {
-        let options = ProcessSupervisorOptions {
-            launcher_path,
-            data_root: paths.data_dir.join("executions"),
-            state_root: paths.state_dir.join("executions"),
-            max_active: self.max_active,
-            command_capacity: self.command_capacity,
-            poll_interval: Duration::from_millis(self.poll_interval_ms),
-            setup_timeout: Duration::from_millis(self.setup_timeout_ms),
-            termination_grace: Duration::from_millis(self.termination_grace_ms),
-            max_input_bytes: self.max_input_bytes,
-            max_result_bytes: self.max_result_bytes,
-            max_spool_bytes: self.max_spool_bytes,
-            termination_output_headroom_bytes: self.termination_output_headroom_bytes,
-            finished_retention: Duration::from_secs(self.finished_retention_seconds),
-            runtime_read_only_roots: self.runtime_read_only_roots.clone(),
-        };
-        options
-            .validate()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        Ok(options)
+    pub fn terminal_endpoint(&self, paths: &AgentLibrePaths) -> Result<TerminalEndpoint> {
+        let state_root = paths.state_dir.join("terminal");
+        TerminalEndpoint::new(
+            state_root.join("terminal.sock"),
+            state_root.join("service-identity.json"),
+            AuthorityFingerprint::new(TERMINAL_BUILD_ID)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            TERMINAL_SOURCE_REVISION,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }
 

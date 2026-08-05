@@ -21,7 +21,7 @@ pub struct SupervisedChat {
     session_id: SessionId,
     options: ChatOptions,
     delegation_plan: Option<RuntimeDelegationPlan>,
-    execution_context: agl_process::ExecutionContextSnapshot,
+    execution_context: agl_exec::ExecutionContextSnapshot,
 }
 
 impl SupervisedChat {
@@ -90,7 +90,7 @@ impl SupervisedChat {
         })
     }
 
-    pub fn execution_context(&self) -> Result<agl_process::ExecutionContextSnapshot> {
+    pub fn execution_context(&self) -> Result<agl_exec::ExecutionContextSnapshot> {
         self.factory.with_session(&self.session_id, |service| {
             Ok(service.execution_context().clone())
         })
@@ -123,7 +123,7 @@ impl SupervisedChat {
         &mut self,
         working_directory: impl AsRef<Path>,
         host: bool,
-    ) -> Result<agl_process::ExecutionContextSnapshot> {
+    ) -> Result<agl_exec::ExecutionContextSnapshot> {
         let snapshot = self.factory.with_session(&self.session_id, |service| {
             service.set_working_directory(working_directory, host)?;
             Ok(service.execution_context().clone())

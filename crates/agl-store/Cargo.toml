@@ -11,7 +11,6 @@ agl-exec.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 agl-process.workspace = true
-agl-terminal.workspace = true
 libc.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

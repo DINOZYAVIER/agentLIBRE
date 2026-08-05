@@ -1,10 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Formatter};
 
+use agl_exec::{ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState, TerminalSize};
 use agl_ids::{RunId, SessionId};
-use agl_process::{
-    ExecutionExit, ExecutionId, ExecutionProfile, ExecutionState, TerminalSize, WriterLeaseId,
-};
 use agl_terminal::TerminalId;
 use serde::{Deserialize, Serialize};
 
@@ -134,67 +132,6 @@ pub struct HumanTerminalEnsure {
     pub terminal_size: TerminalSize,
     pub agl_env: StructuredEnvironmentOverlay,
     pub host_startup: HostStartupPolicy,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanTerminalCommandSubmit {
-    pub session_id: SessionId,
-    pub terminal_id: TerminalId,
-    pub client_submission_id: String,
-    pub writer_lease_id: WriterLeaseId,
-    pub expected_command_sequence: u64,
-    pub expected_prompt_generation: u64,
-    pub command: String,
-}
-
-impl Debug for HumanTerminalCommandSubmit {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HumanTerminalCommandSubmit")
-            .field("session_id", &self.session_id)
-            .field("terminal_id", &self.terminal_id)
-            .field("client_submission_id", &self.client_submission_id)
-            .field("writer_lease_present", &true)
-            .field("expected_command_sequence", &self.expected_command_sequence)
-            .field(
-                "expected_prompt_generation",
-                &self.expected_prompt_generation,
-            )
-            .field("command_bytes", &self.command.len())
-            .finish()
-    }
-}
-
-impl HumanTerminalCommandSubmit {
-    pub fn validate(&self) -> Result<(), ApplicationError> {
-        validate_bounded_identifier(
-            &self.client_submission_id,
-            MAX_CLIENT_SUBMISSION_ID_BYTES,
-            "client submission ID",
-        )?;
-        if self.command.is_empty()
-            || self.command.len() > crate::MAX_HUMAN_COMMAND_BYTES
-            || self.command.chars().any(|character| {
-                let code = character as u32;
-                (code <= 0x1f && character != '\n' && character != '\t')
-                    || (0x7f..=0x9f).contains(&code)
-            })
-        {
-            return invalid(
-                "Human terminal command must be nonempty, bounded UTF-8 without unsafe controls",
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanTerminalCommandAccepted {
-    pub terminal_id: TerminalId,
-    pub command_sequence: u64,
-    pub output_after_sequence: u64,
 }
 
 impl HumanTerminalEnsure {

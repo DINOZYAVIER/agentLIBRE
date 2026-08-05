@@ -36,7 +36,7 @@ struct DelegationContext {
     plan: RuntimeDelegationPlan,
     children: BTreeSet<String>,
     authority_ceiling: BTreeSet<ToolId>,
-    execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+    execution_context_state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
 }
 
 impl DelegationHandler {
@@ -46,7 +46,7 @@ impl DelegationHandler {
 
     pub(crate) fn from_session(
         session: &crate::InferenceSession,
-        execution_context_state: Arc<Mutex<agl_process::ExecutionContextSnapshot>>,
+        execution_context_state: Arc<Mutex<agl_exec::ExecutionContextSnapshot>>,
     ) -> Option<Self> {
         let plan = session.delegation_plan()?.clone();
         let children = session
@@ -406,13 +406,13 @@ mod tests {
         }
     }
 
-    fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
+    fn test_execution_context() -> agl_exec::ExecutionContextSnapshot {
         let workspace = std::env::temp_dir().canonicalize().unwrap();
-        agl_process::ExecutionContextSnapshot {
+        agl_exec::ExecutionContextSnapshot {
             workspace_root: workspace.clone(),
             working_directory: workspace,
             private_execution_roots: Vec::new(),
-            shell: agl_process::ShellProfileSnapshot {
+            shell: agl_exec::ShellProfileSnapshot {
                 program: std::path::PathBuf::from("/bin/sh"),
                 command_args: vec!["-c".to_owned()],
                 login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),

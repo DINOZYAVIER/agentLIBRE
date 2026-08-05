@@ -78,7 +78,7 @@ pub(crate) fn chat_tool_runtime(config: ChatToolRuntimeConfig<'_>) -> Result<Too
         .map(|process| {
             permission_tools
                 .clone()
-                .with_process_handle(process.process_handle())
+                .with_terminal_endpoint(process.terminal_endpoint())
         })
         .unwrap_or(permission_tools);
     register_extension(

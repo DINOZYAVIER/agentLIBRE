@@ -2,10 +2,9 @@ use std::sync::{Arc, Weak};
 
 use agl_app::{
     ApplicationBackend, ApplicationCallContext, ApplicationError, ApplicationErrorCode,
-    ApplicationService, CommandContext, CommandId, HumanTerminalCommandAdmission,
-    HumanTerminalCommandSubmit, HumanTerminalEnsure, PresentationSubscribe, PromptAdmission,
-    PromptAdmissionState, PromptBudget, PromptSubmission, SessionOpen, SessionOpened,
-    SessionPresentationEventEnvelope, SessionPresentationSnapshot, SuggestionPage,
+    ApplicationService, CommandContext, CommandId, HumanTerminalEnsure, PresentationSubscribe,
+    PromptAdmission, PromptAdmissionState, PromptBudget, PromptSubmission, SessionOpen,
+    SessionOpened, SessionPresentationEventEnvelope, SessionPresentationSnapshot, SuggestionPage,
     SuggestionRequest, TerminalEnsured,
 };
 use agl_ids::{DaemonInstanceId, RequestId, SessionId};
@@ -154,16 +153,6 @@ impl ApplicationBackend for DaemonApplicationBackend {
     ) -> Result<TerminalEnsured, ApplicationError> {
         self.with_state(context, move |state, _| {
             state.application_ensure_human_terminal(request)
-        })
-    }
-
-    fn submit_human_terminal_command(
-        &self,
-        context: ApplicationCallContext,
-        request: HumanTerminalCommandSubmit,
-    ) -> Result<HumanTerminalCommandAdmission, ApplicationError> {
-        self.with_state(context, move |state, _| {
-            state.application_submit_human_terminal_command(request)
         })
     }
 

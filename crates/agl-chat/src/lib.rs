@@ -30,4 +30,4 @@ pub use session::InferenceSession;
 pub use supervised_chat::SupervisedChat;
 pub use supervisor_driver::{ChatRunInput, ChatSupervisorFactory};
 pub use terminal::assistant_text_for_terminal;
-pub use turn_runtime::{ChatTurnRuntime, shared_process_handle, shared_terminal_registry};
+pub use turn_runtime::ChatTurnRuntime;

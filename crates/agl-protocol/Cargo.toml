@@ -12,7 +12,6 @@ agl-exec.workspace = true
 agl-events.workspace = true
 agl-ids.workspace = true
 agl-model.workspace = true
-agl-process.workspace = true
 agl-terminal.workspace = true
 base64.workspace = true
 serde.workspace = true

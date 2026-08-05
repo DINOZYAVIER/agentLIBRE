@@ -3,7 +3,6 @@ use std::fmt::{self, Display, Formatter};
 
 use agl_ids::{MessageId, SessionId};
 use agl_kernel::ToolAccessMode;
-use agl_process::{ExecutionId, KillMode};
 use agl_terminal::TerminalId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -72,7 +71,6 @@ pub enum CommandCategory {
     Session,
     Runtime,
     Workspace,
-    Execution,
     Client,
 }
 
@@ -84,7 +82,6 @@ pub enum CommandArgumentKind {
     Unsigned,
     Path,
     SessionId,
-    ExecutionId,
     ModelId,
     OperationMode,
     SkillId,
@@ -117,9 +114,6 @@ pub enum ApplicationActionKind {
     TerminalList,
     TerminalPromote,
     IncompleteTurnContinue,
-    ExecutionList,
-    ExecutionAttach,
-    ExecutionKill,
     RuntimeContextReload,
     SessionClear,
     SessionExit,
@@ -131,7 +125,6 @@ pub enum CommandConcurrency {
     ReadOnly,
     TurnBoundaryMutation,
     SessionDestructive,
-    StartsExecution,
     SurfaceLocal,
 }
 
@@ -307,17 +300,6 @@ pub enum ApplicationAction {
         message_id: MessageId,
         expected_execution_context_revision: u64,
     },
-    ExecutionList {
-        include_finished: bool,
-    },
-    ExecutionAttach {
-        execution_id: ExecutionId,
-        read_only: bool,
-    },
-    ExecutionKill {
-        execution_id: ExecutionId,
-        mode: KillMode,
-    },
     RuntimeContextReload,
     SessionClear,
     SessionExit {
@@ -359,9 +341,6 @@ impl ApplicationActionRequest {
             | ApplicationAction::TerminalList { .. }
             | ApplicationAction::TerminalPromote { .. }
             | ApplicationAction::IncompleteTurnContinue { .. }
-            | ApplicationAction::ExecutionList { .. }
-            | ApplicationAction::ExecutionAttach { .. }
-            | ApplicationAction::ExecutionKill { .. }
             | ApplicationAction::RuntimeContextReload
             | ApplicationAction::SessionClear
             | ApplicationAction::SessionExit { .. } => {}
@@ -574,77 +553,6 @@ pub fn shared_command_catalog(context: &CommandContext) -> CommandCatalog {
             ApplicationActionKind::WorkspaceSet,
             CommandConcurrency::TurnBoundaryMutation,
             turn_boundary(),
-        ),
-        descriptor(
-            "execution.list",
-            "processes",
-            "List session executions",
-            CommandCategory::Execution,
-            vec![argument(
-                "all",
-                "include finished",
-                CommandArgumentKind::Boolean,
-                false,
-                false,
-                None,
-            )],
-            ApplicationActionKind::ExecutionList,
-            CommandConcurrency::ReadOnly,
-            requires_session(),
-        ),
-        descriptor(
-            "execution.attach",
-            "attach",
-            "Attach to an execution terminal",
-            CommandCategory::Execution,
-            vec![
-                argument(
-                    "execution_id",
-                    "execution",
-                    CommandArgumentKind::ExecutionId,
-                    true,
-                    false,
-                    Some("executions"),
-                ),
-                argument(
-                    "read_only",
-                    "read only",
-                    CommandArgumentKind::Boolean,
-                    false,
-                    false,
-                    None,
-                ),
-            ],
-            ApplicationActionKind::ExecutionAttach,
-            CommandConcurrency::StartsExecution,
-            requires_session(),
-        ),
-        descriptor(
-            "execution.kill",
-            "kill",
-            "Terminate an execution",
-            CommandCategory::Execution,
-            vec![
-                argument(
-                    "execution_id",
-                    "execution",
-                    CommandArgumentKind::ExecutionId,
-                    true,
-                    false,
-                    Some("executions"),
-                ),
-                argument(
-                    "immediate",
-                    "immediate",
-                    CommandArgumentKind::Boolean,
-                    false,
-                    false,
-                    None,
-                ),
-            ],
-            ApplicationActionKind::ExecutionKill,
-            CommandConcurrency::SessionDestructive,
-            requires_session(),
         ),
         descriptor(
             "session.reload",

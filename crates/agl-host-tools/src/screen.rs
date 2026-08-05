@@ -559,13 +559,13 @@ mod tests {
         run_id
     }
 
-    fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
+    fn test_execution_context() -> agl_exec::ExecutionContextSnapshot {
         let workspace = std::env::temp_dir().canonicalize().unwrap();
-        agl_process::ExecutionContextSnapshot {
+        agl_exec::ExecutionContextSnapshot {
             workspace_root: workspace.clone(),
             working_directory: workspace,
             private_execution_roots: Vec::new(),
-            shell: agl_process::ShellProfileSnapshot {
+            shell: agl_exec::ShellProfileSnapshot {
                 program: PathBuf::from("/bin/sh"),
                 command_args: vec!["-c".to_owned()],
                 login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),

@@ -8,7 +8,6 @@ members = [
     "crates/agl-cli",
     "crates/agl-cron",
     "crates/agl-daemon",
-    "crates/agl-exec",
     "crates/agl-function",
     "crates/agl-core-tools",
     "crates/agl-hooks",
@@ -24,12 +23,6 @@ members = [
     "crates/agl-notes",
     "crates/agl-oven",
     "crates/agl-process",
-    "crates/agl-process-launcher",
-    "crates/agl-pty",
-    "crates/agl-terminal",
-    "crates/agl-terminal-client",
-    "crates/agl-terminal-protocol",
-    "crates/agl-terminald",
     "crates/agl-protocol",
     "crates/agl-repo",
     "crates/agl-session",
@@ -64,7 +57,7 @@ agl-chat = { path = "crates/agl-chat" }
 agl-client = { path = "crates/agl-client" }
 agl-cron = { path = "crates/agl-cron" }
 agl-daemon = { path = "crates/agl-daemon" }
-agl-exec = { path = "crates/agl-exec" }
+agl-exec = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
 agl-function = { path = "crates/agl-function" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
@@ -82,12 +75,10 @@ agl-model = { path = "crates/agl-model" }
 agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-process = { path = "crates/agl-process" }
-agl-process-launcher = { path = "crates/agl-process-launcher" }
-agl-pty = { path = "crates/agl-pty" }
-agl-terminal = { path = "crates/agl-terminal" }
-agl-terminal-client = { path = "crates/agl-terminal-client" }
-agl-terminal-protocol = { path = "crates/agl-terminal-protocol" }
-agl-terminald = { path = "crates/agl-terminald" }
+agl-pty = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
+agl-terminal = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
+agl-terminal-client = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
+agl-terminal-protocol = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }
@@ -101,16 +92,13 @@ ashpd = { version = "0.13.12", default-features = false, features = ["documents"
 cc = "1.2.67"
 clap = { version = "4.6.2", features = ["derive"] }
 clap_complete = "4.6.7"
-crossterm = "0.28.1"
 directories = "6.0.0"
 futures-util = { version = "0.3.32", features = ["sink"] }
-fs2 = "0.4.3"
 hf-hub = "=1.0.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2.186"
 matrix-sdk = { version = "=0.18.0", default-features = false, features = ["bundled-sqlite", "e2e-encryption"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
-ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.228", features = ["derive"] }
 semver = { version = "1.0.28", features = ["serde"] }
 serde_json = "1.0.150"
@@ -122,8 +110,6 @@ sysinfo = "=0.39.6"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.18", features = ["codec"] }
-unicode-segmentation = "1.12.0"
-unicode-width = "0.2.0"
 toml = "1.1.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"

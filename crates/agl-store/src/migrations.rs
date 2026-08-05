@@ -427,94 +427,9 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     },
     StoreMigration {
         version: 14,
-        name: "014_process_executions",
+        name: "014_run_execution_context",
         sql: r#"
             ALTER TABLE runs ADD COLUMN execution_context_json TEXT;
-
-            CREATE TABLE executions (
-                id TEXT PRIMARY KEY,
-                owner_namespace TEXT NOT NULL,
-                owner_namespace_version INTEGER NOT NULL CHECK (owner_namespace_version > 0),
-                owner_id TEXT NOT NULL,
-                owner_kind TEXT NOT NULL CHECK (owner_kind IN ('persistent', 'ephemeral', 'service')),
-                owner_role TEXT NOT NULL CHECK (owner_role IN ('human', 'agent', 'service')),
-                authority_scope TEXT NOT NULL,
-                correlation_namespace TEXT NOT NULL,
-                correlation_namespace_version INTEGER NOT NULL CHECK (correlation_namespace_version > 0),
-                correlation_group_id TEXT NOT NULL,
-                correlation_operation_id TEXT NOT NULL,
-                execution_kind TEXT NOT NULL CHECK (execution_kind IN ('argv', 'shell')),
-                state TEXT NOT NULL CHECK (state IN (
-                    'admitting', 'starting', 'running', 'exited', 'signalled',
-                    'cancelled', 'timed_out', 'failed', 'outcome_unknown'
-                )),
-                profile TEXT NOT NULL CHECK (profile IN ('workspace', 'host')),
-                io TEXT NOT NULL CHECK (io IN ('pipes', 'pty')),
-                cwd TEXT NOT NULL,
-                terminal_columns INTEGER,
-                terminal_rows INTEGER,
-                supervisor_id TEXT NOT NULL,
-                exit_kind TEXT CHECK (exit_kind IN ('code', 'signal', 'error')),
-                exit_code INTEGER,
-                exit_signal INTEGER,
-                exit_error_code TEXT,
-                error_code TEXT,
-                started_at_ms INTEGER,
-                finished_at_ms INTEGER,
-                created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                first_retained_sequence INTEGER,
-                last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
-                retained_bytes INTEGER NOT NULL DEFAULT 0 CHECK (retained_bytes >= 0),
-                discarded_output_bytes INTEGER NOT NULL DEFAULT 0 CHECK (discarded_output_bytes >= 0),
-                accepted_input_bytes INTEGER NOT NULL DEFAULT 0 CHECK (accepted_input_bytes >= 0),
-                output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0, 1)),
-                output_expired INTEGER NOT NULL DEFAULT 0 CHECK (output_expired IN (0, 1)),
-                input_lease_id TEXT,
-                input_lease_renewed_at_ms INTEGER,
-                grant_lease_json TEXT,
-                invocation_json TEXT NOT NULL,
-                spool_ref TEXT NOT NULL,
-                retention_deadline_ms INTEGER,
-                cleanup_state TEXT NOT NULL DEFAULT 'live'
-                    CHECK (cleanup_state IN ('live', 'tombstoned', 'cleaned')),
-                CHECK ((terminal_columns IS NULL) = (terminal_rows IS NULL)),
-                CHECK (
-                    (exit_kind IS NULL AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NULL) OR
-                    (exit_kind = 'code' AND exit_code IS NOT NULL AND exit_signal IS NULL AND exit_error_code IS NULL) OR
-                    (exit_kind = 'signal' AND exit_code IS NULL AND exit_signal IS NOT NULL AND exit_error_code IS NULL) OR
-                    (exit_kind = 'error' AND exit_code IS NULL AND exit_signal IS NULL AND exit_error_code IS NOT NULL)
-                )
-            );
-            CREATE INDEX executions_owner_idx
-                ON executions(owner_namespace, owner_namespace_version, owner_id, state, created_at_ms);
-            CREATE INDEX executions_correlation_group_idx
-                ON executions(correlation_namespace, correlation_namespace_version,
-                              correlation_group_id, state, created_at_ms);
-            CREATE INDEX executions_supervisor_idx
-                ON executions(supervisor_id, state);
-            CREATE INDEX executions_retention_idx
-                ON executions(cleanup_state, retention_deadline_ms);
-
-            CREATE TABLE execution_events (
-                execution_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL CHECK (sequence > 0),
-                kind TEXT NOT NULL,
-                channel TEXT CHECK (channel IN ('stdout', 'stderr', 'terminal', 'lifecycle')),
-                spool_offset INTEGER,
-                byte_length INTEGER NOT NULL DEFAULT 0 CHECK (byte_length >= 0),
-                bounded_preview_json TEXT,
-                occurred_at_ms INTEGER NOT NULL,
-                safe_digest TEXT NOT NULL,
-                PRIMARY KEY (execution_id, sequence),
-                FOREIGN KEY(execution_id) REFERENCES executions(id) ON DELETE CASCADE,
-                CHECK (
-                    (kind = 'output' AND channel IS NOT NULL AND spool_offset IS NOT NULL AND byte_length > 0) OR
-                    (kind != 'output' AND spool_offset IS NULL AND byte_length = 0)
-                )
-            );
-            CREATE INDEX execution_events_replay_idx
-                ON execution_events(execution_id, sequence);
         "#,
     },
     StoreMigration {
@@ -529,68 +444,8 @@ pub const STORE_MIGRATIONS: &[StoreMigration] = &[
     },
     StoreMigration {
         version: 16,
-        name: "016_terminal_sessions",
-        sql: r#"
-            CREATE TABLE terminal_sessions (
-                terminal_id TEXT PRIMARY KEY,
-                execution_id TEXT NOT NULL UNIQUE,
-                topology_id TEXT NOT NULL,
-                owner_json TEXT NOT NULL,
-                authority_scope TEXT NOT NULL,
-                profile TEXT NOT NULL CHECK (profile IN ('workspace', 'host')),
-                workspace_root BLOB NOT NULL CHECK (typeof(workspace_root) = 'blob'),
-                shell_kind TEXT NOT NULL CHECK (shell_kind IN ('bash', 'zsh')),
-                shell_program BLOB NOT NULL CHECK (typeof(shell_program) = 'blob'),
-                shell_argv_json TEXT NOT NULL,
-                shell_login_argv_json TEXT,
-                shell_environment_names_json TEXT NOT NULL,
-                shell_executable_digest TEXT NOT NULL,
-                shell_config_digest TEXT NOT NULL,
-                environment_digest TEXT NOT NULL,
-                command_sequence INTEGER NOT NULL CHECK (command_sequence >= 0),
-                prompt_kind TEXT NOT NULL CHECK (prompt_kind IN (
-                    'unknown', 'ready', 'command_running', 'foreground_program', 'degraded'
-                )),
-                prompt_sequence INTEGER CHECK (prompt_sequence > 0),
-                prompt_last_exit INTEGER CHECK (
-                    prompt_last_exit IS NULL OR prompt_last_exit BETWEEN 0 AND 255
-                ),
-                prompt_process_group INTEGER CHECK (prompt_process_group > 0),
-                integration_health TEXT NOT NULL CHECK (integration_health IN (
-                    'awaiting_first_prompt', 'trusted', 'degraded'
-                )),
-                cwd BLOB NOT NULL CHECK (typeof(cwd) = 'blob'),
-                state TEXT NOT NULL CHECK (state IN (
-                    'reserved', 'starting', 'running', 'stopping', 'exited', 'failed',
-                    'outcome_unknown'
-                )),
-                slot_key TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                active_slot INTEGER NOT NULL CHECK (active_slot IN (0, 1)),
-                CHECK (
-                    (integration_health = 'awaiting_first_prompt' AND prompt_kind = 'unknown') OR
-                    (integration_health = 'degraded' AND prompt_kind = 'degraded') OR
-                    (integration_health = 'trusted' AND prompt_kind != 'degraded')
-                ),
-                CHECK (
-                    (state IN ('exited', 'failed') AND active_slot = 0) OR
-                    (state NOT IN ('exited', 'failed') AND active_slot = 1)
-                ),
-                CHECK (
-                    (prompt_kind IN ('unknown', 'degraded') AND
-                        prompt_sequence IS NULL AND prompt_last_exit IS NULL AND
-                        prompt_process_group IS NULL) OR
-                    (prompt_kind = 'ready' AND prompt_sequence IS NOT NULL AND
-                        prompt_process_group IS NULL) OR
-                    (prompt_kind = 'command_running' AND prompt_sequence IS NOT NULL AND
-                        prompt_last_exit IS NULL AND prompt_process_group IS NULL) OR
-                    (prompt_kind = 'foreground_program' AND prompt_sequence IS NOT NULL AND
-                        prompt_last_exit IS NULL AND prompt_process_group IS NOT NULL)
-                )
-            );
-            CREATE UNIQUE INDEX terminal_sessions_active_slot_unique_idx
-                ON terminal_sessions(slot_key) WHERE active_slot = 1;
-        "#,
+        name: "016_agent_terminal_ownership_removed",
+        sql: r#"SELECT 1;"#,
     },
     StoreMigration {
         version: 17,
