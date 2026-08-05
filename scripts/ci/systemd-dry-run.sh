@@ -85,19 +85,15 @@ chmod 0755 \
   "$runtime_root/libexec/agentlibre" \
   "$runtime_root/libexec/agentlibre/generations"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$runtime_generation/agl-process-launcher"
 create_worker_fixture "$runtime_generation/agl-inference-worker"
 create_native_bundle_fixture "$runtime_generation"
 create_runtime_manifest_fixture "$runtime_generation"
 chmod 0555 \
   "$runtime_generation/agl" \
-  "$runtime_generation/agl-process-launcher" \
   "$runtime_generation/agl-inference-worker"
 chmod 0555 "$runtime_generation"
 ln -s generations/generation-test "$runtime_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$runtime_root/bin/agl"
-ln -s ../libexec/agentlibre/current/agl-process-launcher \
-  "$runtime_root/bin/agl-process-launcher"
 ln -s "$runtime_root/bin/agl" "$tmp_dir/bin/agl"
 
 require_output_contains() {
@@ -135,7 +131,6 @@ require_output_contains "$daemon_output" "socket unit: agl-test.socket"
 require_output_contains "$daemon_output" "requested binary: $tmp_dir/bin/agl"
 require_output_contains "$daemon_output" "binary: $runtime_root/bin/agl"
 require_output_contains "$daemon_output" "resolved binary: $runtime_generation/agl"
-require_output_contains "$daemon_output" "process launcher: $runtime_generation/agl-process-launcher"
 require_output_contains "$daemon_output" "private inference worker: $runtime_generation/agl-inference-worker"
 require_output_contains "$daemon_output" "native inference bundle: $runtime_generation/agl-inference-native"
 require_output_contains "$daemon_output" "runtime manifest: $runtime_generation/runtime-manifest.json"
@@ -149,7 +144,8 @@ require_output_not_contains "$daemon_output" "Environment=\"VK_DRIVER_FILES="
 require_output_contains "$daemon_output" \
   "UnsetEnvironment=VK_DRIVER_FILES VK_ICD_FILENAMES"
 require_output_contains "$daemon_output" "UMask=0077"
-require_output_contains "$daemon_output" "Requires=agl-test.socket"
+require_output_contains "$daemon_output" "Requires=agl-test.socket agl-terminald.service"
+require_output_contains "$daemon_output" "After=agl-test.socket agl-terminald.service"
 require_output_contains "$daemon_output" "function profile: gemma4-31b-32k (embedded; local inference config disabled)"
 require_output_contains "$daemon_output" "ExecStart=\"$runtime_root/bin/agl\" serve --systemd-activation --workspace-root \"$tmp_dir/workspace\" --function \"gemma4-31b-32k\" --max-output-tokens 512 --tool-mode execute"
 require_output_contains "$daemon_output" "ListenStream=$tmp_dir/state/daemon/agl.sock"
@@ -340,19 +336,15 @@ umask_runtime_root="$tmp_dir/umask-zero-runtime"
 umask_runtime_generation="$umask_runtime_root/libexec/agentlibre/generations/generation-test"
 (umask 000; mkdir -p "$umask_runtime_root/bin" "$umask_runtime_generation")
 printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$umask_runtime_generation/agl-process-launcher"
 create_worker_fixture "$umask_runtime_generation/agl-inference-worker"
 create_native_bundle_fixture "$umask_runtime_generation"
 create_runtime_manifest_fixture "$umask_runtime_generation"
 chmod 0555 \
   "$umask_runtime_generation/agl" \
-  "$umask_runtime_generation/agl-process-launcher" \
   "$umask_runtime_generation/agl-inference-worker"
 chmod 0555 "$umask_runtime_generation"
 ln -s generations/generation-test "$umask_runtime_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$umask_runtime_root/bin/agl"
-ln -s ../libexec/agentlibre/current/agl-process-launcher \
-  "$umask_runtime_root/bin/agl-process-launcher"
 umask_runtime_status=0
 "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
   --dry-run \
@@ -408,11 +400,9 @@ grep -F -- "--unit must be a unit name" "$tmp_dir/invalid-unit.err" >/dev/null |
 
 mkdir -p "$tmp_dir/mutable"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl-process-launcher"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$tmp_dir/mutable/agl-inference-worker"
 chmod 0755 \
   "$tmp_dir/mutable/agl" \
-  "$tmp_dir/mutable/agl-process-launcher" \
   "$tmp_dir/mutable/agl-inference-worker"
 mutable_status=0
 "$AGL_CI_REPO_ROOT/scripts/agentlibre-daemon-systemd-service.sh" \
@@ -450,8 +440,6 @@ printf '%s\n' \
   'fi' \
   'exit 0' \
   >"$install_root/libexec/agentlibre/generations/generation-test/agl"
-printf '#!/usr/bin/env bash\nexit 0\n' \
-  >"$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher"
 create_worker_fixture \
   "$install_root/libexec/agentlibre/generations/generation-test/agl-inference-worker"
 create_native_bundle_fixture \
@@ -460,13 +448,10 @@ create_runtime_manifest_fixture \
   "$install_root/libexec/agentlibre/generations/generation-test"
 chmod 0555 \
   "$install_root/libexec/agentlibre/generations/generation-test/agl" \
-  "$install_root/libexec/agentlibre/generations/generation-test/agl-process-launcher" \
   "$install_root/libexec/agentlibre/generations/generation-test/agl-inference-worker"
 chmod 0555 "$install_root/libexec/agentlibre/generations/generation-test"
 ln -s generations/generation-test "$install_root/libexec/agentlibre/current"
 ln -s ../libexec/agentlibre/current/agl "$install_root/bin/agl"
-ln -s ../libexec/agentlibre/current/agl-process-launcher \
-  "$install_root/bin/agl-process-launcher"
 printf '[backend]\nkind = "llama_cpp"\n' >"$install_root/config/local.toml"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"${AGL_TEST_SYSTEMCTL_LOG:?}"\n' \
   >"$install_root/fake-bin/systemctl"

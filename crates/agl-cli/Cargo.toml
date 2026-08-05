@@ -42,3 +42,8 @@ sha2.workspace = true
 tracing.workspace = true
 libc.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+agl-exec.workspace = true
+agl-process.workspace = true
+agl-terminal-protocol.workspace = true

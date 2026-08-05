@@ -25,11 +25,11 @@ fn agl_help_lists_public_commands() {
         ".agl/workspace.toml lists the repo's agentLIBRE folders",
     );
     assert_contains(&stdout, "Workspace skills need .agl/artifact-lock.toml");
+    assert_contains(&stdout, "agl-terminal");
     assert_contains(&stdout, "run");
     assert_contains(&stdout, "init");
-    assert_contains(&stdout, "--resume");
-    assert_contains(&stdout, "--no-input-history");
-    assert_contains(&stdout, "process");
+    assert_contains(&stdout, "session");
+    assert_contains(&stdout, "trace");
     assert_contains(&stdout, "runtime");
     assert_contains(&stdout, "serve");
     assert_contains(&stdout, "status");
@@ -52,17 +52,16 @@ fn agl_help_lists_public_commands() {
 }
 
 #[test]
-fn agl_no_arg_help_uses_public_alias() {
-    let output = run_agl(&[]);
+fn agl_no_arg_reports_bounded_status_and_terminal_entrypoint() {
+    let home = TempHome::new("no-arg-status");
+    let output = run_agl(&["--home", &home.path_string()]);
 
     assert_success_no_stderr(&output);
     let stdout = stdout(&output);
-    assert_contains(&stdout, "▒▒████████▒▒███████ ███████████");
-    assert!(
-        !stdout.contains("\x1b[35m"),
-        "captured help output should not include ANSI color:\n{stdout}"
-    );
-    assert_contains(&stdout, "Usage: agl");
+    assert_contains(&stdout, "agentLIBRE command client");
+    assert_contains(&stdout, "sessions=agl session --help");
+    assert_contains(&stdout, "interactive_ui=agl-terminal");
+    assert_contains(&stdout, "state=not_running");
 }
 
 #[test]
@@ -120,13 +119,18 @@ fn command_help_exits_successfully_for_public_commands() {
         &["init", "--help"][..],
         &["install-hooks", "--help"][..],
         &["run", "--help"][..],
-        &["process", "--help"][..],
-        &["process", "list", "--help"][..],
-        &["process", "status", "--help"][..],
-        &["process", "read", "--help"][..],
-        &["process", "attach", "--help"][..],
-        &["process", "kill", "--help"][..],
-        &["process", "doctor", "--help"][..],
+        &["session", "--help"][..],
+        &["session", "new", "--help"][..],
+        &["session", "list", "--help"][..],
+        &["session", "show", "--help"][..],
+        &["session", "resume", "--help"][..],
+        &["session", "submit", "--help"][..],
+        &["session", "follow", "--help"][..],
+        &["session", "cancel", "--help"][..],
+        &["session", "finish", "--help"][..],
+        &["trace", "--help"][..],
+        &["trace", "export", "--help"][..],
+        &["trace", "replay", "--help"][..],
         &["serve", "--help"][..],
         &["status", "--help"][..],
         &["function", "--help"][..],
@@ -2319,8 +2323,8 @@ fn removed_command_names_fail_before_inference_path() {
         assert_failure(&output);
         assert_empty_stdout(&output);
         let stderr = stderr(&output);
-        assert_contains(&stderr, "unknown command");
-        assert_contains(&stderr, "Use `agl run --prompt TEXT`");
+        assert_contains(&stderr, "unrecognized subcommand");
+        assert_contains(&stderr, "Usage: agl");
         assert!(
             !stderr.contains("local inference config"),
             "removed command name should not run inference path:\n{stderr}"
@@ -2329,8 +2333,8 @@ fn removed_command_names_fail_before_inference_path() {
 }
 
 #[test]
-fn blank_bare_prompt_fails_before_inference_path() {
-    let output = run_agl(&["   "]);
+fn blank_run_prompt_fails_before_inference_path() {
+    let output = run_agl(&["run", "--prompt", "   "]);
 
     assert_failure(&output);
     assert_empty_stdout(&output);

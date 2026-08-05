@@ -106,16 +106,13 @@ fn default_root_run_budget_is_identical_across_protocol_application_and_store() 
 struct TestRuntime {
     runtime: AgentLibreRuntimeConfig,
     inference: InferenceOptions,
+    terminal: Option<TestTerminalService>,
 }
 
 impl TestRuntime {
     fn new() -> Self {
         let index = TEST_RUNTIME_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "agl-daemon-test-{}-{}-{index}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("main")
-        ));
+        let root = std::env::temp_dir().join(format!("agl-dt-{}-{index}", std::process::id()));
         let paths = AgentLibrePaths::from_agl_home(root.clone());
         std::fs::create_dir_all(&root).unwrap();
         let config = root.join("inference.toml");
@@ -141,28 +138,258 @@ tool_call_format = "hermes_json"
             ),
         )
         .unwrap();
-        Self {
-            runtime: AgentLibreRuntimeConfig {
-                paths,
-                logging: AgentLibreLoggingConfig::from_env(),
-                history: AgentLibreHistoryConfig::default(),
-                workspace: AgentLibreWorkspaceConfig::default(),
-                inference: agl_runtime::AgentLibreInferenceConfig::default(),
-                execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        let runtime = AgentLibreRuntimeConfig {
+            paths,
+            logging: AgentLibreLoggingConfig::from_env(),
+            history: AgentLibreHistoryConfig::default(),
+            workspace: AgentLibreWorkspaceConfig {
+                root: Some(root.clone()),
             },
+            inference: agl_runtime::AgentLibreInferenceConfig::default(),
+            execution: agl_runtime::AgentLibreExecutionConfig::default(),
+        };
+        let terminal = TestTerminalService::start(&runtime);
+        Self {
+            runtime,
             inference: InferenceOptions {
                 config: Some(config),
                 ..InferenceOptions::default()
             },
+            terminal: Some(terminal),
         }
     }
 }
 
 impl Drop for TestRuntime {
     fn drop(&mut self) {
+        drop(self.terminal.take());
         if let Some(root) = self.runtime.paths.config_dir.parent() {
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+}
+
+struct TestTerminalService {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+}
+
+#[derive(Default)]
+struct TestTerminalState {
+    records: std::collections::BTreeMap<agl_terminal::TerminalId, agl_terminal::TerminalRecord>,
+    fingerprints: std::collections::BTreeMap<String, agl_terminal::TerminalId>,
+}
+
+impl TestTerminalService {
+    fn start(runtime: &AgentLibreRuntimeConfig) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let state_root = runtime.paths.terminal_state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
+        let runtime_root = runtime.paths.terminal_runtime_root();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        let socket_path = runtime_root.join("terminal.sock");
+        let identity = agl_terminal_protocol::ServiceIdentity {
+            protocol_version: agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+            crate_version: "1.0.0-alpha.1".to_owned(),
+            build_id: agl_exec::AuthorityFingerprint::new(agl_process::TERMINAL_BUILD_ID).unwrap(),
+            generation_id: agl_exec::ServiceGenerationId::generate(),
+        };
+        let identity_path = state_root.join("service-identity.json");
+        std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let listener = UnixListener::bind(socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let state = Mutex::new(TestTerminalState::default());
+            while !thread_stop.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                serve_terminal_fixture_request(&mut stream, &identity, &state)?;
+            }
+            Ok(())
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for TestTerminalService {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .expect("terminal fixture thread panicked")
+                .expect("terminal fixture failed");
+        }
+    }
+}
+
+fn serve_terminal_fixture_request(
+    stream: &mut std::os::unix::net::UnixStream,
+    identity: &agl_terminal_protocol::ServiceIdentity,
+    state: &Mutex<TestTerminalState>,
+) -> anyhow::Result<()> {
+    use std::io::{Read as _, Write as _};
+
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length)?;
+    let mut frame = vec![0_u8; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut frame)?;
+    let request: agl_terminal_protocol::TerminalRequest = serde_json::from_slice(&frame)?;
+    let response = terminal_fixture_response(request.request, identity, state)?;
+    let response = agl_terminal_protocol::TerminalResponse {
+        schema: agl_terminal_protocol::TERMINAL_RESPONSE_SCHEMA.to_owned(),
+        request_id: request.request_id,
+        service: identity.clone(),
+        response,
+    };
+    let encoded = serde_json::to_vec(&response)?;
+    stream.write_all(&(encoded.len() as u32).to_be_bytes())?;
+    stream.write_all(&encoded)?;
+    Ok(())
+}
+
+fn terminal_fixture_response(
+    request: agl_terminal_protocol::TerminalRequestKind,
+    identity: &agl_terminal_protocol::ServiceIdentity,
+    state: &Mutex<TestTerminalState>,
+) -> anyhow::Result<agl_terminal_protocol::TerminalResponseKind> {
+    use agl_terminal_protocol::{TerminalRequestKind, TerminalResponseKind};
+
+    match request {
+        TerminalRequestKind::Hello => Ok(TerminalResponseKind::Hello),
+        TerminalRequestKind::ListExecutions { .. } => Ok(TerminalResponseKind::ExecutionList {
+            statuses: Vec::new(),
+        }),
+        TerminalRequestKind::Ensure { admission } => {
+            let mut state = state.lock().unwrap();
+            let terminal_id = state
+                .fingerprints
+                .get(&admission.request_fingerprint)
+                .cloned()
+                .unwrap_or_else(agl_terminal::TerminalId::generate);
+            let record = if let Some(record) = state.records.get(&terminal_id) {
+                record.clone()
+            } else {
+                let record = agl_terminal::TerminalRecord {
+                    terminal_id: terminal_id.clone(),
+                    execution_id: agl_exec::ExecutionId::generate(),
+                    topology_id: admission.topology_id.clone(),
+                    owner: admission.owner.clone(),
+                    authority_scope: admission.authority_scope.clone(),
+                    profile: admission.profile,
+                    workspace_root: admission.context.workspace_root.clone(),
+                    shell_profile: admission.shell.clone(),
+                    environment_digest: admission.environment.admit()?.digest().clone(),
+                    command_sequence: 0,
+                    prompt_state: agl_terminal::TerminalPromptState::Unknown,
+                    integration_health: agl_terminal::ShellIntegrationHealth::AwaitingFirstPrompt,
+                    cwd: admission.context.working_directory.clone(),
+                    state: agl_terminal::TerminalState::Running,
+                };
+                state
+                    .fingerprints
+                    .insert(admission.request_fingerprint.clone(), terminal_id.clone());
+                state.records.insert(terminal_id, record.clone());
+                record
+            };
+            Ok(TerminalResponseKind::Terminal {
+                descriptor: fixture_descriptor(&record, &admission.authority_fingerprint, identity),
+            })
+        }
+        TerminalRequestKind::Inspect { terminal_id } => {
+            let record = state
+                .lock()
+                .unwrap()
+                .records
+                .get(&terminal_id)
+                .cloned()
+                .context("terminal fixture record is missing")?;
+            Ok(TerminalResponseKind::TerminalRecord {
+                record: Box::new(record),
+            })
+        }
+        TerminalRequestKind::ListTopology { topology_id } => {
+            let records = state
+                .lock()
+                .unwrap()
+                .records
+                .values()
+                .filter(|record| record.topology_id == topology_id)
+                .cloned()
+                .collect();
+            Ok(TerminalResponseKind::TerminalList { records })
+        }
+        TerminalRequestKind::Promote {
+            terminal_id,
+            topology_id,
+            owner,
+        } => {
+            let mut state = state.lock().unwrap();
+            let record = state
+                .records
+                .get_mut(&terminal_id)
+                .context("terminal fixture record is missing")?;
+            record.owner =
+                agl_terminal::TerminalOwner::promoted(owner, record.owner.caller().clone());
+            record.topology_id = topology_id;
+            Ok(TerminalResponseKind::TerminalRecord {
+                record: Box::new(record.clone()),
+            })
+        }
+        TerminalRequestKind::Retire { terminal_id } => {
+            let mut state = state.lock().unwrap();
+            let record = state
+                .records
+                .get_mut(&terminal_id)
+                .context("terminal fixture record is missing")?;
+            record.state = agl_terminal::TerminalState::Exited;
+            Ok(TerminalResponseKind::TerminalRecord {
+                record: Box::new(record.clone()),
+            })
+        }
+        TerminalRequestKind::Terminate { terminal_id } => {
+            let mut state = state.lock().unwrap();
+            let record = state
+                .records
+                .get_mut(&terminal_id)
+                .context("terminal fixture record is missing")?;
+            record.state = agl_terminal::TerminalState::Exited;
+            Ok(TerminalResponseKind::Ack)
+        }
+        other => anyhow::bail!("unexpected terminal fixture request: {other:?}"),
+    }
+}
+
+fn fixture_descriptor(
+    record: &agl_terminal::TerminalRecord,
+    authority: &agl_exec::AuthorityFingerprint,
+    identity: &agl_terminal_protocol::ServiceIdentity,
+) -> agl_terminal::TerminalDescriptor {
+    agl_terminal::TerminalDescriptor {
+        terminal_id: record.terminal_id.clone(),
+        execution_id: record.execution_id.clone(),
+        owner: record.owner.caller().clone(),
+        authority_fingerprint: authority.clone(),
+        profile: record.profile,
+        service_generation: identity.generation_id.clone(),
+        state: record.state,
+        command_sequence: record.command_sequence,
+        output_sequence: 0,
     }
 }
 
@@ -1970,6 +2197,13 @@ fn session_queries_and_unknown_runs_have_typed_responses() {
     assert!(matches!(
         list.kind,
         DaemonEventKind::SessionList(ref list) if list.sessions.len() == 1
+    ));
+    let wire = serde_json::to_vec(&list).unwrap();
+    let decoded: DaemonEvent = serde_json::from_slice(&wire).unwrap();
+    assert!(matches!(
+        decoded.kind,
+        DaemonEventKind::SessionList(ref list)
+            if list.sessions.len() == 1 && list.sessions[0].updated_at_unix_ms > 0
     ));
 
     let missing = state.handle_request(request(DaemonRequestKind::RunStatus(RunStatusRequest {

@@ -508,10 +508,7 @@ mod tests {
 
     #[test]
     fn compatible_daemon_executes_staged_setup_smoke_without_local_worker() {
-        let root = std::env::temp_dir().join(format!(
-            "agl-cli-daemon-setup-smoke-{}",
-            agl_ids::RequestId::generate()
-        ));
+        let root = std::env::temp_dir().join(format!("agl-cli-ds-{}", std::process::id()));
         let runtime = runtime(&root);
         let workspace = root.join("workspace");
         let function_root = workspace.join(".agl/functions/setup-smoke");
@@ -595,6 +592,7 @@ tool_call_format = "gemma_function_call"
         let server_runtime = runtime.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || -> anyhow::Result<()> {
+            let _terminal_service = crate::TestTerminalService::start(&server_runtime);
             let async_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;

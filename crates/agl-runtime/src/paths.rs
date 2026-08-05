@@ -14,6 +14,7 @@ pub struct AgentLibrePaths {
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,
     pub cache_dir: PathBuf,
+    pub runtime_dir: PathBuf,
 }
 
 impl AgentLibrePaths {
@@ -38,6 +39,9 @@ impl AgentLibrePaths {
             cache_dir: env_path("XDG_CACHE_HOME")
                 .map(|path| path.join(APP_DIR))
                 .unwrap_or_else(|| project_dirs.cache_dir().to_path_buf()),
+            runtime_dir: env_path("XDG_RUNTIME_DIR")
+                .unwrap_or_else(default_runtime_home)
+                .join(APP_DIR),
         })
     }
 
@@ -48,6 +52,7 @@ impl AgentLibrePaths {
             data_dir: home.join("data"),
             state_dir: home.join("state"),
             cache_dir: home.join("cache"),
+            runtime_dir: home.join("runtime").join(APP_DIR),
         }
     }
 
@@ -85,6 +90,24 @@ impl AgentLibrePaths {
 
     pub fn inference_state_root(&self) -> PathBuf {
         self.state_dir.join("inference")
+    }
+
+    /// State owned by the independently installed `agl-terminal` product.
+    ///
+    /// agentLIBRE may address this root through the terminal client contract,
+    /// but it must never place terminal state beneath its own application root.
+    pub fn terminal_state_root(&self) -> PathBuf {
+        self.state_dir
+            .parent()
+            .unwrap_or(&self.state_dir)
+            .join("agl-terminal")
+    }
+
+    pub fn terminal_runtime_root(&self) -> PathBuf {
+        self.runtime_dir
+            .parent()
+            .unwrap_or(&self.runtime_dir)
+            .join("agl-terminal")
     }
 
     pub fn inference_worker_temp_root(&self) -> PathBuf {
@@ -126,6 +149,17 @@ fn fallback_home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn default_runtime_home() -> PathBuf {
+    #[cfg(unix)]
+    {
+        // SAFETY: `geteuid` has no preconditions and does not mutate memory.
+        let uid = unsafe { libc::geteuid() };
+        PathBuf::from(format!("/run/user/{uid}"))
+    }
+    #[cfg(not(unix))]
+    fallback_home_dir().join(".local/state")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +172,10 @@ mod tests {
         assert_eq!(paths.data_dir, PathBuf::from("/tmp/agl-home/data"));
         assert_eq!(paths.state_dir, PathBuf::from("/tmp/agl-home/state"));
         assert_eq!(paths.cache_dir, PathBuf::from("/tmp/agl-home/cache"));
+        assert_eq!(
+            paths.runtime_dir,
+            PathBuf::from("/tmp/agl-home/runtime/agentLIBRE")
+        );
     }
 
     #[test]
@@ -179,6 +217,14 @@ mod tests {
         assert_eq!(
             paths.model_lease_root(),
             PathBuf::from("/tmp/agl-home/state/models/leases")
+        );
+        assert_eq!(
+            paths.terminal_state_root(),
+            PathBuf::from("/tmp/agl-home/agl-terminal")
+        );
+        assert_eq!(
+            paths.terminal_runtime_root(),
+            PathBuf::from("/tmp/agl-home/runtime/agl-terminal")
         );
         assert_eq!(
             paths.inference_worker_temp_root(),

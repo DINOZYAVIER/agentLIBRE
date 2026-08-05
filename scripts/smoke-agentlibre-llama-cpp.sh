@@ -39,9 +39,7 @@ config="$(smoke_abs_path "$config")"
 cd "$repo_root"
 cargo build \
   -p agl-cli \
-  -p agl-process-launcher \
-  --bin agl \
-  --bin agl-process-launcher
+  --bin agl
 agl_bin="$(smoke_abs_path "$agl_bin")"
 
 linked_libraries="$(readelf -d "$agl_bin" | grep -E 'NEEDED.*(libllama|libggml)|RUNPATH' || true)"

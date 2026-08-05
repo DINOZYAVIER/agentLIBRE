@@ -32,7 +32,7 @@
 | agl-model | AI/ML |
 | agl-notes | Storage |
 | agl-oven | Tooling |
-| agl-process | Runtime (temporary consumer facade; removed in Step 04) |
+| agl-process | Runtime (agent-side typed terminal client adapter) |
 | agl-protocol | Communication |
 | agl-repo | Storage |
 | agl-runtime | Runtime |
@@ -42,26 +42,26 @@
 | agl-supervisor | Runtime |
 | agl-turn | Runtime |
 
-## Future Packages (Owner: agl-terminal)
+## Extracted Packages (Owner: agl-terminal)
 
 ### Selected Targets
 
-**In-tree split packages (Step 02):**
+**Independent engine and contract packages:**
 - `agl-exec`
 - `agl-pty`
 - `agl-terminal`
 - `agl-terminal-protocol`
 - `agl-terminal-client`
 
-These packages are still owned by the selected future `agl-terminal`
-repository. Their temporary workspace sources exist only to build the
-extraction seam before the Step 03 immutable Git cutover.
+These packages are built and released from the independent `agl-terminal`
+repository. agentLIBRE consumes the selected contract crates at one exact Git
+revision.
 
-**In-tree split binary packages (Step 02):**
+**Independent binary packages:**
 - `agl-process-launcher`
 - `agl-terminald`
 
-**Selected binary package introduced in Step 05:**
+**Interactive product package:**
 - `agl-terminal-ui`
 
 ### Classified-but-not-moved agentLIBRE Domains
@@ -96,8 +96,8 @@ The following are core agentLIBRE domains and are NOT candidates for terminal ex
 - **Strictness:** No compatibility aliases, no fallback mechanisms, and no duplicate ownership.
 
 ## Summary of State
-- **Current Facts:** 37 packages remain owned by `agentLIBRE`; `agl-process` is
-  now only the temporary Step 04 consumer facade.
-- **Selected Target:** 8 packages for `agl-terminal` ownership. Seven are
-  present as in-tree split packages; `agl-terminal-ui` is introduced in Step
-  05.
+- **Current Facts:** terminal execution, PTY, protocol, client, service,
+  launcher, and interactive UI sources are owned by the independent terminal
+  repository. `agl-process` is the narrow agent-side endpoint adapter.
+- **Selected Target:** all eight selected packages are terminal-owned;
+  `agl-terminal-ui` is the sole bounded Agent SDK consumer.

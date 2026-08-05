@@ -25,9 +25,10 @@ pub enum ClientError {
     DaemonUnavailable(String),
     HandshakeTimeout,
     Io(String),
-    InvalidProtocolFrame,
+    InvalidProtocolFrame(String),
     Protocol {
         code: ProtocolErrorCode,
+        message: String,
         retryable: bool,
     },
     RuntimeIdentityMismatch {
@@ -75,11 +76,17 @@ impl Display for ClientError {
             }
             Self::HandshakeTimeout => formatter.write_str("daemon protocol handshake timed out"),
             Self::Io(message) => write!(formatter, "daemon connection I/O failed: {message}"),
-            Self::InvalidProtocolFrame => formatter.write_str("daemon protocol frame was invalid"),
-            Self::Protocol { code, retryable } => {
+            Self::InvalidProtocolFrame(message) => {
+                write!(formatter, "daemon protocol frame was invalid: {message}")
+            }
+            Self::Protocol {
+                code,
+                message,
+                retryable,
+            } => {
                 write!(
                     formatter,
-                    "daemon request failed with {code:?} (retryable={retryable})"
+                    "daemon request failed with {code:?}: {message} (retryable={retryable})"
                 )
             }
             Self::RuntimeIdentityMismatch { client, daemon } => write!(
@@ -1375,7 +1382,7 @@ async fn connection_task(
                 }
                 let line = match serde_json::to_string(&request) {
                     Ok(line) => line,
-                    Err(_) => break ClientError::InvalidProtocolFrame,
+                    Err(error) => break ClientError::InvalidProtocolFrame(error.to_string()),
                 };
                 if line.len() > MAX_JSONL_FRAME_BYTES {
                     break ClientError::FrameTooLarge;
@@ -1394,7 +1401,7 @@ async fn connection_task(
                 };
                 let event: DaemonEvent = match serde_json::from_str(&line) {
                     Ok(event) => event,
-                    Err(_) => break ClientError::InvalidProtocolFrame,
+                    Err(error) => break ClientError::InvalidProtocolFrame(error.to_string()),
                 };
                 if event.schema != EVENT_SCHEMA {
                     break ClientError::SchemaMismatch { expected: EVENT_SCHEMA };
@@ -1574,6 +1581,7 @@ fn protocol_error(error: ProtocolError) -> ClientError {
     }
     ClientError::Protocol {
         code: error.code,
+        message: error.message,
         retryable: error.retryable,
     }
 }
@@ -1880,7 +1888,7 @@ mod tests {
             Ok(_) => panic!("invalid daemon unexpectedly completed the handshake"),
             Err(error) => error,
         };
-        assert_eq!(error, ClientError::InvalidProtocolFrame);
+        assert!(matches!(error, ClientError::InvalidProtocolFrame(_)));
         server.await.unwrap();
         std::fs::remove_file(socket_path).unwrap();
     }
@@ -2068,6 +2076,7 @@ mod tests {
                 .unwrap_err(),
             ClientError::Protocol {
                 code: ProtocolErrorCode::Busy,
+                message: "active model cannot be unloaded".to_owned(),
                 retryable: true,
             }
         );

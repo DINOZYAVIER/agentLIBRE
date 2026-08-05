@@ -804,13 +804,13 @@ fn manager_resolves_vision_artifacts_only_for_the_worker_runtime() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-fn test_execution_context() -> agl_exec::ExecutionContextSnapshot {
+fn test_execution_context() -> agl_process::ExecutionContextSnapshot {
     let workspace = std::env::temp_dir().canonicalize().unwrap();
-    agl_exec::ExecutionContextSnapshot {
+    agl_process::ExecutionContextSnapshot {
         workspace_root: workspace.clone(),
         working_directory: workspace,
         private_execution_roots: Vec::new(),
-        shell: agl_exec::ShellProfileSnapshot {
+        shell: agl_process::ShellProfileSnapshot {
             program: PathBuf::from("/bin/sh"),
             command_args: vec!["-c".to_owned()],
             login_command_args: Some(vec!["-l".to_owned(), "-c".to_owned()]),

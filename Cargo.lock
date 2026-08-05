@@ -148,6 +148,7 @@ dependencies = [
  "agl-cron",
  "agl-daemon",
  "agl-events",
+ "agl-exec",
  "agl-extension",
  "agl-function",
  "agl-ids",
@@ -155,11 +156,13 @@ dependencies = [
  "agl-memory",
  "agl-model",
  "agl-notes",
+ "agl-process",
  "agl-protocol",
  "agl-repo",
  "agl-runtime",
  "agl-skill",
  "agl-store",
+ "agl-terminal-protocol",
  "anyhow",
  "clap",
  "clap_complete",
@@ -298,7 +301,7 @@ dependencies = [
 [[package]]
 name = "agl-exec"
 version = "1.0.0-alpha.1"
-source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=17134b9f20aa942ba1955331f6e9c9eb4706191e#17134b9f20aa942ba1955331f6e9c9eb4706191e"
+source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=6c653fc02bfd3ac5117d56eeca6526381e07f20d#6c653fc02bfd3ac5117d56eeca6526381e07f20d"
 dependencies = [
  "base64",
  "libc",
@@ -390,7 +393,6 @@ dependencies = [
  "agl-config",
  "agl-content",
  "agl-events",
- "agl-exec",
  "agl-ids",
  "agl-oven",
  "agl-process",
@@ -564,7 +566,7 @@ dependencies = [
 [[package]]
 name = "agl-pty"
 version = "1.0.0-alpha.1"
-source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=17134b9f20aa942ba1955331f6e9c9eb4706191e#17134b9f20aa942ba1955331f6e9c9eb4706191e"
+source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=6c653fc02bfd3ac5117d56eeca6526381e07f20d#6c653fc02bfd3ac5117d56eeca6526381e07f20d"
 dependencies = [
  "agl-exec",
  "libc",
@@ -603,6 +605,7 @@ dependencies = [
  "agl-skill",
  "anyhow",
  "directories",
+ "libc",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -675,7 +678,7 @@ dependencies = [
 [[package]]
 name = "agl-terminal"
 version = "1.0.0-alpha.1"
-source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=17134b9f20aa942ba1955331f6e9c9eb4706191e#17134b9f20aa942ba1955331f6e9c9eb4706191e"
+source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=6c653fc02bfd3ac5117d56eeca6526381e07f20d#6c653fc02bfd3ac5117d56eeca6526381e07f20d"
 dependencies = [
  "agl-exec",
  "agl-pty",
@@ -690,7 +693,7 @@ dependencies = [
 [[package]]
 name = "agl-terminal-client"
 version = "1.0.0-alpha.1"
-source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=17134b9f20aa942ba1955331f6e9c9eb4706191e#17134b9f20aa942ba1955331f6e9c9eb4706191e"
+source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=6c653fc02bfd3ac5117d56eeca6526381e07f20d#6c653fc02bfd3ac5117d56eeca6526381e07f20d"
 dependencies = [
  "agl-exec",
  "agl-terminal",
@@ -705,7 +708,7 @@ dependencies = [
 [[package]]
 name = "agl-terminal-protocol"
 version = "1.0.0-alpha.1"
-source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=17134b9f20aa942ba1955331f6e9c9eb4706191e#17134b9f20aa942ba1955331f6e9c9eb4706191e"
+source = "git+file:///home/dinozyavier/repos/agl-terminal?rev=6c653fc02bfd3ac5117d56eeca6526381e07f20d#6c653fc02bfd3ac5117d56eeca6526381e07f20d"
 dependencies = [
  "agl-exec",
  "agl-terminal",

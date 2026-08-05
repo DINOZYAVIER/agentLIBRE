@@ -68,16 +68,15 @@ generations_dir="$runtime_dir/generations"
 current_link="$runtime_dir/current"
 runtime_lock="$cargo_root/.agentlibre-runtime.lock"
 installed_agl="$install_bin/agl"
-installed_launcher="$install_bin/agl-process-launcher"
 forbidden_public_worker="$install_bin/agl-inference-worker"
+forbidden_public_launcher="$install_bin/agl-process-launcher"
 agl_link_target="../libexec/agentlibre/current/agl"
-launcher_link_target="../libexec/agentlibre/current/agl-process-launcher"
 current_uid="$(id -u)"
 
 if [[ ! -e "$runtime_dir" && ! -L "$runtime_dir" &&
   ! -e "$installed_agl" && ! -L "$installed_agl" &&
-  ! -e "$installed_launcher" && ! -L "$installed_launcher" &&
   ! -e "$forbidden_public_worker" && ! -L "$forbidden_public_worker" &&
+  ! -e "$forbidden_public_launcher" && ! -L "$forbidden_public_launcher" &&
   ! -e "$runtime_lock" && ! -L "$runtime_lock" ]]; then
   echo "no managed agentLIBRE runtime bundle is installed under $cargo_root"
   exit 0
@@ -204,7 +203,7 @@ validate_generation() {
   for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
     name="${entry##*/}"
     case "$name" in
-      agl | agl-process-launcher) ;;
+      agl) ;;
       agl-inference-worker) has_worker=1 ;;
       agl-inference-native) has_native=1 ;;
       runtime-manifest.json) has_manifest=1 ;;
@@ -218,11 +217,10 @@ validate_generation() {
   done
   shopt -u nullglob
   require_exact_executable "$generation/agl" "agl"
-  require_exact_executable "$generation/agl-process-launcher" "process launcher"
   (( has_worker == 1 && has_native == 1 && has_manifest == 1 &&
-    (entry_count == 5 || entry_count == 6) )) ||
+    (entry_count == 4 || entry_count == 5) )) ||
     fail "runtime generation is not the exact sealed-manifest alpha layout: $generation"
-  if (( (entry_count == 6) != (has_gc_roots == 1) )); then
+  if (( (entry_count == 5) != (has_gc_roots == 1) )); then
     fail "runtime generation has an inconsistent Nix GC-root layout: $generation"
   fi
   [[ -f "$generation/runtime-manifest.json" && ! -L "$generation/runtime-manifest.json" &&
@@ -262,10 +260,10 @@ fi
 
 [[ ! -e "$forbidden_public_worker" && ! -L "$forbidden_public_worker" ]] ||
   fail "refusing to remove a surface with a public inference worker: $forbidden_public_worker"
+[[ ! -e "$forbidden_public_launcher" && ! -L "$forbidden_public_launcher" ]] ||
+  fail "refusing the obsolete combined alpha surface; remove it using its matching old uninstaller: $forbidden_public_launcher"
 [[ -L "$installed_agl" && "$(readlink -- "$installed_agl")" == "$agl_link_target" ]] ||
   fail "agl is not an exact managed link: $installed_agl"
-[[ -L "$installed_launcher" && "$(readlink -- "$installed_launcher")" == "$launcher_link_target" ]] ||
-  fail "process launcher is not an exact managed link: $installed_launcher"
 [[ -L "$current_link" ]] || fail "runtime current pointer is not a symlink: $current_link"
 current_target="$(readlink -- "$current_link")"
 [[ "$current_target" =~ ^generations/(generation-[A-Za-z0-9]+)$ ]] ||
@@ -305,12 +303,10 @@ done
 (( current_seen == 1 )) || fail "runtime current pointer does not select a managed generation"
 [[ "$(readlink -f -- "$installed_agl" 2>/dev/null || true)" == "$current_generation/agl" ]] ||
   fail "managed agl link does not resolve through current: $installed_agl"
-[[ "$(readlink -f -- "$installed_launcher" 2>/dev/null || true)" == "$current_generation/agl-process-launcher" ]] ||
-  fail "managed launcher link does not resolve through current: $installed_launcher"
 
 declare -A managed_executable_inodes=()
 for generation in "${generation_paths[@]}"; do
-  for executable_name in agl agl-process-launcher agl-inference-worker; do
+  for executable_name in agl agl-inference-worker; do
     executable="$generation/$executable_name"
     if [[ -f "$executable" && ! -L "$executable" ]]; then
       managed_executable_inodes["$(stat -Lc '%d:%i' -- "$executable")"]=1
@@ -479,7 +475,6 @@ echo "  root: $cargo_root"
 echo "  current generation: $current_generation"
 echo "  generations: ${#generation_paths[@]} (sealed=$sealed_count)"
 echo "  remove: $installed_agl"
-echo "  remove: $installed_launcher"
 echo "  remove: $current_link"
 for generation in "${generation_paths[@]}"; do
   echo "  remove: $generation"
@@ -522,11 +517,8 @@ restore_detached_surface() {
   if (( status != 0 && surface_detached == 1 && deletion_started == 0 )); then
     [[ -e "$current_link" || -L "$current_link" ]] || ln -s -- "$current_target" "$current_link" || true
     [[ -e "$installed_agl" || -L "$installed_agl" ]] || ln -s -- "$agl_link_target" "$installed_agl" || true
-    [[ -e "$installed_launcher" || -L "$installed_launcher" ]] ||
-      ln -s -- "$launcher_link_target" "$installed_launcher" || true
     if [[ -L "$current_link" && "$(readlink -- "$current_link")" == "$current_target" &&
-          -L "$installed_agl" && "$(readlink -- "$installed_agl")" == "$agl_link_target" &&
-          -L "$installed_launcher" && "$(readlink -- "$installed_launcher")" == "$launcher_link_target" ]]; then
+          -L "$installed_agl" && "$(readlink -- "$installed_agl")" == "$agl_link_target" ]]; then
       echo "restored managed runtime links after uninstall was interrupted" >&2
     else
       echo "could not safely restore managed runtime links after uninstall failure" >&2
@@ -537,7 +529,7 @@ restore_detached_surface() {
 trap restore_detached_surface EXIT
 
 surface_detached=1
-rm -f -- "$installed_agl" "$installed_launcher" "$current_link"
+rm -f -- "$installed_agl" "$current_link"
 ensure_standard_units_stopped "after detaching managed links"
 late_block_reasons=()
 scan_runtime_processes late_block_reasons

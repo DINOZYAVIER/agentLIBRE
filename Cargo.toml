@@ -57,7 +57,7 @@ agl-chat = { path = "crates/agl-chat" }
 agl-client = { path = "crates/agl-client" }
 agl-cron = { path = "crates/agl-cron" }
 agl-daemon = { path = "crates/agl-daemon" }
-agl-exec = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
+agl-exec = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "6c653fc02bfd3ac5117d56eeca6526381e07f20d", version = "=1.0.0-alpha.1" }
 agl-function = { path = "crates/agl-function" }
 agl-turn = { path = "crates/agl-turn" }
 agl-config = { path = "crates/agl-config" }
@@ -75,10 +75,10 @@ agl-model = { path = "crates/agl-model" }
 agl-notes = { path = "crates/agl-notes" }
 agl-oven = { path = "crates/agl-oven" }
 agl-process = { path = "crates/agl-process" }
-agl-pty = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
-agl-terminal = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
-agl-terminal-client = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
-agl-terminal-protocol = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "17134b9f20aa942ba1955331f6e9c9eb4706191e", version = "=1.0.0-alpha.1" }
+agl-pty = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "6c653fc02bfd3ac5117d56eeca6526381e07f20d", version = "=1.0.0-alpha.1" }
+agl-terminal = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "6c653fc02bfd3ac5117d56eeca6526381e07f20d", version = "=1.0.0-alpha.1" }
+agl-terminal-client = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "6c653fc02bfd3ac5117d56eeca6526381e07f20d", version = "=1.0.0-alpha.1" }
+agl-terminal-protocol = { git = "file:///home/dinozyavier/repos/agl-terminal", rev = "6c653fc02bfd3ac5117d56eeca6526381e07f20d", version = "=1.0.0-alpha.1" }
 agl-protocol = { path = "crates/agl-protocol" }
 agl-repo = { path = "crates/agl-repo" }
 agl-runtime = { path = "crates/agl-runtime" }

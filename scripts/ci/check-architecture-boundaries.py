@@ -163,9 +163,14 @@ def dependency_diagnostics(packages, current, future):
                 if target_info["owner"] == "agentLIBRE":
                     diagnostics.add(f"{kind}: {name} -> {target} crosses terminal-to-agent")
             if name == "agl-terminal-ui":
-                if target_info["owner"] == "agentLIBRE" and target != "agl-client":
+                if target_info["owner"] == "agentLIBRE" and target not in {
+                    "agl-client",
+                    "agl-content",
+                    "agl-ids",
+                    "agl-protocol",
+                }:
                     diagnostics.add(f"{kind}: {name} -> {target} exceeds the bounded agent SDK")
-            if category == "terminal" and (
+            if category == "terminal" and name != "agl-terminal-ui" and (
                 target in {"agl-protocol", "agl-store"}
                 or target_info["category"] in {"presentation", "inference"}
             ):

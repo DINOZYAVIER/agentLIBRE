@@ -15,10 +15,8 @@ Build the bridge and start an agent daemon:
 ```sh
 cargo build --release \
   -p agl-cli \
-  -p agl-process \
   -p agl-matrix-bridge \
   --bin agl \
-  --bin agl-process-launcher \
   --bin agl-matrix-bridge
 ./target/release/agl serve --config /path/to/local-inference.toml
 ```

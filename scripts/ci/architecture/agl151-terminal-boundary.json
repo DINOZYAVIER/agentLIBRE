@@ -54,7 +54,7 @@
       {"name": "agl-terminal-client", "owner": "agl-terminal", "status": "external-pinned", "kind": "crate", "category": "terminal"},
       {"name": "agl-process-launcher", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"},
       {"name": "agl-terminald", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"},
-      {"name": "agl-terminal-ui", "owner": "agl-terminal", "status": "not-yet-present", "kind": "binary", "category": "terminal"}
+      {"name": "agl-terminal-ui", "owner": "agl-terminal", "status": "external-pinned", "kind": "binary", "category": "terminal"}
     ]
   },
   "rules": [
@@ -71,16 +71,19 @@
     },
     {
       "id": "ui-terminal-bounded-sdk",
-      "description": "Only agl-terminal-ui may depend on bounded agent SDK (agl-client); any other agentLIBRE targets are forbidden",
+      "description": "Only agl-terminal-ui may depend on the bounded agent client/content/identity/protocol SDK; any other agentLIBRE targets are forbidden",
       "selector": {
         "name": "agl-terminal-ui"
       },
       "allowed_dependencies": [
-        {"name": "agl-client", "kind": ["normal", "build", "dev"]}
+        {"name": "agl-client", "kind": ["normal", "build", "dev"]},
+        {"name": "agl-content", "kind": ["normal", "build", "dev"]},
+        {"name": "agl-ids", "kind": ["normal", "build", "dev"]},
+        {"name": "agl-protocol", "kind": ["normal", "build", "dev"]}
       ],
       "forbidden_dependencies": {
         "owner": "agentLIBRE",
-        "exclude": ["agl-client"]
+        "exclude": ["agl-client", "agl-content", "agl-ids", "agl-protocol"]
       }
     },
     {

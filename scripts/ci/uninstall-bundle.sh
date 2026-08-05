@@ -84,7 +84,6 @@ seed_current_generation() {
   digest="$(printf 'a%.0s' {1..64})"
   mkdir -p "$generation/agl-inference-native/sha256-$digest"
   write_executable "$generation/agl"
-  write_executable "$generation/agl-process-launcher"
   write_executable "$generation/agl-inference-worker"
   for library in \
     libllama-common.so.0 \
@@ -113,6 +112,12 @@ seed_surface() {
   chmod 0600 "$root/.agentlibre-runtime.lock"
   ln -s -- "generations/$current" "$root/libexec/agentlibre/current"
   ln -s -- "../libexec/agentlibre/current/agl" "$root/bin/agl"
+}
+
+seed_obsolete_surface() {
+  local root="$1"
+  local current="$2"
+  seed_surface "$root" "$current"
   ln -s -- "../libexec/agentlibre/current/agl-process-launcher" \
     "$root/bin/agl-process-launcher"
 }
@@ -150,8 +155,7 @@ EOF
 
 assert_surface_present() {
   local root="$1"
-  [[ -L "$root/bin/agl" && -L "$root/bin/agl-process-launcher" &&
-    -L "$root/libexec/agentlibre/current" &&
+  [[ -L "$root/bin/agl" && -L "$root/libexec/agentlibre/current" &&
     -f "$root/.agentlibre-runtime.lock" ]] ||
     ci_fail "managed runtime surface was unexpectedly changed: $root"
 }
@@ -159,14 +163,16 @@ assert_surface_present() {
 obsolete_root="$tmp_dir/obsolete"
 seed_legacy_generation "$obsolete_root" generation-olda
 seed_legacy_generation "$obsolete_root" generation-oldb
-seed_surface "$obsolete_root" generation-oldb
+seed_obsolete_surface "$obsolete_root" generation-oldb
 obsolete_status=0
 run_uninstaller "$obsolete_root" --apply \
   >"$tmp_dir/obsolete.out" 2>"$tmp_dir/obsolete.err" || obsolete_status=$?
 [[ "$obsolete_status" -eq 1 ]] ||
   ci_fail "uninstaller accepted an obsolete pre-manifest alpha layout"
-grep -F "not the exact sealed-manifest alpha layout" "$tmp_dir/obsolete.err" >/dev/null ||
+grep -F "refusing the obsolete combined alpha surface" "$tmp_dir/obsolete.err" >/dev/null ||
   ci_fail "obsolete layout rejection omitted its reason"
+[[ -L "$obsolete_root/bin/agl-process-launcher" ]] ||
+  ci_fail "obsolete layout rejection mutated its launcher surface"
 assert_surface_present "$obsolete_root"
 
 current_root="$tmp_dir/current"
