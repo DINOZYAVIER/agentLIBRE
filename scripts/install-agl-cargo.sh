@@ -120,10 +120,9 @@ generations_dir="$runtime_dir/generations"
 current_link="$runtime_dir/current"
 runtime_lock="$cargo_root/.agentlibre-runtime.lock"
 installed_agl="$install_bin/agl"
-installed_launcher="$install_bin/agl-process-launcher"
 forbidden_public_worker="$install_bin/agl-inference-worker"
+forbidden_public_launcher="$install_bin/agl-process-launcher"
 agl_link_target="../libexec/agentlibre/current/agl"
-launcher_link_target="../libexec/agentlibre/current/agl-process-launcher"
 
 cd "$repo_root"
 
@@ -225,13 +224,6 @@ resolve_native_bundle_relative() {
 
 set_install_args() {
   local stage_root="$1"
-  launcher_install_args=(
-    install
-    --path "$repo_root/crates/agl-process-launcher"
-    --bin agl-process-launcher
-    "${install_options[@]}"
-    --root "$stage_root"
-  )
   worker_install_args=(
     install
     --path "$repo_root/crates/agl-inference-worker"
@@ -251,7 +243,6 @@ set_install_args() {
 if [[ "$dry_run" -eq 1 ]]; then
   dry_stage_root="$generations_dir/.staging.DRY-RUN/.cargo-root"
   set_install_args "$dry_stage_root"
-  run cargo "${launcher_install_args[@]}"
   run cargo "${worker_install_args[@]}"
   run cargo "${agl_install_args[@]}"
   printf '+ resolve exact content-addressed native bundle from %q\n' \
@@ -300,6 +291,9 @@ require_managed_directory "$generations_dir" "runtime generations directory"
 if [[ -e "$forbidden_public_worker" || -L "$forbidden_public_worker" ]]; then
   fail "refusing a public inference worker command; remove it before installing the private runtime bundle: $forbidden_public_worker"
 fi
+if [[ -e "$forbidden_public_launcher" || -L "$forbidden_public_launcher" ]]; then
+  fail "refusing the obsolete terminal-owned launcher surface; uninstall the old combined alpha runtime first: $forbidden_public_launcher"
+fi
 
 if [[ -L "$runtime_lock" || ( -e "$runtime_lock" && ! -f "$runtime_lock" ) ]]; then
   fail "refusing to use non-regular runtime lock: $runtime_lock"
@@ -313,11 +307,11 @@ if ! flock --exclusive --nonblock "$runtime_lock_fd"; then
   fail "refusing to install while another runtime bundle operation holds: $runtime_lock"
 fi
 
-if [[ "$force" -eq 0 && ( -e "$installed_agl" || -L "$installed_agl" || -e "$installed_launcher" || -L "$installed_launcher" ) ]]; then
+if [[ "$force" -eq 0 && ( -e "$installed_agl" || -L "$installed_agl" ) ]]; then
   fail "refusing to replace the existing runtime bundle because --no-force was requested"
 fi
 
-for install_artifact in "$installed_agl" "$installed_launcher" "$current_link"; do
+for install_artifact in "$installed_agl" "$current_link"; do
   if [[ -e "$install_artifact" || -L "$install_artifact" ]]; then
     if [[ "$install_artifact" == "$current_link" ]]; then
       [[ -L "$install_artifact" ]] || fail "refusing to replace non-symlink current pointer: $install_artifact"
@@ -392,13 +386,10 @@ validate_generation() {
     fail "runtime generation is not an exact immutable directory: $generation"
   [[ -f "$generation/agl" && -x "$generation/agl" && ! -L "$generation/agl" ]] ||
     fail "runtime generation has no regular executable agl: $generation"
-  [[ -f "$generation/agl-process-launcher" && -x "$generation/agl-process-launcher" && ! -L "$generation/agl-process-launcher" ]] ||
-    fail "runtime generation has no regular executable process launcher: $generation"
   [[ -f "$generation/agl-inference-worker" && -x "$generation/agl-inference-worker" && ! -L "$generation/agl-inference-worker" ]] ||
     fail "runtime generation has no regular executable inference worker: $generation"
   for executable in \
     "$generation/agl" \
-    "$generation/agl-process-launcher" \
     "$generation/agl-inference-worker"
   do
     [[ "$(stat -c '%a' -- "$executable")" == 555 &&
@@ -415,7 +406,7 @@ validate_generation() {
   for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
     name="${entry##*/}"
     case "$name" in
-      agl | agl-process-launcher | agl-inference-worker | agl-inference-native | runtime-manifest.json) ;;
+      agl | agl-inference-worker | agl-inference-native | runtime-manifest.json) ;;
       .nix-gc-roots) has_gc_roots=1 ;;
       *)
         shopt -u nullglob
@@ -425,7 +416,7 @@ validate_generation() {
     entry_count=$((entry_count + 1))
   done
   shopt -u nullglob
-  (( entry_count == 5 || (entry_count == 6 && has_gc_roots == 1) )) ||
+  (( entry_count == 4 || (entry_count == 5 && has_gc_roots == 1) )) ||
     fail "runtime generation does not have the exact manifest-bearing layout: $generation"
   validate_native_bundle \
     "$generation/agl-inference-native" \
@@ -434,46 +425,24 @@ validate_generation() {
     fail "runtime generation manifest or component identity failed verification: $generation"
 }
 
-is_obsolete_two_binary_generation() {
+is_obsolete_combined_generation() {
   local generation="$1"
-  local entry
-  local name
-  local entry_count=0
   [[ -d "$generation" && ! -L "$generation" &&
     "$(stat -c '%a' -- "$generation")" == 555 &&
     "$(stat -c '%u' -- "$generation")" == "$(id -u)" ]] ||
     return 1
-  for name in agl agl-process-launcher; do
-    entry="$generation/$name"
-    [[ -f "$entry" && -x "$entry" && ! -L "$entry" &&
-      "$(stat -c '%a' -- "$entry")" == 555 &&
-      "$(stat -c '%u' -- "$entry")" == "$(id -u)" &&
-      "$(stat -c '%h' -- "$entry")" == 1 ]] ||
-      return 1
-  done
-  shopt -s nullglob
-  for entry in "$generation"/* "$generation"/.[!.]* "$generation"/..?*; do
-    case "${entry##*/}" in
-      agl | agl-process-launcher) ;;
-      *)
-        shopt -u nullglob
-        return 1
-        ;;
-    esac
-    entry_count=$((entry_count + 1))
-  done
-  shopt -u nullglob
-  (( entry_count == 2 ))
+  [[ -f "$generation/agl-process-launcher" &&
+    ! -L "$generation/agl-process-launcher" ]]
 }
 
-reject_obsolete_two_binary_generation() {
+reject_obsolete_combined_generation() {
   local generation="$1"
-  is_obsolete_two_binary_generation "$generation" || return 0
-  echo "existing managed runtime uses an obsolete two-binary alpha layout" >&2
+  is_obsolete_combined_generation "$generation" || return 0
+  echo "existing managed runtime uses an obsolete combined agent/terminal alpha layout" >&2
   echo "agentLIBRE alpha installers do not migrate obsolete runtime generations" >&2
   echo "move or remove all of these managed artifacts before a clean install:" >&2
   echo "  $installed_agl" >&2
-  echo "  $installed_launcher" >&2
+  echo "  $forbidden_public_launcher" >&2
   echo "  $current_link" >&2
   echo "  $generation" >&2
   echo "the manifest-aware uninstaller intentionally rejects this obsolete alpha layout" >&2
@@ -565,7 +534,6 @@ collect_nix_runtime_references() {
   local reference
   local -a objects=(
     "$generation/agl"
-    "$generation/agl-process-launcher"
     "$generation/agl-inference-worker"
   )
   shopt -s nullglob
@@ -662,7 +630,7 @@ resolve_current_generation() {
   resolved="$(readlink -f -- "$current_link")" || fail "runtime current pointer is broken: $current_link"
   [[ "$(dirname -- "$resolved")" == "$generations_dir" ]] ||
     fail "runtime current pointer escapes the generations directory: $current_link"
-  reject_obsolete_two_binary_generation "$resolved"
+  reject_obsolete_combined_generation "$resolved"
   validate_generation "$resolved"
   validate_nix_runtime_roots "$resolved"
   printf '%s\n' "$resolved"
@@ -711,23 +679,18 @@ install_managed_link() {
 
 classify_managed_surface() {
   local agl_kind
-  local launcher_kind
 
   agl_kind="$(managed_link_kind "$installed_agl" "$agl_link_target")"
-  launcher_kind="$(managed_link_kind "$installed_launcher" "$launcher_link_target")"
-  if [[ "$agl_kind" == regular || "$launcher_kind" == regular ]]; then
+  if [[ "$agl_kind" == regular ]]; then
     echo "refusing to replace an unmanaged regular runtime command under $install_bin" >&2
-    echo "agentLIBRE alpha installs do not migrate flat binaries; move or remove both" >&2
+    echo "agentLIBRE alpha installs do not migrate flat binaries; move or remove" >&2
     echo "  $installed_agl" >&2
-    echo "  $installed_launcher" >&2
     fail "then rerun the installer"
   fi
   [[ "$agl_kind" != invalid ]] || fail "refusing to replace unmanaged agl artifact: $installed_agl"
-  [[ "$launcher_kind" != invalid ]] || fail "refusing to replace unmanaged launcher artifact: $installed_launcher"
 
   if [[ ! -e "$current_link" && ! -L "$current_link" ]]; then
-    if [[ "$agl_kind" == absent || "$agl_kind" == managed ]] &&
-      [[ "$launcher_kind" == absent || "$launcher_kind" == managed ]]; then
+    if [[ "$agl_kind" == absent || "$agl_kind" == managed ]]; then
       surface_mode="fresh"
       return 0
     fi
@@ -736,12 +699,12 @@ classify_managed_surface() {
 
   [[ -L "$current_link" ]] || fail "refusing to replace non-symlink current pointer: $current_link"
   resolve_current_generation >/dev/null
-  if [[ "$agl_kind" == managed && "$launcher_kind" == managed ]]; then
+  if [[ "$agl_kind" == managed ]]; then
     surface_mode="update"
     return 0
   fi
 
-  fail "refusing an incomplete managed runtime surface under $install_bin; restore both managed links before retrying"
+  fail "refusing an incomplete managed runtime surface under $install_bin; restore the managed agl link before retrying"
 }
 
 surface_mode=""
@@ -754,7 +717,6 @@ stage_root="$generation_staging/.cargo-root"
 mkdir -p "$stage_root"
 set_install_args "$stage_root"
 
-run cargo "${launcher_install_args[@]}"
 run cargo "${worker_install_args[@]}"
 run cargo "${agl_install_args[@]}"
 
@@ -775,8 +737,6 @@ chmod 0755 "$stage_root/bin/agl-inference-native"
 
 [[ -x "$stage_root/bin/agl" && ! -L "$stage_root/bin/agl" ]] ||
   fail "staged cargo install did not produce a regular executable agl"
-[[ -x "$stage_root/bin/agl-process-launcher" && ! -L "$stage_root/bin/agl-process-launcher" ]] ||
-  fail "staged cargo install did not produce a regular executable process launcher"
 [[ -x "$stage_root/bin/agl-inference-worker" && ! -L "$stage_root/bin/agl-inference-worker" ]] ||
   fail "staged cargo install did not produce a regular executable inference worker"
 run "$stage_root/bin/agl" --version
@@ -786,14 +746,12 @@ run env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$stage_root/bin/agl"
 # the same filesystem. Publish fresh inodes so no writable build-tree alias can
 # mutate an allegedly immutable runtime executable after installation.
 cp -- "$stage_root/bin/agl" "$generation_staging/agl"
-cp -- "$stage_root/bin/agl-process-launcher" "$generation_staging/agl-process-launcher"
 cp -- "$stage_root/bin/agl-inference-worker" "$generation_staging/agl-inference-worker"
 mv -- "$stage_root/bin/agl-inference-native" "$generation_staging/agl-inference-native"
 rm -rf -- "$stage_root"
 chmod 0555 "$generation_staging/agl-inference-native"
 chmod 0555 \
   "$generation_staging/agl" \
-  "$generation_staging/agl-process-launcher" \
   "$generation_staging/agl-inference-worker"
 
 runtime_source_state="unavailable"
@@ -842,10 +800,6 @@ fault_inject after-generation-ready
 
 if [[ "$surface_mode" == fresh ]]; then
   fault_inject before-initial-links
-  if [[ ! -L "$installed_launcher" ]]; then
-    install_managed_link "$installed_launcher" "$launcher_link_target"
-  fi
-  fault_inject after-initial-launcher-link
   if [[ ! -L "$installed_agl" ]]; then
     install_managed_link "$installed_agl" "$agl_link_target"
   fi
@@ -862,19 +816,17 @@ else
 fi
 
 resolved_agl="$(readlink -f -- "$installed_agl")"
-resolved_launcher="$(readlink -f -- "$installed_launcher")"
 resolved_worker="$(readlink -f -- "$new_generation/agl-inference-worker")"
 [[ "$resolved_agl" == "$new_generation/agl" ]] ||
   fail "installed agl did not resolve through the published generation"
-[[ "$resolved_launcher" == "$new_generation/agl-process-launcher" ]] ||
-  fail "installed launcher did not resolve through the published generation"
 [[ "$resolved_worker" == "$new_generation/agl-inference-worker" ]] ||
   fail "installed inference worker did not remain private to the published generation"
 [[ ! -e "$forbidden_public_worker" && ! -L "$forbidden_public_worker" ]] ||
   fail "refusing a public inference worker command under $install_bin"
+[[ ! -e "$forbidden_public_launcher" && ! -L "$forbidden_public_launcher" ]] ||
+  fail "refusing a terminal-owned launcher command under $install_bin"
 
 echo "installed agl: $installed_agl -> $resolved_agl"
-echo "installed process launcher: $installed_launcher -> $resolved_launcher"
 echo "installed private inference worker: $resolved_worker"
 run "$installed_agl" --version
 run "$installed_agl" runtime identity

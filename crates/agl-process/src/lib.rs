@@ -7,14 +7,15 @@
 use std::path::{Path, PathBuf};
 
 use agl_exec::AuthorityFingerprint;
+pub use agl_exec::{ExecutionContextSnapshot, ShellProfileSnapshot};
 use agl_terminal_client::{ClientError, TerminalClient, UnixTerminalTransport};
 use agl_terminal_protocol::ServiceIdentity;
 use thiserror::Error;
 
 const MAX_IDENTITY_BYTES: u64 = 4 * 1024;
-pub const TERMINAL_SOURCE_REVISION: &str = "17134b9f20aa942ba1955331f6e9c9eb4706191e";
+pub const TERMINAL_SOURCE_REVISION: &str = "6c653fc02bfd3ac5117d56eeca6526381e07f20d";
 pub const TERMINAL_BUILD_ID: &str =
-    "sha256:57e7080ad368f24fc63a63bbf9cd40af29cd66764df72203286304a5e9d1f760";
+    "sha256:20d95981fb6afa6d9c6a608ebc208c03ee75ea3ee0e3c5c6137f6999576e48ab";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalEndpoint {

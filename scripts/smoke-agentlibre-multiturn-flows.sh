@@ -140,9 +140,7 @@ fi
 cd "$repo_root"
 cargo build \
   -p agl-cli \
-  -p agl-process-launcher \
-  --bin agl \
-  --bin agl-process-launcher
+  --bin agl
 agl_bin="$(smoke_abs_path "$agl_bin")"
 [[ -x "$agl_bin" ]] || fail "missing executable agl binary: $agl_bin"
 

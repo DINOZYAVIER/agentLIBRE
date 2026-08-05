@@ -7,12 +7,9 @@ use agl_exec::{
 };
 use agl_process::TerminalEndpoint;
 use agl_terminal::{TerminalId, TerminalOperation, TerminalRecord, TerminalTopologyId};
-use agl_terminal_protocol::TerminalAdmission;
+use agl_terminal_protocol::{LOCAL_OPERATOR_AUTHORITY_FINGERPRINT, TerminalAdmission};
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
-
-pub(crate) const DAEMON_TERMINAL_AUTHORITY: &str =
-    "sha256:ba24b5b6f59bbde628b19fa8a23b6341f6a316a3c869cf4791de1e9269b4b6b6";
 
 #[derive(Clone)]
 pub(crate) struct TerminalBridge {
@@ -24,7 +21,7 @@ impl TerminalBridge {
     pub(crate) fn daemon(endpoint: TerminalEndpoint) -> Result<Self> {
         Ok(Self {
             endpoint: Arc::new(endpoint),
-            authority: AuthorityFingerprint::new(DAEMON_TERMINAL_AUTHORITY)
+            authority: AuthorityFingerprint::new(LOCAL_OPERATOR_AUTHORITY_FINGERPRINT)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?,
         })
     }

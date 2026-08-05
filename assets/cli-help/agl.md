@@ -11,7 +11,9 @@ Basics:
 
 Common commands:
   agl
-  agl --resume
+  agl-terminal
+  agl session list
+  agl session new
   agl init --dry-run
   agl status
   agl function list

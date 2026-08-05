@@ -777,7 +777,7 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: SessionStatus,
-    pub updated_at_unix_ms: u128,
+    pub updated_at_unix_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

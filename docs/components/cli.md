@@ -1,71 +1,53 @@
-# CLI
+# CLI and interactive terminal UI
 
-The CLI is the command-line entrypoint and operator surface for `agl`.
-
-Top-level runtime commands are function-first:
+`agl` is the command-only agentLIBRE automation surface. Bare `agl` is a
+read-only overview: it reports daemon compatibility and bounded session status,
+names `agl-terminal` as the interactive application, and starts or mutates
+nothing. Function-first automation remains explicit:
 
 ```bash
 agl run --prompt "Summarize this repo."
-agl
-agl --resume
 agl serve
-agl --function coding
+agl --function coding run --prompt "Inspect the tests."
 ```
 
-On Linux, bare `agl` opens the daemon-backed interactive surface. Chat and a
-persistent Unix terminal are peer views of the same durable session:
+Durable sessions have eight scriptable operations, all with deterministic text
+and `--json` output:
 
-- type a physical `!` in an empty Chat composer to enter the one-shot Shell
-  composer immediately; type a command and press Enter to run it through the
-  persistent Human PTY and show a bounded inline command card;
-- press Enter in an empty Shell composer to enter the last Human terminal
-  (creating its managed Bash/Zsh PTY on first use);
-- a second physical `!` in an empty Shell composer returns to Prompt with one
-  literal leading `!`; bracketed-pasted leading `!` never changes mode;
-- at a trusted empty shell prompt, `!` followed by Enter returns to Chat
-  without sending either byte to the shell;
-- while Vim, a REPL, or another foreground program is active, press `Esc` then
-  `!` within 750 ms. `Esc` reaches the program immediately, so Vim is left in
-  Normal mode while Chat is visible.
+```bash
+agl session new
+agl session list
+agl session show SESSION_ID
+agl session resume SESSION_ID
+agl session submit SESSION_ID --prompt "Continue."
+agl session follow SESSION_ID
+agl session cancel SESSION_ID
+agl session finish SESSION_ID
+```
 
-Changing views does not stop the shell, jobs, cwd, exports, aliases, Vim, or a
-waiting REPL. The daemon continuously drains the PTY and the CLI uses filtered
-raw passthrough; it does not embed a terminal emulator or reconstruct a hidden
-screen. `/disconnect` releases this client while the durable session and
-terminal continue. `/exit` finishes the session and terminates its work.
+`follow` detaches on EOF or `Ctrl+C` without cancelling the session. `cancel`
+stops active agent work but leaves the durable session open; `finish` is the
+authoritative terminal state. Unknown or finished sessions are typed errors and
+are never silently replaced.
 
-Session presentation snapshots are transferred in bounded, verified chunks and
-assembled by the client before they replace the visible Chat projection. `/new`
-and `/resume` keep the source session visible and subscribed until the target
-snapshot and command catalog have both loaded successfully; a failed target
-load leaves the source view usable.
+`agl-terminal`, built and installed by the independent terminal repository,
+owns interactive Chat and terminal presentation. It composes the bounded agent
+client with the independent terminal client; canonical agent transcripts stay
+in agentLIBRE and terminal execution/state stays in `agl-terminald`.
 
-Shell navigation is native terminal behavior, so the Chat command catalog has
-no `/cd` or `/pwd`. `/processes`, `/attach`, and `/kill` operate on typed
-daemon-owned execution identities. Human terminal bytes and command history
-are private and are never added to model context automatically.
+Within `agl-terminal`, Chat and persistent Unix terminal views remain peers:
+a physical `!` enters the Shell composer, Enter on an empty Shell composer
+attaches the Human terminal, and the trusted prompt/`Esc`+`!` gestures return to
+Chat. Switching views does not stop shells, foreground programs, jobs, cwd, or
+exports. `/disconnect` releases only the UI client; `/exit` explicitly finishes
+the agent session. Human terminal bytes, command history, raw arguments,
+secrets, and host paths never enter model context or safe activity projection.
 
-While an agent turn is active, Chat keeps a compact typed activity path visible:
-run, turn, model attempt, inference stage, capability step, and delegated child
-run. `Ctrl+G` expands the bounded tree. The renderer uses deterministic arrows
-and box drawing with narrow-terminal, ASCII, and `NO_COLOR` fallbacks. Known
-capabilities expose only reviewed facts such as a repository-relative path,
-entry/match count, completeness, execution profile, exit status, or inference
-progress. Raw arguments/results, prompts, reasoning, secrets, and host paths are
-never activity fields.
-
-`/processes` also contains two visible typed actions for a separate Human
-`HOST` terminal. **Open HOST terminal** uses managed startup and is the default
-and recommended Host startup choice. **Open HOST terminal + user rc**
-explicitly requests that the daemon resolve and source the normal Bash/Zsh rc
-after managed setup. Both
-actions show a Host-authority confirmation before sending any request; cancel
-leaves the Workspace terminal unchanged. The CLI never accepts or sends an rc
-path. An existing matching Host terminal is selected idempotently and attached
-writable, with a visible `HOST` marker. These are picker actions, not slash
-commands and not an authority upgrade of the Workspace terminal. Dedicated
-`Ctrl+H`/`Ctrl+Shift+H` bindings are intentionally avoided because common
-terminals cannot distinguish them reliably from Backspace/control encodings.
+Session projections are bounded and digest-verified before display. The UI's
+history and reducer caches are disposable; neither can become a canonical
+agent transcript or terminal lifecycle store. Host terminal creation remains
+an explicit same-UID confirmation and is never an upgrade of workspace or
+model authority.
 
 `agl init` downloads and validates the selected pinned package, stages explicit
 bindings, runs a normal model-manager smoke, and only then writes the workspace

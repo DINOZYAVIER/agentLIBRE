@@ -1110,6 +1110,100 @@ fn bare_agl_is_a_bounded_daemon_status_query() {
 }
 
 #[test]
+fn all_eight_session_operations_have_exact_scriptable_parsers() {
+    let id = "ses_01890f3b-6d7a-7c1f-b4b5-8f7e0c1a2b31";
+    assert_command(
+        [
+            "agl",
+            "session",
+            "new",
+            "--workspace-root",
+            "/tmp/work",
+            "--json",
+        ],
+        CliCommand::Session(SessionOptions {
+            socket_path: None,
+            command: SessionCommand::New(SessionNewOptions {
+                workspace_root: Some(PathBuf::from("/tmp/work")),
+                function_ref: None,
+                skills: Vec::new(),
+                tool_mode: ToolAccessMode::ReadOnly,
+                json: true,
+            }),
+        }),
+    );
+    assert_command(
+        ["agl", "session", "list", "--json"],
+        CliCommand::Session(SessionOptions {
+            socket_path: None,
+            command: SessionCommand::List { json: true },
+        }),
+    );
+    assert_command(
+        ["agl", "session", "show", id, "--include-content", "--json"],
+        CliCommand::Session(SessionOptions {
+            socket_path: None,
+            command: SessionCommand::Show(SessionShowOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                include_content: true,
+                json: true,
+            }),
+        }),
+    );
+    for (name, command) in [
+        (
+            "resume",
+            SessionCommand::Resume(SessionIdOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                json: true,
+            }),
+        ),
+        (
+            "follow",
+            SessionCommand::Follow(SessionIdOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                json: true,
+            }),
+        ),
+        (
+            "cancel",
+            SessionCommand::Cancel(SessionIdOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                json: true,
+            }),
+        ),
+        (
+            "finish",
+            SessionCommand::Finish(SessionIdOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                json: true,
+            }),
+        ),
+    ] {
+        assert_command(
+            ["agl", "session", name, id, "--json"],
+            CliCommand::Session(SessionOptions {
+                socket_path: None,
+                command,
+            }),
+        );
+    }
+    assert_command(
+        [
+            "agl", "session", "submit", id, "--json", "one", "bounded", "prompt",
+        ],
+        CliCommand::Session(SessionOptions {
+            socket_path: None,
+            command: SessionCommand::Submit(SessionSubmitOptions {
+                session_id: SessionId::parse(id).unwrap(),
+                prompt: "one bounded prompt".to_owned(),
+                json: true,
+            }),
+        }),
+    );
+}
+
+#[test]
 fn removed_command_names_do_not_fall_through_to_bare_prompt() {
     for command in ["chat", "infer", "generate", "setup", "doctor"] {
         let message = parse_error(["agl", command, "--help"]);

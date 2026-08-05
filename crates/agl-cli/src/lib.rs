@@ -2772,6 +2772,106 @@ fn is_gpu_load_failure_message(message: &str) -> bool {
             && (message.contains("memory") || message.contains("device")))
 }
 
+#[cfg(all(test, unix))]
+struct TestTerminalService {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+}
+
+#[cfg(all(test, unix))]
+impl TestTerminalService {
+    fn start(runtime: &AgentLibreRuntimeConfig) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let state_root = runtime.paths.terminal_state_root();
+        std::fs::create_dir_all(&state_root).unwrap();
+        let runtime_root = runtime.paths.terminal_runtime_root();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        let socket_path = runtime_root.join("terminal.sock");
+        let identity = agl_terminal_protocol::ServiceIdentity {
+            protocol_version: agl_terminal_protocol::TERMINAL_PROTOCOL_VERSION,
+            crate_version: "1.0.0-alpha.1".to_owned(),
+            build_id: agl_exec::AuthorityFingerprint::new(agl_process::TERMINAL_BUILD_ID).unwrap(),
+            generation_id: agl_exec::ServiceGenerationId::generate(),
+        };
+        let identity_path = state_root.join("service-identity.json");
+        std::fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        std::fs::set_permissions(&identity_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let listener = UnixListener::bind(socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            use std::sync::atomic::Ordering;
+            use std::time::Duration;
+
+            while !thread_stop.load(Ordering::Acquire) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                let mut length = [0_u8; 4];
+                stream.read_exact(&mut length)?;
+                let mut frame = vec![0_u8; u32::from_be_bytes(length) as usize];
+                stream.read_exact(&mut frame)?;
+                let request: agl_terminal_protocol::TerminalRequest =
+                    serde_json::from_slice(&frame)?;
+                let response = match request.request {
+                    agl_terminal_protocol::TerminalRequestKind::Hello => {
+                        agl_terminal_protocol::TerminalResponseKind::Hello
+                    }
+                    agl_terminal_protocol::TerminalRequestKind::ListExecutions { .. } => {
+                        agl_terminal_protocol::TerminalResponseKind::ExecutionList {
+                            statuses: Vec::new(),
+                        }
+                    }
+                    agl_terminal_protocol::TerminalRequestKind::ListTopology { .. } => {
+                        agl_terminal_protocol::TerminalResponseKind::TerminalList {
+                            records: Vec::new(),
+                        }
+                    }
+                    other => anyhow::bail!("unexpected terminal fixture request: {other:?}"),
+                };
+                let response = agl_terminal_protocol::TerminalResponse {
+                    schema: agl_terminal_protocol::TERMINAL_RESPONSE_SCHEMA.to_owned(),
+                    request_id: request.request_id,
+                    service: identity.clone(),
+                    response,
+                };
+                let encoded = serde_json::to_vec(&response)?;
+                stream.write_all(&(encoded.len() as u32).to_be_bytes())?;
+                stream.write_all(&encoded)?;
+            }
+            Ok(())
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for TestTerminalService {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .expect("terminal fixture thread panicked")
+                .expect("terminal fixture failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -2930,6 +3030,7 @@ tool_call_format = "gemma_function_call"
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || -> anyhow::Result<()> {
+            let _terminal_service = TestTerminalService::start(&runtime);
             let async_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -3139,7 +3240,7 @@ tool_call_format = "gemma_function_call"
     #[test]
     fn direct_run_uses_a_compatible_daemon_for_inference() {
         let root = std::env::temp_dir().join(format!(
-            "agl-cli-run-compatible-daemon-{}",
+            "agl-cli-run-daemon-{}",
             agl_ids::RequestId::generate()
         ));
         let runtime = daemon_test_runtime(&root);
@@ -3201,7 +3302,7 @@ subagents:
     #[test]
     fn cron_skill_uses_a_compatible_daemon_for_inference() {
         let root = std::env::temp_dir().join(format!(
-            "agl-cli-cron-compatible-daemon-{}",
+            "agl-cli-cron-daemon-{}",
             agl_ids::RequestId::generate()
         ));
         let runtime = daemon_test_runtime(&root);

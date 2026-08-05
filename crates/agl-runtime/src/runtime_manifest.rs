@@ -19,7 +19,7 @@ const DEVELOPMENT_ID_DOMAIN: &[u8] = b"agentlibre.development-runtime.v1\0";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_NATIVE_FILES: usize = 64;
-const RUNTIME_EXECUTABLES: [&str; 3] = ["agl", "agl-inference-worker", "agl-process-launcher"];
+const RUNTIME_EXECUTABLES: [&str; 2] = ["agl", "agl-inference-worker"];
 
 static CURRENT_RUNTIME_IDENTITY: OnceLock<std::result::Result<CurrentRuntimeIdentity, String>> =
     OnceLock::new();
@@ -694,7 +694,7 @@ mod tests {
 
         assert_eq!(first_manifest.generation_id, second_manifest.generation_id);
         assert_eq!(load_runtime_manifest(&first).unwrap(), first_manifest);
-        fs::write(first.join("agl-process-launcher"), b"tampered").unwrap();
+        fs::write(first.join("agl-inference-worker"), b"tampered").unwrap();
         assert!(
             load_runtime_manifest(&first)
                 .unwrap_err()

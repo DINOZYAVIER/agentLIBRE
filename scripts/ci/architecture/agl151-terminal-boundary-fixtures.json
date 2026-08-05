@@ -13,7 +13,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-exec -> agl-actions crosses terminal-to-agent"],
       "add_packages": [
-        { "name": "agl-exec", "source": null }
+        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-actions", "kind": null }
@@ -24,7 +24,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal-client -> agl-client crosses terminal-to-agent"],
       "add_packages": [
-        { "name": "agl-terminal-client", "source": null }
+        { "name": "agl-terminal-client", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-terminal-client", "name": "agl-client", "kind": null }
@@ -35,7 +35,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-terminal -> agl-app is forbidden below terminal UI"],
       "add_packages": [
-        { "name": "agl-terminal", "source": null }
+        { "name": "agl-terminal", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-terminal", "name": "agl-app", "kind": null }
@@ -49,7 +49,7 @@
         "normal: agl-pty -> agl-store is forbidden below terminal UI"
       ],
       "add_packages": [
-        { "name": "agl-pty", "source": null }
+        { "name": "agl-pty", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-pty", "name": "agl-protocol", "kind": null },
@@ -61,7 +61,7 @@
       "expected_exit": 1,
       "expected_diagnostics": ["normal: agl-inference -> agl-exec crosses inference-to-terminal"],
       "add_packages": [
-        { "name": "agl-exec", "source": null }
+        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-inference", "name": "agl-exec", "kind": null }
@@ -77,9 +77,9 @@
       "dependencies": []
     },
     {
-      "name": "in-tree-split-external-source",
-      "expected_exit": 1,
-      "expected_diagnostics": ["in-tree-split requires a workspace path source"],
+      "name": "external-pinned-exact-source",
+      "expected_exit": 0,
+      "expected_diagnostics": [],
       "add_packages": [
         { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
@@ -93,7 +93,7 @@
         "dev: agl-exec -> agl-client crosses terminal-to-agent"
       ],
       "add_packages": [
-        { "name": "agl-exec", "source": null }
+        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-actions", "kind": "build" },
@@ -105,7 +105,7 @@
       "expected_exit": 0,
       "expected_diagnostics": [],
       "add_packages": [
-        { "name": "agl-exec", "source": null }
+        { "name": "agl-exec", "source": "git+https://example.invalid/agl-terminal?rev=fixture#1111111111111111111111111111111111111111" }
       ],
       "dependencies": [
         { "from": "agl-exec", "name": "agl-client-extra", "kind": null }

@@ -343,9 +343,9 @@ impl AgentLibreExecutionConfig {
     }
 
     pub fn terminal_endpoint(&self, paths: &AgentLibrePaths) -> Result<TerminalEndpoint> {
-        let state_root = paths.state_dir.join("terminal");
+        let state_root = paths.terminal_state_root();
         TerminalEndpoint::new(
-            state_root.join("terminal.sock"),
+            paths.terminal_runtime_root().join("terminal.sock"),
             state_root.join("service-identity.json"),
             AuthorityFingerprint::new(TERMINAL_BUILD_ID)
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?,

@@ -165,10 +165,9 @@ libexec_dir="$(dirname -- "$runtime_dir")"
 runtime_root="$(dirname -- "$libexec_dir")"
 generation_name="$(basename -- "$generation_dir")"
 binary="$runtime_root/bin/agl"
-surface_launcher="$runtime_root/bin/agl-process-launcher"
 surface_worker="$runtime_root/bin/agl-inference-worker"
+forbidden_surface_launcher="$runtime_root/bin/agl-process-launcher"
 current_link="$runtime_dir/current"
-launcher="$generation_dir/agl-process-launcher"
 worker="$generation_dir/agl-inference-worker"
 native_bundle="$generation_dir/agl-inference-native"
 runtime_manifest="$generation_dir/runtime-manifest.json"
@@ -267,7 +266,6 @@ collect_nix_runtime_references() {
   local reference
   local -a objects=(
     "$generation/agl"
-    "$generation/agl-process-launcher"
     "$generation/agl-inference-worker"
   )
   shopt -s nullglob
@@ -335,30 +333,24 @@ if [[ "$(basename -- "$resolved_binary")" != "agl" ||
       "$(basename -- "$runtime_dir")" != "agentlibre" ||
       "$(basename -- "$libexec_dir")" != "libexec" ||
       ! -f "$resolved_binary" || -L "$resolved_binary" ||
-      ! -f "$launcher" || -L "$launcher" ||
       ! -f "$worker" || -L "$worker" ||
       ! -d "$native_bundle" || -L "$native_bundle" ||
       ! -f "$runtime_manifest" || -L "$runtime_manifest" ||
       -e "$surface_worker" || -L "$surface_worker" ||
+      -e "$forbidden_surface_launcher" || -L "$forbidden_surface_launcher" ||
       ! -L "$current_link" ||
       "$(readlink -- "$current_link")" != "generations/$generation_name" ||
       "$(readlink -f -- "$current_link" 2>/dev/null || true)" != "$generation_dir" ||
       ! -L "$binary" ||
       "$(readlink -- "$binary")" != "../libexec/agentlibre/current/agl" ||
       "$(readlink -f -- "$binary" 2>/dev/null || true)" != "$resolved_binary" ||
-      ! -L "$surface_launcher" ||
-      "$(readlink -- "$surface_launcher")" != "../libexec/agentlibre/current/agl-process-launcher" ||
-      "$(readlink -f -- "$surface_launcher" 2>/dev/null || true)" != "$launcher" ||
       "$(realpath -e -- "$runtime_root/bin" 2>/dev/null || true)" != "$runtime_root/bin" ||
       "$(stat -c '%a' -- "$generation_dir" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%a' -- "$resolved_binary" 2>/dev/null || true)" != "555" ||
-      "$(stat -c '%a' -- "$launcher" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%a' -- "$worker" 2>/dev/null || true)" != "555" ||
       "$(stat -c '%u' -- "$resolved_binary" 2>/dev/null || true)" != "$(id -u)" ||
-      "$(stat -c '%u' -- "$launcher" 2>/dev/null || true)" != "$(id -u)" ||
       "$(stat -c '%u' -- "$worker" 2>/dev/null || true)" != "$(id -u)" ||
       "$(stat -c '%h' -- "$resolved_binary" 2>/dev/null || true)" != "1" ||
-      "$(stat -c '%h' -- "$launcher" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%h' -- "$worker" 2>/dev/null || true)" != "1" ||
       "$(stat -c '%a' -- "$runtime_manifest" 2>/dev/null || true)" != "444" ||
       "$(stat -c '%u' -- "$runtime_manifest" 2>/dev/null || true)" != "$(id -u)" ||
@@ -414,7 +406,6 @@ agl_systemd_validate_absolute_vars \
   requested_binary \
   binary \
   resolved_binary \
-  launcher \
   worker \
   native_bundle \
   runtime_manifest \
@@ -476,11 +467,10 @@ fi
 agl_systemd_require_dir "$dry_run" "$cwd" "working directory"
 agl_systemd_require_dir "$dry_run" "$workspace_root" "workspace root"
 agl_systemd_require_executable "$dry_run" "$binary"
-agl_systemd_require_executable "$dry_run" "$launcher"
 agl_systemd_require_executable "$dry_run" "$worker"
 if [[ "$dry_run" -eq 0 ]] &&
   ! env AGL_INTERNAL_VERIFY_RUNTIME_BUNDLE=1 "$resolved_binary" >/dev/null; then
-  echo "agl, its sibling process launcher, and its private inference worker do not have matching build identities: $resolved_binary" >&2
+  echo "agl and its private inference worker do not have matching build identities: $resolved_binary" >&2
   exit 1
 fi
 if [[ -z "$function_ref" ]]; then
@@ -494,8 +484,8 @@ socket_unit="${unit%.service}.socket"
 socket_unit_file="$unit_dir/$socket_unit"
 service_content="[Unit]
 Description=agentLIBRE daemon
-Requires=$socket_unit
-After=$socket_unit
+Requires=$socket_unit agl-terminald.service
+After=$socket_unit agl-terminald.service
 
 [Service]
 Type=simple
@@ -530,7 +520,6 @@ echo "cwd: $cwd"
 echo "requested binary: $requested_binary"
 echo "binary: $binary"
 echo "resolved binary: $resolved_binary"
-echo "process launcher: $launcher"
 echo "private inference worker: $worker"
 echo "native inference bundle: $native_bundle"
 echo "runtime manifest: $runtime_manifest"

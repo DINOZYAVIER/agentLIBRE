@@ -1,6 +1,8 @@
 # Processes
 
-Process execution is a first-party, capability-checked runtime service. It
+Process execution is a first-party, capability-checked service owned by the
+independently deployed `agl-terminald` runtime. agentLIBRE admits policy and
+calls its typed client contract; it does not own a second process runtime. It
 supports exact argv programs, admitted shell commands with a real PTY, logical
 working directories, background ownership, bounded private output, and daemon
 operator controls.
@@ -80,7 +82,7 @@ names cannot substitute a different shell profile.
 
 ## Persistent terminals
 
-The daemon lazily owns one Human workspace terminal, an optional separately
+The terminal daemon lazily owns one Human workspace terminal, an optional separately
 approved Human Host terminal, one main-agent workspace terminal, and one
 workspace terminal per live subagent. Each terminal has a stable
 terminal-owned `TerminalId` and one backing `ExecutionId`; switching between Chat and
@@ -194,5 +196,6 @@ Persistent terminals follow the same rule. Their durable
 the old outcome is known. Shell input, jobs and private integration events are
 not replayed.
 
-A future graphical terminal UI will attach to the same protocol. It is not part
-of the current process implementation.
+The `agl-terminal` interactive application attaches through the same bounded
+terminal protocol while separately consuming the agent presentation client.
+Its local UI caches own neither process state nor canonical agent transcripts.

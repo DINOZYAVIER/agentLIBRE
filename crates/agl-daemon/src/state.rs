@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agl_app::{
     ActiveRunView, ApplicationAction, ApplicationActionRequest, ApplicationCallContext,
@@ -1047,11 +1047,16 @@ impl DaemonState {
                         SessionCatalogStatus::Finished => SessionStatus::Finished,
                         SessionCatalogStatus::Failed => SessionStatus::Failed,
                     },
-                    updated_at_unix_ms: entry.metadata.updated_at_unix_ms,
+                    updated_at_unix_ms: u64::try_from(entry.metadata.updated_at_unix_ms)
+                        .map_err(|_| runtime_error("session timestamp exceeds the wire bound"))?,
                 },
             );
         }
-        let now = u128::MAX;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64;
         for (session_id, session) in &self.sessions {
             sessions.insert(
                 session_id.clone(),

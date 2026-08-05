@@ -16,7 +16,6 @@ if [[ "${AGL_CI_SKIP_PREPARE:-0}" != "1" ]]; then
 fi
 
 agl_bin="$AGL_CI_REPO_ROOT/target/release/agl"
-launcher_bin="$AGL_CI_REPO_ROOT/target/release/agl-process-launcher"
 worker_bin="$AGL_CI_REPO_ROOT/target/release/agl-inference-worker"
 native_bundle_base="$AGL_CI_REPO_ROOT/target/release/agl-inference-native"
 cleanup_smoke_home=0
@@ -44,13 +43,10 @@ ci_section "Building release runtime bundle"
 ci_run cargo build --locked --release \
   -p agl-cli \
   -p agl-inference-worker \
-  -p agl-process-launcher \
   --bin agl \
-  --bin agl-inference-worker \
-  --bin agl-process-launcher
+  --bin agl-inference-worker
 
 [[ -x "$agl_bin" ]] || ci_fail "missing release binary: $agl_bin"
-[[ -x "$launcher_bin" ]] || ci_fail "missing release binary: $launcher_bin"
 [[ -x "$worker_bin" ]] || ci_fail "missing release binary: $worker_bin"
 [[ -d "$native_bundle_base" && ! -L "$native_bundle_base" ]] ||
   ci_fail "missing release native inference bundle base: $native_bundle_base"

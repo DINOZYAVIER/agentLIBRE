@@ -1,9 +1,9 @@
 # Daemon
 
-The Linux user daemon is the long-running owner of interactive sessions,
-application projections, turn execution, persistent terminals, and background
-operations. Bare `agl` is a presentation client; it does not fall back to an
-in-process interactive chat or launch a Human shell itself.
+The Linux agent daemon is the long-running owner of agent sessions,
+application projections, and turn execution. Bare `agl` is a read-only command
+overview; it does not fall back to in-process Chat, launch a Human shell, or
+start another service. Interactive presentation belongs to `agl-terminal`.
 
 The daemon also owns inference admission, queuing, reservations, and recovery,
 but never owns native llama.cpp, ggml, or Vulkan objects. Those live in an exact
@@ -12,18 +12,18 @@ channel. Worker loss closes the current attempt once, reaps the native process,
 releases its generation's reservations, and preserves the daemon socket,
 session, presentation stream, and terminal PTYs.
 
-The first interactive transport is a private Unix socket. The server validates
+The agent transport is a private Unix socket. The server validates
 the peer UID, enforces bounded protocol v7alpha frames/streams, and supports
 systemd user socket activation. A manual bind requires an absolute canonical
 parent owned by the daemon UID with mode `0700`, rejects symlinked or public
 custom parents, and verifies the bound socket is owned with mode `0600`.
 `agl-app` owns the presentation-neutral command catalog and session projection.
-The in-tree `agl-terminald` runtime owns terminal supervision and composition,
-and `agl-pty` owns the OS process/PTY implementation. During the staged H02/H04
-cutover, daemon consumers still reach that implementation through the thin
-`agl-process` facade; the facade contains no second runtime implementation.
-The exact `agl-terminal-protocol`/`agl-terminal-client` boundary is also the
-boundary a future native GUI will use.
+The independently installed `agl-terminald` service owns terminal supervision,
+persistence, spool, and process lifecycle; `agl-pty` owns the OS process/PTY
+implementation in that repository. Agent consumers reach it only through the
+thin `agl-process` endpoint adapter and exact pinned
+`agl-terminal-protocol`/`agl-terminal-client` contracts. The adapter contains
+no second runtime implementation.
 
 Semantic prompt submission also crosses `agl-app`: `RunSubmit` is admitted
 against the authoritative application snapshot before the daemon starts or
