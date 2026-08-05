@@ -259,6 +259,7 @@ fn add_skills(
     reject_symlink(skills_root);
     for pack_root in read_dir_sorted(skills_root)
         .into_iter()
+        .filter(|path| path.file_name().is_none_or(|name| name != ".git"))
         .filter(|path| path.is_dir())
     {
         reject_symlink(&pack_root);
